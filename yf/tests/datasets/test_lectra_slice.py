@@ -127,6 +127,44 @@ def _frames(
     }
 
 
+def _add_view_candidate(
+    frames: dict[str, pd.DataFrame],
+    *,
+    task_id: int,
+    parts_1: object,
+    parts_2: object = None,
+) -> None:
+    task = _task(task_id, part_count=35)
+    task.pop("part_count")
+    frames["tasks"] = pd.concat([frames["tasks"], pd.DataFrame([task])], ignore_index=True)
+    new_parts = []
+    new_shapes = []
+    for offset in range(35):
+        shape_hash = task_id * 100 + offset % 9
+        new_parts.append(
+            {
+                "tasks_index": task_id,
+                "part_id": task_id * 1000 + offset,
+                "shape_hash": shape_hash,
+            }
+        )
+        if offset < 9:
+            new_shapes.append(_shape(shape_hash))
+    frames["parts"] = pd.concat([frames["parts"], pd.DataFrame(new_parts)], ignore_index=True)
+    frames["shapes"] = pd.concat([frames["shapes"], pd.DataFrame(new_shapes)], ignore_index=True)
+    row = _constraint(
+        task_id,
+        task_id * 1000,
+        kind="c1",
+        parts_1=parts_1,
+        parts_2=parts_2,
+    )
+    frames["constraints"] = pd.concat(
+        [frames["constraints"], pd.DataFrame([row], columns=CONSTRAINT_COLUMNS)],
+        ignore_index=True,
+    )
+
+
 def _manifest() -> DatasetSourceManifest:
     names = ("parts.gz", "constraints.gz", "shapes.gz", "tasks.gz")
     return DatasetSourceManifest.model_validate(
@@ -238,6 +276,31 @@ def test_view_only_task_requires_a_real_nonempty_constraint_type() -> None:
 
     with pytest.raises(NoEligibleLectraSliceError, match="non-s1 view-only"):
         select_representative_task_ids(frames)
+
+
+@pytest.mark.parametrize(
+    ("parts_1", "parts_2"),
+    [
+        (800_000, None),
+        ([999_999], None),
+        ([800_000.0], None),
+        ([800_000], 800_001),
+        ([800_000], [999_999]),
+        ([800_000], [800_001.0]),
+    ],
+)
+def test_malformed_or_unresolved_view_references_skip_to_next_ranked_candidate(
+    parts_1: object,
+    parts_2: object,
+) -> None:
+    frames = _frames()
+    _add_view_candidate(frames, task_id=800, parts_1=parts_1, parts_2=parts_2)
+
+    selected = select_representative_task_ids(frames)
+    normalized = _export(frames)
+
+    assert selected.view_only_tasks_index == 900
+    assert tuple(task.tasks_index for task in normalized.tasks) == (100, 900)
 
 
 @pytest.mark.parametrize(

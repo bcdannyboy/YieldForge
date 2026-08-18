@@ -431,6 +431,37 @@ def _validate_opaque_value(value: Any) -> OpaqueValue:
     return OpaqueSequence(kind="sequence", items=tuple(items))
 
 
+def _validate_view_part_references(
+    *,
+    parts: Any,
+    constraints: Any,
+    part_positions: list[int],
+    constraint_positions: list[int],
+) -> None:
+    valid_part_ids = {
+        _source_int(_cell(parts, position, "part_id"), label="part_id", nonnegative=True)
+        for position in part_positions
+    }
+    for position in constraint_positions:
+        for column in ("parts_1", "parts_2"):
+            value = _cell(constraints, position, column)
+            if _is_missing(value):
+                continue
+            references = _sequence(
+                value,
+                label=f"view constraint {column}",
+                nonempty=False,
+            )
+            for reference in references:
+                part_id = _source_int(
+                    reference,
+                    label=f"view constraint {column} reference",
+                    nonnegative=True,
+                )
+                if part_id not in valid_part_ids:
+                    raise ValueError(f"view constraint {column} reference {part_id} is unresolved")
+
+
 def select_representative_task_ids(
     frames: Mapping[str, Any],
 ) -> RepresentativeTaskSelection:
@@ -476,6 +507,12 @@ def select_representative_task_ids(
         )
         if has_non_s1 and view_only is None:
             try:
+                _validate_view_part_references(
+                    parts=frames["parts"],
+                    constraints=frames["constraints"],
+                    part_positions=parts_by_task[task_id],
+                    constraint_positions=constraint_positions,
+                )
                 for position in constraint_positions:
                     for column in CONSTRAINT_OPAQUE_FIELD_ORDER:
                         _validate_opaque_value(_cell(frames["constraints"], position, column))
