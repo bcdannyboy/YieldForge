@@ -197,6 +197,22 @@ def test_report_validation_is_size_bounded_strict_and_manifest_bound(tmp_path: P
     with pytest.raises(runner.QualifierRunnerError, match="checksum identity"):
         runner._validate_report(json.dumps(changed).encode(), manifest, max_bytes=100_000)
 
+    with pytest.raises(runner.QualifierRunnerError, match="duplicate JSON object key"):
+        runner._validate_report(b'{"outer":{"x":1,"x":2}}', manifest, max_bytes=100_000)
+
+
+def test_validated_report_is_reserialized_as_canonical_finite_json(tmp_path: Path) -> None:
+    runner = _load_runner()
+    payload, manifest = _valid_fixture_report(tmp_path)
+    report = runner._validate_report(payload, manifest)
+
+    canonical = runner._canonical_report_bytes(report)
+
+    assert canonical.endswith(b"\n")
+    assert canonical != payload
+    assert b'\n  "' not in canonical
+    assert json.loads(canonical) == report.model_dump(mode="json")
+
 
 def test_publisher_is_atomic_no_clobber_and_exact(tmp_path: Path) -> None:
     runner = _load_runner()
@@ -204,12 +220,14 @@ def test_publisher_is_atomic_no_clobber_and_exact(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()
 
-    destination = runner._publish_report(output_dir, payload)
+    with runner._open_output_dir(output_dir) as opened:
+        destination = runner._publish_report(opened, payload)
     assert destination.read_bytes() == payload
     assert {path.name for path in output_dir.iterdir()} == {runner.REPORT_NAME}
 
     with pytest.raises(runner.QualifierRunnerError, match="empty"):
-        runner._publish_report(output_dir, b'{"replacement":true}\n')
+        with runner._open_output_dir(output_dir):
+            pass
     assert destination.read_bytes() == payload
 
 
@@ -221,12 +239,30 @@ def test_publisher_rejects_symlink_and_unknown_output(tmp_path: Path) -> None:
     linked_output.symlink_to(real_output, target_is_directory=True)
 
     with pytest.raises(runner.QualifierRunnerError, match="regular directory"):
-        runner._publish_report(linked_output, b"{}\n")
+        with runner._open_output_dir(linked_output):
+            pass
 
     (real_output / "unknown.txt").write_text("preserve me")
     with pytest.raises(runner.QualifierRunnerError, match="empty"):
-        runner._publish_report(real_output, b"{}\n")
+        with runner._open_output_dir(real_output):
+            pass
     assert (real_output / "unknown.txt").read_text() == "preserve me"
+
+
+def test_publisher_fails_closed_if_output_path_is_swapped(tmp_path: Path) -> None:
+    runner = _load_runner()
+    output_dir = tmp_path / "output"
+    moved_dir = tmp_path / "moved-output"
+    output_dir.mkdir()
+
+    with runner._open_output_dir(output_dir) as opened:
+        output_dir.rename(moved_dir)
+        output_dir.mkdir()
+        with pytest.raises(runner.QualifierRunnerError, match="identity changed"):
+            runner._publish_report(opened, b'{"safe":true}\n')
+
+    assert list(moved_dir.iterdir()) == []
+    assert list(output_dir.iterdir()) == []
 
 
 def test_bounded_capture_stops_process_on_stdout_limit() -> None:
@@ -257,6 +293,79 @@ def test_bounded_capture_stops_process_on_timeout() -> None:
             on_abort=lambda: aborted.append(True),
         )
     assert aborted == [True]
+
+
+def test_abort_cleanup_failure_still_terminates_local_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    terminated: list[int] = []
+    original_terminate = runner._terminate_process
+
+    def record_termination(process: object) -> None:
+        terminated.append(process.pid)
+        original_terminate(process)
+
+    def cleanup_failure() -> None:
+        raise runner.QualifierRunnerError("could not prove container test-name absent")
+
+    monkeypatch.setattr(runner, "_terminate_process", record_termination)
+    with pytest.raises(runner.QualifierRunnerError, match="test-name"):
+        runner._capture_process(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            timeout_seconds=0.05,
+            stdout_limit=128,
+            stderr_limit=128,
+            on_abort=cleanup_failure,
+        )
+    assert len(terminated) == 1
+
+
+def test_container_cleanup_accepts_only_explicit_absence_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    container_name = "yieldforge-lectra-cleanup-test"
+    responses = iter(
+        [
+            runner.subprocess.CompletedProcess([], 1, b"", b"already absent"),
+            runner.subprocess.CompletedProcess(
+                [], 1, b"", f"Error: No such object: {container_name}".encode()
+            ),
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: object) -> object:
+        calls.append(command)
+        return next(responses)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    runner._ensure_container_absent(container_name)
+
+    assert calls[0][:3] == ["docker", "rm", "--force"]
+    assert calls[1][:4] == ["docker", "inspect", "--type", "container"]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "oserror", "inspect-present"])
+def test_container_cleanup_failure_names_the_unconfirmed_container(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    runner = _load_runner()
+    container_name = f"yieldforge-lectra-{failure}"
+
+    def fake_run(command: list[str], **_: object) -> object:
+        if failure == "timeout":
+            raise runner.subprocess.TimeoutExpired(command, 1)
+        if failure == "oserror":
+            raise OSError("docker unavailable")
+        return runner.subprocess.CompletedProcess(command, 0, b"still-present", b"")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    with pytest.raises(runner.QualifierRunnerError, match=container_name):
+        runner._ensure_container_absent(container_name, attempts=2)
 
 
 def test_runner_refuses_root_and_never_mounts_host_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -359,6 +468,7 @@ def test_docker_runner_smoke(tmp_path: Path) -> None:
 
     assert report_path.name == runner.REPORT_NAME
     assert {path.name for path in tmp_path.iterdir()} == {runner.REPORT_NAME}
+    assert b'\n  "' not in report_path.read_bytes()
 
 
 @pytest.mark.integration

@@ -46,10 +46,12 @@ uv run python tools/lectra/run_qualifier.py \
 ```
 
 The runner refuses root UID or GID, symbolic links, extra input files, a nonempty output
-directory, oversized output, non-finite or trailing JSON, schema mismatch, and dataset/checksum
-identity mismatch. On macOS Docker Desktop it passes the numeric host UID and GID (commonly
-`501:20`) into the container so publication does not require a root container. Do not run the
-publisher with `sudo`.
+directory, oversized output, non-finite, duplicate-key, or trailing JSON, schema mismatch, and
+dataset/checksum identity mismatch. Before Docker starts it opens the output directory with
+`O_DIRECTORY`, `O_NOFOLLOW`, and `O_CLOEXEC`, records its device and inode, and holds that
+descriptor through container cleanup, validation, and publication. On macOS Docker Desktop it
+passes the numeric host UID and GID (commonly `501:20`) into the container so publication does
+not require a root container. Do not run the publisher with `sudo`.
 
 For each run the runner generates a unique container name. It invokes Docker without
 `shell=True` and applies:
@@ -62,12 +64,19 @@ For each run the runner generates a unique container name. It invokes Docker wit
   `--log-driver none`;
 - exactly one bind mount: the input at `/input`, read-only.
 
-Stdout is capped at 4 MiB, stderr at 1 MiB, and runtime at the requested timeout. A timeout or
-limit violation stops and removes the named container. After a clean exit, the runner accepts
-exactly one finite JSON payload from stdout, validates the full Pydantic contract and pinned
-manifest identity, and atomically hard-links a completed temporary file as
-`lectra-audit.json`. It never overwrites. Its final postcondition requires exactly that one
-regular file with the captured bytes in the host output directory.
+Stdout is capped at 4 MiB, stderr at 1 MiB, and runtime at the requested timeout. On every exit
+path the runner retries `docker rm --force`, then uses `docker inspect --type container` to prove
+the unique generated name is absent. Cleanup failure is fatal and names the unconfirmed
+container; the local Docker client is terminated even if abort cleanup fails.
+
+After a clean exit, the runner accepts exactly one finite JSON payload from stdout, recursively
+rejects duplicate object keys, and validates the full Pydantic contract and pinned manifest
+identity. It discards the captured representation and serializes canonical finite JSON from the
+validated report. Temporary creation, listing, hard-link publication, bounded no-follow reading,
+stat checks, and cleanup all operate relative to the held directory descriptor. It never
+overwrites. Before returning, the final postcondition requires exactly `lectra-audit.json` with
+the canonical bytes and proves the path still resolves to the held device and inode. A moved or
+swapped output path causes descriptor-relative cleanup and failure.
 
 ## Trusted Docker smoke fixtures
 

@@ -12,8 +12,11 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic import ValidationError
 
@@ -33,6 +36,18 @@ _IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")
 
 class QualifierRunnerError(RuntimeError):
     """Qualification or trusted publication failed closed."""
+
+
+class _DuplicateJsonKeyError(ValueError):
+    """A JSON object repeated a key at any nesting level."""
+
+
+@dataclass(frozen=True)
+class _OutputDirectory:
+    path: Path
+    file_descriptor: int
+    device: int
+    inode: int
 
 
 class _LimitedCapture:
@@ -57,12 +72,12 @@ class _LimitedCapture:
                 self.overflow_event.set()
 
 
-def _drain_pipe(pipe: object, capture: _LimitedCapture) -> None:
+def _drain_pipe(pipe: BinaryIO, capture: _LimitedCapture) -> None:
     try:
-        while chunk := pipe.read(64 * 1024):  # type: ignore[attr-defined]
+        while chunk := pipe.read(64 * 1024):
             capture.append(chunk)
     finally:
-        pipe.close()  # type: ignore[attr-defined]
+        pipe.close()
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:
@@ -120,9 +135,12 @@ def _capture_process(
             abort_reason = "qualifier exceeded its runtime timeout"
             break
 
+    cleanup_error: BaseException | None = None
     if abort_reason is not None:
         try:
             on_abort()
+        except BaseException as error:
+            cleanup_error = error
         finally:
             _terminate_process(process)
     else:
@@ -132,7 +150,12 @@ def _capture_process(
         thread.join(timeout=2)
     if any(thread.is_alive() for thread in threads):
         _terminate_process(process)
+        if cleanup_error is not None:
+            raise cleanup_error
         raise QualifierRunnerError("qualifier output pipes did not close")
+
+    if cleanup_error is not None:
+        raise cleanup_error
 
     if abort_reason is None and (stdout_capture.overflowed or stderr_capture.overflowed):
         on_abort()
@@ -172,17 +195,54 @@ def _validate_input_dir(input_dir: Path, manifest: DatasetSourceManifest) -> Pat
     return resolved
 
 
-def _require_empty_output_dir(output_dir: Path) -> Path:
-    if output_dir.is_symlink() or not output_dir.is_dir():
-        raise QualifierRunnerError("output must be a regular directory, not a link")
-    resolved = output_dir.resolve(strict=True)
-    if any(output_dir.iterdir()):
-        raise QualifierRunnerError("output directory must be empty")
-    return resolved
+@contextmanager
+def _open_output_dir(output_dir: Path) -> Iterator[_OutputDirectory]:
+    """Hold the initially empty output directory by inode for the whole run."""
+    absolute_path = output_dir.absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        file_descriptor = os.open(absolute_path, flags)
+    except OSError as error:
+        raise QualifierRunnerError("output must be a regular directory, not a link") from error
+    try:
+        metadata = os.fstat(file_descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise QualifierRunnerError("output must be a regular directory, not a link")
+        if os.listdir(file_descriptor):
+            raise QualifierRunnerError("output directory must be empty")
+        yield _OutputDirectory(
+            path=absolute_path,
+            file_descriptor=file_descriptor,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+        )
+    finally:
+        os.close(file_descriptor)
+
+
+def _output_path_has_held_identity(output: _OutputDirectory) -> bool:
+    try:
+        metadata = os.stat(output.path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_dev == output.device
+        and metadata.st_ino == output.inode
+    )
 
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(f"duplicate JSON object key: {key}")
+        value[key] = item
+    return value
 
 
 def _validate_report(
@@ -195,8 +255,13 @@ def _validate_report(
         raise QualifierRunnerError("qualifier report violates the size limit")
     try:
         text = payload.decode("utf-8", errors="strict")
-        decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
+        decoder = json.JSONDecoder(
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
         decoded, end = decoder.raw_decode(text)
+    except _DuplicateJsonKeyError as error:
+        raise QualifierRunnerError(str(error)) from error
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
         raise QualifierRunnerError("qualifier did not emit valid finite UTF-8 JSON") from error
     if text[end:] not in {"", "\n"}:
@@ -213,13 +278,63 @@ def _validate_report(
     return report
 
 
-def _publish_report(output_dir: Path, payload: bytes) -> Path:
+def _canonical_report_bytes(report: LectraAuditReport) -> bytes:
+    try:
+        payload = (
+            json.dumps(
+                report.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise QualifierRunnerError(
+            "validated report could not be serialized canonically"
+        ) from error
+    if len(payload) > MAX_REPORT_BYTES:
+        raise QualifierRunnerError("canonical report violates the size limit")
+    return payload
+
+
+def _unlink_owned(output: _OutputDirectory, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=output.file_descriptor)
+    except FileNotFoundError:
+        pass
+
+
+def _read_published_report(output: _OutputDirectory) -> bytes:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(REPORT_NAME, flags, dir_fd=output.file_descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise QualifierRunnerError("published report is not a regular file")
+        if metadata.st_size > MAX_REPORT_BYTES:
+            raise QualifierRunnerError("published report violates the size limit")
+        chunks: list[bytes] = []
+        byte_count = 0
+        while chunk := os.read(descriptor, min(64 * 1024, MAX_REPORT_BYTES + 1 - byte_count)):
+            byte_count += len(chunk)
+            if byte_count > MAX_REPORT_BYTES:
+                raise QualifierRunnerError("published report violates the size limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_report(output: _OutputDirectory, payload: bytes) -> Path:
     """Atomically link a complete file into an empty directory without overwriting."""
     if len(payload) > MAX_REPORT_BYTES:
         raise QualifierRunnerError("qualifier report violates the size limit")
-    resolved = _require_empty_output_dir(output_dir)
-    destination = resolved / REPORT_NAME
-    temporary = resolved / f".{REPORT_NAME}.{uuid.uuid4().hex}.tmp"
+    if not _output_path_has_held_identity(output):
+        raise QualifierRunnerError("output directory identity changed during qualification")
+    if os.listdir(output.file_descriptor):
+        raise QualifierRunnerError("output directory must remain empty until publication")
+    temporary = f".{REPORT_NAME}.{uuid.uuid4().hex}.tmp"
     temporary_created = False
     destination_created = False
     try:
@@ -227,6 +342,7 @@ def _publish_report(output_dir: Path, payload: bytes) -> Path:
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
             0o600,
+            dir_fd=output.file_descriptor,
         )
         temporary_created = True
         try:
@@ -240,35 +356,38 @@ def _publish_report(output_dir: Path, payload: bytes) -> Path:
         finally:
             os.close(descriptor)
 
-        if {entry.name for entry in resolved.iterdir()} != {temporary.name}:
+        if set(os.listdir(output.file_descriptor)) != {temporary}:
             raise QualifierRunnerError("unknown output appeared during publication")
         try:
-            os.link(temporary, destination, follow_symlinks=False)
+            os.link(
+                temporary,
+                REPORT_NAME,
+                src_dir_fd=output.file_descriptor,
+                dst_dir_fd=output.file_descriptor,
+                follow_symlinks=False,
+            )
         except FileExistsError as error:
             raise QualifierRunnerError("refusing to overwrite an existing report") from error
         destination_created = True
-        temporary.unlink()
+        os.unlink(temporary, dir_fd=output.file_descriptor)
         temporary_created = False
-
-        directory_fd = os.open(resolved, os.O_RDONLY | os.O_CLOEXEC)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        entries = list(resolved.iterdir())
-        if {entry.name for entry in entries} != {REPORT_NAME} or len(entries) != 1:
+        os.fsync(output.file_descriptor)
+        entries = os.listdir(output.file_descriptor)
+        if set(entries) != {REPORT_NAME} or len(entries) != 1:
             raise QualifierRunnerError("published output failed its exact postcondition")
-        metadata = destination.lstat()
-        if destination.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        metadata = os.stat(REPORT_NAME, dir_fd=output.file_descriptor, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
             raise QualifierRunnerError("published report is not a regular file")
-        if destination.read_bytes() != payload:
+        if _read_published_report(output) != payload:
             raise QualifierRunnerError("published report bytes changed unexpectedly")
-        return destination
+        if not _output_path_has_held_identity(output):
+            raise QualifierRunnerError("output directory identity changed during qualification")
+        return output.path / REPORT_NAME
     except BaseException:
         if temporary_created:
-            temporary.unlink(missing_ok=True)
+            _unlink_owned(output, temporary)
         if destination_created:
-            destination.unlink(missing_ok=True)
+            _unlink_owned(output, REPORT_NAME)
         raise
 
 
@@ -331,35 +450,67 @@ def _docker_command(
     ]
 
 
-def _remove_container(container_name: str) -> None:
-    try:
-        subprocess.run(
-            ["docker", "rm", "--force", container_name],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-            shell=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+def _docker_cleanup_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=10,
+        check=False,
+        shell=False,
+    )
 
 
-def _stop_and_remove_container(container_name: str) -> None:
-    try:
-        subprocess.run(
-            ["docker", "stop", "--time", "1", container_name],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-            shell=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    _remove_container(container_name)
+def _inspect_proves_absence(
+    result: subprocess.CompletedProcess[bytes], container_name: str
+) -> bool:
+    if result.returncode == 0:
+        return False
+    detail = (result.stdout + result.stderr).decode("utf-8", errors="replace").lower()
+    expected_name = container_name.lower()
+    return expected_name in detail and ("no such object" in detail or "no such container" in detail)
+
+
+def _ensure_container_absent(container_name: str, *, attempts: int = 3) -> None:
+    """Force removal and require Docker to prove the generated name is absent."""
+    if attempts <= 0:
+        raise ValueError("cleanup attempts must be positive")
+    observations: list[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            removal = _docker_cleanup_command(["docker", "rm", "--force", container_name])
+            observations.append(f"rm#{attempt}={removal.returncode}")
+        except subprocess.TimeoutExpired:
+            observations.append(f"rm#{attempt}=timeout")
+        except OSError:
+            observations.append(f"rm#{attempt}=oserror")
+
+        try:
+            inspection = _docker_cleanup_command(
+                [
+                    "docker",
+                    "inspect",
+                    "--type",
+                    "container",
+                    "--format",
+                    "{{.Id}}",
+                    container_name,
+                ]
+            )
+            observations.append(f"inspect#{attempt}={inspection.returncode}")
+            if _inspect_proves_absence(inspection, container_name):
+                return
+        except subprocess.TimeoutExpired:
+            observations.append(f"inspect#{attempt}=timeout")
+        except OSError:
+            observations.append(f"inspect#{attempt}=oserror")
+        if attempt < attempts:
+            time.sleep(0.05)
+
+    evidence = ", ".join(observations)
+    raise QualifierRunnerError(
+        f"could not prove generated container {container_name} absent after cleanup: {evidence}"
+    )
 
 
 def run_qualifier(
@@ -372,7 +523,6 @@ def run_qualifier(
 ) -> Path:
     manifest = _load_manifest(manifest_path)
     resolved_input = _validate_input_dir(input_dir, manifest)
-    _require_empty_output_dir(output_dir)
     uid, gid = _nonroot_identity()
     container_name = f"yieldforge-lectra-{uuid.uuid4().hex}"
     command = _docker_command(
@@ -382,26 +532,29 @@ def run_qualifier(
         uid=uid,
         gid=gid,
     )
-    try:
-        return_code, stdout, stderr = _capture_process(
-            command,
-            timeout_seconds=timeout_seconds,
-            stdout_limit=MAX_REPORT_BYTES,
-            stderr_limit=MAX_STDERR_BYTES,
-            on_abort=lambda: _stop_and_remove_container(container_name),
-        )
-    finally:
-        _remove_container(container_name)
+    with _open_output_dir(output_dir) as opened_output:
+        try:
+            return_code, stdout, stderr = _capture_process(
+                command,
+                timeout_seconds=timeout_seconds,
+                stdout_limit=MAX_REPORT_BYTES,
+                stderr_limit=MAX_STDERR_BYTES,
+                on_abort=lambda: _ensure_container_absent(container_name),
+            )
+        finally:
+            _ensure_container_absent(container_name)
 
-    if return_code != 0:
-        detail = stderr.decode("utf-8", errors="replace").strip()
-        raise QualifierRunnerError(f"qualifier container failed with exit {return_code}: {detail}")
-    _validate_report(stdout, manifest)
-    if stderr:
-        sys.stderr.buffer.write(stderr)
-        sys.stderr.buffer.flush()
-    _require_empty_output_dir(output_dir)
-    return _publish_report(output_dir, stdout)
+        if return_code != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise QualifierRunnerError(
+                f"qualifier container failed with exit {return_code}: {detail}"
+            )
+        report = _validate_report(stdout, manifest)
+        canonical_payload = _canonical_report_bytes(report)
+        if stderr:
+            sys.stderr.buffer.write(stderr)
+            sys.stderr.buffer.flush()
+        return _publish_report(opened_output, canonical_payload)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
