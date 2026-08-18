@@ -199,7 +199,7 @@ class SolverJobService:
         spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
         cancel_task: asyncio.Task[bool] | None = None
         timeout_task: asyncio.Task[None] | None = None
-        archive_task: asyncio.Task[Path] | None = None
+        archive_task: asyncio.Future[Path] | None = None
         archive_abandoned = threading.Event()
         archive_staging = state.directory / "candidate-archive.staging"
         deadline = time.monotonic() + state.request.max_runtime_seconds
@@ -351,13 +351,10 @@ class SolverJobService:
 
             archive_path = self.archive_root / state.job_id
             archive_error: Exception | None = None
-            archive_task = asyncio.create_task(
-                asyncio.to_thread(
-                    self._create_staged_archive,
-                    archive_staging,
-                    outcome.result.batch,
-                    archive_abandoned,
-                )
+            archive_task = self._start_daemon_archive_staging(
+                archive_staging,
+                outcome.result.batch,
+                archive_abandoned,
             )
             try:
                 done, _ = await asyncio.wait(
@@ -366,11 +363,13 @@ class SolverJobService:
                 )
                 if state.cancel_requested.is_set():
                     archive_abandoned.set()
+                    archive_task.cancel()
                     self._discard_path(archive_staging)
                     self._finish_terminal(state, JobStatus.CANCELLED)
                     return
                 if timeout_task in done or time.monotonic() >= deadline:
                     archive_abandoned.set()
+                    archive_task.cancel()
                     self._discard_path(archive_staging)
                     self._finish_terminal(state, JobStatus.TIMED_OUT)
                     return
@@ -380,6 +379,7 @@ class SolverJobService:
                     archive_error = error
             except asyncio.CancelledError:
                 archive_abandoned.set()
+                archive_task.cancel()
                 self._discard_path(archive_staging)
                 raise
             if timeout_task.done() or time.monotonic() >= deadline:
@@ -410,13 +410,12 @@ class SolverJobService:
             if state.status not in TERMINAL_JOB_STATUSES:
                 self._finish_failed(state, "supervisor_failure", "solver worker failed")
         finally:
-            if (
-                archive_task is not None
-                and not archive_task.done()
-                and not archive_abandoned.is_set()
-            ):
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(archive_task)
+            if archive_task is not None and not archive_task.done():
+                archive_abandoned.set()
+                archive_task.cancel()
+            elif archive_task is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    archive_task.exception()
             if state.status is not JobStatus.COMPLETED:
                 self._discard_path(archive_staging)
             if state.process is not None:
@@ -936,6 +935,59 @@ class SolverJobService:
         }
         if manifest != expected_manifest or candidates != batch.candidates:
             raise ValueError("completed archive does not match terminal batch")
+
+    @staticmethod
+    def _start_daemon_archive_staging(
+        archive_staging: Path,
+        batch: CandidateBatch,
+        abandoned: threading.Event,
+    ) -> asyncio.Future[Path]:
+        loop = asyncio.get_running_loop()
+        completion: asyncio.Future[Path] = loop.create_future()
+
+        def deliver(result: Path | None, error: BaseException | None) -> None:
+            if completion.done():
+                return
+            if error is not None:
+                completion.set_exception(error)
+            else:
+                assert result is not None
+                completion.set_result(result)
+
+        def stage() -> None:
+            try:
+                result = SolverJobService._create_staged_archive(
+                    archive_staging,
+                    batch,
+                    abandoned,
+                )
+            except BaseException as error:
+                failure = (
+                    error
+                    if isinstance(error, Exception) and not isinstance(error, StopIteration)
+                    else RuntimeError("archive staging aborted")
+                )
+                try:
+                    loop.call_soon_threadsafe(deliver, None, failure)
+                except RuntimeError:
+                    pass
+            else:
+                try:
+                    loop.call_soon_threadsafe(deliver, result, None)
+                except RuntimeError:
+                    pass
+
+        thread = threading.Thread(
+            target=stage,
+            name=f"yieldforge-archive-{archive_staging.parent.name}",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            completion.cancel()
+            raise
+        return completion
 
     @staticmethod
     def _create_staged_archive(

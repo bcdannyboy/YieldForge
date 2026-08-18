@@ -429,6 +429,28 @@ def test_supervisor_shutdown_does_not_await_hung_archive_staging(
     run(scenario())
 
 
+def test_event_loop_shutdown_does_not_join_abandoned_archive_staging(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--loop-shutdown-probe",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=1.5,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "loop_shutdown_completed",
+        "late_archive_cleanup_completed",
+    ]
+    assert completed.stderr == ""
+
+
 def test_hard_deadline_during_archive_staging_publishes_no_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -915,7 +937,57 @@ def _fake_worker_main(mode: str, request_path: Path) -> int:
     return 0
 
 
+def _loop_shutdown_probe(root: Path) -> int:
+    archive_started = threading.Event()
+    release_archive = threading.Event()
+    archive_returned = threading.Event()
+    original_create = CandidateArchive.create
+
+    def blocked_create(
+        _archive_type: type[CandidateArchive], _output: Path, _batch: CandidateBatch
+    ) -> Path:
+        archive_started.set()
+        release_archive.wait()
+        try:
+            return original_create(_output, _batch)
+        finally:
+            archive_returned.set()
+
+    CandidateArchive.create = classmethod(blocked_create)
+
+    async def scenario() -> None:
+        service = SolverJobService(
+            root / "jobs",
+            root / "archives",
+            worker_command=fake_command("complete"),
+        )
+        created = await service.start(make_request())
+        for _ in range(200):
+            if archive_started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert archive_started.is_set()
+        terminal = await asyncio.wait_for(service.cancel(created.job_id), timeout=0.5)
+        assert terminal.status is JobStatus.CANCELLED
+
+    asyncio.run(scenario())
+    print("loop_shutdown_completed", flush=True)
+    release_archive.set()
+    assert archive_returned.wait(timeout=0.5)
+    staging = next((root / "jobs").iterdir()) / "candidate-archive.staging"
+    for _ in range(100):
+        if not staging.exists():
+            break
+        time.sleep(0.005)
+    assert not staging.exists()
+    print("late_archive_cleanup_completed", flush=True)
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover - invoked by subprocess tests
+    if "--loop-shutdown-probe" in sys.argv:
+        probe_index = sys.argv.index("--loop-shutdown-probe")
+        raise SystemExit(_loop_shutdown_probe(Path(sys.argv[probe_index + 1])))
     mode_index = sys.argv.index("--fake-worker")
     request_index = sys.argv.index("--request")
     raise SystemExit(_fake_worker_main(sys.argv[mode_index + 1], Path(sys.argv[request_index + 1])))
