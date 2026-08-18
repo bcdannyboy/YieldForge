@@ -1,5 +1,10 @@
 # Lectra Corpus Qualification Implementation Plan
 
+**Execution status:** Qualification complete 2026-08-17; see [[Lectra Corpus Audit]].
+
+> [!note] Implemented boundary and evidence
+> The final implementation is stricter than the original command sketches below. The trusted runner gives the container no host-writable output mount, validates a single bounded stdout report, and publishes it with no-clobber semantics. The production ceiling is 16 GiB, not the originally proposed 8 GiB; the canonical run peaked at 9,721,896,960 bytes. The observed parts key is `part_id`, while the public schema text names `parts_id`. The aggregate audit proves corpus-wide counts and distributions but cannot prove representative task IDs or task-level direct-support coverage; those require a separate bounded passive export.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Acquire the pinned Lectra/Lallier 100,000-task release safely and produce a reproducible capability census that determines the first Corpus Explorer and Nest Lab slice.
@@ -390,7 +395,7 @@ Create `Docs/Research/Lectra Corpus Audit.md` from the verified JSON. Report:
 - recurrence and task-size distributions;
 - malformed or ambiguous records;
 - estimated current Spyrrow coverage, with the exact rule used;
-- representative task IDs for the first visible slice;
+- representative task IDs only if a bounded passive artifact proves the selection; otherwise record why the aggregate audit cannot provide them;
 - unresolved questions that must block normalization.
 
 Do not label inferred contours as holes without source evidence. Do not describe task index order as chronological.

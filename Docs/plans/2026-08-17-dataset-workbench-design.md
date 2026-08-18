@@ -23,6 +23,8 @@ The closest open source is the Lectra/Lallier nesting-task corpus. It contains 1
 
 The evidence program will therefore use real Lectra geometry and real within-task composition as its backbone, then generate only the missing chronology and economic context with explicit provenance.
 
+The completed qualification census is recorded in [[Lectra Corpus Audit]]. It found coherent keys and joins across all 100,000 tasks, but it did not establish the semantics of the 15 opaque constraint codes or interpret the literal source unit label `m^-4`. The first visible Lectra nest must therefore pair a `source_lossless` record with a separate `runnable_with_explicit_assumptions` projection; it is not `directly_supported` evidence.
+
 ## Source roles
 
 | Source | Role | Claim ceiling |
