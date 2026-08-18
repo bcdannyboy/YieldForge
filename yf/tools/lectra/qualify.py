@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
+import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Iterator
@@ -15,6 +18,8 @@ from typing import Any, BinaryIO
 from yieldforge.datasets.source_manifest import DatasetSourceManifest, SourceFile
 
 EXPECTED_FILENAMES = frozenset({"constraints.gz", "parts.gz", "shapes.gz", "tasks.gz"})
+QUALIFIER_MODES = frozenset({"audit", "slice"})
+SLICE_NAME = "lectra-slice.json"
 APP_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = APP_ROOT / "datasets" / "sources" / "lectra-7030786-v1.1.json"
 INPUT_DIR = Path("/input")
@@ -26,6 +31,7 @@ CGROUP_MEMORY_FILES = (
     ("memory.current", Path("/sys/fs/cgroup/memory.current")),
     ("memory.peak", Path("/sys/fs/cgroup/memory.peak")),
 )
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class QualificationBoundaryError(RuntimeError):
@@ -187,12 +193,31 @@ def _emit_stage_telemetry(stage: str) -> None:
     _write_all(sys.stderr.fileno(), payload)
 
 
-def _qualify_payload() -> bytes:
+def _qualify_payload(
+    mode: str = "audit",
+    source_manifest_sha256: str | None = None,
+    audit_report_sha256: str | None = None,
+) -> bytes:
     from yieldforge.datasets.lectra_audit import (
         audit_frames,
         report_to_json,
         validate_frame_schema,
     )
+
+    if mode not in QUALIFIER_MODES:
+        raise QualificationBoundaryError(f"unknown qualification mode: {mode!r}")
+    if mode == "slice":
+        if not source_manifest_sha256 or not _SHA256_PATTERN.fullmatch(source_manifest_sha256):
+            raise QualificationBoundaryError("slice mode requires a lowercase manifest SHA-256")
+        if not audit_report_sha256 or not _SHA256_PATTERN.fullmatch(audit_report_sha256):
+            raise QualificationBoundaryError("slice mode requires a lowercase audit SHA-256")
+        actual_manifest_sha256 = hashlib.sha256(MANIFEST_PATH.read_bytes()).hexdigest()
+        if actual_manifest_sha256 != source_manifest_sha256:
+            raise QualificationBoundaryError(
+                "mounted manifest hash differs from the trusted runner"
+            )
+    elif source_manifest_sha256 is not None or audit_report_sha256 is not None:
+        raise QualificationBoundaryError("audit mode does not accept slice evidence hashes")
 
     manifest = _load_manifest()
     with _verified_memfds(INPUT_DIR, manifest) as staged:
@@ -203,13 +228,35 @@ def _qualify_payload() -> bytes:
             validate_frame_schema(name, frame)
             frames[name] = frame
             _emit_stage_telemetry(f"table-{name}-validated")
-    report = audit_frames(
-        frames,
-        dataset_id=manifest.dataset_id,
-        source_checksums={source.name: source.checksum for source in manifest.files},
-    )
-    _emit_stage_telemetry("audit-complete")
-    payload = (report_to_json(report, indent=2) + "\n").encode("utf-8")
+    if mode == "audit":
+        report = audit_frames(
+            frames,
+            dataset_id=manifest.dataset_id,
+            source_checksums={source.name: source.checksum for source in manifest.files},
+        )
+        _emit_stage_telemetry("audit-complete")
+        payload = (report_to_json(report, indent=2) + "\n").encode("utf-8")
+    else:
+        from yieldforge.datasets.lectra_slice import export_representative_slice
+
+        assert source_manifest_sha256 is not None
+        assert audit_report_sha256 is not None
+        normalized = export_representative_slice(
+            frames,
+            manifest=manifest,
+            source_manifest_sha256=source_manifest_sha256,
+            audit_report_sha256=audit_report_sha256,
+        )
+        _emit_stage_telemetry("slice-complete")
+        payload = (
+            json.dumps(
+                normalized.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
     if len(payload) > MAX_REPORT_BYTES:
         raise QualificationBoundaryError("audit report exceeds the qualifier size limit")
     return payload
@@ -224,13 +271,35 @@ def _write_all(file_descriptor: int, payload: bytes) -> None:
         view = view[written:]
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=sorted(QUALIFIER_MODES), default="audit")
+    parser.add_argument("--source-manifest-sha256")
+    parser.add_argument("--audit-report-sha256")
+    args = parser.parse_args(argv)
+    if args.mode == "slice" and (
+        args.source_manifest_sha256 is None or args.audit_report_sha256 is None
+    ):
+        parser.error("slice mode requires both evidence SHA-256 arguments")
+    if args.mode == "audit" and (
+        args.source_manifest_sha256 is not None or args.audit_report_sha256 is not None
+    ):
+        parser.error("audit mode does not accept slice evidence hashes")
+    return args
+
+
 def _entrypoint() -> None:
     """Suppress untrusted stdout until one final JSON payload is ready."""
     report_fd = os.dup(sys.stdout.fileno())
     os.set_inheritable(report_fd, False)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     try:
-        payload = _qualify_payload()
+        args = _parse_args()
+        payload = _qualify_payload(
+            mode=args.mode,
+            source_manifest_sha256=args.source_manifest_sha256,
+            audit_report_sha256=args.audit_report_sha256,
+        )
         sys.stdout.flush()
         _write_all(report_fd, payload)
         _write_all(sys.stderr.fileno(), b"qualification completed\n")

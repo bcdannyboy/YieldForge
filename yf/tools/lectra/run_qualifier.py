@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -16,14 +17,17 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 
 from yieldforge.datasets.lectra_audit import LectraAuditReport
+from yieldforge.datasets.normalized_slice import NormalizedSlice
 from yieldforge.datasets.passive_report import (
     PassiveEvidenceError,
     bind_lectra_audit_report,
+    bind_normalized_slice_evidence,
     parse_dataset_source_manifest,
     parse_lectra_audit_report,
+    parse_normalized_slice,
     read_passive_evidence_file,
 )
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
@@ -33,10 +37,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = PROJECT_ROOT / "datasets" / "sources" / "lectra-7030786-v1.1.json"
 DEFAULT_IMAGE = "yieldforge-lectra-qualifier:7030786-v1.1"
 REPORT_NAME = "lectra-audit.json"
+SLICE_NAME = "lectra-slice.json"
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15 * 60
 _IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")
+type QualifierMode = Literal["audit", "slice"]
 
 
 class QualifierRunnerError(RuntimeError):
@@ -248,6 +254,31 @@ def _validate_report(
     return report
 
 
+def _validate_slice(
+    payload: bytes,
+    manifest: DatasetSourceManifest,
+    report: LectraAuditReport,
+    *,
+    manifest_payload: bytes,
+    report_payload: bytes,
+    max_bytes: int = MAX_REPORT_BYTES,
+) -> NormalizedSlice:
+    if not payload or len(payload) > max_bytes:
+        raise QualifierRunnerError("qualifier slice violates the size limit")
+    try:
+        normalized = parse_normalized_slice(payload, max_bytes=max_bytes)
+        bind_normalized_slice_evidence(
+            normalized,
+            report,
+            manifest,
+            report_payload=report_payload,
+            manifest_payload=manifest_payload,
+        )
+    except PassiveEvidenceError as error:
+        raise QualifierRunnerError(str(error)) from error
+    return normalized
+
+
 def _canonical_report_bytes(report: LectraAuditReport) -> bytes:
     try:
         payload = (
@@ -268,6 +299,24 @@ def _canonical_report_bytes(report: LectraAuditReport) -> bytes:
     return payload
 
 
+def _canonical_slice_bytes(normalized: NormalizedSlice) -> bytes:
+    try:
+        payload = (
+            json.dumps(
+                normalized.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise QualifierRunnerError("validated slice could not be serialized canonically") from error
+    if len(payload) > MAX_REPORT_BYTES:
+        raise QualifierRunnerError("canonical slice violates the size limit")
+    return payload
+
+
 def _unlink_owned(output: _OutputDirectory, name: str) -> None:
     try:
         os.unlink(name, dir_fd=output.file_descriptor)
@@ -275,9 +324,9 @@ def _unlink_owned(output: _OutputDirectory, name: str) -> None:
         pass
 
 
-def _read_published_report(output: _OutputDirectory) -> bytes:
+def _read_published_report(output: _OutputDirectory, name: str = REPORT_NAME) -> bytes:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-    descriptor = os.open(REPORT_NAME, flags, dir_fd=output.file_descriptor)
+    descriptor = os.open(name, flags, dir_fd=output.file_descriptor)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -296,7 +345,12 @@ def _read_published_report(output: _OutputDirectory) -> bytes:
         os.close(descriptor)
 
 
-def _publish_report(output: _OutputDirectory, payload: bytes) -> Path:
+def _publish_report(
+    output: _OutputDirectory,
+    payload: bytes,
+    *,
+    name: str = REPORT_NAME,
+) -> Path:
     """Atomically link a complete file into an empty directory without overwriting."""
     if len(payload) > MAX_REPORT_BYTES:
         raise QualifierRunnerError("qualifier report violates the size limit")
@@ -304,7 +358,9 @@ def _publish_report(output: _OutputDirectory, payload: bytes) -> Path:
         raise QualifierRunnerError("output directory identity changed during qualification")
     if os.listdir(output.file_descriptor):
         raise QualifierRunnerError("output directory must remain empty until publication")
-    temporary = f".{REPORT_NAME}.{uuid.uuid4().hex}.tmp"
+    if name not in {REPORT_NAME, SLICE_NAME}:
+        raise QualifierRunnerError("unknown passive artifact name")
+    temporary = f".{name}.{uuid.uuid4().hex}.tmp"
     temporary_created = False
     destination_created = False
     try:
@@ -331,33 +387,33 @@ def _publish_report(output: _OutputDirectory, payload: bytes) -> Path:
         try:
             os.link(
                 temporary,
-                REPORT_NAME,
+                name,
                 src_dir_fd=output.file_descriptor,
                 dst_dir_fd=output.file_descriptor,
                 follow_symlinks=False,
             )
         except FileExistsError as error:
-            raise QualifierRunnerError("refusing to overwrite an existing report") from error
+            raise QualifierRunnerError("refusing to overwrite an existing artifact") from error
         destination_created = True
         os.unlink(temporary, dir_fd=output.file_descriptor)
         temporary_created = False
         os.fsync(output.file_descriptor)
         entries = os.listdir(output.file_descriptor)
-        if set(entries) != {REPORT_NAME} or len(entries) != 1:
+        if set(entries) != {name} or len(entries) != 1:
             raise QualifierRunnerError("published output failed its exact postcondition")
-        metadata = os.stat(REPORT_NAME, dir_fd=output.file_descriptor, follow_symlinks=False)
+        metadata = os.stat(name, dir_fd=output.file_descriptor, follow_symlinks=False)
         if not stat.S_ISREG(metadata.st_mode):
             raise QualifierRunnerError("published report is not a regular file")
-        if _read_published_report(output) != payload:
+        if _read_published_report(output, name) != payload:
             raise QualifierRunnerError("published report bytes changed unexpectedly")
         if not _output_path_has_held_identity(output):
             raise QualifierRunnerError("output directory identity changed during qualification")
-        return output.path / REPORT_NAME
+        return output.path / name
     except BaseException:
         if temporary_created:
             _unlink_owned(output, temporary)
         if destination_created:
-            _unlink_owned(output, REPORT_NAME)
+            _unlink_owned(output, name)
         raise
 
 
@@ -376,10 +432,11 @@ def _docker_command(
     input_dir: Path,
     uid: int,
     gid: int,
+    qualifier_args: Sequence[str] = (),
 ) -> list[str]:
     if not _IMAGE_PATTERN.fullmatch(image) or image.startswith("-"):
         raise QualifierRunnerError("invalid qualifier image reference")
-    return [
+    command = [
         "docker",
         "run",
         "--pull",
@@ -418,6 +475,8 @@ def _docker_command(
         f"type=bind,src={input_dir},dst=/input,readonly",
         image,
     ]
+    command.extend(qualifier_args)
+    return command
 
 
 def _docker_cleanup_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
@@ -490,8 +549,45 @@ def run_qualifier(
     output_dir: Path,
     manifest_path: Path,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    mode: QualifierMode = "audit",
+    audit_report_path: Path | None = None,
 ) -> Path:
-    manifest = _load_manifest(manifest_path)
+    if mode not in {"audit", "slice"}:
+        raise QualifierRunnerError(f"unknown qualifier mode: {mode!r}")
+    try:
+        manifest_payload = read_passive_evidence_file(
+            manifest_path, label="dataset source manifest"
+        )
+        manifest = parse_dataset_source_manifest(manifest_payload)
+    except PassiveEvidenceError as error:
+        raise QualifierRunnerError(str(error)) from error
+    if {source.name for source in manifest.files} != EXPECTED_FILENAMES:
+        raise QualifierRunnerError("manifest must identify exactly the four Lectra files")
+
+    report: LectraAuditReport | None = None
+    report_payload: bytes | None = None
+    qualifier_args: tuple[str, ...] = ()
+    if mode == "slice":
+        if audit_report_path is None:
+            raise QualifierRunnerError("slice mode requires an exact audit report")
+        try:
+            report_payload = read_passive_evidence_file(
+                audit_report_path, label="Lectra audit report"
+            )
+            report = parse_lectra_audit_report(report_payload)
+            bind_lectra_audit_report(report, manifest)
+        except PassiveEvidenceError as error:
+            raise QualifierRunnerError(str(error)) from error
+        qualifier_args = (
+            "--mode",
+            "slice",
+            "--source-manifest-sha256",
+            hashlib.sha256(manifest_payload).hexdigest(),
+            "--audit-report-sha256",
+            hashlib.sha256(report_payload).hexdigest(),
+        )
+    elif audit_report_path is not None:
+        raise QualifierRunnerError("audit mode does not accept an audit report input")
     resolved_input = _validate_input_dir(input_dir, manifest)
     uid, gid = _nonroot_identity()
     container_name = f"yieldforge-lectra-{uuid.uuid4().hex}"
@@ -501,6 +597,7 @@ def run_qualifier(
         input_dir=resolved_input,
         uid=uid,
         gid=gid,
+        qualifier_args=qualifier_args,
     )
     with _open_output_dir(output_dir) as opened_output:
         try:
@@ -519,12 +616,26 @@ def run_qualifier(
             raise QualifierRunnerError(
                 f"qualifier container failed with exit {return_code}: {detail}"
             )
-        report = _validate_report(stdout, manifest)
-        canonical_payload = _canonical_report_bytes(report)
+        if mode == "audit":
+            validated_report = _validate_report(stdout, manifest)
+            canonical_payload = _canonical_report_bytes(validated_report)
+            artifact_name = REPORT_NAME
+        else:
+            assert report is not None
+            assert report_payload is not None
+            normalized = _validate_slice(
+                stdout,
+                manifest,
+                report,
+                manifest_payload=manifest_payload,
+                report_payload=report_payload,
+            )
+            canonical_payload = _canonical_slice_bytes(normalized)
+            artifact_name = SLICE_NAME
         if stderr:
             sys.stderr.buffer.write(stderr)
             sys.stderr.buffer.flush()
-        return _publish_report(opened_output, canonical_payload)
+        return _publish_report(opened_output, canonical_payload, name=artifact_name)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -533,6 +644,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--mode", choices=("audit", "slice"), default="audit")
+    parser.add_argument("--audit-report", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
     try:
@@ -542,6 +655,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output,
             manifest_path=args.manifest,
             timeout_seconds=args.timeout_seconds,
+            mode=args.mode,
+            audit_report_path=args.audit_report,
         )
     except QualifierRunnerError as error:
         parser.error(str(error))

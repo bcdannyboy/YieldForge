@@ -84,6 +84,37 @@ def _valid_fixture_report(tmp_path: Path) -> tuple[bytes, DatasetSourceManifest]
     return (report_to_json(report) + "\n").encode(), manifest
 
 
+def _valid_fixture_slice(
+    tmp_path: Path,
+) -> tuple[bytes, bytes, bytes, DatasetSourceManifest, object]:
+    pytest.importorskip("pandas")
+    from yieldforge.datasets.lectra_audit import audit_frames, report_to_json
+    from yieldforge.datasets.lectra_slice import export_representative_slice
+
+    maker = _load_fixture_maker()
+    input_dir = tmp_path / "input"
+    manifest_path = tmp_path / "fixture-manifest.json"
+    maker.write_fixture(input_dir, manifest_path)
+    manifest_payload = manifest_path.read_bytes()
+    manifest = DatasetSourceManifest.model_validate_json(manifest_payload)
+    report = audit_frames(
+        maker._trusted_frames(),
+        dataset_id=manifest.dataset_id,
+        source_checksums={source.name: source.checksum for source in manifest.files},
+    )
+    report_payload = (report_to_json(report) + "\n").encode()
+    normalized = export_representative_slice(
+        maker._trusted_frames(),
+        manifest=manifest,
+        source_manifest_sha256=hashlib.sha256(manifest_payload).hexdigest(),
+        audit_report_sha256=hashlib.sha256(report_payload).hexdigest(),
+    )
+    payload = (
+        json.dumps(normalized.model_dump(mode="json"), separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode()
+    return payload, report_payload, manifest_payload, manifest, report
+
+
 def test_only_qualifier_deserializes_pickles() -> None:
     production_files = [
         *PROJECT_ROOT.glob("src/**/*.py"),
@@ -96,6 +127,15 @@ def test_only_qualifier_deserializes_pickles() -> None:
     }
 
     assert callers == {"tools/lectra/qualify.py"}
+
+
+def test_qualifier_has_explicit_audit_and_slice_modes() -> None:
+    qualifier = _load_qualifier()
+
+    assert qualifier.QUALIFIER_MODES == frozenset({"audit", "slice"})
+    assert qualifier.SLICE_NAME == "lectra-slice.json"
+    assert "source_manifest_sha256" in qualifier._qualify_payload.__annotations__
+    assert "audit_report_sha256" in qualifier._qualify_payload.__annotations__
 
 
 def test_qualifier_stages_verified_bytes_in_sealed_memfds() -> None:
@@ -311,6 +351,59 @@ def test_validated_report_is_reserialized_as_canonical_finite_json(tmp_path: Pat
     assert json.loads(canonical) == report.model_dump(mode="json")
 
 
+def test_slice_validation_is_strict_and_bound_to_exact_evidence_bytes(tmp_path: Path) -> None:
+    runner = _load_runner()
+    payload, report_payload, manifest_payload, manifest, report = _valid_fixture_slice(tmp_path)
+
+    normalized = runner._validate_slice(
+        payload,
+        manifest,
+        report,
+        manifest_payload=manifest_payload,
+        report_payload=report_payload,
+    )
+
+    assert tuple(task.tasks_index for task in normalized.tasks) == (100, 900)
+    with pytest.raises(runner.QualifierRunnerError, match="audit report SHA-256 mismatch"):
+        runner._validate_slice(
+            payload,
+            manifest,
+            report,
+            manifest_payload=manifest_payload,
+            report_payload=report_payload + b" ",
+        )
+    with pytest.raises(runner.QualifierRunnerError, match="duplicate JSON object key"):
+        runner._validate_slice(
+            b'{"schema_version":"x","schema_version":"y"}',
+            manifest,
+            report,
+            manifest_payload=manifest_payload,
+            report_payload=report_payload,
+        )
+
+
+def test_slice_publisher_uses_fixed_name_and_canonical_exact_bytes(tmp_path: Path) -> None:
+    runner = _load_runner()
+    payload, report_payload, manifest_payload, manifest, report = _valid_fixture_slice(tmp_path)
+    normalized = runner._validate_slice(
+        payload,
+        manifest,
+        report,
+        manifest_payload=manifest_payload,
+        report_payload=report_payload,
+    )
+    canonical = runner._canonical_slice_bytes(normalized)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    with runner._open_output_dir(output_dir) as opened:
+        destination = runner._publish_report(opened, canonical, name=runner.SLICE_NAME)
+
+    assert destination.name == "lectra-slice.json"
+    assert destination.read_bytes() == canonical
+    assert {path.name for path in output_dir.iterdir()} == {"lectra-slice.json"}
+
+
 def test_publisher_is_atomic_no_clobber_and_exact(tmp_path: Path) -> None:
     runner = _load_runner()
     payload = b'{"safe":true}\n'
@@ -489,6 +582,36 @@ def test_runner_refuses_root_and_never_mounts_host_output(monkeypatch: pytest.Mo
     assert command[command.index("--memory-swap") + 1] == "16g"
 
 
+def test_slice_docker_command_passes_only_mode_and_evidence_hashes() -> None:
+    runner = _load_runner()
+    command = runner._docker_command(
+        image="yieldforge-lectra-qualifier:test",
+        container_name="yieldforge-lectra-test",
+        input_dir=Path("/absolute/input"),
+        uid=501,
+        gid=20,
+        qualifier_args=(
+            "--mode",
+            "slice",
+            "--source-manifest-sha256",
+            "a" * 64,
+            "--audit-report-sha256",
+            "b" * 64,
+        ),
+    )
+
+    assert command[-6:] == [
+        "--mode",
+        "slice",
+        "--source-manifest-sha256",
+        "a" * 64,
+        "--audit-report-sha256",
+        "b" * 64,
+    ]
+    assert all("audit.json" not in argument for argument in command)
+    assert all("manifest.json" not in argument for argument in command)
+
+
 def test_dockerfile_is_pinned_minimal_and_nonroot() -> None:
     dockerfile = DOCKERFILE_PATH.read_text()
 
@@ -505,6 +628,8 @@ def test_dockerfile_is_pinned_minimal_and_nonroot() -> None:
     assert "COPY . ." not in dockerfile
     assert "COPY --from=builder /app/.venv /app/.venv" in dockerfile
     assert "run_qualifier.py" not in dockerfile
+    assert "src/yieldforge/datasets/normalized_slice.py" in dockerfile
+    assert "src/yieldforge/datasets/lectra_slice.py" in dockerfile
 
 
 def test_dockerignore_denies_by_default_and_allows_only_build_inputs() -> None:
@@ -519,6 +644,8 @@ def test_dockerignore_denies_by_default_and_allows_only_build_inputs() -> None:
     assert "!uv.lock" in rules
     assert "!datasets/sources/lectra-7030786-v1.1.json" in rules
     assert "!tools/lectra/qualify.py" in rules
+    assert "!src/yieldforge/datasets/normalized_slice.py" in rules
+    assert "!src/yieldforge/datasets/lectra_slice.py" in rules
     assert all(".env" not in rule for rule in rules[1:])
 
 
@@ -533,8 +660,23 @@ def test_trusted_fixture_has_representative_constraint_and_test_manifest(tmp_pat
     assert {path.name for path in input_dir.iterdir()} == set(maker.EXPECTED_FILENAMES)
     frames = maker._trusted_frames()
     assert list(frames["parts"].columns) == ["tasks_index", "part_id", "shape_hash"]
-    assert len(frames["constraints"]) == 1
+    runnable_task = frames["tasks"].loc[frames["tasks"]["tasks_index"] == 100]
+    view_task = frames["tasks"].loc[frames["tasks"]["tasks_index"] == 900]
+    assert len(runnable_task) == 1
+    assert len(view_task) == 1
+    assert len(frames["parts"].loc[frames["parts"]["tasks_index"] == 100]) >= 20
+    runnable_constraints = frames["constraints"].loc[frames["constraints"]["tasks_index"] == 100]
+    assert set(runnable_constraints["type"]) == {"s1"}
+    assert len(runnable_constraints) == len(
+        frames["parts"].loc[frames["parts"]["tasks_index"] == 100]
+    )
+    assert any(
+        kind != "s1"
+        for kind in frames["constraints"].loc[frames["constraints"]["tasks_index"] == 900, "type"]
+    )
     manifest = DatasetSourceManifest.model_validate_json(manifest_path.read_text())
+    assert manifest.dataset_id == "lectra-7030786-v1.1"
+    assert manifest.doi == "10.5281/zenodo.7030786"
     for source in manifest.files:
         payload = (input_dir / source.name).read_bytes()
         assert source.size_bytes == len(payload)
@@ -559,18 +701,34 @@ def test_docker_runner_smoke(tmp_path: Path) -> None:
     if not all((image, input_path, manifest_path)):
         pytest.skip("trusted Docker fixture environment is not configured")
     runner = _load_runner()
+    audit_output = tmp_path / "audit"
+    slice_output = tmp_path / "slice"
+    audit_output.mkdir()
+    slice_output.mkdir()
 
     report_path = runner.run_qualifier(
         image=image,
         input_dir=Path(input_path),
-        output_dir=tmp_path,
+        output_dir=audit_output,
         manifest_path=Path(manifest_path),
+        timeout_seconds=30,
+    )
+    slice_path = runner.run_qualifier(
+        mode="slice",
+        image=image,
+        input_dir=Path(input_path),
+        output_dir=slice_output,
+        manifest_path=Path(manifest_path),
+        audit_report_path=report_path,
         timeout_seconds=30,
     )
 
     assert report_path.name == runner.REPORT_NAME
-    assert {path.name for path in tmp_path.iterdir()} == {runner.REPORT_NAME}
+    assert {path.name for path in audit_output.iterdir()} == {runner.REPORT_NAME}
+    assert slice_path.name == runner.SLICE_NAME
+    assert {path.name for path in slice_output.iterdir()} == {runner.SLICE_NAME}
     assert b'\n  "' not in report_path.read_bytes()
+    assert b'\n  "' not in slice_path.read_bytes()
 
 
 @pytest.mark.integration
@@ -581,15 +739,30 @@ def test_adversarial_pickle_cannot_create_host_output_artifact(tmp_path: Path) -
     if not all((image, input_path, manifest_path)):
         pytest.skip("adversarial Docker fixture environment is not configured")
     runner = _load_runner()
+    audit_output = tmp_path / "audit"
+    slice_output = tmp_path / "slice"
+    audit_output.mkdir()
+    slice_output.mkdir()
 
     report_path = runner.run_qualifier(
         image=image,
         input_dir=Path(input_path),
-        output_dir=tmp_path,
+        output_dir=audit_output,
         manifest_path=Path(manifest_path),
+        timeout_seconds=30,
+    )
+    slice_path = runner.run_qualifier(
+        mode="slice",
+        image=image,
+        input_dir=Path(input_path),
+        output_dir=slice_output,
+        manifest_path=Path(manifest_path),
+        audit_report_path=report_path,
         timeout_seconds=30,
     )
 
     assert report_path.name == runner.REPORT_NAME
-    assert {path.name for path in tmp_path.iterdir()} == {runner.REPORT_NAME}
+    assert slice_path.name == runner.SLICE_NAME
+    assert {path.name for path in audit_output.iterdir()} == {runner.REPORT_NAME}
+    assert {path.name for path in slice_output.iterdir()} == {runner.SLICE_NAME}
     assert not (tmp_path / "pickle-escape").exists()

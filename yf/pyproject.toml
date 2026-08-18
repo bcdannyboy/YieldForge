@@ -20,6 +20,7 @@ build-backend = "hatchling.build"
 data = [
     "pandas>=2.3,<3",
     "pydantic==2.12.5",
+    "shapely==2.1.2",
 ]
 dev = [
     "pytest>=8.4,<10",

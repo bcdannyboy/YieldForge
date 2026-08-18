@@ -295,6 +295,7 @@ dependencies = [
 data = [
     { name = "pandas" },
     { name = "pydantic" },
+    { name = "shapely" },
 ]
 dev = [
     { name = "pytest" },
@@ -312,6 +313,7 @@ requires-dist = [
 data = [
     { name = "pandas", specifier = ">=2.3,<3" },
     { name = "pydantic", specifier = "==2.12.5" },
+    { name = "shapely", specifier = "==2.1.2" },
 ]
 dev = [
     { name = "pytest", specifier = ">=8.4,<10" },

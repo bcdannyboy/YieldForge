@@ -24,6 +24,8 @@ COPY src/yieldforge/domain.py /app/src/yieldforge/domain.py
 COPY src/yieldforge/datasets/__init__.py /app/src/yieldforge/datasets/__init__.py
 COPY src/yieldforge/datasets/source_manifest.py /app/src/yieldforge/datasets/source_manifest.py
 COPY src/yieldforge/datasets/lectra_audit.py /app/src/yieldforge/datasets/lectra_audit.py
+COPY src/yieldforge/datasets/normalized_slice.py /app/src/yieldforge/datasets/normalized_slice.py
+COPY src/yieldforge/datasets/lectra_slice.py /app/src/yieldforge/datasets/lectra_slice.py
 COPY datasets/sources/lectra-7030786-v1.1.json /app/datasets/sources/lectra-7030786-v1.1.json
 COPY tools/lectra/qualify.py /app/tools/lectra/qualify.py
 

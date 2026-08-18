@@ -12,6 +12,8 @@
 !src/yieldforge/datasets/__init__.py
 !src/yieldforge/datasets/source_manifest.py
 !src/yieldforge/datasets/lectra_audit.py
+!src/yieldforge/datasets/normalized_slice.py
+!src/yieldforge/datasets/lectra_slice.py
 !tools/
 !tools/lectra/
 !tools/lectra/Dockerfile

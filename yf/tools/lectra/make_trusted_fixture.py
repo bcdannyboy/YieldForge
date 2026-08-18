@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-EXPECTED_FILENAMES = ("constraints.gz", "parts.gz", "shapes.gz", "tasks.gz")
+EXPECTED_FILENAMES = ("parts.gz", "constraints.gz", "shapes.gz", "tasks.gz")
 
 
 class _AttemptHostOutputWrite:
@@ -27,43 +27,69 @@ def _trusted_frames(*, adversarial_output_write: bool = False) -> dict[str, Any]
         [
             {
                 "efficiency": 0.5,
-                "duration": 1.25,
+                "duration": 3,
                 "sheet_width": 10.0,
                 "sheet_length": 20.0,
-                "sheet_type": "sheet",
-                "tasks_index": 1,
+                "sheet_type": 0,
+                "tasks_index": 100,
                 "is_train": True,
                 "is_val": False,
                 "is_test": False,
-            }
+            },
+            {
+                "efficiency": 0.4,
+                "duration": 4,
+                "sheet_width": 12.0,
+                "sheet_length": 25.0,
+                "sheet_type": 0,
+                "tasks_index": 900,
+                "is_train": True,
+                "is_val": False,
+                "is_test": False,
+            },
         ]
     )
     if adversarial_output_write:
-        tasks["adversarial_probe"] = [_AttemptHostOutputWrite()]
-    parts = pd.DataFrame([{"tasks_index": 1, "part_id": 10, "shape_hash": "shape-a"}])
+        tasks["adversarial_probe"] = [_AttemptHostOutputWrite(), None]
+
     shapes = pd.DataFrame(
         [
             {
-                "shape_hash": "shape-a",
-                "raw": [0.0, 0.0, 1.0, 0.0, 1.0, 1.0],
-                "sizes": [3],
+                "shape_hash": 10_000 + offset,
+                "raw": [0.0, 0.0, float(offset + 1), 0.0, 0.0, float(offset + 1)],
+                "sizes": [6],
             }
+            for offset in range(9)
+        ]
+    )
+    parts = pd.DataFrame(
+        [
+            {
+                "tasks_index": 100,
+                "part_id": 100_000 + offset,
+                "shape_hash": 10_000 + offset % 9,
+            }
+            for offset in range(35)
+        ]
+        + [
+            {
+                "tasks_index": 900,
+                "part_id": 900_000 + offset,
+                "shape_hash": 10_000 + offset % 5,
+            }
+            for offset in range(20)
         ]
     )
     constraint_columns = [
-        "type",
-        "tasks_index",
         "parts_1",
-        "parts_2",
         "p1_x",
         "p1_y",
-        "p2_x",
-        "p2_y",
         "r1_start",
         "r1_end",
         "r1_flip_x",
-        "y_min",
-        "y_max",
+        "parts_2",
+        "p2_x",
+        "p2_y",
         "x_offset",
         "y_offset",
         "motif_order",
@@ -71,12 +97,31 @@ def _trusted_frames(*, adversarial_output_write: bool = False) -> dict[str, Any]
         "y_alignment_type",
         "proximity_type",
         "max_distance",
+        "y_min",
+        "y_max",
         "groups_relative_orientation",
         "is_frozen",
+        "tasks_index",
+        "type",
     ]
-    constraint = dict.fromkeys(constraint_columns)
-    constraint.update({"type": "opaque-a", "tasks_index": 1, "parts_1": [10], "p1_x": 0.0})
-    constraints = pd.DataFrame([constraint], columns=constraint_columns)
+    constraints_data = []
+    for offset in range(35):
+        constraint = dict.fromkeys(constraint_columns)
+        constraint.update(
+            {
+                "parts_1": [100_000 + offset],
+                "r1_start": [0.0, 90.0],
+                "r1_end": [0.0, 90.0],
+                "r1_flip_x": [0, 0],
+                "tasks_index": 100,
+                "type": "s1",
+            }
+        )
+        constraints_data.append(constraint)
+    view_constraint = dict.fromkeys(constraint_columns)
+    view_constraint.update({"parts_1": [900_000], "tasks_index": 900, "type": "c1"})
+    constraints_data.append(view_constraint)
+    constraints = pd.DataFrame(constraints_data, columns=constraint_columns)
     return {"constraints": constraints, "parts": parts, "shapes": shapes, "tasks": tasks}
 
 
@@ -130,11 +175,11 @@ def write_fixture(
         )
     manifest = {
         "schema_version": "yieldforge.dataset-source.v1",
-        "dataset_id": "lectra-trusted-fixture",
+        "dataset_id": "lectra-7030786-v1.1",
         "title": "Trusted Lectra qualifier smoke fixture",
-        "doi": "test-only",
-        "version": "1",
-        "license": "test-only",
+        "doi": "10.5281/zenodo.7030786",
+        "version": "1.1",
+        "license": "CC-BY-4.0",
         "source_page": "fixture://local",
         "files": files,
     }
