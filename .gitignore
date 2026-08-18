@@ -1,4 +1,12 @@
 .worktrees/
-docs/.obsidian/
-docs/.trash/
+Docs/.obsidian/
+Docs/.trash/
 .DS_Store
+
+yf/.venv/
+yf/.pytest_cache/
+yf/.ruff_cache/
+yf/**/__pycache__/
+yf/**/*.py[cod]
+yf/var/archives/*
+!yf/var/archives/.gitkeep

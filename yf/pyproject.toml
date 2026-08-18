@@ -1,0 +1,40 @@
+[project]
+name = "yieldforge"
+version = "0.1.0"
+description = "Future-aware irregular nesting research system"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic==2.12.5",
+    "shapely==2.1.2",
+    "spyrrow==0.9.0",
+]
+
+[project.scripts]
+yieldforge = "yieldforge.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<10",
+    "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yieldforge"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "integration: exercises installed native solver dependencies",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

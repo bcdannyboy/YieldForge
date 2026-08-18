@@ -1,0 +1,19 @@
+{
+  "name": "m0-smoke",
+  "strip_height": 2.001,
+  "sheet_length": 10.0,
+  "parts": [
+    {
+      "id": "rectangle",
+      "shape": [[0, 0], [1, 0], [1, 1], [0, 1]],
+      "demand": 4,
+      "allowed_orientations": [0]
+    },
+    {
+      "id": "triangle",
+      "shape": [[0, 0], [1, 0], [1, 1]],
+      "demand": 6,
+      "allowed_orientations": [0, 90, 180, -90]
+    }
+  ]
+}

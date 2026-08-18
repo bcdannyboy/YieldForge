@@ -2,7 +2,7 @@
 
 YieldForge is a research project testing whether future demand should change which high-quality 2D nesting layout a manufacturer chooses today.
 
-> **Current status:** Proposal and documentation stage. M0—the experiment contract—is active. No product code, Sparrow integration, benchmark result, or validated savings claim exists yet.
+> **Current status:** M0—the experiment contract—is active. The reusable `yf/` development foundation and Spyrrow candidate adapter are working, but M0 has not passed and no savings result or commercial claim exists.
 
 ## The idea
 
@@ -39,7 +39,7 @@ Synthetic benchmarks can test the mechanism, but they cannot establish physical 
 | M6–M8 | Build controlled temporal benchmarks, freeze a strong baseline, and measure perfect-information value. |
 | M9–M10 | Validate search quality, run the experiment, and issue the investment verdict. |
 
-Detailed planning happens one milestone at a time. See the [Milestone Roadmap](docs/Milestones/Milestone%20Roadmap.md) for the current sequence and semantic explanation of every milestone.
+Detailed planning happens one milestone at a time. See the [Milestone Roadmap](Docs/Milestones/Milestone%20Roadmap.md) for the current sequence and semantic explanation of every milestone.
 
 ## MVP boundary
 
@@ -54,22 +54,39 @@ The perfect-information MVP intentionally excludes:
 
 ## Repository documentation
 
-The repository's primary project and developer documentation is an Obsidian vault under [`docs/`](docs/Home.md). The original DOCX is preserved inside the vault, while its contents are split into section-sized Markdown notes for easier navigation and maintenance.
+The repository's primary project and developer documentation is an Obsidian vault under [`Docs/`](Docs/Home.md). The original DOCX is preserved inside the vault, while its contents are split into section-sized Markdown notes for easier navigation and maintenance.
 
-- [Notebook Home](docs/Home.md)
-- [Current Work](docs/Current%20Work.md)
-- [Proposal Contents](docs/Proposal%20Contents.md)
-- [Proposal at a Glance](docs/Proposal/03%201.%20Proposal%20at%20a%20Glance.md)
-- [Validation Thesis](docs/Proposal/07%205.%20Validation%20Thesis%20and%20Falsifiable%20Hypotheses.md)
-- [Perfect-Information MVP](docs/Proposal/08%206.%20The%20Perfect-Information%20MVP.md)
-- [Milestone Roadmap](docs/Milestones/Milestone%20Roadmap.md)
-- [Go/No-Go Framework](docs/Proposal/11%209.%20Go%20-%20No-Go%20Decision%20Framework.md)
+- [Notebook Home](Docs/Home.md)
+- [Current Work](Docs/Current%20Work.md)
+- [Developer setup](Docs/Development/Getting%20Started.md)
+- [Proposal Contents](Docs/Proposal%20Contents.md)
+- [Proposal at a Glance](Docs/Proposal/03%201.%20Proposal%20at%20a%20Glance.md)
+- [Validation Thesis](Docs/Proposal/07%205.%20Validation%20Thesis%20and%20Falsifiable%20Hypotheses.md)
+- [Perfect-Information MVP](Docs/Proposal/08%206.%20The%20Perfect-Information%20MVP.md)
+- [Milestone Roadmap](Docs/Milestones/Milestone%20Roadmap.md)
+- [Go/No-Go Framework](Docs/Proposal/11%209.%20Go%20-%20No-Go%20Decision%20Framework.md)
 
-To use the notebook in Obsidian, open the repository's `docs/` directory as a vault. The Markdown files remain readable in GitHub and ordinary editors without Obsidian.
+To use the notebook in Obsidian, open the repository's `Docs/` directory as a vault. The Markdown files remain readable in GitHub and ordinary editors without Obsidian.
+
+## Developer quick start
+
+All implementation work accumulates in one directory: `yf/`. Milestones extend this package; they do not create `yf0`, `yf1`, or parallel application trees.
+
+```bash
+cd yf
+uv sync
+uv run pytest
+uv run yieldforge candidates generate \
+  --input benchmarks/static/m0-smoke.json \
+  --output var/archives/m0-smoke-seed-0 \
+  --seed 0 --seconds 1 --workers 1
+```
+
+Candidate output directories are immutable. Choose a new output path for every run; committed source and tests never depend on generated archives.
 
 ## Current next step
 
-Work through [M0—Experiment Contract](docs/Milestones/M0%20-%20Experiment%20contract.md), beginning with the primary outcome and comparison: what “better” means, which costs count, and how the oracle will be compared with the strongest legitimate baseline.
+Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md), beginning with the primary outcome and comparison: what “better” means, which costs count, and how the oracle will be compared with the strongest legitimate baseline.
 
 ## Name status
 
