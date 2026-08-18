@@ -1,4 +1,5 @@
 import copy
+import math
 
 import pytest
 from test_normalized_slice import valid_slice
@@ -296,6 +297,79 @@ def test_project_task_compares_large_integer_interval_endpoints_before_float_con
 
     with pytest.raises(ProjectionError, match="degenerate.*start.*end"):
         project_task(normalized, 17)
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [9_007_199_254_740_993, 10**400],
+)
+def test_project_task_rejects_rotations_without_an_exact_finite_solver_float(
+    rotation: int,
+) -> None:
+    data = _projectable_slice().model_dump()
+    values = list(data["constraints"][0]["values"])
+    values[3] = _sequence(OpaqueInteger(kind="integer", value=rotation))
+    values[4] = _sequence(OpaqueInteger(kind="integer", value=rotation))
+    values[5] = _sequence(OpaqueInteger(kind="integer", value=0))
+    data["constraints"][0]["values"] = tuple(values)
+    normalized = NormalizedSlice.model_validate(data)
+
+    with pytest.raises(ProjectionError, match="exact finite solver float"):
+        project_task(normalized, 17)
+
+
+def test_project_task_rejects_duplicate_allowed_rotations() -> None:
+    data = _projectable_slice().model_dump()
+    values = list(data["constraints"][0]["values"])
+    repeated = _sequence(
+        OpaqueNumber(kind="number", value=90.0),
+        OpaqueNumber(kind="number", value=90.0),
+    )
+    values[3] = repeated
+    values[4] = copy.deepcopy(repeated)
+    data["constraints"][0]["values"] = tuple(values)
+    normalized = NormalizedSlice.model_validate(data)
+
+    with pytest.raises(ProjectionError, match="duplicate allowed rotations"):
+        project_task(normalized, 17)
+
+
+@pytest.mark.parametrize(
+    ("shape", "rotation", "translation", "sheet_width"),
+    [
+        (((0.0, 0.0),), math.nan, (0.0, 0.0), 10.0),
+        (((0.0, 0.0),), math.inf, (0.0, 0.0), 10.0),
+        (((0.0, 0.0),), 0.0, (math.nan, 0.0), 10.0),
+        (((0.0, 0.0),), 0.0, (0.0, -math.inf), 10.0),
+        (((0.0, 0.0),), 0.0, (0.0, 0.0), math.nan),
+        (((0.0, 0.0),), 0.0, (0.0, 0.0), math.inf),
+        (((math.nan, 0.0),), 0.0, (0.0, 0.0), 10.0),
+        (((0.0, math.inf),), 0.0, (0.0, 0.0), 10.0),
+    ],
+)
+def test_placed_shape_svg_points_rejects_nonfinite_inputs(
+    shape: tuple[tuple[float, float], ...],
+    rotation: float,
+    translation: tuple[float, float],
+    sheet_width: float,
+) -> None:
+    with pytest.raises(ProjectionError, match="finite"):
+        placed_shape_svg_points(
+            shape,
+            rotation_degrees=rotation,
+            translation=translation,
+            sheet_width=sheet_width,
+        )
+
+
+def test_placed_shape_svg_points_rejects_nonfinite_outputs() -> None:
+    with pytest.raises(ProjectionError, match="finite"):
+        placed_shape_svg_points(
+            ((1e308, 0.0),),
+            rotation_degrees=0.0,
+            translation=(1e308, 0.0),
+            sheet_width=10.0,
+        )
 
 
 def test_placed_shape_svg_points_rotates_then_translates_then_flips_y() -> None:

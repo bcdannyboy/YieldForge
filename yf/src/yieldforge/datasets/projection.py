@@ -25,19 +25,49 @@ class ProjectionError(ValueError):
     """A selected source task cannot be truthfully projected to the solver."""
 
 
+def _finite_float(value: object, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise ProjectionError(f"{label} must be a finite number")
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ProjectionError(f"{label} must be a finite number") from error
+    if not math.isfinite(number):
+        raise ProjectionError(f"{label} must be a finite number")
+    return number
+
+
 def _require_sequence(value: object, *, column: str) -> OpaqueSequence:
     if not isinstance(value, OpaqueSequence):
         raise ProjectionError(f"s1 {column} must be a sequence")
     return value
 
 
-def _rotation_number(value: object) -> tuple[int | float, float]:
+def _rotation_source_number(value: object) -> int | float:
     if not isinstance(value, (OpaqueInteger, OpaqueNumber)):
         raise ProjectionError("s1 rotation entries must be finite numbers")
-    number = float(value.value)
-    if not math.isfinite(number):
+    if isinstance(value, OpaqueNumber) and not math.isfinite(value.value):
         raise ProjectionError("s1 rotation entries must be finite numbers")
-    return value.value, number
+    return value.value
+
+
+def _rotation_number(value: object) -> float:
+    source_number = _rotation_source_number(value)
+    try:
+        number = float(source_number)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ProjectionError(
+            "s1 rotation entries must have an exact finite solver float representation"
+        ) from error
+    if not math.isfinite(number):
+        raise ProjectionError(
+            "s1 rotation entries must have an exact finite solver float representation"
+        )
+    if isinstance(value, OpaqueInteger) and int(number) != source_number:
+        raise ProjectionError(
+            "s1 rotation entries must have an exact finite solver float representation"
+        )
+    return number
 
 
 def _constraint_orientations(
@@ -71,13 +101,16 @@ def _constraint_orientations(
 
     orientations = []
     for start, end, flip in zip(starts.items, ends.items, flips.items, strict=True):
-        start_value, start_number = _rotation_number(start)
-        end_value, _ = _rotation_number(end)
+        start_value = _rotation_source_number(start)
+        end_value = _rotation_source_number(end)
         if start_value != end_value:
             raise ProjectionError("s1 rotations must be degenerate with start equal to end")
+        start_number = _rotation_number(start)
         if not isinstance(flip, OpaqueInteger) or flip.value != 0:
             raise ProjectionError("s1 flip flags must be strict integer zero")
         orientations.append(start_number)
+    if len(orientations) != len(set(orientations)):
+        raise ProjectionError("s1 contains duplicate allowed rotations")
     return part_id, orientations
 
 
@@ -155,15 +188,23 @@ def placed_shape_svg_points(
     sheet_width: float,
 ) -> tuple[tuple[float, float], ...]:
     """Transform solver points to SVG coordinates without mutating the source shape."""
-    radians = math.radians(rotation_degrees)
+    rotation = _finite_float(rotation_degrees, label="rotation_degrees")
+    translate_x = _finite_float(translation[0], label="translation x")
+    translate_y = _finite_float(translation[1], label="translation y")
+    render_height = _finite_float(sheet_width, label="sheet_width")
+    radians = math.radians(rotation)
     cosine = math.cos(radians)
     sine = math.sin(radians)
-    translate_x, translate_y = translation
     rendered = []
     for x, y in shape:
-        rotated_x = x * cosine - y * sine
-        rotated_y = x * sine + y * cosine
+        source_x = _finite_float(x, label="source point x")
+        source_y = _finite_float(y, label="source point y")
+        rotated_x = source_x * cosine - source_y * sine
+        rotated_y = source_x * sine + source_y * cosine
         translated_x = rotated_x + translate_x
         translated_y = rotated_y + translate_y
-        rendered.append((translated_x, sheet_width - translated_y))
+        render_y = render_height - translated_y
+        if not (math.isfinite(translated_x) and math.isfinite(render_y)):
+            raise ProjectionError("placed SVG geometry must contain only finite output points")
+        rendered.append((translated_x, render_y))
     return tuple(rendered)
