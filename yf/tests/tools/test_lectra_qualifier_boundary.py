@@ -184,7 +184,7 @@ def test_report_validation_is_size_bounded_strict_and_manifest_bound(tmp_path: P
 
     with pytest.raises(runner.QualifierRunnerError, match="size limit"):
         runner._validate_report(payload, manifest, max_bytes=len(payload) - 1)
-    with pytest.raises(runner.QualifierRunnerError, match="exactly one JSON"):
+    with pytest.raises(runner.QualifierRunnerError, match="trailing JSON data"):
         runner._validate_report(payload + b"noise", manifest, max_bytes=len(payload) + 5)
 
     changed = json.loads(payload)
@@ -194,11 +194,21 @@ def test_report_validation_is_size_bounded_strict_and_manifest_bound(tmp_path: P
 
     changed = json.loads(payload)
     changed["source_checksums"]["tasks.gz"] = "f" * 32
-    with pytest.raises(runner.QualifierRunnerError, match="checksum identity"):
+    with pytest.raises(runner.QualifierRunnerError, match="source checksum mismatch"):
         runner._validate_report(json.dumps(changed).encode(), manifest, max_bytes=100_000)
 
     with pytest.raises(runner.QualifierRunnerError, match="duplicate JSON object key"):
         runner._validate_report(b'{"outer":{"x":1,"x":2}}', manifest, max_bytes=100_000)
+
+
+def test_runner_delegates_passive_report_policy() -> None:
+    source = RUNNER_PATH.read_text()
+
+    assert "parse_lectra_audit_report" in source
+    assert "bind_lectra_audit_report" in source
+    assert "parse_dataset_source_manifest" in source
+    assert "read_passive_evidence_file" in source
+    assert "JSONDecoder" not in source
 
 
 def test_validated_report_is_reserialized_as_canonical_finite_json(tmp_path: Path) -> None:

@@ -18,9 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from pydantic import ValidationError
-
 from yieldforge.datasets.lectra_audit import LectraAuditReport
+from yieldforge.datasets.passive_report import (
+    PassiveEvidenceError,
+    bind_lectra_audit_report,
+    parse_dataset_source_manifest,
+    parse_lectra_audit_report,
+    read_passive_evidence_file,
+)
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 
 EXPECTED_FILENAMES = frozenset({"constraints.gz", "parts.gz", "shapes.gz", "tasks.gz"})
@@ -36,10 +41,6 @@ _IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")
 
 class QualifierRunnerError(RuntimeError):
     """Qualification or trusted publication failed closed."""
-
-
-class _DuplicateJsonKeyError(ValueError):
-    """A JSON object repeated a key at any nesting level."""
 
 
 @dataclass(frozen=True)
@@ -169,12 +170,11 @@ def _capture_process(
 
 
 def _load_manifest(path: Path) -> DatasetSourceManifest:
-    if path.is_symlink() or not path.is_file():
-        raise QualifierRunnerError("manifest must be a regular file, not a link")
     try:
-        manifest = DatasetSourceManifest.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValidationError) as error:
-        raise QualifierRunnerError("manifest validation failed") from error
+        payload = read_passive_evidence_file(path, label="dataset source manifest")
+        manifest = parse_dataset_source_manifest(payload)
+    except PassiveEvidenceError as error:
+        raise QualifierRunnerError(str(error)) from error
     if {source.name for source in manifest.files} != EXPECTED_FILENAMES:
         raise QualifierRunnerError("manifest must identify exactly the four Lectra files")
     return manifest
@@ -232,19 +232,6 @@ def _output_path_has_held_identity(output: _OutputDirectory) -> bool:
     )
 
 
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON constant: {value}")
-
-
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value: dict[str, object] = {}
-    for key, item in pairs:
-        if key in value:
-            raise _DuplicateJsonKeyError(f"duplicate JSON object key: {key}")
-        value[key] = item
-    return value
-
-
 def _validate_report(
     payload: bytes,
     manifest: DatasetSourceManifest,
@@ -254,27 +241,10 @@ def _validate_report(
     if not payload or len(payload) > max_bytes:
         raise QualifierRunnerError("qualifier report violates the size limit")
     try:
-        text = payload.decode("utf-8", errors="strict")
-        decoder = json.JSONDecoder(
-            parse_constant=_reject_json_constant,
-            object_pairs_hook=_reject_duplicate_json_keys,
-        )
-        decoded, end = decoder.raw_decode(text)
-    except _DuplicateJsonKeyError as error:
+        report = parse_lectra_audit_report(payload, max_bytes=max_bytes)
+        bind_lectra_audit_report(report, manifest)
+    except PassiveEvidenceError as error:
         raise QualifierRunnerError(str(error)) from error
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
-        raise QualifierRunnerError("qualifier did not emit valid finite UTF-8 JSON") from error
-    if text[end:] not in {"", "\n"}:
-        raise QualifierRunnerError("qualifier must emit exactly one JSON payload")
-    try:
-        report = LectraAuditReport.model_validate(decoded)
-    except ValidationError as error:
-        raise QualifierRunnerError("qualifier report schema validation failed") from error
-    if report.dataset_id != manifest.dataset_id:
-        raise QualifierRunnerError("qualifier report dataset identity does not match the manifest")
-    expected_checksums = {source.name: source.checksum for source in manifest.files}
-    if report.source_checksums != expected_checksums:
-        raise QualifierRunnerError("qualifier report checksum identity does not match the manifest")
     return report
 
 
