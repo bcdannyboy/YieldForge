@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -124,6 +125,82 @@ def test_pickle_loader_passes_the_exact_staged_handle(monkeypatch: pytest.Monkey
 
     assert qualifier._read_verified_pickle(handle) == "frame"
     assert observed == {"handle": handle, "compression": "gzip"}
+
+
+def test_qualifier_validates_each_table_immediately_and_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.datasets import lectra_audit
+
+    qualifier = _load_qualifier()
+    payloads = {name: name.encode() for name in qualifier.EXPECTED_FILENAMES}
+    manifest = _fixture_manifest(payloads)
+    staged = {name.removesuffix(".gz"): name for name in sorted(payloads)}
+    events: list[str] = []
+
+    @contextmanager
+    def fake_memfds(*_: object) -> object:
+        yield staged
+
+    def fake_read(handle: str) -> object:
+        events.append(f"read:{handle.removesuffix('.gz')}")
+        return object()
+
+    def fake_validate(table_name: str, _: object) -> list[str]:
+        events.append(f"validate:{table_name}")
+        if table_name == "parts":
+            raise RuntimeError("invalid parts schema")
+        return []
+
+    monkeypatch.setattr(qualifier, "_load_manifest", lambda: manifest)
+    monkeypatch.setattr(qualifier, "_verified_memfds", fake_memfds)
+    monkeypatch.setattr(qualifier, "_read_verified_pickle", fake_read)
+    monkeypatch.setattr(qualifier, "_emit_stage_telemetry", events.append)
+    monkeypatch.setattr(lectra_audit, "validate_frame_schema", fake_validate)
+    monkeypatch.setattr(
+        lectra_audit,
+        "audit_frames",
+        lambda *_args, **_kwargs: pytest.fail("audit must not retain an invalid frame"),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid parts schema"):
+        qualifier._qualify_payload()
+
+    assert events == [
+        "sealed-staging",
+        "read:constraints",
+        "validate:constraints",
+        "table-constraints-validated",
+        "read:parts",
+        "validate:parts",
+    ]
+
+
+def test_stage_telemetry_is_bounded_stderr_only_and_omits_unavailable_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    qualifier = _load_qualifier()
+    current = tmp_path / "memory.current"
+    current.write_text("123456\n")
+    missing_peak = tmp_path / "memory.peak"
+    writes: list[tuple[int, bytes]] = []
+
+    monkeypatch.setattr(
+        qualifier,
+        "CGROUP_MEMORY_FILES",
+        (("memory.current", current), ("memory.peak", missing_peak)),
+    )
+    monkeypatch.setattr(qualifier.sys, "stderr", SimpleNamespace(fileno=lambda: 2))
+    monkeypatch.setattr(
+        qualifier,
+        "_write_all",
+        lambda file_descriptor, payload: writes.append((file_descriptor, payload)),
+    )
+
+    qualifier._emit_stage_telemetry("table-parts-validated")
+
+    assert writes == [(2, b"stage=table-parts-validated memory.current=123456\n")]
+    assert len(writes[0][1]) <= qualifier.MAX_TELEMETRY_LINE_BYTES
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd seals are container-only")
@@ -408,6 +485,8 @@ def test_runner_refuses_root_and_never_mounts_host_output(monkeypatch: pytest.Mo
     assert "--network none" in joined
     assert "--read-only" in joined
     assert "--cap-drop ALL" in joined
+    assert command[command.index("--memory") + 1] == "16g"
+    assert command[command.index("--memory-swap") + 1] == "16g"
 
 
 def test_dockerfile_is_pinned_minimal_and_nonroot() -> None:
@@ -452,7 +531,9 @@ def test_trusted_fixture_has_representative_constraint_and_test_manifest(tmp_pat
     maker.write_fixture(input_dir, manifest_path)
 
     assert {path.name for path in input_dir.iterdir()} == set(maker.EXPECTED_FILENAMES)
-    assert len(maker._trusted_frames()["constraints"]) == 1
+    frames = maker._trusted_frames()
+    assert list(frames["parts"].columns) == ["tasks_index", "part_id", "shape_hash"]
+    assert len(frames["constraints"]) == 1
     manifest = DatasetSourceManifest.model_validate_json(manifest_path.read_text())
     for source in manifest.files:
         payload = (input_dir / source.name).read_bytes()
@@ -467,6 +548,7 @@ def test_readme_documents_runner_and_no_output_mount() -> None:
     assert "sealed memfd" in readme
     assert "stdout" in readme
     assert "No host output path is mounted into the container" in readme
+    assert "--memory 16g" in readme
 
 
 @pytest.mark.integration

@@ -40,7 +40,7 @@ def _trusted_frames(*, adversarial_output_write: bool = False) -> dict[str, Any]
     )
     if adversarial_output_write:
         tasks["adversarial_probe"] = [_AttemptHostOutputWrite()]
-    parts = pd.DataFrame([{"tasks_index": 1, "parts_id": 10, "shape_hash": "shape-a"}])
+    parts = pd.DataFrame([{"tasks_index": 1, "part_id": 10, "shape_hash": "shape-a"}])
     shapes = pd.DataFrame(
         [
             {

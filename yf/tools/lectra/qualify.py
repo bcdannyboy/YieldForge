@@ -20,6 +20,12 @@ MANIFEST_PATH = APP_ROOT / "datasets" / "sources" / "lectra-7030786-v1.1.json"
 INPUT_DIR = Path("/input")
 HASH_CHUNK_BYTES = 1024 * 1024
 MAX_REPORT_BYTES = 4 * 1024 * 1024
+MAX_CGROUP_VALUE_BYTES = 64
+MAX_TELEMETRY_LINE_BYTES = 256
+CGROUP_MEMORY_FILES = (
+    ("memory.current", Path("/sys/fs/cgroup/memory.current")),
+    ("memory.peak", Path("/sys/fs/cgroup/memory.peak")),
+)
 
 
 class QualificationBoundaryError(RuntimeError):
@@ -144,17 +150,65 @@ def _read_verified_pickle(handle: BinaryIO) -> Any:
     return pd.read_pickle(handle, compression="gzip")
 
 
+def _read_cgroup_counter(path: Path) -> str | None:
+    """Read one bounded decimal cgroup-v2 counter, or omit it when unavailable."""
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        payload = os.read(descriptor, MAX_CGROUP_VALUE_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    value = payload.strip()
+    if not value or len(payload) > MAX_CGROUP_VALUE_BYTES or not value.isdigit():
+        return None
+    return value.decode("ascii")
+
+
+def _emit_stage_telemetry(stage: str) -> None:
+    """Emit one bounded diagnostic line without ever using the report stream."""
+    safe_stage = "".join(
+        character
+        for character in stage
+        if character.isascii() and (character.isalnum() or character in "._-")
+    )[:64]
+    if not safe_stage:
+        safe_stage = "unknown"
+    fields = [f"stage={safe_stage}"]
+    for label, path in CGROUP_MEMORY_FILES:
+        if value := _read_cgroup_counter(path):
+            fields.append(f"{label}={value}")
+    payload = (" ".join(fields) + "\n").encode("ascii")
+    if len(payload) > MAX_TELEMETRY_LINE_BYTES:
+        payload = f"stage={safe_stage}\n".encode("ascii")
+    _write_all(sys.stderr.fileno(), payload)
+
+
 def _qualify_payload() -> bytes:
-    from yieldforge.datasets.lectra_audit import audit_frames, report_to_json
+    from yieldforge.datasets.lectra_audit import (
+        audit_frames,
+        report_to_json,
+        validate_frame_schema,
+    )
 
     manifest = _load_manifest()
     with _verified_memfds(INPUT_DIR, manifest) as staged:
-        frames = {name: _read_verified_pickle(handle) for name, handle in sorted(staged.items())}
+        _emit_stage_telemetry("sealed-staging")
+        frames = {}
+        for name, handle in sorted(staged.items()):
+            frame = _read_verified_pickle(handle)
+            validate_frame_schema(name, frame)
+            frames[name] = frame
+            _emit_stage_telemetry(f"table-{name}-validated")
     report = audit_frames(
         frames,
         dataset_id=manifest.dataset_id,
         source_checksums={source.name: source.checksum for source in manifest.files},
     )
+    _emit_stage_telemetry("audit-complete")
     payload = (report_to_json(report, indent=2) + "\n").encode("utf-8")
     if len(payload) > MAX_REPORT_BYTES:
         raise QualificationBoundaryError("audit report exceeds the qualifier size limit")

@@ -58,7 +58,7 @@ For each run the runner generates a unique container name. It invokes Docker wit
 
 - `--pull never`, `--network none`, and `--read-only`;
 - `--cap-drop ALL` and `--security-opt no-new-privileges:true`;
-- numeric non-root `--user`, `--pids-limit 128`, `--memory 8g`, `--memory-swap 8g`, and
+- numeric non-root `--user`, `--pids-limit 128`, `--memory 16g`, `--memory-swap 16g`, and
   `--cpus 4`;
 - `nofile` and `nproc` limits, `--ipc none`, an isolated 64 MiB `/tmp` tmpfs, and
   `--log-driver none`;
@@ -68,6 +68,12 @@ Stdout is capped at 4 MiB, stderr at 1 MiB, and runtime at the requested timeout
 path the runner retries `docker rm --force`, then uses `docker inspect --type container` to prove
 the unique generated name is absent. Cleanup failure is fatal and names the unconfirmed
 container; the local Docker client is terminated even if abort cleanup fails.
+
+The 16 GiB memory ceiling is based on a full-corpus qualification probe whose cgroup peak was
+9,534,488,576 bytes; it leaves headroom above the observed audit while keeping the container
+bounded. The default 900-second timeout likewise exceeds the observed 306.6-second probe. The
+qualifier records each sealed-staging, table-validation, and audit-completion stage on stderr,
+including bounded cgroup-v2 `memory.current` and `memory.peak` values when Linux exposes them.
 
 After a clean exit, the runner accepts exactly one finite JSON payload from stdout, recursively
 rejects duplicate object keys, and validates the full Pydantic contract and pinned manifest
