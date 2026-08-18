@@ -26,6 +26,7 @@ from yieldforge.domain import (
     SpyrrowRunResult,
     StripPackingProblem,
 )
+from yieldforge.workbench import jobs as jobs_module
 from yieldforge.workbench.contracts import (
     JobEvent,
     JobStatus,
@@ -86,6 +87,16 @@ def make_result(request: SolveRequest, count: int) -> SpyrrowRunResult:
 
 def fake_command(mode: str) -> tuple[str, ...]:
     return (sys.executable, str(Path(__file__).resolve()), "--fake-worker", mode)
+
+
+async def create_completed_job(tmp_path: Path, *, mode: str = "complete") -> tuple[Path, Path, str]:
+    jobs = tmp_path / "jobs"
+    archives = tmp_path / "archives"
+    service = SolverJobService(jobs, archives, worker_command=fake_command(mode))
+    created = await service.start(make_request())
+    terminal = await service.wait(created.job_id)
+    assert terminal.status is JobStatus.COMPLETED
+    return jobs, archives, created.job_id
 
 
 def run(coroutine: object) -> object:
@@ -330,13 +341,16 @@ def test_cancel_during_archive_staging_wins_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive_started = threading.Event()
+    archive_created = threading.Event()
     allow_archive = threading.Event()
     original_create = CandidateArchive.create
 
     def slow_create(output: Path, batch: CandidateBatch) -> Path:
         archive_started.set()
         assert allow_archive.wait(timeout=2)
-        return original_create(output, batch)
+        created = original_create(output, batch)
+        archive_created.set()
+        return created
 
     monkeypatch.setattr(CandidateArchive, "create", slow_create)
 
@@ -349,16 +363,68 @@ def test_cancel_during_archive_staging_wins_before_publication(
         created = await service.start(make_request())
         assert await asyncio.to_thread(archive_started.wait, 1)
 
-        cancel_task = asyncio.create_task(service.cancel(created.job_id))
-        await asyncio.sleep(0.01)
-        assert service.get(created.job_id).status is JobStatus.CANCELLING
-        allow_archive.set()
-        terminal = await cancel_task
+        try:
+            terminal = await asyncio.wait_for(service.cancel(created.job_id), timeout=0.5)
+        finally:
+            allow_archive.set()
 
         assert terminal.status is JobStatus.CANCELLED
         assert terminal.archive_path is None
         assert not (tmp_path / "archives" / created.job_id).exists()
-        assert not (service.job_directory(created.job_id) / "candidate-archive.staging").exists()
+        assert await asyncio.to_thread(archive_created.wait, 1)
+        staging = service.job_directory(created.job_id) / "candidate-archive.staging"
+        for _ in range(100):
+            if not staging.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert not staging.exists()
+
+    run(scenario())
+
+
+def test_supervisor_shutdown_does_not_await_hung_archive_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_started = threading.Event()
+    archive_created = threading.Event()
+    allow_archive = threading.Event()
+    original_create = CandidateArchive.create
+
+    def slow_create(output: Path, batch: CandidateBatch) -> Path:
+        archive_started.set()
+        assert allow_archive.wait(timeout=2)
+        created = original_create(output, batch)
+        archive_created.set()
+        return created
+
+    monkeypatch.setattr(CandidateArchive, "create", slow_create)
+
+    async def scenario() -> None:
+        service = SolverJobService(
+            tmp_path / "jobs",
+            tmp_path / "archives",
+            worker_command=fake_command("complete"),
+        )
+        created = await service.start(make_request())
+        assert await asyncio.to_thread(archive_started.wait, 1)
+        runner = service._jobs[created.job_id].runner
+        assert runner is not None
+
+        runner.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(runner, timeout=0.5)
+        finally:
+            allow_archive.set()
+
+        assert await asyncio.to_thread(archive_created.wait, 1)
+        staging = service.job_directory(created.job_id) / "candidate-archive.staging"
+        for _ in range(100):
+            if not staging.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert not staging.exists()
+        assert not (tmp_path / "archives" / created.job_id).exists()
 
     run(scenario())
 
@@ -612,6 +678,133 @@ def test_recovery_rebinds_completed_event_and_archive_to_immutable_request(
         SolverJobService(jobs, archives, worker_command=fake_command("complete"))
 
 
+@pytest.mark.parametrize("mutation", ["transition", "candidate_count", "candidate_content"])
+def test_recovery_rejects_internally_invalid_event_history(tmp_path: Path, mutation: str) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    events_path = jobs / job_id / "events.jsonl"
+    records = [json.loads(line) for line in events_path.read_text().splitlines()]
+    phase_index = next(index for index, record in enumerate(records) if record["kind"] == "phase")
+    candidate_index = next(
+        index for index, record in enumerate(records) if record["kind"] == "candidate"
+    )
+    if mutation == "transition":
+        records[phase_index].pop("phase")
+        records[phase_index]["kind"] = "status"
+        records[phase_index]["status"] = "cancelling"
+    elif mutation == "candidate_count":
+        records[phase_index]["candidate_count"] = 2
+    else:
+        records[candidate_index]["candidate"]["width"] += 1
+    events_path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    with pytest.raises(ValueError, match="event history"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+
+def test_recovery_reads_evidence_without_path_read_convenience_methods(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+
+    def forbidden_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("recovery must use one bounded non-following descriptor")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read)
+    monkeypatch.setattr(Path, "read_text", forbidden_read)
+
+    recovered = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+    assert recovered.get(job_id).status is JobStatus.COMPLETED
+
+
+def test_recovery_rejects_runtime_symlink_without_exposing_outside_pid(tmp_path: Path) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    runtime_path = jobs / job_id / "runtime.json"
+    runtime_path.unlink()
+    outside = tmp_path / "outside-runtime.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "schema_version": "yieldforge.job-runtime.v1",
+                "worker_pid": os.getpid(),
+            }
+        )
+        + "\n"
+    )
+    runtime_path.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="runtime.*regular file"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+
+def test_recovery_rejects_unbounded_runtime_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    runtime_path = jobs / job_id / "runtime.json"
+    runtime_path.chmod(0o600)
+    runtime_path.write_text(json.dumps({"worker_pid": os.getpid(), "padding": "x" * 100}) + "\n")
+    monkeypatch.setattr(jobs_module, "MAX_RUNTIME_BYTES", 32, raising=False)
+
+    with pytest.raises(ValueError, match="runtime.*size limit"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+
+def test_recovery_rejects_unbounded_archive_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    monkeypatch.setattr(jobs_module, "MAX_ARCHIVE_CANDIDATES_BYTES", 32, raising=False)
+
+    with pytest.raises(ValueError, match="archive candidates.*size limit"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+
+def test_recovery_removes_server_owned_staging_from_terminal_job(tmp_path: Path) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    staging = jobs / job_id / "candidate-archive.staging"
+    staging.mkdir()
+    (staging / "leftover").write_text("server-owned generated state")
+
+    recovered = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+    assert recovered.get(job_id).status is JobStatus.COMPLETED
+    assert not staging.exists()
+
+
+def test_recovery_removes_terminal_staging_before_rejecting_other_evidence(
+    tmp_path: Path,
+) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    staging = jobs / job_id / "candidate-archive.staging"
+    staging.mkdir()
+    (staging / "leftover").write_text("server-owned generated state")
+    (archives / job_id / "manifest.json").chmod(0o600)
+    (archives / job_id / "manifest.json").write_text("{}\n")
+
+    with pytest.raises(ValueError, match="archive does not match"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+    assert not staging.exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["file", "symlink"])
+def test_recovery_fails_visibly_for_unsafe_terminal_staging(
+    tmp_path: Path, unsafe_kind: str
+) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    staging = jobs / job_id / "candidate-archive.staging"
+    outside = tmp_path / "outside-staging"
+    outside.mkdir()
+    if unsafe_kind == "file":
+        staging.write_text("not a server-owned staging directory")
+    else:
+        staging.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="unsafe terminal staging"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+    assert outside.is_dir()
+
+
 def test_restart_marks_unterminated_job_failed_without_signalling_stale_pid(tmp_path: Path) -> None:
     jobs = tmp_path / "jobs"
     archives = tmp_path / "archives"
@@ -627,7 +820,15 @@ def test_restart_marks_unterminated_job_failed_without_signalling_stale_pid(tmp_
         status="queued",
     )
     (job_dir / "events.jsonl").write_text(queued.model_dump_json() + "\n")
-    (job_dir / "runtime.json").write_text(json.dumps({"worker_pid": os.getpid()}) + "\n")
+    (job_dir / "runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "yieldforge.job-runtime.v1",
+                "worker_pid": os.getpid(),
+            }
+        )
+        + "\n"
+    )
 
     service = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
 
@@ -717,6 +918,4 @@ def _fake_worker_main(mode: str, request_path: Path) -> int:
 if __name__ == "__main__":  # pragma: no cover - invoked by subprocess tests
     mode_index = sys.argv.index("--fake-worker")
     request_index = sys.argv.index("--request")
-    raise SystemExit(
-        _fake_worker_main(sys.argv[mode_index + 1], Path(sys.argv[request_index + 1]))
-    )
+    raise SystemExit(_fake_worker_main(sys.argv[mode_index + 1], Path(sys.argv[request_index + 1])))

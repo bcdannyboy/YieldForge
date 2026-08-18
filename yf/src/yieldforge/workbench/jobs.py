@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import sys
 import threading
 import time
@@ -18,6 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from yieldforge.archive import CandidateArchive, batch_content_hash, canonical_json
+from yieldforge.datasets.passive_report import (
+    PassiveEvidenceError,
+    decode_strict_json_bytes,
+    read_passive_evidence_file,
+)
 from yieldforge.domain import Candidate, CandidateBatch, SpyrrowRunResult
 from yieldforge.workbench.contracts import (
     TERMINAL_JOB_STATUSES,
@@ -30,6 +36,14 @@ from yieldforge.workbench.contracts import (
     WorkerMessage,
     WorkerMessageKind,
 )
+
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_EVENTS_BYTES = 32 * 1024 * 1024
+MAX_EVENT_LINE_BYTES = 10 * 1024 * 1024
+MAX_TERMINAL_BYTES = 64 * 1024
+MAX_RUNTIME_BYTES = 4 * 1024
+MAX_ARCHIVE_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_ARCHIVE_CANDIDATES_BYTES = 16 * 1024 * 1024
 
 
 class WorkerProtocolError(RuntimeError):
@@ -194,9 +208,7 @@ class SolverJobService:
                 self._finish_terminal(state, JobStatus.CANCELLED)
                 return
             cancel_task = asyncio.create_task(state.cancel_requested.wait())
-            timeout_task = asyncio.create_task(
-                asyncio.sleep(max(0.0, deadline - time.monotonic()))
-            )
+            timeout_task = asyncio.create_task(asyncio.sleep(max(0.0, deadline - time.monotonic())))
             spawn_task = asyncio.create_task(
                 asyncio.create_subprocess_exec(
                     *self.worker_command,
@@ -224,9 +236,7 @@ class SolverJobService:
                     spawn_task.cancel()
                 self._finish_terminal(
                     state,
-                    JobStatus.CANCELLED
-                    if state.cancel_requested.is_set()
-                    else JobStatus.TIMED_OUT,
+                    JobStatus.CANCELLED if state.cancel_requested.is_set() else JobStatus.TIMED_OUT,
                 )
                 return
             try:
@@ -355,8 +365,7 @@ class SolverJobService:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if state.cancel_requested.is_set():
-                    with contextlib.suppress(Exception):
-                        await archive_task
+                    archive_abandoned.set()
                     self._discard_path(archive_staging)
                     self._finish_terminal(state, JobStatus.CANCELLED)
                     return
@@ -370,8 +379,8 @@ class SolverJobService:
                 except Exception as error:
                     archive_error = error
             except asyncio.CancelledError:
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(archive_task)
+                archive_abandoned.set()
+                self._discard_path(archive_staging)
                 raise
             if timeout_task.done() or time.monotonic() >= deadline:
                 archive_abandoned.set()
@@ -633,24 +642,37 @@ class SolverJobService:
         for directory in sorted(self.job_root.iterdir()):
             if directory.is_symlink() or not directory.is_dir():
                 continue
+            if not directory.name.startswith("job_"):
+                continue
             request_path = directory / "request.json"
             events_path = directory / "events.jsonl"
-            if request_path.is_symlink() or events_path.is_symlink():
-                raise ValueError(f"persisted job contains a link: {directory.name}")
-            if not request_path.is_file() or not events_path.is_file():
-                continue
-            request = SolveRequest.model_validate_json(request_path.read_bytes())
-            events = [
-                JobEvent.model_validate_json(line)
-                for line in events_path.read_bytes().splitlines()
-                if line
-            ]
-            if not events or any(
-                event.job_id != directory.name or event.sequence != index
-                for index, event in enumerate(events, start=1)
-            ):
-                raise ValueError(f"invalid persisted event sequence: {directory.name}")
-            worker_pid = self._load_worker_pid(directory / "runtime.json")
+            request_payload = self._read_optional_recovery_file(
+                request_path,
+                label="job request",
+                max_bytes=MAX_REQUEST_BYTES,
+            )
+            events_payload = self._read_optional_recovery_file(
+                events_path,
+                label="job events",
+                max_bytes=MAX_EVENTS_BYTES,
+            )
+            if request_payload is None or events_payload is None:
+                raise ValueError(f"persisted job is missing request or events: {directory.name}")
+            request = SolveRequest.model_validate(
+                decode_strict_json_bytes(
+                    request_payload,
+                    label="job request",
+                    max_bytes=MAX_REQUEST_BYTES,
+                )
+            )
+            events = self._parse_event_history(events_payload)
+            self._validate_event_history(directory.name, events)
+            runtime_payload = self._read_optional_recovery_file(
+                directory / "runtime.json",
+                label="job runtime",
+                max_bytes=MAX_RUNTIME_BYTES,
+            )
+            worker_pid = self._load_worker_pid(runtime_payload)
             last = events[-1]
             state = _JobState(
                 job_id=directory.name,
@@ -665,10 +687,14 @@ class SolverJobService:
             )
             self._jobs[state.job_id] = state
             terminal_path = directory / "terminal.json"
-            if terminal_path.is_symlink():
-                raise ValueError(f"persisted terminal metadata is a link: {directory.name}")
+            terminal_payload = self._read_optional_recovery_file(
+                terminal_path,
+                label="job terminal metadata",
+                max_bytes=MAX_TERMINAL_BYTES,
+            )
 
             if last.kind is JobEventKind.TERMINAL:
+                self._remove_terminal_staging(directory)
                 assert last.status is not None
                 state.status = last.status
                 state.error_code = last.error_code
@@ -685,9 +711,7 @@ class SolverJobService:
                         ) from error
                     server_archive_path = self.archive_root / state.job_id
                     if server_archive_path.is_symlink():
-                        raise ValueError(
-                            f"completed archive is a link: {directory.name}"
-                        )
+                        raise ValueError(f"completed archive is a link: {directory.name}")
                     archive_path = server_archive_path.resolve()
                     state.archive_path = str(archive_path)
                     state.completion_committed = True
@@ -707,17 +731,19 @@ class SolverJobService:
                     error_code=state.error_code,
                     error_message=state.error_message,
                 )
-                if terminal_path.is_file():
-                    terminal = JobTerminalMetadata.model_validate_json(
-                        terminal_path.read_bytes()
+                if terminal_payload is not None:
+                    terminal = JobTerminalMetadata.model_validate(
+                        decode_strict_json_bytes(
+                            terminal_payload,
+                            label="job terminal metadata",
+                            max_bytes=MAX_TERMINAL_BYTES,
+                        )
                     )
                     if (
                         terminal.status is JobStatus.COMPLETED
                         and terminal.archive_path != state.archive_path
                     ):
-                        raise ValueError(
-                            f"invalid completed archive path: {directory.name}"
-                        )
+                        raise ValueError(f"invalid completed archive path: {directory.name}")
                     if terminal != expected_terminal:
                         raise ValueError(f"invalid terminal metadata: {directory.name}")
                 else:
@@ -727,13 +753,137 @@ class SolverJobService:
                     )
                 continue
 
-            if terminal_path.exists():
+            if terminal_payload is not None:
                 raise ValueError(f"terminal metadata has no terminal event: {directory.name}")
             self._discard_path(self.archive_root / state.job_id)
             self._discard_path(directory / "candidate-archive.staging")
             state.error_code = "supervisor_restart"
             state.error_message = "solver supervisor restarted"
             self._finish_terminal(state, JobStatus.FAILED)
+
+    @staticmethod
+    def _read_optional_recovery_file(
+        path: Path,
+        *,
+        label: str,
+        max_bytes: int,
+    ) -> bytes | None:
+        try:
+            return read_passive_evidence_file(path, label=label, max_bytes=max_bytes)
+        except PassiveEvidenceError as error:
+            if isinstance(error.__cause__, FileNotFoundError):
+                return None
+            raise ValueError(str(error)) from error
+
+    @staticmethod
+    def _parse_event_history(payload: bytes) -> list[JobEvent]:
+        if not payload.endswith(b"\n"):
+            raise ValueError("invalid event history: JSONL must end with a newline")
+        lines = payload.splitlines()
+        if not lines or any(not line for line in lines):
+            raise ValueError("invalid event history: JSONL contains an empty record")
+        events: list[JobEvent] = []
+        for line in lines:
+            try:
+                decoded = decode_strict_json_bytes(
+                    line,
+                    label="job event",
+                    max_bytes=MAX_EVENT_LINE_BYTES,
+                )
+                events.append(JobEvent.model_validate(decoded))
+            except Exception as error:
+                raise ValueError("invalid event history: malformed event record") from error
+        return events
+
+    @staticmethod
+    def _validate_event_history(job_id: str, events: list[JobEvent]) -> None:
+        def invalid(detail: str) -> None:
+            raise ValueError(f"invalid event history for {job_id}: {detail}")
+
+        if not events:
+            invalid("event stream is empty")
+        if any(
+            event.job_id != job_id or event.sequence != index
+            for index, event in enumerate(events, start=1)
+        ):
+            invalid("job identity or sequence is inconsistent")
+        first = events[0]
+        if (
+            first.kind is not JobEventKind.STATUS
+            or first.status is not JobStatus.QUEUED
+            or first.candidate_count != 0
+        ):
+            invalid("first event must be an empty queued status")
+
+        prior_status = JobStatus.QUEUED
+        prior_count = 0
+        prior_candidate_count = 0
+        phase_seen = False
+        candidate_events: list[JobEvent] = []
+        for offset, event in enumerate(events[1:], start=1):
+            is_last = offset == len(events) - 1
+            if event.candidate_count < prior_count:
+                invalid("candidate count decreased")
+            if event.kind is JobEventKind.TERMINAL and not is_last:
+                invalid("terminal event was not last")
+
+            allowed = False
+            if prior_status is JobStatus.QUEUED:
+                allowed = (
+                    event.kind is JobEventKind.STATUS
+                    and event.status in {JobStatus.RUNNING, JobStatus.CANCELLING}
+                ) or (
+                    event.kind is JobEventKind.TERMINAL
+                    and event.status in {JobStatus.FAILED, JobStatus.TIMED_OUT}
+                )
+            elif prior_status is JobStatus.RUNNING:
+                allowed = (
+                    (
+                        event.status is JobStatus.RUNNING
+                        and event.kind in {JobEventKind.PHASE, JobEventKind.CANDIDATE}
+                    )
+                    or (event.kind is JobEventKind.STATUS and event.status is JobStatus.CANCELLING)
+                    or (
+                        event.kind is JobEventKind.TERMINAL
+                        and event.status
+                        in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMED_OUT}
+                    )
+                )
+            elif prior_status is JobStatus.CANCELLING:
+                allowed = event.kind is JobEventKind.TERMINAL and event.status in {
+                    JobStatus.CANCELLED,
+                    JobStatus.FAILED,
+                }
+            if not allowed:
+                invalid(f"illegal {prior_status.value} to {event.status.value} transition")
+
+            if event.kind is JobEventKind.PHASE:
+                if phase_seen or event.candidate_count != prior_count:
+                    invalid("phase event is duplicated or changes candidate count")
+                phase_seen = True
+            elif event.kind is JobEventKind.CANDIDATE:
+                if not phase_seen or event.candidate_count <= prior_candidate_count:
+                    invalid("candidate event order is inconsistent")
+                prior_candidate_count = event.candidate_count
+                candidate_events.append(event)
+
+            prior_status = event.status
+            prior_count = event.candidate_count
+
+        terminal = events[-1]
+        if terminal.kind is not JobEventKind.TERMINAL:
+            return
+        if terminal.status is JobStatus.COMPLETED:
+            if terminal.batch is None or terminal.candidate_count != len(terminal.batch.candidates):
+                invalid("completed terminal count does not match its batch")
+            if not phase_seen:
+                invalid("completed history omitted the solving phase")
+            for event in candidate_events:
+                candidate_index = event.candidate_count - 1
+                if candidate_index >= len(terminal.batch.candidates):
+                    invalid("candidate event index exceeds terminal batch")
+                if event.candidate != terminal.batch.candidates[candidate_index]:
+                    invalid("candidate event does not match terminal batch order and content")
 
     @staticmethod
     def _validate_completed_archive(archive_path: Path, batch: CandidateBatch) -> None:
@@ -745,12 +895,35 @@ class SolverJobService:
         ):
             raise ValueError("completed archive has an invalid file inventory")
         try:
-            manifest = json.loads(members["manifest.json"].read_text())
+            manifest_payload = read_passive_evidence_file(
+                members["manifest.json"],
+                label="archive manifest",
+                max_bytes=MAX_ARCHIVE_MANIFEST_BYTES,
+            )
+            candidates_payload = read_passive_evidence_file(
+                members["candidates.jsonl"],
+                label="archive candidates",
+                max_bytes=MAX_ARCHIVE_CANDIDATES_BYTES,
+            )
+            manifest = decode_strict_json_bytes(
+                manifest_payload,
+                label="archive manifest",
+                max_bytes=MAX_ARCHIVE_MANIFEST_BYTES,
+            )
+            if candidates_payload and not candidates_payload.endswith(b"\n"):
+                raise ValueError("archive candidates JSONL must end with a newline")
             candidates = [
-                Candidate.model_validate_json(line)
-                for line in members["candidates.jsonl"].read_bytes().splitlines()
-                if line
+                Candidate.model_validate(
+                    decode_strict_json_bytes(
+                        line,
+                        label="archive candidate",
+                        max_bytes=MAX_EVENT_LINE_BYTES,
+                    )
+                )
+                for line in candidates_payload.splitlines()
             ]
+        except PassiveEvidenceError:
+            raise
         except Exception as error:
             raise ValueError("completed archive is malformed") from error
         expected_manifest = {
@@ -777,6 +950,20 @@ class SolverJobService:
                 SolverJobService._discard_path(archive_staging)
 
     @staticmethod
+    def _remove_terminal_staging(job_directory: Path) -> None:
+        staging = job_directory / "candidate-archive.staging"
+        try:
+            metadata = os.lstat(staging)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise ValueError(f"unsafe terminal staging path: {staging}")
+        try:
+            shutil.rmtree(staging)
+        except OSError as error:
+            raise ValueError(f"unsafe terminal staging could not be removed: {staging}") from error
+
+    @staticmethod
     def _discard_path(path: Path) -> None:
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             path.unlink()
@@ -784,12 +971,25 @@ class SolverJobService:
             shutil.rmtree(path)
 
     @staticmethod
-    def _load_worker_pid(path: Path) -> int | None:
-        if not path.is_file():
+    def _load_worker_pid(payload: bytes | None) -> int | None:
+        if payload is None:
             return None
-        payload = json.loads(path.read_text())
-        pid = payload.get("worker_pid")
-        return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+        decoded = decode_strict_json_bytes(
+            payload,
+            label="job runtime",
+            max_bytes=MAX_RUNTIME_BYTES,
+        )
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "schema_version",
+            "worker_pid",
+        }:
+            raise ValueError("Invalid job runtime: unexpected fields")
+        if decoded["schema_version"] != "yieldforge.job-runtime.v1":
+            raise ValueError("Invalid job runtime: unsupported schema version")
+        pid = decoded["worker_pid"]
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise ValueError("Invalid job runtime: worker_pid must be a positive integer")
+        return pid
 
     def _snapshot(self, state: _JobState) -> JobSnapshot:
         return JobSnapshot(
