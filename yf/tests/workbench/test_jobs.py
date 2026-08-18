@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -366,13 +367,16 @@ def test_hard_deadline_during_archive_staging_publishes_no_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive_started = threading.Event()
+    archive_created = threading.Event()
     allow_archive = threading.Event()
     original_create = CandidateArchive.create
 
     def slow_create(output: Path, batch: CandidateBatch) -> Path:
         archive_started.set()
         assert allow_archive.wait(timeout=3)
-        return original_create(output, batch)
+        created = original_create(output, batch)
+        archive_created.set()
+        return created
 
     monkeypatch.setattr(CandidateArchive, "create", slow_create)
 
@@ -385,14 +389,51 @@ def test_hard_deadline_during_archive_staging_publishes_no_archive(
         created = await service.start(make_request(budget=1.0))
         assert await asyncio.to_thread(archive_started.wait, 1)
 
-        await asyncio.sleep(1.05)
-        allow_archive.set()
-        terminal = await service.wait(created.job_id)
+        try:
+            terminal = await asyncio.wait_for(service.wait(created.job_id), timeout=1.5)
+        finally:
+            allow_archive.set()
 
         assert terminal.status is JobStatus.TIMED_OUT
         assert terminal.archive_path is None
         assert not (tmp_path / "archives" / created.job_id).exists()
-        assert not (service.job_directory(created.job_id) / "candidate-archive.staging").exists()
+        assert await asyncio.to_thread(archive_created.wait, 1)
+        staging = service.job_directory(created.job_id) / "candidate-archive.staging"
+        for _ in range(100):
+            if not staging.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert not staging.exists()
+
+    run(scenario())
+
+
+def test_hard_deadline_bounds_subprocess_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    never_spawned = asyncio.Event()
+
+    async def stalled_spawn(*_args: object, **_kwargs: object) -> object:
+        await never_spawned.wait()
+        raise AssertionError("spawn should have been cancelled at the hard deadline")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", stalled_spawn)
+
+    async def scenario() -> None:
+        service = SolverJobService(tmp_path / "jobs", tmp_path / "archives")
+        created = await service.start(make_request(budget=1.0))
+        runner = service._jobs[created.job_id].runner
+        assert runner is not None
+        try:
+            terminal = await asyncio.wait_for(service.wait(created.job_id), timeout=1.5)
+            assert terminal.status is JobStatus.TIMED_OUT
+            assert terminal.worker_pid is None
+            assert terminal.archive_path is None
+        finally:
+            if not runner.done():
+                runner.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await runner
 
     run(scenario())
 
@@ -416,6 +457,10 @@ def test_cancel_kills_worker_descendants_in_its_process_group(tmp_path: Path) ->
         try:
             terminal = await service.cancel(created.job_id)
             assert terminal.status is JobStatus.CANCELLED
+            for _ in range(100):
+                if not pid_is_alive(child_pid):
+                    break
+                await asyncio.sleep(0.01)
             assert not pid_is_alive(child_pid)
         finally:
             if pid_is_alive(child_pid):
@@ -446,6 +491,10 @@ def test_exceptional_supervisor_cancellation_kills_worker_process_group(tmp_path
             runner.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await runner
+            for _ in range(100):
+                if not pid_is_alive(child_pid):
+                    break
+                await asyncio.sleep(0.01)
             assert not pid_is_alive(child_pid)
         finally:
             if pid_is_alive(child_pid):
