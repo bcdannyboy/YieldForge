@@ -17,8 +17,8 @@ from yieldforge.datasets.passive_report import (
     bind_normalized_slice_evidence,
     decode_strict_json_bytes,
     load_lectra_audit_evidence,
-    load_normalized_slice,
     load_normalized_slice_evidence,
+    load_unbound_normalized_slice,
     parse_dataset_source_manifest,
     parse_lectra_audit_report,
     parse_normalized_slice,
@@ -317,7 +317,10 @@ def test_normalized_slice_parser_and_loader_delegate_strict_passive_policy(tmp_p
     slice_path.write_bytes(slice_bytes)
 
     assert parse_normalized_slice(slice_bytes).source.dataset_id == "lectra-7030786-v1.1"
-    assert load_normalized_slice(slice_path).schema_version == "yieldforge.normalized-slice.v1"
+    assert (
+        load_unbound_normalized_slice(slice_path).schema_version == "yieldforge.normalized-slice.v1"
+    )
+    assert not hasattr(passive_report, "load_normalized_slice")
 
     with pytest.raises(PassiveEvidenceError, match="duplicate JSON object key"):
         parse_normalized_slice(b'{"schema_version":"x","schema_version":"y"}')
@@ -333,7 +336,7 @@ def test_normalized_slice_loader_rejects_links_and_size_via_shared_reader(tmp_pa
     linked.symlink_to(target)
 
     with pytest.raises(PassiveEvidenceError, match="regular file"):
-        load_normalized_slice(linked)
+        load_unbound_normalized_slice(linked)
     with pytest.raises(PassiveEvidenceError, match="size limit"):
         parse_normalized_slice(slice_bytes, max_bytes=10)
 

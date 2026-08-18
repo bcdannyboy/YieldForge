@@ -94,7 +94,7 @@ class NormalizedSliceSource(StrictContractModel):
     doi: Literal["10.5281/zenodo.7030786"]
     license: Literal["CC-BY-4.0"]
     source_unit: SourceUnit
-    conversion_ruleset_version: StrictStr = Field(min_length=1)
+    conversion_ruleset_version: Literal["lectra-slice-rules.v1"]
 
     @model_validator(mode="after")
     def require_exact_source_inventory(self) -> Self:
@@ -302,6 +302,8 @@ class DerivedShapeGeometry(StrictContractModel):
 
     @model_validator(mode="after")
     def validate_derived_geometry(self) -> Self:
+        from shapely.geometry import Polygon
+
         if self.raw_scalar_count != len(self.paired_points) * 2:
             raise ValueError("raw_scalar_count must equal twice the paired point count")
         expected_ring = (
@@ -329,6 +331,15 @@ class DerivedShapeGeometry(StrictContractModel):
             raise ValueError("geometry bounds must equal the paired-point extent")
         if self.has_nonzero_area != (self.area > 0):
             raise ValueError("has_nonzero_area must agree with area")
+        polygon = Polygon(self.paired_points)
+        if self.area != polygon.area:
+            raise ValueError("area must match the Shapely planar polygon area")
+        if self.is_valid is not polygon.is_valid:
+            raise ValueError("is_valid must match the Shapely planar polygon truth")
+        if self.is_simple is not polygon.is_simple:
+            raise ValueError("is_simple must match the Shapely planar polygon truth")
+        if self.has_nonzero_area is not (polygon.area > 0):
+            raise ValueError("has_nonzero_area must match the Shapely planar polygon truth")
         return self
 
 
@@ -419,15 +430,24 @@ SOURCE_REAL_PROVENANCE_PATHS = (
     "/constraints",
     "/parts",
     "/shapes",
-    "/source",
+    "/source/dataset_id",
+    "/source/doi",
+    "/source/license",
+    "/source/source_checksums",
+    "/source/source_unit/interpretation",
+    "/source/source_unit/literal_label",
     "/tasks",
 )
 DERIVED_PROVENANCE_PATHS = (
     "/derived_geometry",
+    "/source/audit_report_sha256",
+    "/source/conversion_ruleset_version",
+    "/source/source_manifest_sha256",
     "/task_dispositions/normalization_status",
     "/task_dispositions/projection_status",
     "/task_dispositions/reason_codes",
     "/task_dispositions/support_status",
+    "/task_dispositions/tasks_index",
 )
 ASSUMED_PROVENANCE_PATH = "/task_dispositions/assumption_codes"
 
@@ -455,20 +475,24 @@ def _validate_provenance_path(path: str) -> None:
     root = segments[0]
     if root not in _PROVENANCE_ROOT_FIELDS:
         raise ValueError(f"provenance path has no artifact root {root!r}")
-    if len(segments) > 2:
-        raise ValueError("provenance paths may identify only an artifact root and direct field")
+    if len(segments) > 3:
+        raise ValueError("provenance paths exceed the supported artifact field depth")
     if len(segments) == 2 and segments[1] not in _PROVENANCE_ROOT_FIELDS[root]:
         raise ValueError(
             f"provenance path {path!r} identifies no nested field on artifact root {root!r}"
         )
+    if len(segments) == 3 and (
+        segments[:2] != ["source", "source_unit"] or segments[2] not in SourceUnit.model_fields
+    ):
+        raise ValueError(f"provenance path {path!r} identifies no nested artifact leaf field")
 
 
 def _is_source_real_provenance_path(path: str) -> bool:
-    return any(path == root or path.startswith(f"{root}/") for root in SOURCE_REAL_PROVENANCE_PATHS)
+    return path in SOURCE_REAL_PROVENANCE_PATHS
 
 
 def _is_derived_provenance_path(path: str) -> bool:
-    return path.startswith("/derived_geometry/") or path in DERIVED_PROVENANCE_PATHS
+    return path in DERIVED_PROVENANCE_PATHS
 
 
 class ProvenanceGroup(StrictContractModel):
@@ -493,10 +517,13 @@ class ProvenanceGroup(StrictContractModel):
     def require_kind_specific_paths(self) -> Self:
         if self.kind is ProvenanceKind.GENERATED:
             raise ValueError("GENERATED provenance is not supported by this source-slice schema")
-        if self.kind is ProvenanceKind.SOURCE_REAL and any(
-            not _is_source_real_provenance_path(path) for path in self.field_paths
-        ):
-            raise ValueError("SOURCE_REAL provenance cannot point at derived or assumed fields")
+        if self.kind is ProvenanceKind.SOURCE_REAL:
+            if "/source" in self.field_paths:
+                raise ValueError(
+                    "SOURCE_REAL provenance requires exhaustive leaf-level source paths"
+                )
+            if any(not _is_source_real_provenance_path(path) for path in self.field_paths):
+                raise ValueError("SOURCE_REAL provenance cannot point at derived or assumed fields")
         if self.kind is ProvenanceKind.DERIVED and any(
             not _is_derived_provenance_path(path) for path in self.field_paths
         ):
@@ -617,6 +644,26 @@ class NormalizedSlice(StrictContractModel):
         disposition_ids = tuple(item.tasks_index for item in self.task_dispositions)
         if disposition_ids != task_ids:
             raise ValueError("tasks must have exactly one disposition in source task order")
+        geometry_by_hash = {geometry.shape_hash: geometry for geometry in self.derived_geometry}
+        for disposition in self.task_dispositions:
+            if disposition.projection_status not in {
+                ProjectionStatus.ELIGIBLE,
+                ProjectionStatus.PROJECTED,
+            }:
+                continue
+            referenced_geometry = (
+                geometry_by_hash[part.shape_hash]
+                for part in self.parts
+                if part.tasks_index == disposition.tasks_index
+            )
+            if any(
+                not (geometry.is_simple and geometry.is_valid and geometry.has_nonzero_area)
+                for geometry in referenced_geometry
+            ):
+                raise ValueError(
+                    f"eligible or projected task {disposition.tasks_index} shapes must be simple, "
+                    "valid, and nonzero"
+                )
 
         provenance_kinds = tuple(group.kind for group in self.provenance)
         if len(provenance_kinds) != len(set(provenance_kinds)):

@@ -7,7 +7,10 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from yieldforge.datasets.normalized_slice import (
+    ASSUMED_PROVENANCE_PATH,
     CONSTRAINT_OPAQUE_FIELD_ORDER,
+    DERIVED_PROVENANCE_PATHS,
+    SOURCE_REAL_PROVENANCE_PATHS,
     ConstraintSourceRow,
     DerivedShapeGeometry,
     NormalizationStatus,
@@ -147,30 +150,17 @@ def valid_slice() -> NormalizedSlice:
         provenance=(
             ProvenanceGroup(
                 kind=ProvenanceKind.SOURCE_REAL,
-                field_paths=(
-                    "/constraint_value_columns",
-                    "/constraints",
-                    "/parts",
-                    "/shapes",
-                    "/source",
-                    "/tasks",
-                ),
+                field_paths=SOURCE_REAL_PROVENANCE_PATHS,
                 note="Verbatim selected source rows.",
             ),
             ProvenanceGroup(
                 kind=ProvenanceKind.DERIVED,
-                field_paths=(
-                    "/derived_geometry",
-                    "/task_dispositions/normalization_status",
-                    "/task_dispositions/projection_status",
-                    "/task_dispositions/reason_codes",
-                    "/task_dispositions/support_status",
-                ),
+                field_paths=DERIVED_PROVENANCE_PATHS,
                 note="Reversible adjacent-scalar pairing and ring closure.",
             ),
             ProvenanceGroup(
                 kind=ProvenanceKind.ASSUMED,
-                field_paths=("/task_dispositions/assumption_codes",),
+                field_paths=(ASSUMED_PROVENANCE_PATH,),
                 note="Declared projection assumptions only.",
             ),
         ),
@@ -361,6 +351,11 @@ def test_source_identity_pins_release_unit_and_checksum_inventory() -> None:
     with pytest.raises(ValidationError, match="source checksum inventory"):
         NormalizedSliceSource.model_validate(data)
 
+    data = source_identity().model_dump()
+    data["conversion_ruleset_version"] = "arbitrary-rules"
+    with pytest.raises(ValidationError, match="conversion_ruleset_version"):
+        NormalizedSliceSource.model_validate(data)
+
 
 @pytest.mark.parametrize("field", ["reason_codes", "assumption_codes"])
 def test_reason_and_assumption_codes_must_be_sorted_and_unique(field: str) -> None:
@@ -454,11 +449,9 @@ def test_slice_validates_source_references_geometry_and_dispositions() -> None:
         NormalizedSlice.model_validate(data)
 
     data = valid_slice().model_dump()
-    points = list(data["derived_geometry"][0]["paired_points"])
-    points[0] = (9, 9)
-    data["derived_geometry"][0]["paired_points"] = tuple(points)
-    data["derived_geometry"][0]["closed_ring"] = tuple(points) + (points[0],)
-    data["derived_geometry"][0]["bounds"] = (0, 0.0, 9, 9)
+    raw = list(data["shapes"][0]["raw"])
+    raw[0] = 9
+    data["shapes"][0]["raw"] = tuple(raw)
     with pytest.raises(ValidationError, match="adjacent raw scalars"):
         NormalizedSlice.model_validate(data)
 
@@ -466,6 +459,65 @@ def test_slice_validates_source_references_geometry_and_dispositions() -> None:
     data["task_dispositions"] = ()
     with pytest.raises(ValidationError, match="exactly one disposition"):
         NormalizedSlice.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("area", 4.0, "area.*planar polygon"),
+        ("is_valid", False, "is_valid.*planar polygon"),
+        ("is_simple", False, "is_simple.*planar polygon"),
+    ],
+)
+def test_derived_geometry_flags_and_area_must_match_shapely_truth(
+    field: str, value: float | bool, message: str
+) -> None:
+    data = valid_slice().derived_geometry[0].model_dump()
+    data[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        DerivedShapeGeometry.model_validate(data)
+
+
+def invalid_bowtie_slice_data() -> dict[str, object]:
+    data = valid_slice().model_dump()
+    data["shapes"][0].update(
+        raw=(0, 0, 2, 2, 0, 2, 2, 0),
+        sizes=(8,),
+    )
+    data["derived_geometry"][0].update(
+        paired_points=((0, 0), (2, 2), (0, 2), (2, 0)),
+        closed_ring=((0, 0), (2, 2), (0, 2), (2, 0), (0, 0)),
+        raw_scalar_count=8,
+        is_simple=False,
+        is_valid=False,
+        has_nonzero_area=False,
+        area=0.0,
+        bounds=(0, 0, 2, 2),
+    )
+    return data
+
+
+def test_eligible_tasks_reject_truthfully_invalid_or_zero_area_shapes() -> None:
+    with pytest.raises(ValidationError, match="eligible.*simple, valid, and nonzero"):
+        NormalizedSlice.model_validate(invalid_bowtie_slice_data())
+
+
+def test_truthfully_invalid_geometry_remains_available_for_view_only_exclusions() -> None:
+    data = invalid_bowtie_slice_data()
+    data["task_dispositions"][0].update(
+        support_status=SupportStatus.VIEW_ONLY,
+        projection_status=ProjectionStatus.BLOCKED,
+        reason_codes=("invalid_geometry",),
+        assumption_codes=(),
+    )
+    data["provenance"] = tuple(
+        group for group in data["provenance"] if group["kind"] != ProvenanceKind.ASSUMED
+    )
+
+    normalized = NormalizedSlice.model_validate(data)
+
+    assert normalized.derived_geometry[0].is_valid is False
 
 
 def test_every_selected_task_has_parts_and_every_selected_shape_is_referenced() -> None:
@@ -544,7 +596,13 @@ def test_assumptions_require_assumed_provenance_and_paths_require_real_roots() -
     ("kind", "path", "message"),
     [
         (ProvenanceKind.SOURCE_REAL, "/derived_geometry", "SOURCE_REAL.*derived"),
+        (
+            ProvenanceKind.SOURCE_REAL,
+            "/source/source_manifest_sha256",
+            "SOURCE_REAL.*derived",
+        ),
         (ProvenanceKind.DERIVED, "/tasks", "DERIVED.*source"),
+        (ProvenanceKind.DERIVED, "/source/doi", "DERIVED.*source"),
         (
             ProvenanceKind.ASSUMED,
             "/task_dispositions/reason_codes",
@@ -563,10 +621,15 @@ def test_provenance_kinds_cannot_claim_other_evidence_families(
 @pytest.mark.parametrize(
     ("kind", "missing_path", "message"),
     [
-        (ProvenanceKind.SOURCE_REAL, "/source", "SOURCE_REAL.*minimum coverage"),
+        (ProvenanceKind.SOURCE_REAL, "/source/doi", "SOURCE_REAL.*minimum coverage"),
         (
             ProvenanceKind.DERIVED,
             "/task_dispositions/reason_codes",
+            "DERIVED.*minimum coverage",
+        ),
+        (
+            ProvenanceKind.DERIVED,
+            "/source/audit_report_sha256",
             "DERIVED.*minimum coverage",
         ),
     ],
@@ -604,6 +667,15 @@ def test_assumed_provenance_may_be_absent_only_when_no_assumptions_exist() -> No
     normalized = NormalizedSlice.model_validate(data)
 
     assert ProvenanceKind.ASSUMED not in {group.kind for group in normalized.provenance}
+
+
+def test_whole_source_provenance_is_rejected_in_favor_of_exhaustive_leaf_families() -> None:
+    with pytest.raises(ValidationError, match="SOURCE_REAL.*leaf-level"):
+        ProvenanceGroup(
+            kind=ProvenanceKind.SOURCE_REAL,
+            field_paths=("/source",),
+            note="Too coarse to distinguish observed and derived identity fields.",
+        )
 
 
 def test_normalized_contract_imports_without_pandas_or_pickle() -> None:

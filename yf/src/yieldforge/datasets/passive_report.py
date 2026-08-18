@@ -307,8 +307,8 @@ def load_lectra_audit_evidence(
     return report, manifest
 
 
-def load_normalized_slice(path: Path) -> NormalizedSlice:
-    """Safely read and validate one passive normalized-slice file."""
+def load_unbound_normalized_slice(path: Path) -> NormalizedSlice:
+    """Safely read an unbound slice for isolated inspection, not normal consumption."""
     return parse_normalized_slice(read_passive_evidence_file(path, label="normalized Lectra slice"))
 
 
