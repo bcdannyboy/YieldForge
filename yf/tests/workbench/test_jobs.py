@@ -22,6 +22,7 @@ from yieldforge.domain import (
     Part,
     Placement,
     SolverIdentity,
+    SourceTaskBinding,
     SpyrrowRunConfig,
     SpyrrowRunResult,
     StripPackingProblem,
@@ -33,10 +34,28 @@ from yieldforge.workbench.contracts import (
     SolveRequest,
     WorkerMessage,
 )
-from yieldforge.workbench.jobs import SolverJobService
+from yieldforge.workbench.jobs import ActiveJobError, SolverJobService
 
 
-def make_request(*, budget: float = 2.0, problem_name: str = "job-test") -> SolveRequest:
+def make_source_task_binding(
+    *,
+    tasks_index: int = 13958,
+    assumption_codes: tuple[str, ...] = ("interpret_s1_degenerate_entries_as_allowed_rotations",),
+) -> SourceTaskBinding:
+    return SourceTaskBinding(
+        dataset_id="lectra-7030786-v1.1",
+        source_slice_sha256="d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8",
+        tasks_index=tasks_index,
+        acknowledged_assumption_codes=assumption_codes,
+    )
+
+
+def make_request(
+    *,
+    budget: float = 2.0,
+    problem_name: str = "job-test",
+    source_task_binding: SourceTaskBinding | None = None,
+) -> SolveRequest:
     return SolveRequest(
         problem=StripPackingProblem(
             name=problem_name,
@@ -53,6 +72,7 @@ def make_request(*, budget: float = 2.0, problem_name: str = "job-test") -> Solv
         ),
         config=SpyrrowRunConfig(seed=23, total_computation_time=1, num_workers=1),
         max_runtime_seconds=budget,
+        source_task_binding=source_task_binding,
     )
 
 
@@ -111,6 +131,18 @@ async def wait_until_running(service: SolverJobService, job_id: str) -> None:
     raise AssertionError("job did not start")
 
 
+async def wait_for_pid_file(path: Path) -> int:
+    for _ in range(200):
+        try:
+            payload = path.read_text()
+            if payload:
+                return int(payload)
+        except (FileNotFoundError, ValueError):
+            pass
+        await asyncio.sleep(0.01)
+    raise AssertionError("worker PID file was not completely written")
+
+
 def pid_is_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -163,6 +195,60 @@ def test_completed_job_persists_sampled_events_full_batch_and_archive(tmp_path: 
             .splitlines()
         ]
         assert persisted == events
+
+    run(scenario())
+
+
+def test_completed_source_job_persists_binding_and_exposes_archive_bound_batch(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[Path, Path, str, CandidateBatch, SourceTaskBinding]:
+        jobs = tmp_path / "jobs"
+        archives = tmp_path / "archives"
+        binding = make_source_task_binding()
+        service = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+        created = await service.start(make_request(source_task_binding=binding))
+        assert created.source_task_binding == binding
+        assert service.completed_batch(created.job_id) is None
+        terminal = await service.wait(created.job_id)
+
+        exposed = service.completed_batch(created.job_id)
+        assert terminal.source_task_binding == binding
+        assert exposed == service.events(created.job_id)[-1].batch
+        assert exposed is not None
+        exposed.candidates.clear()
+        completed = service.completed_batch(created.job_id)
+        assert completed is not None and len(completed.candidates) == 1
+        request_payload = json.loads(
+            (service.job_directory(created.job_id) / "request.json").read_text()
+        )
+        manifest = json.loads((Path(terminal.archive_path) / "manifest.json").read_text())
+        assert request_payload["source_task_binding"] == binding.model_dump(mode="json")
+        assert manifest["source_task_binding"] == binding.model_dump(mode="json")
+        return jobs, archives, created.job_id, completed, binding
+
+    jobs, archives, job_id, batch, binding = run(scenario())
+    recovered = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+    assert recovered.get(job_id).source_task_binding == binding
+    assert recovered.completed_batch(job_id) == batch
+
+
+def test_completed_batch_returns_none_for_non_completed_jobs(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = SolverJobService(
+            tmp_path / "jobs",
+            tmp_path / "archives",
+            worker_command=fake_command("hang"),
+            terminate_grace_seconds=0.05,
+        )
+        created = await service.start(make_request())
+        await wait_until_running(service, created.job_id)
+
+        assert service.completed_batch(created.job_id) is None
+        await service.cancel(created.job_id)
+        assert service.completed_batch(created.job_id) is None
 
     run(scenario())
 
@@ -257,10 +343,57 @@ def test_only_one_job_can_be_active(tmp_path: Path) -> None:
         first = await service.start(make_request())
         await wait_until_running(service, first.job_id)
 
-        with pytest.raises(RuntimeError, match="one solver job"):
+        with pytest.raises(ActiveJobError, match="one solver job") as blocked:
             await service.start(make_request())
+        assert blocked.value.active_job_id == first.job_id
 
         await service.cancel(first.job_id)
+
+    run(scenario())
+
+
+def test_source_task_snapshot_lookup_uses_binding_identity_not_problem_name(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        service = SolverJobService(
+            tmp_path / "jobs",
+            tmp_path / "archives",
+            worker_command=fake_command("complete"),
+        )
+        first_binding = make_source_task_binding(assumption_codes=("first_assumption",))
+        second_binding = make_source_task_binding(assumption_codes=("second_assumption",))
+
+        first = await service.start(
+            make_request(
+                problem_name="name-does-not-identify-source-task",
+                source_task_binding=first_binding,
+            )
+        )
+        await service.wait(first.job_id)
+        unbound = await service.start(make_request(problem_name="lectra-task-13958"))
+        await service.wait(unbound.job_id)
+        second = await service.start(make_request(source_task_binding=second_binding))
+        await service.wait(second.job_id)
+        other = await service.start(
+            make_request(source_task_binding=make_source_task_binding(tasks_index=25801))
+        )
+        await service.wait(other.job_id)
+
+        matched = service.snapshots_for_source_task(
+            dataset_id=first_binding.dataset_id,
+            source_slice_sha256=first_binding.source_slice_sha256,
+            tasks_index=first_binding.tasks_index,
+        )
+
+        assert tuple(snapshot.job_id for snapshot in matched) == (first.job_id, second.job_id)
+        assert tuple(snapshot.source_task_binding for snapshot in matched) == (
+            first_binding,
+            second_binding,
+        )
+        assert tuple(matched) == tuple(
+            sorted(matched, key=lambda item: (item.created_at, item.job_id))
+        )
 
     run(scenario())
 
@@ -537,11 +670,7 @@ def test_cancel_kills_worker_descendants_in_its_process_group(tmp_path: Path) ->
         created = await service.start(make_request())
         await wait_until_running(service, created.job_id)
         child_path = service.job_directory(created.job_id) / "child.pid"
-        for _ in range(200):
-            if child_path.is_file():
-                break
-            await asyncio.sleep(0.01)
-        child_pid = int(child_path.read_text())
+        child_pid = await wait_for_pid_file(child_path)
         try:
             terminal = await service.cancel(created.job_id)
             assert terminal.status is JobStatus.CANCELLED
@@ -568,11 +697,7 @@ def test_exceptional_supervisor_cancellation_kills_worker_process_group(tmp_path
         created = await service.start(make_request())
         await wait_until_running(service, created.job_id)
         child_path = service.job_directory(created.job_id) / "child.pid"
-        for _ in range(200):
-            if child_path.is_file():
-                break
-            await asyncio.sleep(0.01)
-        child_pid = int(child_path.read_text())
+        child_pid = await wait_for_pid_file(child_path)
         runner = service._jobs[created.job_id].runner
         assert runner is not None
         try:
@@ -652,6 +777,15 @@ def test_recovery_rejects_archive_content_that_disagrees_with_terminal_batch(
         SolverJobService(jobs, archives, worker_command=fake_command("complete"))
 
 
+def test_recovery_rejects_non_object_archive_manifest_as_malformed(tmp_path: Path) -> None:
+    jobs, archives, job_id = run(create_completed_job(tmp_path))
+    manifest_path = archives / job_id / "manifest.json"
+    manifest_path.write_text("[]\n")
+
+    with pytest.raises(ValueError, match="completed archive is malformed"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+
 def test_recovery_rejects_completed_archive_symlink_even_if_metadata_follows_it(
     tmp_path: Path,
 ) -> None:
@@ -697,6 +831,32 @@ def test_recovery_rebinds_completed_event_and_archive_to_immutable_request(
     request_path.write_text(json.dumps(payload) + "\n")
 
     with pytest.raises(ValueError, match="does not match solve request"):
+        SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+
+@pytest.mark.parametrize("changed_evidence", ["archive", "request"])
+def test_recovery_rejects_source_task_binding_mismatch(
+    tmp_path: Path, changed_evidence: str
+) -> None:
+    async def create_complete() -> tuple[Path, Path, str]:
+        jobs = tmp_path / "jobs"
+        archives = tmp_path / "archives"
+        service = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+        created = await service.start(make_request(source_task_binding=make_source_task_binding()))
+        await service.wait(created.job_id)
+        return jobs, archives, created.job_id
+
+    jobs, archives, job_id = run(create_complete())
+    if changed_evidence == "archive":
+        evidence_path = archives / job_id / "manifest.json"
+    else:
+        evidence_path = jobs / job_id / "request.json"
+        evidence_path.chmod(0o600)
+    payload = json.loads(evidence_path.read_text())
+    payload["source_task_binding"]["tasks_index"] += 1
+    evidence_path.write_text(json.dumps(payload) + "\n")
+
+    with pytest.raises(ValueError, match="source task binding"):
         SolverJobService(jobs, archives, worker_command=fake_command("complete"))
 
 

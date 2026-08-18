@@ -11,6 +11,7 @@ from yieldforge.domain import (
     Part,
     Placement,
     SolverIdentity,
+    SourceTaskBinding,
     SpyrrowRunConfig,
     StripPackingProblem,
 )
@@ -46,6 +47,15 @@ def make_batch() -> CandidateBatch:
     )
 
 
+def make_source_task_binding() -> SourceTaskBinding:
+    return SourceTaskBinding(
+        dataset_id="lectra-7030786-v1.1",
+        source_slice_sha256="d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8",
+        tasks_index=13958,
+        acknowledged_assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
+    )
+
+
 def test_archive_writes_manifest_and_jsonl_candidates(tmp_path: Path) -> None:
     batch = make_batch()
     output = tmp_path / "run-001"
@@ -57,7 +67,18 @@ def test_archive_writes_manifest_and_jsonl_candidates(tmp_path: Path) -> None:
     assert manifest["schema_version"] == "yieldforge.candidate-archive.v1"
     assert manifest["candidate_count"] == 1
     assert manifest["batch_sha256"] == batch_content_hash(batch)
+    assert "source_task_binding" not in manifest
     assert json.loads(records[0])["candidate_id"] == "candidate-1"
+
+
+def test_archive_persists_exact_source_task_binding_when_present(tmp_path: Path) -> None:
+    output = tmp_path / "source-run"
+    binding = make_source_task_binding()
+
+    CandidateArchive.create(output, make_batch(), source_task_binding=binding)
+
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["source_task_binding"] == binding.model_dump(mode="json")
 
 
 def test_archive_refuses_to_overwrite_existing_path(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from yieldforge.domain import CandidateBatch
+from yieldforge.domain import CandidateBatch, SourceTaskBinding
 
 
 def canonical_json(value: BaseModel | dict[str, Any]) -> str:
@@ -28,7 +28,13 @@ class CandidateArchive:
     """Write a candidate batch once and refuse destructive replacement."""
 
     @classmethod
-    def create(cls, output: Path, batch: CandidateBatch) -> Path:
+    def create(
+        cls,
+        output: Path,
+        batch: CandidateBatch,
+        *,
+        source_task_binding: SourceTaskBinding | None = None,
+    ) -> Path:
         output = Path(output)
         if output.exists():
             raise FileExistsError(f"archive path already exists: {output}")
@@ -42,6 +48,8 @@ class CandidateArchive:
             "solver": batch.solver.model_dump(mode="json"),
             "config": batch.config.model_dump(mode="json"),
         }
+        if source_task_binding is not None:
+            manifest["source_task_binding"] = source_task_binding.model_dump(mode="json")
 
         with TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as temp_dir:
             staging = Path(temp_dir) / "archive"

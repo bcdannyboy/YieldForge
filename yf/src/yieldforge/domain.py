@@ -1,17 +1,46 @@
 """Canonical contracts used at the solver boundary."""
 
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 Point = tuple[float, float]
+Sha256 = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+AssumptionCode = Annotated[StrictStr, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 
 
 class ContractModel(BaseModel):
     """Strict, immutable base model for persisted experiment contracts."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class SourceTaskBinding(ContractModel):
+    """Immutable provenance tying a solve to one normalized source task."""
+
+    schema_version: Literal["yieldforge.source-task-binding.v1"] = (
+        "yieldforge.source-task-binding.v1"
+    )
+    dataset_id: StrictStr = Field(min_length=1)
+    source_slice_sha256: Sha256
+    tasks_index: StrictInt = Field(ge=0)
+    acknowledged_assumption_codes: tuple[AssumptionCode, ...] = ()
+
+    @field_validator("acknowledged_assumption_codes")
+    @classmethod
+    def require_sorted_unique_assumption_codes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("acknowledged assumption codes must be sorted and unique")
+        return value
 
 
 class Part(ContractModel):

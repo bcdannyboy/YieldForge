@@ -13,6 +13,7 @@ from yieldforge.domain import (
     Part,
     Placement,
     SolverIdentity,
+    SourceTaskBinding,
     SpyrrowRunConfig,
     SpyrrowRunResult,
     StripPackingProblem,
@@ -42,6 +43,15 @@ def make_request(*, workers: int = 1, budget: float = 2.0) -> SolveRequest:
             num_workers=workers,
         ),
         max_runtime_seconds=budget,
+    )
+
+
+def make_source_task_binding() -> SourceTaskBinding:
+    return SourceTaskBinding(
+        dataset_id="lectra-7030786-v1.1",
+        source_slice_sha256="d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8",
+        tasks_index=13958,
+        acknowledged_assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
     )
 
 
@@ -79,6 +89,54 @@ def test_solve_request_requires_one_worker_and_at_most_ten_seconds() -> None:
         make_request(workers=2)
     with pytest.raises(ValidationError, match="less than or equal to 10"):
         make_request(budget=10.01)
+
+
+def test_source_task_binding_round_trips_through_solve_request_and_is_frozen() -> None:
+    binding = make_source_task_binding()
+    request = make_request().model_copy(update={"source_task_binding": binding})
+
+    restored = SolveRequest.model_validate_json(request.model_dump_json())
+
+    assert restored.source_task_binding == binding
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        binding.tasks_index = 1  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"source_slice_sha256": "A" * 64}, "source_slice_sha256"),
+        ({"source_slice_sha256": "a" * 63}, "source_slice_sha256"),
+        ({"tasks_index": True}, "tasks_index"),
+        (
+            {"acknowledged_assumption_codes": ("second_code", "first_code")},
+            "sorted and unique",
+        ),
+        (
+            {"acknowledged_assumption_codes": ("same_code", "same_code")},
+            "sorted and unique",
+        ),
+        ({"dataset_id": 7}, "dataset_id"),
+        ({"unexpected": "field"}, "Extra inputs"),
+    ],
+)
+def test_source_task_binding_rejects_inexact_identity(
+    changes: dict[str, object], message: str
+) -> None:
+    payload = make_source_task_binding().model_dump()
+    payload.update(changes)
+
+    with pytest.raises(ValidationError, match=message):
+        SourceTaskBinding.model_validate(payload)
+
+
+def test_non_source_solve_request_remains_compatible() -> None:
+    request = make_request()
+
+    restored = SolveRequest.model_validate_json(request.model_dump_json(exclude_none=True))
+
+    assert restored.source_task_binding is None
+    assert "source_task_binding" not in request.model_dump(mode="json", exclude_none=True)
 
 
 def test_worker_emits_strict_ndjson_progress_and_complete_batch(

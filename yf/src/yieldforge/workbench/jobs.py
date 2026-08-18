@@ -24,7 +24,7 @@ from yieldforge.datasets.passive_report import (
     decode_strict_json_bytes,
     read_passive_evidence_file,
 )
-from yieldforge.domain import Candidate, CandidateBatch, SpyrrowRunResult
+from yieldforge.domain import Candidate, CandidateBatch, SourceTaskBinding, SpyrrowRunResult
 from yieldforge.workbench.contracts import (
     TERMINAL_JOB_STATUSES,
     JobEvent,
@@ -48,6 +48,14 @@ MAX_ARCHIVE_CANDIDATES_BYTES = 16 * 1024 * 1024
 
 class WorkerProtocolError(RuntimeError):
     """A worker violated the bounded NDJSON protocol."""
+
+
+class ActiveJobError(RuntimeError):
+    """A new solve was rejected because another job still owns the active slot."""
+
+    def __init__(self, active_job_id: str) -> None:
+        self.active_job_id = active_job_id
+        super().__init__(f"only one solver job may be active: {active_job_id}")
 
 
 @dataclass
@@ -125,7 +133,7 @@ class SolverJobService:
             if self._active_job_id is not None:
                 active = self._jobs[self._active_job_id]
                 if active.status not in TERMINAL_JOB_STATUSES:
-                    raise RuntimeError("only one solver job may be active")
+                    raise ActiveJobError(active.job_id)
                 self._active_job_id = None
 
             job_id = f"job_{uuid.uuid4().hex}"
@@ -191,6 +199,54 @@ class SolverJobService:
         """Resolve only a known server-assigned job directory."""
 
         return self._require_job(job_id).directory
+
+    def completed_batch(self, job_id: str) -> CandidateBatch | None:
+        """Return a defensive copy of archive-bound completed truth, if available."""
+
+        state = self._require_job(job_id)
+        if (
+            state.status is not JobStatus.COMPLETED
+            or not state.completion_committed
+            or state.archive_path is None
+        ):
+            return None
+        terminal = state.events[-1]
+        if terminal.kind is not JobEventKind.TERMINAL or terminal.batch is None:
+            return None
+        self._validate_completed_archive(
+            Path(state.archive_path),
+            terminal.batch,
+            state.request.source_task_binding,
+        )
+        return CandidateBatch.model_validate(terminal.batch.model_dump())
+
+    def snapshots_for_source_task(
+        self,
+        *,
+        dataset_id: str,
+        source_slice_sha256: str,
+        tasks_index: int,
+    ) -> tuple[JobSnapshot, ...]:
+        """Return stable snapshots matching one explicit source-task identity."""
+
+        identity = SourceTaskBinding(
+            dataset_id=dataset_id,
+            source_slice_sha256=source_slice_sha256,
+            tasks_index=tasks_index,
+        )
+        matched = (
+            state
+            for state in self._jobs.values()
+            if state.request.source_task_binding is not None
+            and state.request.source_task_binding.dataset_id == identity.dataset_id
+            and state.request.source_task_binding.source_slice_sha256
+            == identity.source_slice_sha256
+            and state.request.source_task_binding.tasks_index == identity.tasks_index
+        )
+        return tuple(
+            self._snapshot(state)
+            for state in sorted(matched, key=lambda item: (item.created_at, item.job_id))
+        )
 
     async def _run_job(self, state: _JobState) -> None:
         stdout_task: asyncio.Task[_ProtocolOutcome] | None = None
@@ -354,6 +410,7 @@ class SolverJobService:
             archive_task = self._start_daemon_archive_staging(
                 archive_staging,
                 outcome.result.batch,
+                state.request.source_task_binding,
                 archive_abandoned,
             )
             try:
@@ -714,7 +771,11 @@ class SolverJobService:
                     archive_path = server_archive_path.resolve()
                     state.archive_path = str(archive_path)
                     state.completion_committed = True
-                    self._validate_completed_archive(archive_path, last.batch)
+                    self._validate_completed_archive(
+                        archive_path,
+                        last.batch,
+                        state.request.source_task_binding,
+                    )
                 else:
                     archive_path = self.archive_root / state.job_id
                     if archive_path.exists() or archive_path.is_symlink():
@@ -885,7 +946,11 @@ class SolverJobService:
                     invalid("candidate event does not match terminal batch order and content")
 
     @staticmethod
-    def _validate_completed_archive(archive_path: Path, batch: CandidateBatch) -> None:
+    def _validate_completed_archive(
+        archive_path: Path,
+        batch: CandidateBatch,
+        source_task_binding: SourceTaskBinding | None,
+    ) -> None:
         if archive_path.is_symlink() or not archive_path.is_dir():
             raise ValueError("completed archive is missing or is not a directory")
         members = {path.name: path for path in archive_path.iterdir()}
@@ -909,6 +974,8 @@ class SolverJobService:
                 label="archive manifest",
                 max_bytes=MAX_ARCHIVE_MANIFEST_BYTES,
             )
+            if not isinstance(manifest, dict):
+                raise ValueError("archive manifest must be an object")
             if candidates_payload and not candidates_payload.endswith(b"\n"):
                 raise ValueError("archive candidates JSONL must end with a newline")
             candidates = [
@@ -925,6 +992,15 @@ class SolverJobService:
             raise
         except Exception as error:
             raise ValueError("completed archive is malformed") from error
+        expected_binding = (
+            source_task_binding.model_dump(mode="json") if source_task_binding is not None else None
+        )
+        if manifest.get("source_task_binding") != expected_binding or (
+            ("source_task_binding" in manifest) != (source_task_binding is not None)
+        ):
+            raise ValueError(
+                "completed archive source task binding does not match immutable request"
+            )
         expected_manifest = {
             "schema_version": "yieldforge.candidate-archive.v1",
             "candidate_count": len(batch.candidates),
@@ -933,6 +1009,8 @@ class SolverJobService:
             "solver": batch.solver.model_dump(mode="json"),
             "config": batch.config.model_dump(mode="json"),
         }
+        if source_task_binding is not None:
+            expected_manifest["source_task_binding"] = expected_binding
         if manifest != expected_manifest or candidates != batch.candidates:
             raise ValueError("completed archive does not match terminal batch")
 
@@ -940,6 +1018,7 @@ class SolverJobService:
     def _start_daemon_archive_staging(
         archive_staging: Path,
         batch: CandidateBatch,
+        source_task_binding: SourceTaskBinding | None,
         abandoned: threading.Event,
     ) -> asyncio.Future[Path]:
         loop = asyncio.get_running_loop()
@@ -959,6 +1038,7 @@ class SolverJobService:
                 result = SolverJobService._create_staged_archive(
                     archive_staging,
                     batch,
+                    source_task_binding,
                     abandoned,
                 )
             except BaseException as error:
@@ -993,10 +1073,17 @@ class SolverJobService:
     def _create_staged_archive(
         archive_staging: Path,
         batch: CandidateBatch,
+        source_task_binding: SourceTaskBinding | None,
         abandoned: threading.Event,
     ) -> Path:
         try:
-            return CandidateArchive.create(archive_staging, batch)
+            if source_task_binding is None:
+                return CandidateArchive.create(archive_staging, batch)
+            return CandidateArchive.create(
+                archive_staging,
+                batch,
+                source_task_binding=source_task_binding,
+            )
         finally:
             if abandoned.is_set():
                 SolverJobService._discard_path(archive_staging)
@@ -1053,6 +1140,7 @@ class SolverJobService:
             candidate_count=state.candidate_count,
             worker_pid=state.worker_pid,
             archive_path=state.archive_path,
+            source_task_binding=state.request.source_task_binding,
             error_code=state.error_code,
             error_message=state.error_message,
         )

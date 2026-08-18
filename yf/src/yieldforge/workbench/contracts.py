@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from yieldforge.domain import (
     Candidate,
     CandidateBatch,
+    SourceTaskBinding,
     SpyrrowRunConfig,
     SpyrrowRunResult,
     StripPackingProblem,
@@ -30,6 +31,7 @@ class SolveRequest(WorkbenchContract):
     problem: StripPackingProblem
     config: SpyrrowRunConfig
     max_runtime_seconds: float = Field(gt=0, le=10)
+    source_task_binding: SourceTaskBinding | None = None
 
     @model_validator(mode="after")
     def require_bounded_single_worker(self) -> Self:
@@ -192,5 +194,6 @@ class JobSnapshot(WorkbenchContract):
     candidate_count: StrictInt = Field(ge=0)
     worker_pid: StrictInt | None = Field(default=None, gt=0)
     archive_path: str | None = Field(default=None, min_length=1)
+    source_task_binding: SourceTaskBinding | None = None
     error_code: str | None = Field(default=None, min_length=1, max_length=80)
     error_message: str | None = Field(default=None, min_length=1, max_length=200)
