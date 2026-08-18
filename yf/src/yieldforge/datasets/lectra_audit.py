@@ -552,16 +552,29 @@ class LectraAuditReport(ContractModel):
             "constraint type inventory total",
         )
         for column in CONSTRAINT_PARAMETER_COLUMNS:
+            presence_inventory = self.constraint_parameter_presence[column]
+            shape_inventory = self.constraint_parameter_shape[column]
             _require_inventory_total(
-                self.constraint_parameter_presence[column],
+                presence_inventory,
                 constraint_rows,
                 "constraint parameter presence inventory total",
             )
             _require_inventory_total(
-                self.constraint_parameter_shape[column],
+                shape_inventory,
                 constraint_rows,
                 "constraint parameter shape inventory total",
             )
+            shape_missing = shape_inventory.get("missing", 0)
+            shape_present = sum(
+                count for shape, count in shape_inventory.items() if shape != "missing"
+            )
+            if (
+                presence_inventory["missing"] != shape_missing
+                or presence_inventory["present"] != shape_present
+            ):
+                raise ValueError(
+                    f"constraint parameter presence and shape inventory disagree for {column}"
+                )
 
         if (
             self.raw_encoding_frequency.get("malformed", 0)
@@ -641,6 +654,19 @@ class LectraAuditReport(ContractModel):
             raise ValueError("sheet length sentinel count exceeds its source population")
         if any(count > task_rows for count in self.partition_true_frequency.values()):
             raise ValueError("partition true count exceeds its source population")
+        if (
+            self.partition_violation_counts[PARTITION_VIOLATION_KEYS[1]] == 0
+            and sum(self.partition_true_frequency.values()) != task_rows
+        ):
+            raise ValueError(
+                "partition true total must equal task rows without assignment violations"
+            )
+        if (
+            self.sheet_length_unconstrained_sentinel_count
+            + self.sheet_dimension_violation_counts[SHEET_DIMENSION_VIOLATION_KEYS[1]]
+            > task_rows
+        ):
+            raise ValueError("sheet length classifications exceed the task population")
         if self.unused_record_counts[UNUSED_RECORD_KEYS[0]] > (
             task_rows - self.key_failure_counts[KEY_FAILURE_KEYS[0]]
         ):

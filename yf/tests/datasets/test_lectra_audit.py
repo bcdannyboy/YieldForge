@@ -640,3 +640,62 @@ def test_invalid_dataframe_column_labels_are_reported_before_schema_metrics() ->
     }
     assert "non-string" in str(caught.value)
     assert "duplicates" in str(caught.value)
+
+
+def test_constraint_parameter_presence_must_reconcile_with_shape_inventory() -> None:
+    missing_mismatch = audit().model_dump()
+    missing_mismatch["constraint_parameter_presence"]["p1_x"] = {
+        "missing": 1,
+        "present": 3,
+    }
+    with pytest.raises(ValidationError, match="parameter presence and shape inventory"):
+        LectraAuditReport.model_validate(missing_mismatch)
+
+    present_mismatch = audit().model_dump()
+    present_mismatch["constraint_parameter_shape"]["p1_y"] = {
+        "missing": 3,
+        "string": 1,
+    }
+    with pytest.raises(ValidationError, match="parameter presence and shape inventory"):
+        LectraAuditReport.model_validate(present_mismatch)
+
+
+def test_partition_true_frequency_reconciles_when_every_task_has_exact_assignment() -> None:
+    incomplete = audit().model_dump()
+    assert (
+        incomplete["partition_violation_counts"]["task_rows_not_assigned_to_exactly_one_partition"]
+        == 0
+    )
+    incomplete["partition_true_frequency"]["is_train"] = 0
+    with pytest.raises(ValidationError, match="partition true total"):
+        LectraAuditReport.model_validate(incomplete)
+
+    excessive = audit().model_dump()
+    excessive["partition_true_frequency"]["is_train"] = excessive["table_rows"]["tasks"] + 1
+    with pytest.raises(ValidationError, match="partition true count exceeds"):
+        LectraAuditReport.model_validate(excessive)
+
+
+def test_sheet_length_sentinel_and_invalid_rows_cannot_exceed_task_population() -> None:
+    payload = audit().model_dump()
+    task_rows = payload["table_rows"]["tasks"]
+    payload["sheet_length_unconstrained_sentinel_count"] = task_rows
+    payload["sheet_dimension_violation_counts"]["task_rows_with_invalid_sheet_length"] = 1
+    payload["bounded_examples"]["invalid_sheet_length_tasks"] = ["task:10:row:0"]
+
+    with pytest.raises(ValidationError, match="sheet length classifications exceed"):
+        LectraAuditReport.model_validate(payload)
+
+
+def test_direct_malformed_frequency_categories_reconcile_with_counts() -> None:
+    raw_payload = audit().model_dump()
+    raw_payload["raw_encoding_frequency"]["malformed"] -= 1
+    raw_payload["raw_encoding_frequency"]["flat_numeric_even"] += 1
+    with pytest.raises(ValidationError, match="malformed raw inventory and count"):
+        LectraAuditReport.model_validate(raw_payload)
+
+    type_payload = audit().model_dump()
+    type_payload["constraint_type_frequency"]["<missing>"] -= 1
+    type_payload["constraint_type_frequency"]["opaque-a"] += 1
+    with pytest.raises(ValidationError, match="missing constraint type inventory and count"):
+        LectraAuditReport.model_validate(type_payload)
