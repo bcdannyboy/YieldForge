@@ -66,6 +66,8 @@ audit output, solver runtime state, or generated full-size corpora.
 - Modify: `yf/tools/lectra/run_qualifier.py`
 - Modify: `yf/tools/lectra/Dockerfile`
 - Modify: `yf/.dockerignore`
+- Modify: `yf/pyproject.toml`
+- Modify: `yf/uv.lock`
 - Modify: `yf/tools/lectra/README.md`
 - Create: `yf/tools/lectra/export_slice.py`
 - Modify: `yf/tools/lectra/make_trusted_fixture.py`
@@ -73,21 +75,31 @@ audit output, solver runtime state, or generated full-size corpora.
 - Modify: `yf/tests/tools/test_lectra_qualifier_boundary.py`
 
 1. Write failing tests for a deterministic selector whose strict runnable rule is: training split,
-   positive physical `sheet_length`, 20–50 part rows, finite flat-even single-sequence geometry,
-   exactly one well-formed `s1` reference per part, no non-`s1` constraints, and valid, simple,
-   nonzero polygons without repair. Rank by distance to the observed medians (35 parts, 9 unique
-   shapes, 23 repeated rows), then `tasks_index`.
-2. Select one separate non-`s1` task as a view-only exclusion example.
-3. Extend the one trusted pickle entrypoint with an explicit `audit` or `slice` mode. Keep sealed
+   `sheet_type == 0`, positive physical `sheet_length`, 20–50 part rows, finite flat-even
+   single-sequence geometry with `sizes == [len(raw)]`, exactly one well-formed `s1` reference per
+   part, no non-`s1` constraints, and valid, simple, nonzero polygons without repair. Rank by
+   `abs(parts-35) + abs(unique_shapes-9) + abs(repeated-23)`, then `tasks_index`.
+2. Validate each runnable `s1` row exactly: `parts_1 == [part_id]`, `parts_2` and unrelated
+   parameters missing, the three `r1_*` values nonempty and equal-length, elementwise
+   `r1_start == r1_end`, finite rotations, and integer-zero flip flags. Record only the narrow
+   `interpret_s1_degenerate_entries_as_allowed_rotations` assumption. Interval- or mirror-bearing
+   rows remain view-only.
+3. Select one separate non-`s1` task as a view-only exclusion example.
+4. Extend the one trusted pickle entrypoint with an explicit `audit` or `slice` mode. Keep sealed
    memfd staging, exact source verification, fail-fast table schemas, no network, and no writable
    host mount.
-4. Emit only bounded JSON stdout. Extend the trusted runner to validate, canonicalize, source-bind,
+5. Emit only bounded JSON stdout. Extend the trusted runner to validate, canonicalize, source-bind,
    and atomically publish exactly `lectra-slice.json` for slice mode.
-5. Preserve all selected source records and opaque values; add only declared derived geometry facts.
-6. Test row-order-independent selection, no eligible-task failure, adversarial pickle containment,
+6. Preserve all selected source records and opaque values in observed column order; serialize the
+   exact `constraint_value_columns` inventory so positional typed values are self-describing. Add
+   only declared derived geometry facts.
+7. Add pinned Shapely to the isolated data group and explicitly admit only the normalized slice
+   modules through the deny-default Docker context.
+8. Test task-ID selection independent of row order, exact ranking, missing/duplicate/wrong-part/
+   interval/mirror/extra-parameter `s1` failures, no eligible task, adversarial pickle containment,
    exact publication, and that `read_pickle` still appears only in `qualify.py`.
-7. Build the pinned image, run trusted-fixture Docker integration, and run the full suite.
-8. Commit `feat: export a bounded Lectra slice`.
+9. Build the pinned image, run trusted-fixture Docker integration, and run the full suite.
+10. Commit `feat: export a bounded Lectra slice`.
 
 ## Task 3: Produce and commit the real representative slice
 
@@ -114,13 +126,14 @@ audit output, solver runtime state, or generated full-size corpora.
 - Modify: `yf/benchmarks/static/m0-smoke.json` only if a schema migration is necessary
 
 1. Write failing tests for adjacent-scalar pairing, reversible ring closure, and projection refusal
-   for sentinel length, non-`s1`, malformed, multi-sequence, unlabelled orientation, or unlabelled
-   ignored-constraint assumptions.
+   for sentinel length, non-`s1`, malformed, multi-sequence, interval/mirror orientation data, or a
+   missing explicit `s1` interpretation assumption.
 2. Create one solver `Part` per source `(tasks_index, part_id)`, `demand=1`, so placement identity is
    never lost through shape grouping.
 3. Map `strip_height=sheet_width` and `sheet_length=sheet_length` without scaling.
-4. Permit free rotation only through an explicit `assume_free_rotation` policy and record it beside
-   `ignore_opaque_s1`. Never mutate source geometry.
+4. Populate allowed orientations only from validated degenerate `s1` entries and record the explicit
+   `interpret_s1_degenerate_entries_as_allowed_rotations` assumption. Never permit intervals,
+   mirrors, or free rotation and never mutate source geometry.
 5. Golden-test a 90-degree rotation around `(0,0)`, followed by translation, then SVG y-flip
    `render_y = sheet_width - y`.
 6. Run focused/native integration tests and commit `feat: project explicit Lectra assumptions`.
