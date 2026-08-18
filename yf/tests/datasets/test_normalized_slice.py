@@ -147,12 +147,25 @@ def valid_slice() -> NormalizedSlice:
         provenance=(
             ProvenanceGroup(
                 kind=ProvenanceKind.SOURCE_REAL,
-                field_paths=("/constraints", "/parts", "/shapes", "/tasks"),
+                field_paths=(
+                    "/constraint_value_columns",
+                    "/constraints",
+                    "/parts",
+                    "/shapes",
+                    "/source",
+                    "/tasks",
+                ),
                 note="Verbatim selected source rows.",
             ),
             ProvenanceGroup(
                 kind=ProvenanceKind.DERIVED,
-                field_paths=("/derived_geometry",),
+                field_paths=(
+                    "/derived_geometry",
+                    "/task_dispositions/normalization_status",
+                    "/task_dispositions/projection_status",
+                    "/task_dispositions/reason_codes",
+                    "/task_dispositions/support_status",
+                ),
                 note="Reversible adjacent-scalar pairing and ring closure.",
             ),
             ProvenanceGroup(
@@ -525,6 +538,72 @@ def test_assumptions_require_assumed_provenance_and_paths_require_real_roots() -
             field_paths=("/tasks/nonexistent",),
             note="Nonexistent nested field.",
         )
+
+
+@pytest.mark.parametrize(
+    ("kind", "path", "message"),
+    [
+        (ProvenanceKind.SOURCE_REAL, "/derived_geometry", "SOURCE_REAL.*derived"),
+        (ProvenanceKind.DERIVED, "/tasks", "DERIVED.*source"),
+        (
+            ProvenanceKind.ASSUMED,
+            "/task_dispositions/reason_codes",
+            "ASSUMED.*assumption_codes",
+        ),
+        (ProvenanceKind.GENERATED, "/tasks", "GENERATED.*not supported"),
+    ],
+)
+def test_provenance_kinds_cannot_claim_other_evidence_families(
+    kind: ProvenanceKind, path: str, message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ProvenanceGroup(kind=kind, field_paths=(path,), note="Wrong evidence family.")
+
+
+@pytest.mark.parametrize(
+    ("kind", "missing_path", "message"),
+    [
+        (ProvenanceKind.SOURCE_REAL, "/source", "SOURCE_REAL.*minimum coverage"),
+        (
+            ProvenanceKind.DERIVED,
+            "/task_dispositions/reason_codes",
+            "DERIVED.*minimum coverage",
+        ),
+    ],
+)
+def test_slice_requires_minimum_source_and_derived_provenance_coverage(
+    kind: ProvenanceKind, missing_path: str, message: str
+) -> None:
+    data = valid_slice().model_dump()
+    for group in data["provenance"]:
+        if group["kind"] == kind:
+            group["field_paths"] = tuple(
+                path for path in group["field_paths"] if path != missing_path
+            )
+
+    with pytest.raises(ValidationError, match=message):
+        NormalizedSlice.model_validate(data)
+
+
+def test_assumed_provenance_may_be_absent_only_when_no_assumptions_exist() -> None:
+    data = valid_slice().model_dump()
+    disposition = data["task_dispositions"][0]
+    disposition.update(
+        support_status=SupportStatus.VIEW_ONLY,
+        projection_status=ProjectionStatus.BLOCKED,
+        assumption_codes=(),
+        reason_codes=("unsupported_constraint",),
+    )
+    with pytest.raises(ValidationError, match="ASSUMED provenance must be absent"):
+        NormalizedSlice.model_validate(data)
+
+    data["provenance"] = tuple(
+        group for group in data["provenance"] if group["kind"] != ProvenanceKind.ASSUMED
+    )
+
+    normalized = NormalizedSlice.model_validate(data)
+
+    assert ProvenanceKind.ASSUMED not in {group.kind for group in normalized.provenance}
 
 
 def test_normalized_contract_imports_without_pandas_or_pickle() -> None:

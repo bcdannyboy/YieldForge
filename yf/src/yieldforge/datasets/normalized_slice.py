@@ -414,6 +414,24 @@ class ProvenanceKind(StrEnum):
     ASSUMED = "assumed"
 
 
+SOURCE_REAL_PROVENANCE_PATHS = (
+    "/constraint_value_columns",
+    "/constraints",
+    "/parts",
+    "/shapes",
+    "/source",
+    "/tasks",
+)
+DERIVED_PROVENANCE_PATHS = (
+    "/derived_geometry",
+    "/task_dispositions/normalization_status",
+    "/task_dispositions/projection_status",
+    "/task_dispositions/reason_codes",
+    "/task_dispositions/support_status",
+)
+ASSUMED_PROVENANCE_PATH = "/task_dispositions/assumption_codes"
+
+
 _PROVENANCE_ROOT_FIELDS: dict[str, frozenset[str]] = {
     "schema_version": frozenset(),
     "source": frozenset(NormalizedSliceSource.model_fields),
@@ -445,6 +463,14 @@ def _validate_provenance_path(path: str) -> None:
         )
 
 
+def _is_source_real_provenance_path(path: str) -> bool:
+    return any(path == root or path.startswith(f"{root}/") for root in SOURCE_REAL_PROVENANCE_PATHS)
+
+
+def _is_derived_provenance_path(path: str) -> bool:
+    return path.startswith("/derived_geometry/") or path in DERIVED_PROVENANCE_PATHS
+
+
 class ProvenanceGroup(StrictContractModel):
     """A group of JSON field paths that share one provenance family."""
 
@@ -462,6 +488,22 @@ class ProvenanceGroup(StrictContractModel):
         for path in value:
             _validate_provenance_path(path)
         return value
+
+    @model_validator(mode="after")
+    def require_kind_specific_paths(self) -> Self:
+        if self.kind is ProvenanceKind.GENERATED:
+            raise ValueError("GENERATED provenance is not supported by this source-slice schema")
+        if self.kind is ProvenanceKind.SOURCE_REAL and any(
+            not _is_source_real_provenance_path(path) for path in self.field_paths
+        ):
+            raise ValueError("SOURCE_REAL provenance cannot point at derived or assumed fields")
+        if self.kind is ProvenanceKind.DERIVED and any(
+            not _is_derived_provenance_path(path) for path in self.field_paths
+        ):
+            raise ValueError("DERIVED provenance cannot point at source or assumed fields")
+        if self.kind is ProvenanceKind.ASSUMED and self.field_paths != (ASSUMED_PROVENANCE_PATH,):
+            raise ValueError("ASSUMED provenance is limited to task disposition assumption_codes")
+        return self
 
 
 type SourceIndexedRow = TaskSourceRow | PartSourceRow | ShapeSourceRow | ConstraintSourceRow
@@ -582,6 +624,20 @@ class NormalizedSlice(StrictContractModel):
         required_kinds = {ProvenanceKind.SOURCE_REAL, ProvenanceKind.DERIVED}
         if not required_kinds.issubset(provenance_kinds):
             raise ValueError("provenance must identify source_real and derived field groups")
+        groups_by_kind = {group.kind: group for group in self.provenance}
+        source_real_paths = set(groups_by_kind[ProvenanceKind.SOURCE_REAL].field_paths)
+        missing_source_real_paths = set(SOURCE_REAL_PROVENANCE_PATHS) - source_real_paths
+        if missing_source_real_paths:
+            raise ValueError(
+                "SOURCE_REAL provenance minimum coverage is missing "
+                f"{sorted(missing_source_real_paths)!r}"
+            )
+        derived_paths = set(groups_by_kind[ProvenanceKind.DERIVED].field_paths)
+        missing_derived_paths = set(DERIVED_PROVENANCE_PATHS) - derived_paths
+        if missing_derived_paths:
+            raise ValueError(
+                f"DERIVED provenance minimum coverage is missing {sorted(missing_derived_paths)!r}"
+            )
         has_assumptions = any(item.assumption_codes for item in self.task_dispositions)
         if has_assumptions and ProvenanceKind.ASSUMED not in provenance_kinds:
             raise ValueError("task assumptions require an ASSUMED provenance group")
@@ -589,8 +645,10 @@ class NormalizedSlice(StrictContractModel):
             assumed_group = next(
                 group for group in self.provenance if group.kind is ProvenanceKind.ASSUMED
             )
-            if "/task_dispositions/assumption_codes" not in assumed_group.field_paths:
+            if ASSUMED_PROVENANCE_PATH not in assumed_group.field_paths:
                 raise ValueError(
                     "ASSUMED provenance must identify /task_dispositions/assumption_codes"
                 )
+        elif ProvenanceKind.ASSUMED in provenance_kinds:
+            raise ValueError("ASSUMED provenance must be absent when the slice has no assumptions")
         return self
