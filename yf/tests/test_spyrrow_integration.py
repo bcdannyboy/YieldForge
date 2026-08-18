@@ -40,4 +40,10 @@ def test_installed_spyrrow_streams_the_same_candidates_it_returns() -> None:
     candidate_ids = [candidate.candidate_id for candidate in result.batch.candidates]
     assert callback_ids == candidate_ids
     assert result.final_candidate_id in candidate_ids
-    assert result.native_report_count >= len(candidate_ids)
+    assert result.terminal_observation_count == 1
+    assert result.native_report_count + result.terminal_observation_count == (
+        len(candidate_ids)
+        + result.ignored_report_count
+        + result.duplicate_candidate_count
+        + result.sheet_overflow_count
+    )

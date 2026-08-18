@@ -1,5 +1,6 @@
 from enum import Enum
-from threading import Event
+from threading import Event, Timer
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -174,7 +175,8 @@ def test_run_reports_progress_accounting_and_final_identity() -> None:
         CandidateReportType.FINAL,
     ]
     assert result.final_candidate_id == candidate_ids[-1]
-    assert result.native_report_count == 7
+    assert result.native_report_count == 6
+    assert result.terminal_observation_count == 1
     assert result.ignored_report_count == 2
     assert result.duplicate_candidate_count == 2
     assert result.sheet_overflow_count == 1
@@ -190,6 +192,69 @@ def test_run_result_is_a_strict_frozen_contract() -> None:
         type(result).model_validate({**result.model_dump(), "unexpected": True})
     with pytest.raises(ValidationError, match="Instance is frozen"):
         result.native_report_count = 0
+
+
+@pytest.mark.parametrize(
+    "count_field",
+    [
+        "native_report_count",
+        "terminal_observation_count",
+        "ignored_report_count",
+        "duplicate_candidate_count",
+        "sheet_overflow_count",
+    ],
+)
+@pytest.mark.parametrize("invalid_count", [True, 1.0, "1", -1])
+def test_run_result_rejects_non_strict_or_negative_counts(
+    count_field: str, invalid_count: object
+) -> None:
+    result = SpyrrowAdapter(api=FakeSpyrrow(), spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+    )
+    payload = result.model_dump()
+    payload[count_field] = invalid_count
+
+    with pytest.raises(ValidationError):
+        type(result).model_validate(payload)
+
+
+def test_run_result_rejects_empty_or_unknown_final_candidate_id() -> None:
+    result = SpyrrowAdapter(api=FakeSpyrrow(), spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+    )
+
+    for final_candidate_id in ("", "cand_not_in_batch"):
+        payload = result.model_dump()
+        payload["final_candidate_id"] = final_candidate_id
+        with pytest.raises(ValidationError):
+            type(result).model_validate(payload)
+
+
+def test_run_result_rejects_duplicate_candidate_ids() -> None:
+    result = SpyrrowAdapter(api=FakeSpyrrow(), spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+    )
+    payload = result.model_dump()
+    payload["batch"]["candidates"].append(payload["batch"]["candidates"][0])
+    payload["native_report_count"] += 1
+
+    with pytest.raises(ValidationError, match="candidate IDs must be unique"):
+        type(result).model_validate(payload)
+
+
+def test_run_result_rejects_inconsistent_report_accounting() -> None:
+    result = SpyrrowAdapter(api=FakeSpyrrow(), spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+    )
+    payload = result.model_dump()
+    payload["ignored_report_count"] += 1
+
+    with pytest.raises(ValidationError, match="report accounting"):
+        type(result).model_validate(payload)
 
 
 def test_generate_remains_equivalent_to_run_batch() -> None:
@@ -256,6 +321,109 @@ def test_run_invokes_callback_while_native_solver_is_still_running() -> None:
     )
 
     assert solver_finished_at_callback[0] is False
+
+
+def test_run_isolated_batch_from_observer_candidate_mutation() -> None:
+    def clear_placements(candidate: Candidate) -> None:
+        candidate.placements.clear()
+
+    result = SpyrrowAdapter(api=FakeSpyrrow(), spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+        on_candidate=clear_placements,
+    )
+
+    assert all(candidate.placements for candidate in result.batch.candidates)
+
+
+class WaitingAfterCallbackInstance:
+    def __init__(self, api: "WaitingAfterCallbackFakeSpyrrow") -> None:
+        self.api = api
+
+    def solve(self, config: object, *, progress: FakeProgressQueue) -> SimpleNamespace:
+        assert self.api.callback_attempted.wait(timeout=1)
+        assert self.api.allow_finish.wait(timeout=1)
+        self.api.solve_finished = True
+        return self.api.final_solution
+
+
+class WaitingAfterCallbackFakeSpyrrow(FakeSpyrrow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.progress_reports = [
+            (FakeReportType.ExplFeas, solution(4.0)),
+            (FakeReportType.CmprFeas, solution(3.0, x=1.0)),
+        ]
+        self.callback_attempted = Event()
+        self.allow_finish = Event()
+        self.solve_finished = False
+
+    def StripPackingInstance(self, *args: object) -> WaitingAfterCallbackInstance:
+        self.instance_args = args
+        return WaitingAfterCallbackInstance(self)
+
+
+def test_run_waits_for_solver_and_stops_observer_after_callback_error() -> None:
+    api = WaitingAfterCallbackFakeSpyrrow()
+    callback_ids: list[str] = []
+
+    def fail_observer(candidate: Candidate) -> None:
+        callback_ids.append(candidate.candidate_id)
+        api.callback_attempted.set()
+        raise RuntimeError("observer failed")
+
+    release_solver = Timer(0.05, api.allow_finish.set)
+    release_solver.start()
+    started_at = monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="observer failed"):
+            SpyrrowAdapter(api=api, spyrrow_version="test").run(
+                problem(),
+                SpyrrowRunConfig(seed=17, total_computation_time=1),
+                on_candidate=fail_observer,
+            )
+    finally:
+        elapsed = monotonic() - started_at
+        api.allow_finish.set()
+        release_solver.cancel()
+
+    assert elapsed >= 0.04
+    assert api.solve_finished is True
+    assert len(callback_ids) == 1
+
+
+def test_returned_final_overflow_clears_queued_final_identity() -> None:
+    api = FakeSpyrrow()
+    api.progress_reports = [(FakeReportType.Final, solution(3.0, x=1.0))]
+    api.final_solution = solution(6.0, x=2.0)
+
+    result = SpyrrowAdapter(api=api, spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+    )
+
+    assert result.final_candidate_id is None
+    assert result.native_report_count == 1
+    assert result.terminal_observation_count == 1
+    assert result.sheet_overflow_count == 1
+
+
+def test_returned_final_authoritatively_replaces_queued_final_identity() -> None:
+    api = FakeSpyrrow()
+    api.progress_reports = [
+        (FakeReportType.Final, solution(3.0, x=1.0)),
+        (FakeReportType.ExplFeas, solution(4.0)),
+    ]
+    api.final_solution = solution(4.0)
+
+    result = SpyrrowAdapter(api=api, spyrrow_version="test").run(
+        problem(),
+        SpyrrowRunConfig(seed=17, total_computation_time=1),
+    )
+
+    assert result.final_candidate_id == result.batch.candidates[-1].candidate_id
+    assert result.batch.candidates[-1].report_type == CandidateReportType.EXPLORATION_FEASIBLE
+    assert result.duplicate_candidate_count == 1
 
 
 def test_run_preserves_native_solver_errors() -> None:

@@ -88,15 +88,19 @@ class SpyrrowAdapter:
         ignored_report_count = 0
         duplicate_candidate_count = 0
         sheet_overflow_count = 0
+        observer_errors: list[BaseException] = []
 
-        def process_report(report_type: Any, solution: Any) -> None:
+        def process_report(report_type: Any, solution: Any, is_terminal: bool) -> None:
             nonlocal duplicate_candidate_count
             nonlocal final_candidate_id
             nonlocal ignored_report_count
             nonlocal native_report_count
             nonlocal sheet_overflow_count
 
-            native_report_count += 1
+            if is_terminal:
+                final_candidate_id = None
+            else:
+                native_report_count += 1
             normalized_type = self._normalize_report_type(report_type)
             if normalized_type is None:
                 ignored_report_count += 1
@@ -113,7 +117,7 @@ class SpyrrowAdapter:
                 for placed in solution.placed_items
             ]
             candidate_id = _candidate_id(solution.width, placements)
-            if normalized_type == CandidateReportType.FINAL:
+            if is_terminal:
                 final_candidate_id = candidate_id
             if candidate_id in seen:
                 duplicate_candidate_count += 1
@@ -128,10 +132,16 @@ class SpyrrowAdapter:
                 placements=placements,
             )
             candidates.append(candidate)
-            if on_candidate is not None:
-                on_candidate(candidate)
+            if on_candidate is not None and not observer_errors:
+                observer_candidate = Candidate.model_validate(candidate.model_dump())
+                try:
+                    on_candidate(observer_candidate)
+                except BaseException as error:
+                    observer_errors.append(error)
 
         self._solve_with_progress(instance, solver_config, process_report)
+        if observer_errors:
+            raise observer_errors[0]
 
         return SpyrrowRunResult(
             batch=CandidateBatch(
@@ -145,6 +155,7 @@ class SpyrrowAdapter:
             ),
             final_candidate_id=final_candidate_id,
             native_report_count=native_report_count,
+            terminal_observation_count=1,
             ignored_report_count=ignored_report_count,
             duplicate_candidate_count=duplicate_candidate_count,
             sheet_overflow_count=sheet_overflow_count,
@@ -154,7 +165,7 @@ class SpyrrowAdapter:
         self,
         instance: Any,
         config: Any,
-        on_report: Callable[[Any, Any], None],
+        on_report: Callable[[Any, Any, bool], None],
     ) -> None:
         progress = self.api.ProgressQueue()
         result: list[Any] = []
@@ -168,15 +179,26 @@ class SpyrrowAdapter:
 
         thread = Thread(target=solve, name="spyrrow-solve", daemon=True)
         thread.start()
-        while thread.is_alive():
+        report_errors: list[BaseException] = []
+
+        def drain_reports() -> None:
             for report_type, solution in progress.drain():
-                on_report(report_type, solution)
+                if report_errors:
+                    continue
+                try:
+                    on_report(report_type, solution, False)
+                except BaseException as error:
+                    report_errors.append(error)
+
+        while thread.is_alive():
+            drain_reports()
             thread.join(timeout=0.05)
-        for report_type, solution in progress.drain():
-            on_report(report_type, solution)
+        drain_reports()
+        if report_errors:
+            raise report_errors[0]
         if errors:
             raise errors[0]
-        on_report(self.api.ReportType.Final, result[0])
+        on_report(self.api.ReportType.Final, result[0], True)
 
     def _normalize_report_type(self, report_type: Any) -> CandidateReportType | None:
         if report_type == self.api.ReportType.ExplFeas:

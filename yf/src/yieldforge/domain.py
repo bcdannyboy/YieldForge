@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 Point = tuple[float, float]
 
@@ -109,8 +109,31 @@ class SpyrrowRunResult(ContractModel):
 
     schema_version: Literal["yieldforge.spyrrow-run.v1"] = "yieldforge.spyrrow-run.v1"
     batch: CandidateBatch
-    final_candidate_id: str | None
-    native_report_count: int = Field(ge=0)
-    ignored_report_count: int = Field(ge=0)
-    duplicate_candidate_count: int = Field(ge=0)
-    sheet_overflow_count: int = Field(ge=0)
+    final_candidate_id: str | None = Field(default=None, min_length=1)
+    native_report_count: StrictInt = Field(ge=0)
+    terminal_observation_count: StrictInt = Field(default=1, ge=1, le=1)
+    ignored_report_count: StrictInt = Field(ge=0)
+    duplicate_candidate_count: StrictInt = Field(ge=0)
+    sheet_overflow_count: StrictInt = Field(ge=0)
+
+    @model_validator(mode="after")
+    def require_consistent_report_accounting(self) -> Self:
+        candidate_ids = [candidate.candidate_id for candidate in self.batch.candidates]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("candidate IDs must be unique")
+        if self.final_candidate_id is not None and self.final_candidate_id not in candidate_ids:
+            raise ValueError("final candidate ID must reference a batch candidate")
+
+        observations = self.native_report_count + self.terminal_observation_count
+        classified = (
+            len(candidate_ids)
+            + self.ignored_report_count
+            + self.duplicate_candidate_count
+            + self.sheet_overflow_count
+        )
+        if observations != classified:
+            raise ValueError(
+                f"report accounting mismatch: {observations} observations != "
+                f"{classified} classifications"
+            )
+        return self
