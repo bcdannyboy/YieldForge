@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import stat
@@ -10,6 +12,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from yieldforge.datasets.lectra_audit import LectraAuditReport
+from yieldforge.datasets.normalized_slice import NormalizedSlice
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 
 MAX_PASSIVE_EVIDENCE_BYTES = 4 * 1024 * 1024
@@ -185,6 +188,23 @@ def parse_dataset_source_manifest(
         raise PassiveEvidenceError(f"Invalid dataset source manifest: {error}") from error
 
 
+def parse_normalized_slice(
+    payload: bytes,
+    *,
+    max_bytes: int = MAX_PASSIVE_EVIDENCE_BYTES,
+) -> NormalizedSlice:
+    """Parse strict passive JSON into the normalized Lectra slice contract."""
+    decoded = decode_strict_json_bytes(
+        payload,
+        label="normalized Lectra slice",
+        max_bytes=max_bytes,
+    )
+    try:
+        return NormalizedSlice.model_validate(decoded)
+    except ValidationError as error:
+        raise PassiveEvidenceError(f"Invalid normalized Lectra slice: {error}") from error
+
+
 def bind_lectra_audit_report(
     report: LectraAuditReport,
     manifest: DatasetSourceManifest,
@@ -203,6 +223,65 @@ def bind_lectra_audit_report(
         )
 
 
+def bind_normalized_slice_evidence(
+    normalized: NormalizedSlice,
+    report: LectraAuditReport,
+    manifest: DatasetSourceManifest,
+    *,
+    report_payload: bytes,
+    manifest_payload: bytes,
+) -> None:
+    """Bind a slice to the exact parsed manifest and audit-report byte streams."""
+    bind_lectra_audit_report(report, manifest)
+    source = normalized.source
+    if source.dataset_id != manifest.dataset_id:
+        raise PassiveEvidenceError(
+            "Normalized slice dataset identity mismatch: "
+            f"slice={source.dataset_id!r}, manifest={manifest.dataset_id!r}"
+        )
+    if source.doi != manifest.doi:
+        raise PassiveEvidenceError(
+            f"Normalized slice DOI mismatch: slice={source.doi!r}, manifest={manifest.doi!r}"
+        )
+    if source.license != manifest.license:
+        raise PassiveEvidenceError(
+            "Normalized slice license mismatch: "
+            f"slice={source.license!r}, manifest={manifest.license!r}"
+        )
+
+    expected_checksums = tuple(
+        (item.name, item.checksum_algorithm, item.checksum) for item in manifest.files
+    )
+    observed_checksums = tuple(
+        (item.name, item.checksum_algorithm, item.checksum) for item in source.source_checksums
+    )
+    if observed_checksums != expected_checksums:
+        raise PassiveEvidenceError(
+            "Normalized slice source checksum mismatch: "
+            f"slice={observed_checksums!r}, manifest={expected_checksums!r}"
+        )
+    if source.source_unit.literal_label != report.source_unit_label:
+        raise PassiveEvidenceError(
+            "Normalized slice source unit mismatch: "
+            f"slice={source.source_unit.literal_label!r}, report={report.source_unit_label!r}"
+        )
+    if source.source_unit.interpretation is not None:
+        raise PassiveEvidenceError("Normalized slice source unit interpretation must remain null")
+
+    expected_manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+    if not hmac.compare_digest(source.source_manifest_sha256, expected_manifest_sha256):
+        raise PassiveEvidenceError(
+            "Normalized slice source manifest SHA-256 mismatch: "
+            f"slice={source.source_manifest_sha256}, actual={expected_manifest_sha256}"
+        )
+    expected_report_sha256 = hashlib.sha256(report_payload).hexdigest()
+    if not hmac.compare_digest(source.audit_report_sha256, expected_report_sha256):
+        raise PassiveEvidenceError(
+            "Normalized slice audit report SHA-256 mismatch: "
+            f"slice={source.audit_report_sha256}, actual={expected_report_sha256}"
+        )
+
+
 def load_lectra_audit_evidence(
     report_path: Path,
     manifest_path: Path,
@@ -216,3 +295,31 @@ def load_lectra_audit_evidence(
     )
     bind_lectra_audit_report(report, manifest)
     return report, manifest
+
+
+def load_normalized_slice(path: Path) -> NormalizedSlice:
+    """Safely read and validate one passive normalized-slice file."""
+    return parse_normalized_slice(read_passive_evidence_file(path, label="normalized Lectra slice"))
+
+
+def load_normalized_slice_evidence(
+    slice_path: Path,
+    report_path: Path,
+    manifest_path: Path,
+) -> tuple[NormalizedSlice, LectraAuditReport, DatasetSourceManifest]:
+    """Safely read, validate, and bind a slice and both of its evidence files."""
+    slice_payload = read_passive_evidence_file(slice_path, label="normalized Lectra slice")
+    report_payload = read_passive_evidence_file(report_path, label="Lectra audit report")
+    manifest_payload = read_passive_evidence_file(manifest_path, label="dataset source manifest")
+
+    normalized = parse_normalized_slice(slice_payload)
+    report = parse_lectra_audit_report(report_payload)
+    manifest = parse_dataset_source_manifest(manifest_payload)
+    bind_normalized_slice_evidence(
+        normalized,
+        report,
+        manifest,
+        report_payload=report_payload,
+        manifest_payload=manifest_payload,
+    )
+    return normalized, report, manifest
