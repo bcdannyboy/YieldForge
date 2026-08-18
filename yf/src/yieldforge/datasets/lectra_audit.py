@@ -12,9 +12,9 @@ import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from numbers import Integral, Real
-from typing import Any, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from yieldforge.domain import ContractModel
 
@@ -62,6 +62,139 @@ CONSTRAINT_REFERENCE_COLUMNS = ("parts_1", "parts_2")
 CONSTRAINT_PARAMETER_COLUMNS = REQUIRED_COLUMNS["constraints"][4:]
 PARTITION_COLUMNS = ("is_train", "is_val", "is_test")
 MAX_EXAMPLES = 10
+NUMERIC_TASK_COLUMNS = ("efficiency", "duration", "sheet_width", "sheet_length")
+NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+
+KEY_FAILURE_KEYS = (
+    "task_rows_with_missing_or_invalid_key",
+    "part_rows_with_missing_or_invalid_composite_key",
+    "shape_rows_with_missing_or_invalid_key",
+    "constraint_rows_with_missing_or_invalid_task_key",
+)
+DUPLICATE_KEYS = (
+    "task_key_rows_beyond_first",
+    "part_composite_key_rows_beyond_first",
+    "shape_key_rows_beyond_first",
+)
+JOIN_FAILURE_KEYS = (
+    "part_rows_missing_task",
+    "part_rows_missing_shape",
+    "constraint_rows_missing_task",
+    "constraint_part_reference_occurrences_missing_part",
+)
+SHEET_DIMENSION_VIOLATION_KEYS = (
+    "task_rows_with_invalid_sheet_width",
+    "task_rows_with_invalid_sheet_length",
+)
+SHEET_TYPE_VIOLATION_KEYS = ("task_rows_with_missing_sheet_type",)
+PARTITION_VIOLATION_KEYS = (
+    "task_rows_with_non_boolean_partition_value",
+    "task_rows_not_assigned_to_exactly_one_partition",
+)
+MALFORMED_KEYS = (
+    "raw_encoding_rows",
+    "sizes_rows",
+    "constraint_type_rows",
+    "constraint_reference_cells",
+    "constraint_reference_non_integral_elements",
+)
+UNUSED_RECORD_KEYS = (
+    "task_records_without_part_rows",
+    "shape_records_without_part_rows",
+)
+COUNT_SEMANTIC_KEYS = (
+    *DUPLICATE_KEYS,
+    *JOIN_FAILURE_KEYS,
+    "task_repeated_shape_row_summary",
+    "source_declared_subshape_count_frequency",
+    "sheet_length_unconstrained_sentinel_count",
+    *UNUSED_RECORD_KEYS,
+)
+NUMERIC_EXAMPLE_KEYS = tuple(
+    f"{column}_{classification}_values"
+    for column in NUMERIC_TASK_COLUMNS
+    for classification in ("missing", "nonfinite", "invalid")
+)
+BOUNDED_EXAMPLE_KEYS = (
+    "duplicate_task_keys",
+    "duplicate_part_composite_keys",
+    "duplicate_shape_keys",
+    "task_rows_with_invalid_keys",
+    "part_rows_with_invalid_composite_keys",
+    "shape_rows_with_invalid_keys",
+    "constraint_rows_with_invalid_task_keys",
+    "part_rows_missing_task",
+    "part_rows_missing_shape",
+    "constraint_rows_missing_task",
+    "missing_constraint_part_references",
+    "malformed_raw_rows",
+    "malformed_sizes_rows",
+    "malformed_constraint_reference_cells",
+    "non_integral_constraint_reference_elements",
+    "missing_constraint_type_rows",
+    "partition_rows_with_non_boolean_value",
+    "partition_rows_not_assigned_exactly_one",
+    "invalid_sheet_width_tasks",
+    "invalid_sheet_length_tasks",
+    "missing_sheet_type_tasks",
+    *NUMERIC_EXAMPLE_KEYS,
+)
+EXACT_FIELD_KEYS: dict[str, tuple[str, ...]] = {
+    "table_rows": TABLE_ORDER,
+    "columns": TABLE_ORDER,
+    "dtypes": TABLE_ORDER,
+    "missing_columns": TABLE_ORDER,
+    "unexpected_columns": TABLE_ORDER,
+    "key_failure_counts": KEY_FAILURE_KEYS,
+    "duplicate_counts": DUPLICATE_KEYS,
+    "join_failures": JOIN_FAILURE_KEYS,
+    "sheet_dimension_violation_counts": SHEET_DIMENSION_VIOLATION_KEYS,
+    "sheet_type_violation_counts": SHEET_TYPE_VIOLATION_KEYS,
+    "partition_true_frequency": PARTITION_COLUMNS,
+    "partition_violation_counts": PARTITION_VIOLATION_KEYS,
+    "malformed_counts": MALFORMED_KEYS,
+    "unused_record_counts": UNUSED_RECORD_KEYS,
+    "count_semantics": COUNT_SEMANTIC_KEYS,
+    "bounded_examples": BOUNDED_EXAMPLE_KEYS,
+}
+FAILURE_EVIDENCE_MAP: dict[tuple[str, str], str] = {
+    ("key_failure_counts", KEY_FAILURE_KEYS[0]): "task_rows_with_invalid_keys",
+    ("key_failure_counts", KEY_FAILURE_KEYS[1]): "part_rows_with_invalid_composite_keys",
+    ("key_failure_counts", KEY_FAILURE_KEYS[2]): "shape_rows_with_invalid_keys",
+    ("key_failure_counts", KEY_FAILURE_KEYS[3]): "constraint_rows_with_invalid_task_keys",
+    ("duplicate_counts", DUPLICATE_KEYS[0]): "duplicate_task_keys",
+    ("duplicate_counts", DUPLICATE_KEYS[1]): "duplicate_part_composite_keys",
+    ("duplicate_counts", DUPLICATE_KEYS[2]): "duplicate_shape_keys",
+    ("join_failures", JOIN_FAILURE_KEYS[0]): "part_rows_missing_task",
+    ("join_failures", JOIN_FAILURE_KEYS[1]): "part_rows_missing_shape",
+    ("join_failures", JOIN_FAILURE_KEYS[2]): "constraint_rows_missing_task",
+    ("join_failures", JOIN_FAILURE_KEYS[3]): "missing_constraint_part_references",
+    ("malformed_counts", MALFORMED_KEYS[0]): "malformed_raw_rows",
+    ("malformed_counts", MALFORMED_KEYS[1]): "malformed_sizes_rows",
+    ("malformed_counts", MALFORMED_KEYS[2]): "missing_constraint_type_rows",
+    ("malformed_counts", MALFORMED_KEYS[3]): "malformed_constraint_reference_cells",
+    ("malformed_counts", MALFORMED_KEYS[4]): "non_integral_constraint_reference_elements",
+    (
+        "partition_violation_counts",
+        PARTITION_VIOLATION_KEYS[0],
+    ): "partition_rows_with_non_boolean_value",
+    (
+        "partition_violation_counts",
+        PARTITION_VIOLATION_KEYS[1],
+    ): "partition_rows_not_assigned_exactly_one",
+    (
+        "sheet_dimension_violation_counts",
+        SHEET_DIMENSION_VIOLATION_KEYS[0],
+    ): "invalid_sheet_width_tasks",
+    (
+        "sheet_dimension_violation_counts",
+        SHEET_DIMENSION_VIOLATION_KEYS[1],
+    ): "invalid_sheet_length_tasks",
+    (
+        "sheet_type_violation_counts",
+        SHEET_TYPE_VIOLATION_KEYS[0],
+    ): "missing_sheet_type_tasks",
+}
 
 
 class LectraMissingColumnsError(ValueError):
@@ -76,11 +209,11 @@ class LectraMissingColumnsError(ValueError):
 class NumericSummary(ContractModel):
     """Finite, JSON-safe descriptive statistics with explicit input accounting."""
 
-    count: int = Field(ge=0)
-    finite_count: int = Field(default=0, ge=0)
-    missing_count: int = Field(default=0, ge=0)
-    nonfinite_count: int = Field(default=0, ge=0)
-    invalid_count: int = Field(default=0, ge=0)
+    count: NonNegativeInt
+    finite_count: NonNegativeInt = 0
+    missing_count: NonNegativeInt = 0
+    nonfinite_count: NonNegativeInt = 0
+    invalid_count: NonNegativeInt = 0
     minimum: float | None = Field(default=None, allow_inf_nan=False)
     p25: float | None = Field(default=None, allow_inf_nan=False)
     median: float | None = Field(default=None, allow_inf_nan=False)
@@ -165,14 +298,14 @@ class LectraAuditReport(ContractModel):
     dataset_id: str = Field(min_length=1)
     source_checksums: dict[str, str]
     source_unit_label: Literal["m^-4"] = "m^-4"
-    table_rows: dict[str, int]
+    table_rows: dict[str, NonNegativeInt]
     columns: dict[str, list[str]]
     dtypes: dict[str, dict[str, str]]
     missing_columns: dict[str, list[str]]
     unexpected_columns: dict[str, list[str]]
-    key_failure_counts: dict[str, int]
-    duplicate_counts: dict[str, int]
-    join_failures: dict[str, int]
+    key_failure_counts: dict[str, NonNegativeInt]
+    duplicate_counts: dict[str, NonNegativeInt]
+    join_failures: dict[str, NonNegativeInt]
     task_part_row_summary: NumericSummary
     task_unique_shape_summary: NumericSummary
     task_repeated_shape_row_summary: NumericSummary
@@ -182,22 +315,98 @@ class LectraAuditReport(ContractModel):
     duration_summary: NumericSummary
     sheet_width_summary: NumericSummary
     sheet_length_summary: NumericSummary
-    sheet_length_unconstrained_sentinel_count: int = Field(ge=0)
-    sheet_dimension_violation_counts: dict[str, int]
-    sheet_type_frequency: dict[str, int]
-    sheet_type_violation_counts: dict[str, int]
-    partition_true_frequency: dict[str, int]
-    partition_violation_counts: dict[str, int]
-    raw_encoding_frequency: dict[str, int]
-    size_relation_frequency: dict[str, int]
-    source_declared_subshape_count_frequency: dict[str, int]
-    constraint_type_frequency: dict[str, int]
-    constraint_parameter_presence: dict[str, dict[str, int]]
-    constraint_parameter_shape: dict[str, dict[str, int]]
-    malformed_counts: dict[str, int]
-    unused_record_counts: dict[str, int]
+    sheet_length_unconstrained_sentinel_count: NonNegativeInt
+    sheet_dimension_violation_counts: dict[str, NonNegativeInt]
+    sheet_type_frequency: dict[str, NonNegativeInt]
+    sheet_type_violation_counts: dict[str, NonNegativeInt]
+    partition_true_frequency: dict[str, NonNegativeInt]
+    partition_violation_counts: dict[str, NonNegativeInt]
+    raw_encoding_frequency: dict[str, NonNegativeInt]
+    size_relation_frequency: dict[str, NonNegativeInt]
+    source_declared_subshape_count_frequency: dict[str, NonNegativeInt]
+    constraint_type_frequency: dict[str, NonNegativeInt]
+    constraint_parameter_presence: dict[str, dict[str, NonNegativeInt]]
+    constraint_parameter_shape: dict[str, dict[str, NonNegativeInt]]
+    malformed_counts: dict[str, NonNegativeInt]
+    unused_record_counts: dict[str, NonNegativeInt]
     count_semantics: dict[str, str]
     bounded_examples: dict[str, list[str]]
+
+    @field_validator(*EXACT_FIELD_KEYS)
+    @classmethod
+    def require_exact_internal_keys(
+        cls, value: dict[str, object], info: ValidationInfo
+    ) -> dict[str, object]:
+        expected = set(EXACT_FIELD_KEYS[info.field_name])
+        actual = set(value)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unknown = sorted(actual - expected)
+            raise ValueError(
+                f"{info.field_name} must contain exact metric keys; "
+                f"missing={missing}, unknown={unknown}"
+            )
+        return value
+
+    @field_validator("constraint_parameter_presence", "constraint_parameter_shape")
+    @classmethod
+    def require_exact_constraint_parameter_keys(
+        cls,
+        value: dict[str, dict[str, NonNegativeInt]],
+        info: ValidationInfo,
+    ) -> dict[str, dict[str, NonNegativeInt]]:
+        expected = set(CONSTRAINT_PARAMETER_COLUMNS)
+        actual = set(value)
+        if actual != expected:
+            raise ValueError(f"{info.field_name} must contain exact parameter keys")
+        if info.field_name == "constraint_parameter_presence":
+            for column, inventory in value.items():
+                if set(inventory) != {"missing", "present"}:
+                    raise ValueError(
+                        f"constraint_parameter_presence[{column}] must contain "
+                        "exact metric keys missing and present"
+                    )
+        return value
+
+    @field_validator("count_semantics")
+    @classmethod
+    def require_nonempty_count_semantics(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(not description.strip() for description in value.values()):
+            raise ValueError("count semantics must be nonempty")
+        return value
+
+    @field_validator("bounded_examples")
+    @classmethod
+    def require_deterministic_bounded_examples(
+        cls, value: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        for category, examples in value.items():
+            if len(examples) > MAX_EXAMPLES:
+                raise ValueError(f"{category} must contain at most {MAX_EXAMPLES} examples")
+            if examples != sorted(set(examples)):
+                raise ValueError(f"{category} examples must be sorted and unique")
+            if any(not example for example in examples):
+                raise ValueError(f"{category} examples must be nonempty identifiers")
+        return value
+
+    @model_validator(mode="after")
+    def require_evidence_for_nonzero_failures(self) -> Self:
+        for (field, metric), example_category in FAILURE_EVIDENCE_MAP.items():
+            if getattr(self, field)[metric] > 0 and not self.bounded_examples[example_category]:
+                raise ValueError(
+                    f"nonzero {field}.{metric} requires bounded evidence in {example_category}"
+                )
+        for column in NUMERIC_TASK_COLUMNS:
+            summary: NumericSummary = getattr(self, f"{column}_summary")
+            for classification in ("missing", "nonfinite", "invalid"):
+                count = getattr(summary, f"{classification}_count")
+                example_category = f"{column}_{classification}_values"
+                if count > 0 and not self.bounded_examples[example_category]:
+                    raise ValueError(
+                        f"nonzero {column}_summary.{classification}_count requires "
+                        f"bounded evidence in {example_category}"
+                    )
+        return self
 
 
 class _BoundedExamples:
@@ -243,29 +452,7 @@ def audit_frames(
         table: sorted(set(observed_columns[table]) - set(REQUIRED_COLUMNS[table]))
         for table in TABLE_ORDER
     }
-    examples = _BoundedExamples(
-        (
-            "duplicate_task_keys",
-            "duplicate_part_composite_keys",
-            "duplicate_shape_keys",
-            "task_rows_with_invalid_keys",
-            "part_rows_with_invalid_composite_keys",
-            "shape_rows_with_invalid_keys",
-            "part_rows_missing_task",
-            "part_rows_missing_shape",
-            "constraint_rows_missing_task",
-            "missing_constraint_part_references",
-            "malformed_raw_rows",
-            "malformed_sizes_rows",
-            "malformed_constraint_reference_cells",
-            "non_integral_constraint_reference_elements",
-            "missing_constraint_type_rows",
-            "partition_violation_tasks",
-            "invalid_sheet_width_tasks",
-            "invalid_sheet_length_tasks",
-            "missing_sheet_type_tasks",
-        )
-    )
+    examples = _BoundedExamples(BOUNDED_EXAMPLE_KEYS)
 
     task_data = _audit_tasks(frames["tasks"], examples)
     shape_data = _audit_shapes(frames["shapes"], examples)
@@ -389,9 +576,7 @@ def _audit_tasks(frame: Any, examples: _BoundedExamples) -> dict[str, Any]:
     row_keys: list[object] = []
     duplicate_rows = 0
     invalid_key_rows = 0
-    numeric_values: dict[str, list[object]] = {
-        column: [] for column in ("efficiency", "duration", "sheet_width", "sheet_length")
-    }
+    numeric_values: dict[str, list[object]] = {column: [] for column in NUMERIC_TASK_COLUMNS}
     sheet_type_frequency: Counter[str] = Counter()
     partition_true_frequency: Counter[str] = Counter({column: 0 for column in PARTITION_COLUMNS})
     non_boolean_partition_rows = 0
@@ -421,7 +606,7 @@ def _audit_tasks(frame: Any, examples: _BoundedExamples) -> dict[str, Any]:
             *partitions,
         ) = row
         valid_task = _valid_key(task)
-        task_example = _display(task) if valid_task else f"row:{row_number}"
+        task_example = _task_row_identifier(task, row_number)
         if not valid_task:
             invalid_key_rows += 1
             examples.add("task_rows_with_invalid_keys", task_example)
@@ -429,13 +614,16 @@ def _audit_tasks(frame: Any, examples: _BoundedExamples) -> dict[str, Any]:
             row_keys.append(task)
             if task in keys:
                 duplicate_rows += 1
-                examples.add("duplicate_task_keys", _display(task))
+                examples.add("duplicate_task_keys", task_example)
             keys.add(task)
 
-        numeric_values["efficiency"].append(efficiency)
-        numeric_values["duration"].append(duration)
-        numeric_values["sheet_width"].append(sheet_width)
-        numeric_values["sheet_length"].append(sheet_length)
+        for column, value in zip(
+            NUMERIC_TASK_COLUMNS,
+            (efficiency, duration, sheet_width, sheet_length),
+            strict=True,
+        ):
+            numeric_values[column].append(value)
+            _record_numeric_anomaly(column, value, task_example, examples)
         sheet_type_frequency[_literal_frequency_key(sheet_type)] += 1
         if _is_null(sheet_type):
             missing_sheet_type_rows += 1
@@ -445,12 +633,13 @@ def _audit_tasks(frame: Any, examples: _BoundedExamples) -> dict[str, Any]:
         row_has_non_boolean = any(value is None for value in valid_partition_values)
         if row_has_non_boolean:
             non_boolean_partition_rows += 1
+            examples.add("partition_rows_with_non_boolean_value", task_example)
         for column, value in zip(PARTITION_COLUMNS, valid_partition_values, strict=True):
             if value is True:
                 partition_true_frequency[column] += 1
         if row_has_non_boolean or sum(value is True for value in valid_partition_values) != 1:
             assignment_violation_rows += 1
-            examples.add("partition_violation_tasks", task_example)
+            examples.add("partition_rows_not_assigned_exactly_one", task_example)
 
         if not _is_positive_finite(sheet_width):
             invalid_width_rows += 1
@@ -634,7 +823,7 @@ def _audit_constraints(
         constraint_type, task, *remaining = row
         references = remaining[: len(CONSTRAINT_REFERENCE_COLUMNS)]
         parameters = remaining[len(CONSTRAINT_REFERENCE_COLUMNS) :]
-        task_example = _display(task) if _valid_key(task) else f"row:{row_number}"
+        task_example = _task_row_identifier(task, row_number)
         type_key = _literal_frequency_key(constraint_type)
         type_frequency[type_key] += 1
         if type_key == "<missing>":
@@ -643,6 +832,7 @@ def _audit_constraints(
         valid_task = _valid_key(task)
         if not valid_task:
             invalid_task_key_rows += 1
+            examples.add("constraint_rows_with_invalid_task_keys", task_example)
         if not valid_task or task not in task_keys:
             missing_task_rows += 1
             examples.add("constraint_rows_missing_task", task_example)
@@ -660,7 +850,7 @@ def _audit_constraints(
                 malformed_reference_cells += 1
                 examples.add(
                     "malformed_constraint_reference_cells",
-                    f"{task_example}:{column}:row:{row_number}",
+                    f"{task_example}:{column}",
                 )
                 continue
             for referenced_part in sequence:
@@ -835,6 +1025,27 @@ def _value_shape(value: object) -> str:
     return f"other:{type(value).__name__}"
 
 
+def _record_numeric_anomaly(
+    column: str,
+    value: object,
+    row_identifier: str,
+    examples: _BoundedExamples,
+) -> None:
+    if _is_missing_scalar(value):
+        classification = "missing"
+    elif isinstance(value, Real) and not isinstance(value, bool):
+        if math.isfinite(float(value)):
+            return
+        classification = "nonfinite"
+    else:
+        classification = "invalid"
+    examples.add(f"{column}_{classification}_values", row_identifier)
+
+
+def _task_row_identifier(task: object, row_number: int) -> str:
+    return f"task:{_display(task)}:row:{row_number}"
+
+
 def _display(value: object) -> str:
     return str(value)
 
@@ -874,5 +1085,13 @@ def _count_semantics() -> dict[str, str]:
         ),
         "sheet_length_unconstrained_sentinel_count": (
             "task rows where the observed sheet_length is exactly the documented -1 sentinel"
+        ),
+        "task_records_without_part_rows": (
+            "census of task records whose tasks_index has no observed part row; this is not "
+            "classified as a failure"
+        ),
+        "shape_records_without_part_rows": (
+            "census of shape records whose shape_hash has no observed part row; this is not "
+            "classified as a failure"
         ),
     }

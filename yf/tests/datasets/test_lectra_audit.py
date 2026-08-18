@@ -1,5 +1,6 @@
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
@@ -238,7 +239,7 @@ def test_audit_preserves_raw_encodings_sizes_and_literal_constraint_types() -> N
     assert report.malformed_counts["sizes_rows"] == 1
     assert report.malformed_counts["constraint_reference_cells"] == 1
     assert report.malformed_counts["constraint_reference_non_integral_elements"] == 1
-    assert report.bounded_examples["missing_constraint_type_rows"] == ["11"]
+    assert report.bounded_examples["missing_constraint_type_rows"] == ["task:11:row:3"]
 
 
 def test_audit_reports_sheet_and_partition_violations() -> None:
@@ -278,7 +279,7 @@ def test_sheet_length_minus_one_is_preserved_as_a_valid_unconstrained_sentinel()
         "task_rows_with_invalid_sheet_width": 0,
         "task_rows_with_invalid_sheet_length": 1,
     }
-    assert report.bounded_examples["invalid_sheet_length_tasks"] == ["11"]
+    assert report.bounded_examples["invalid_sheet_length_tasks"] == ["task:11:row:1"]
 
 
 def test_malformed_constraint_task_key_is_counted_without_crashing() -> None:
@@ -364,3 +365,130 @@ def test_normal_package_never_deserializes_pickle() -> None:
     ]
 
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("field", "metric"),
+    [
+        ("duplicate_counts", "task_key_rows_beyond_first"),
+        ("join_failures", "part_rows_missing_task"),
+        ("malformed_counts", "raw_encoding_rows"),
+        ("unused_record_counts", "task_records_without_part_rows"),
+        (
+            "partition_violation_counts",
+            "task_rows_with_non_boolean_partition_value",
+        ),
+    ],
+)
+def test_passive_report_rejects_negative_internal_counts(field: str, metric: str) -> None:
+    payload = audit().model_dump()
+    payload[field][metric] = -1
+
+    with pytest.raises(ValidationError):
+        LectraAuditReport.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "metric"),
+    [
+        ("duplicate_counts", "task_key_rows_beyond_first"),
+        ("join_failures", "part_rows_missing_task"),
+        ("malformed_counts", "raw_encoding_rows"),
+        ("unused_record_counts", "task_records_without_part_rows"),
+        (
+            "partition_violation_counts",
+            "task_rows_with_non_boolean_partition_value",
+        ),
+    ],
+)
+def test_passive_report_rejects_missing_or_unknown_metric_keys(field: str, metric: str) -> None:
+    missing_payload = audit().model_dump()
+    missing_payload[field].pop(metric)
+    with pytest.raises(ValidationError, match="exact metric keys"):
+        LectraAuditReport.model_validate(missing_payload)
+
+    unknown_payload = audit().model_dump()
+    unknown_payload[field]["bogus"] = 1
+    with pytest.raises(ValidationError, match="exact metric keys"):
+        LectraAuditReport.model_validate(unknown_payload)
+
+
+def test_passive_report_requires_exact_bounded_example_and_semantic_keys() -> None:
+    payload = audit().model_dump()
+
+    missing_examples = deepcopy(payload)
+    missing_examples["bounded_examples"].pop("duplicate_task_keys")
+    with pytest.raises(ValidationError, match="exact metric keys"):
+        LectraAuditReport.model_validate(missing_examples)
+
+    unknown_examples = deepcopy(payload)
+    unknown_examples["bounded_examples"]["bogus"] = []
+    with pytest.raises(ValidationError, match="exact metric keys"):
+        LectraAuditReport.model_validate(unknown_examples)
+
+    too_many_examples = deepcopy(payload)
+    too_many_examples["bounded_examples"]["duplicate_task_keys"] = [
+        f"task:{index}" for index in range(11)
+    ]
+    with pytest.raises(ValidationError, match="at most 10"):
+        LectraAuditReport.model_validate(too_many_examples)
+
+    missing_semantic = deepcopy(payload)
+    missing_semantic["count_semantics"].pop("task_key_rows_beyond_first")
+    with pytest.raises(ValidationError, match="exact metric keys"):
+        LectraAuditReport.model_validate(missing_semantic)
+
+    unknown_semantic = deepcopy(payload)
+    unknown_semantic["count_semantics"]["bogus"] = "not part of the contract"
+    with pytest.raises(ValidationError, match="exact metric keys"):
+        LectraAuditReport.model_validate(unknown_semantic)
+
+
+def test_every_nonzero_failure_metric_has_deterministic_bounded_evidence() -> None:
+    report = audit()
+
+    assert report.bounded_examples["efficiency_nonfinite_values"] == ["task:11:row:1"]
+    assert report.bounded_examples["duration_nonfinite_values"] == ["task:11:row:1"]
+    assert report.bounded_examples["partition_rows_with_non_boolean_value"] == []
+    assert report.bounded_examples["partition_rows_not_assigned_exactly_one"] == []
+
+    payload = report.model_dump()
+    payload["bounded_examples"]["efficiency_nonfinite_values"] = []
+    with pytest.raises(ValidationError, match="requires bounded evidence"):
+        LectraAuditReport.model_validate(payload)
+
+
+def test_partition_and_sheet_failure_categories_have_row_identifiers() -> None:
+    frames = trusted_frames()
+    frames["tasks"].loc[0, "is_val"] = True
+    frames["tasks"]["is_test"] = frames["tasks"]["is_test"].astype(object)
+    frames["tasks"].loc[1, "is_test"] = "yes"
+    frames["tasks"].loc[2, "sheet_width"] = 0.0
+    frames["tasks"].loc[2, "sheet_length"] = 0.0
+    frames["tasks"]["sheet_type"] = frames["tasks"]["sheet_type"].astype(object)
+    frames["tasks"].loc[2, "sheet_type"] = None
+
+    report = audit_frames(
+        frames,
+        dataset_id="lectra-test",
+        source_checksums={"tasks.gz": "a" * 32},
+    )
+
+    assert report.bounded_examples["partition_rows_with_non_boolean_value"] == ["task:11:row:1"]
+    assert report.bounded_examples["partition_rows_not_assigned_exactly_one"] == [
+        "task:10:row:0",
+        "task:11:row:1",
+    ]
+    assert report.bounded_examples["invalid_sheet_width_tasks"] == ["task:12:row:2"]
+    assert report.bounded_examples["invalid_sheet_length_tasks"] == ["task:12:row:2"]
+    assert report.bounded_examples["missing_sheet_type_tasks"] == ["task:12:row:2"]
+
+
+def test_unused_record_counts_are_documented_as_census_without_failure_examples() -> None:
+    report = audit()
+
+    assert report.unused_record_counts["task_records_without_part_rows"] == 1
+    assert "census" in report.count_semantics["task_records_without_part_rows"]
+    assert "census" in report.count_semantics["shape_records_without_part_rows"]
+    assert "unused_task_records" not in report.bounded_examples
+    assert "unused_shape_records" not in report.bounded_examples
