@@ -14,7 +14,6 @@ from yieldforge.order_books.domain import (
     canonical_json_bytes,
     manifest_content_sha256,
 )
-from yieldforge.order_books.generator import committed_source_task_references
 
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
@@ -32,6 +31,8 @@ def _canonical_manifest_bytes(manifest: OrderBookManifest) -> bytes:
 
 
 def _bind_source_task_references(manifest: OrderBookManifest) -> None:
+    from yieldforge.order_books.generator import committed_source_task_references
+
     expected = {
         reference.tasks_index: reference for reference in committed_source_task_references()
     }
@@ -40,6 +41,19 @@ def _bind_source_task_references(manifest: OrderBookManifest) -> None:
             raise ArchiveIntegrityError(
                 "source-task reference does not match the pinned normalized slice"
             )
+
+
+def _require_deterministic_generator_replay(manifest: OrderBookManifest) -> None:
+    from yieldforge.order_books.generator import COMMITTED_SLICE_PATH, generate_order_book
+
+    try:
+        expected = generate_order_book(manifest.request, COMMITTED_SLICE_PATH)
+    except ValueError as error:
+        raise ArchiveIntegrityError(f"deterministic generator replay failed: {error}") from error
+    if manifest != expected:
+        raise ArchiveIntegrityError(
+            "manifest does not match deterministic generator replay for its request"
+        )
 
 
 def _open_archive_directory(directory: Path) -> int:
@@ -66,6 +80,7 @@ def write_manifest(manifest: OrderBookManifest, directory: Path) -> Path:
             f"manifest validation failed before archive publication: {error}"
         ) from error
     _bind_source_task_references(validated)
+    _require_deterministic_generator_replay(validated)
     if manifest_content_sha256(manifest) != manifest.content_sha256:
         raise ArchiveIntegrityError("content hash mismatch")
     if len(data) > _MAX_MANIFEST_BYTES:
@@ -131,6 +146,7 @@ def read_manifest(path: Path) -> OrderBookManifest:
     if data != _canonical_manifest_bytes(manifest):
         raise ArchiveIntegrityError("manifest bytes do not use canonical archive encoding")
     _bind_source_task_references(manifest)
+    _require_deterministic_generator_replay(manifest)
     return manifest
 
 

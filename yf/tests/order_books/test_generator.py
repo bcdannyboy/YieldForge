@@ -22,8 +22,11 @@ from yieldforge.order_books.domain import (
     OrderBookManifest,
     ProvenanceKind,
     RegimeThresholds,
+    calculate_diagnostics,
     canonical_json_bytes,
+    expected_event_id,
     manifest_content_sha256,
+    resolve_regime_thresholds,
 )
 from yieldforge.order_books.generator import (
     DEFAULT_GENERATOR,
@@ -341,6 +344,60 @@ def test_archive_binds_observed_task_references_to_the_pinned_slice(tmp_path: Pa
     path = tmp_path / f"{forged.order_book_id}.json"
     path.write_bytes(canonical_json_bytes(payload) + b"\n")
     with pytest.raises(ArchiveIntegrityError, match="pinned normalized slice"):
+        read_manifest(path)
+
+
+def test_archive_replays_generator_to_reject_alternate_self_consistent_book(
+    tmp_path: Path,
+) -> None:
+    canonical = generate_order_book(
+        request_for(GenerationRegime.HIGH_MIX, event_count=2),
+        SLICE,
+    )
+    swapped_references = tuple(reversed([event.source_task for event in canonical.events]))
+    alternate_events = []
+    for event, source_task in zip(canonical.events, swapped_references, strict=True):
+        changed = event.model_copy(update={"source_task": source_task})
+        alternate_events.append(
+            changed.model_copy(
+                update={
+                    "event_id": expected_event_id(
+                        canonical.request,
+                        changed.sequence,
+                        changed.source_task,
+                        changed.material,
+                        changed.economics,
+                    )
+                }
+            )
+        )
+    events = tuple(alternate_events)
+    diagnostics = calculate_diagnostics(
+        events,
+        resolve_regime_thresholds(canonical.request),
+    )
+    alternate = canonical.model_copy(update={"events": events, "diagnostics": diagnostics})
+    alternate_hash = manifest_content_sha256(alternate)
+    alternate = alternate.model_copy(
+        update={
+            "content_sha256": alternate_hash,
+            "order_book_id": f"yfob-{alternate_hash[7:31]}",
+        }
+    )
+    alternate = OrderBookManifest.model_validate_json(
+        canonical_json_bytes(alternate.model_dump(mode="json"))
+    )
+
+    assert alternate.request == canonical.request
+    assert alternate.generator == canonical.generator
+    assert alternate != canonical
+    with pytest.raises(ArchiveIntegrityError, match="deterministic generator replay"):
+        write_manifest(alternate, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+    path = tmp_path / f"{alternate.order_book_id}.json"
+    path.write_bytes(canonical_json_bytes(alternate.model_dump(mode="json")) + b"\n")
+    with pytest.raises(ArchiveIntegrityError, match="deterministic generator replay"):
         read_manifest(path)
 
 
