@@ -370,6 +370,42 @@ def test_normalized_slice_binding_requires_exact_manifest_and_audit_hashes() -> 
         )
 
 
+def test_normalized_binding_parses_payloads_and_matches_the_supplied_models() -> None:
+    slice_bytes, report_bytes, manifest_bytes = normalized_evidence_bytes()
+    normalized = parse_normalized_slice(slice_bytes)
+    report = parse_lectra_audit_report(report_bytes)
+    manifest = parse_dataset_source_manifest(manifest_bytes)
+
+    altered_report = report.model_copy(update={"source_unit_label": "invented"})
+    with pytest.raises(PassiveEvidenceError, match="audit report payload.*supplied model"):
+        bind_normalized_slice_evidence(
+            normalized,
+            altered_report,
+            manifest,
+            report_payload=report_bytes,
+            manifest_payload=manifest_bytes,
+        )
+
+    altered_manifest = manifest.model_copy(update={"source_page": "https://other.test/source"})
+    with pytest.raises(PassiveEvidenceError, match="manifest payload.*supplied model"):
+        bind_normalized_slice_evidence(
+            normalized,
+            report,
+            altered_manifest,
+            report_payload=report_bytes,
+            manifest_payload=manifest_bytes,
+        )
+
+    with pytest.raises(PassiveEvidenceError, match="Invalid Lectra audit report"):
+        bind_normalized_slice_evidence(
+            normalized,
+            report,
+            manifest,
+            report_payload=b"{}",
+            manifest_payload=manifest_bytes,
+        )
+
+
 def test_load_normalized_slice_evidence_reads_validates_and_binds_all_files(tmp_path: Path) -> None:
     slice_bytes, report_bytes, manifest_bytes = normalized_evidence_bytes()
     slice_path = tmp_path / "slice.json"

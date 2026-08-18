@@ -147,17 +147,17 @@ def valid_slice() -> NormalizedSlice:
         provenance=(
             ProvenanceGroup(
                 kind=ProvenanceKind.SOURCE_REAL,
-                field_paths=("constraints", "parts", "shapes", "tasks"),
+                field_paths=("/constraints", "/parts", "/shapes", "/tasks"),
                 note="Verbatim selected source rows.",
             ),
             ProvenanceGroup(
                 kind=ProvenanceKind.DERIVED,
-                field_paths=("derived_geometry",),
+                field_paths=("/derived_geometry",),
                 note="Reversible adjacent-scalar pairing and ring closure.",
             ),
             ProvenanceGroup(
                 kind=ProvenanceKind.ASSUMED,
-                field_paths=("task_dispositions.assumption_codes",),
+                field_paths=("/task_dispositions/assumption_codes",),
                 note="Declared projection assumptions only.",
             ),
         ),
@@ -179,6 +179,34 @@ def test_contract_is_frozen_strict_and_has_exact_schema_version() -> None:
         NormalizedSlice.model_validate({**normalized.model_dump(), "surprise": True})
 
 
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("duration", 304.0),
+        ("efficiency", 81),
+        ("sheet_width", 14500),
+        ("sheet_length", 20000),
+    ],
+)
+def test_task_source_row_preserves_exact_audited_scalar_dtypes(
+    field: str, bad_value: int | float
+) -> None:
+    data = valid_slice().tasks[0].model_dump()
+    data[field] = bad_value
+
+    with pytest.raises(ValidationError, match=field):
+        TaskSourceRow.model_validate(data)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_task_source_floats_must_be_finite(bad: float) -> None:
+    data = valid_slice().tasks[0].model_dump()
+    data["efficiency"] = bad
+
+    with pytest.raises(ValidationError, match="efficiency"):
+        TaskSourceRow.model_validate(data)
+
+
 def test_raw_sizes_and_numeric_kinds_round_trip_exactly() -> None:
     normalized = valid_slice()
     payload = normalized.model_dump_json().encode()
@@ -196,6 +224,14 @@ def test_raw_sizes_and_numeric_kinds_round_trip_exactly() -> None:
     ]
     assert restored.shapes[0].sizes == (6,)
     assert restored.model_dump_json() == normalized.model_dump_json()
+
+
+def test_shape_sizes_must_match_the_exact_bound_v11_encoding() -> None:
+    data = valid_slice().shapes[0].model_dump()
+    data["sizes"] = (3, 3)
+
+    with pytest.raises(ValidationError, match=r"sizes.*\(len\(raw\),\)"):
+        ShapeSourceRow.model_validate(data)
 
 
 def test_opaque_values_preserve_missing_boolean_integer_number_string_and_sequence() -> None:
@@ -358,6 +394,46 @@ def test_constraint_requires_exact_observed_opaque_field_order() -> None:
         NormalizedSlice.model_validate(slice_data)
 
 
+@pytest.mark.parametrize(
+    ("column_index", "bad_value", "message"),
+    [
+        (0, OpaqueInteger(kind="integer", value=7), "must be missing or a sequence"),
+        (
+            0,
+            OpaqueSequence(kind="sequence", items=(OpaqueNumber(kind="number", value=7.0),)),
+            "integral elements",
+        ),
+        (
+            6,
+            OpaqueSequence(kind="sequence", items=(OpaqueMissing(kind="missing"),)),
+            "integral elements",
+        ),
+    ],
+)
+def test_constraint_part_reference_cells_reject_malformed_typed_values(
+    column_index: int, bad_value: OpaqueValue, message: str
+) -> None:
+    data = valid_slice().model_dump()
+    values = list(data["constraints"][0]["values"])
+    values[column_index] = bad_value.model_dump()
+    data["constraints"][0]["values"] = tuple(values)
+
+    with pytest.raises(ValidationError, match=message):
+        NormalizedSlice.model_validate(data)
+
+
+def test_constraint_part_references_must_resolve_within_the_constraint_task() -> None:
+    data = valid_slice().model_dump()
+    values = list(data["constraints"][0]["values"])
+    values[0] = OpaqueSequence(
+        kind="sequence", items=(OpaqueInteger(kind="integer", value=999),)
+    ).model_dump()
+    data["constraints"][0]["values"] = tuple(values)
+
+    with pytest.raises(ValidationError, match=r"unresolved parts_1 reference.*999"):
+        NormalizedSlice.model_validate(data)
+
+
 def test_slice_validates_source_references_geometry_and_dispositions() -> None:
     data = valid_slice().model_dump()
     data["parts"][0]["shape_hash"] = 999
@@ -377,6 +453,78 @@ def test_slice_validates_source_references_geometry_and_dispositions() -> None:
     data["task_dispositions"] = ()
     with pytest.raises(ValidationError, match="exactly one disposition"):
         NormalizedSlice.model_validate(data)
+
+
+def test_every_selected_task_has_parts_and_every_selected_shape_is_referenced() -> None:
+    data = valid_slice().model_dump()
+    second_task = copy.deepcopy(data["tasks"][0])
+    second_task["source_row_index"] = 11
+    second_task["tasks_index"] = 18
+    data["tasks"] = (*data["tasks"], second_task)
+    second_disposition = copy.deepcopy(data["task_dispositions"][0])
+    second_disposition["tasks_index"] = 18
+    data["task_dispositions"] = (*data["task_dispositions"], second_disposition)
+    with pytest.raises(ValidationError, match=r"task 18.*at least one part"):
+        NormalizedSlice.model_validate(data)
+
+    data = valid_slice().model_dump()
+    extra_shape = copy.deepcopy(data["shapes"][0])
+    extra_shape["source_row_index"] = 31
+    extra_shape["shape_hash"] = 102
+    data["shapes"] = (*data["shapes"], extra_shape)
+    extra_geometry = copy.deepcopy(data["derived_geometry"][0])
+    extra_geometry["shape_hash"] = 102
+    data["derived_geometry"] = (*data["derived_geometry"], extra_geometry)
+    with pytest.raises(ValidationError, match=r"shape 102.*referenced"):
+        NormalizedSlice.model_validate(data)
+
+
+def test_view_only_or_rejected_dispositions_require_reason_codes() -> None:
+    data = valid_slice().task_dispositions[0].model_dump()
+    data.update(
+        support_status=SupportStatus.VIEW_ONLY,
+        projection_status=ProjectionStatus.BLOCKED,
+        reason_codes=(),
+    )
+    with pytest.raises(ValidationError, match="view-only.*reason"):
+        TaskDisposition.model_validate(data)
+
+    data = valid_slice().task_dispositions[0].model_dump()
+    data.update(
+        normalization_status=NormalizationStatus.REJECTED,
+        projection_status=ProjectionStatus.BLOCKED,
+        reason_codes=(),
+    )
+    with pytest.raises(ValidationError, match="rejected normalization.*reason"):
+        TaskDisposition.model_validate(data)
+
+
+def test_assumptions_require_assumed_provenance_and_paths_require_real_roots() -> None:
+    data = valid_slice().model_dump()
+    data["provenance"] = tuple(
+        group for group in data["provenance"] if group["kind"] != ProvenanceKind.ASSUMED
+    )
+    with pytest.raises(ValidationError, match="assumptions require.*ASSUMED provenance"):
+        NormalizedSlice.model_validate(data)
+
+    with pytest.raises(ValidationError, match="JSON-pointer-like"):
+        ProvenanceGroup(
+            kind=ProvenanceKind.SOURCE_REAL,
+            field_paths=("tasks",),
+            note="Not a rooted path.",
+        )
+    with pytest.raises(ValidationError, match="artifact root"):
+        ProvenanceGroup(
+            kind=ProvenanceKind.SOURCE_REAL,
+            field_paths=("/task",),
+            note="Nonexistent root.",
+        )
+    with pytest.raises(ValidationError, match="nested field"):
+        ProvenanceGroup(
+            kind=ProvenanceKind.SOURCE_REAL,
+            field_paths=("/tasks/nonexistent",),
+            note="Nonexistent nested field.",
+        )
 
 
 def test_normalized_contract_imports_without_pandas_or_pickle() -> None:

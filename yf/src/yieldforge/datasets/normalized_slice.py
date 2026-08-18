@@ -60,6 +60,7 @@ PositiveInt = Annotated[StrictInt, Field(gt=0)]
 Code = Annotated[StrictStr, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 type SourceNumber = StrictInt | StrictFloat
 type Point = tuple[SourceNumber, SourceNumber]
+type ConstraintPartReferenceColumn = Literal["parts_1", "parts_2"]
 
 
 class StrictContractModel(ContractModel):
@@ -178,15 +179,22 @@ class TaskSourceRow(StrictContractModel):
     """One task row copied without unit conversion."""
 
     source_row_index: NonNegativeInt
-    duration: SourceNumber
-    efficiency: SourceNumber
-    sheet_width: SourceNumber
-    sheet_length: SourceNumber
+    duration: StrictInt
+    efficiency: StrictFloat
+    sheet_width: StrictFloat
+    sheet_length: StrictFloat
     sheet_type: StrictInt
     tasks_index: NonNegativeInt
     is_train: StrictBool
     is_val: StrictBool
     is_test: StrictBool
+
+    @field_validator("efficiency", "sheet_width", "sheet_length", mode="before")
+    @classmethod
+    def require_observed_float_dtype(cls, value: object) -> object:
+        if type(value) is not float:
+            raise ValueError("source field must retain its audited floating-point dtype")
+        return value
 
     @model_validator(mode="after")
     def require_one_partition(self) -> Self:
@@ -211,6 +219,12 @@ class ShapeSourceRow(StrictContractModel):
     shape_hash: StrictInt
     raw: tuple[SourceNumber, ...] = Field(min_length=1)
     sizes: tuple[PositiveInt, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_bound_v11_sizes_encoding(self) -> Self:
+        if self.sizes != (len(self.raw),):
+            raise ValueError("sizes must equal exactly (len(raw),) for the bound v1.1 slice")
+        return self
 
 
 class ConstraintSourceRow(StrictContractModel):
@@ -237,6 +251,39 @@ class ConstraintSourceRow(StrictContractModel):
                 "opaque fields"
             )
         return value
+
+    @model_validator(mode="after")
+    def require_typed_part_reference_cells(self) -> Self:
+        for column in ("parts_1", "parts_2"):
+            constraint_part_references(self, column)
+        return self
+
+
+def constraint_value(
+    row: ConstraintSourceRow,
+    column: str,
+) -> OpaqueValue:
+    """Return one typed opaque value using the exact observed column positions."""
+    try:
+        position = CONSTRAINT_OPAQUE_FIELD_ORDER.index(column)
+    except ValueError as error:
+        raise ValueError(f"unknown opaque constraint column {column!r}") from error
+    return row.values[position]
+
+
+def constraint_part_references(
+    row: ConstraintSourceRow,
+    column: ConstraintPartReferenceColumn,
+) -> tuple[int, ...]:
+    """Decode one audited reference cell without numeric coercion."""
+    value = constraint_value(row, column)
+    if isinstance(value, OpaqueMissing):
+        return ()
+    if not isinstance(value, OpaqueSequence):
+        raise ValueError(f"constraint {column} must be missing or a sequence")
+    if any(not isinstance(item, OpaqueInteger) for item in value.items):
+        raise ValueError(f"constraint {column} sequence must contain only integral elements")
+    return tuple(item.value for item in value.items if isinstance(item, OpaqueInteger))
 
 
 class DerivedShapeGeometry(StrictContractModel):
@@ -337,6 +384,10 @@ class TaskDisposition(StrictContractModel):
 
     @model_validator(mode="after")
     def require_truthful_status_evidence(self) -> Self:
+        if self.support_status is SupportStatus.VIEW_ONLY and not self.reason_codes:
+            raise ValueError("view-only support requires at least one reason code")
+        if self.normalization_status is NormalizationStatus.REJECTED and not self.reason_codes:
+            raise ValueError("rejected normalization requires at least one reason code")
         if (
             self.support_status is SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS
             and not self.assumption_codes
@@ -363,6 +414,37 @@ class ProvenanceKind(StrEnum):
     ASSUMED = "assumed"
 
 
+_PROVENANCE_ROOT_FIELDS: dict[str, frozenset[str]] = {
+    "schema_version": frozenset(),
+    "source": frozenset(NormalizedSliceSource.model_fields),
+    "tasks": frozenset(TaskSourceRow.model_fields),
+    "parts": frozenset(PartSourceRow.model_fields),
+    "shapes": frozenset(ShapeSourceRow.model_fields),
+    "constraints": frozenset(ConstraintSourceRow.model_fields),
+    "constraint_value_columns": frozenset(),
+    "derived_geometry": frozenset(DerivedShapeGeometry.model_fields),
+    "task_dispositions": frozenset(TaskDisposition.model_fields),
+    "provenance": frozenset({"field_paths", "kind", "note"}),
+}
+
+
+def _validate_provenance_path(path: str) -> None:
+    if not path.startswith("/"):
+        raise ValueError("provenance field paths must use JSON-pointer-like rooted paths")
+    segments = path[1:].split("/")
+    if not segments or any(not segment or not segment.isidentifier() for segment in segments):
+        raise ValueError("provenance field paths must use JSON-pointer-like field segments")
+    root = segments[0]
+    if root not in _PROVENANCE_ROOT_FIELDS:
+        raise ValueError(f"provenance path has no artifact root {root!r}")
+    if len(segments) > 2:
+        raise ValueError("provenance paths may identify only an artifact root and direct field")
+    if len(segments) == 2 and segments[1] not in _PROVENANCE_ROOT_FIELDS[root]:
+        raise ValueError(
+            f"provenance path {path!r} identifies no nested field on artifact root {root!r}"
+        )
+
+
 class ProvenanceGroup(StrictContractModel):
     """A group of JSON field paths that share one provenance family."""
 
@@ -377,6 +459,8 @@ class ProvenanceGroup(StrictContractModel):
             raise ValueError("provenance field paths must be non-empty")
         if tuple(sorted(set(value))) != value:
             raise ValueError("provenance field paths must be sorted and unique")
+        for path in value:
+            _validate_provenance_path(path)
         return value
 
 
@@ -435,9 +519,14 @@ class NormalizedSlice(StrictContractModel):
         part_keys = tuple((row.tasks_index, row.part_id) for row in self.parts)
         if len(part_keys) != len(set(part_keys)):
             raise ValueError("part rows must have unique (tasks_index, part_id) keys")
+        part_key_set = set(part_keys)
         for part in self.parts:
             if part.tasks_index not in task_id_set:
                 raise ValueError(f"part row has unresolved tasks_index {part.tasks_index}")
+        part_task_ids = {part.tasks_index for part in self.parts}
+        for task_id in task_ids:
+            if task_id not in part_task_ids:
+                raise ValueError(f"task {task_id} must have at least one part row")
 
         shape_hashes = tuple(row.shape_hash for row in self.shapes)
         if len(shape_hashes) != len(set(shape_hashes)):
@@ -446,12 +535,23 @@ class NormalizedSlice(StrictContractModel):
         for part in self.parts:
             if part.shape_hash not in shape_hash_set:
                 raise ValueError(f"part row has unresolved shape_hash {part.shape_hash}")
+        referenced_shape_hashes = {part.shape_hash for part in self.parts}
+        for shape_hash in shape_hashes:
+            if shape_hash not in referenced_shape_hashes:
+                raise ValueError(f"shape {shape_hash} must be referenced by at least one part row")
 
         for constraint in self.constraints:
             if constraint.tasks_index not in task_id_set:
                 raise ValueError(
                     f"constraint row has unresolved tasks_index {constraint.tasks_index}"
                 )
+            for column in ("parts_1", "parts_2"):
+                for part_id in constraint_part_references(constraint, column):
+                    if (constraint.tasks_index, part_id) not in part_key_set:
+                        raise ValueError(
+                            f"constraint has unresolved {column} reference {part_id} "
+                            f"for task {constraint.tasks_index}"
+                        )
 
         geometry_hashes = tuple(geometry.shape_hash for geometry in self.derived_geometry)
         if geometry_hashes != shape_hashes:
@@ -482,4 +582,15 @@ class NormalizedSlice(StrictContractModel):
         required_kinds = {ProvenanceKind.SOURCE_REAL, ProvenanceKind.DERIVED}
         if not required_kinds.issubset(provenance_kinds):
             raise ValueError("provenance must identify source_real and derived field groups")
+        has_assumptions = any(item.assumption_codes for item in self.task_dispositions)
+        if has_assumptions and ProvenanceKind.ASSUMED not in provenance_kinds:
+            raise ValueError("task assumptions require an ASSUMED provenance group")
+        if has_assumptions:
+            assumed_group = next(
+                group for group in self.provenance if group.kind is ProvenanceKind.ASSUMED
+            )
+            if "/task_dispositions/assumption_codes" not in assumed_group.field_paths:
+                raise ValueError(
+                    "ASSUMED provenance must identify /task_dispositions/assumption_codes"
+                )
         return self

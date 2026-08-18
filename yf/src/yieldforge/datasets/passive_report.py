@@ -232,6 +232,16 @@ def bind_normalized_slice_evidence(
     manifest_payload: bytes,
 ) -> None:
     """Bind a slice to the exact parsed manifest and audit-report byte streams."""
+    parsed_report = parse_lectra_audit_report(report_payload)
+    if parsed_report != report:
+        raise PassiveEvidenceError(
+            "Normalized slice audit report payload does not match the supplied model"
+        )
+    parsed_manifest = parse_dataset_source_manifest(manifest_payload)
+    if parsed_manifest != manifest:
+        raise PassiveEvidenceError(
+            "Normalized slice source manifest payload does not match the supplied model"
+        )
     bind_lectra_audit_report(report, manifest)
     source = normalized.source
     if source.dataset_id != manifest.dataset_id:
