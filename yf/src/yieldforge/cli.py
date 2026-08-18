@@ -1,15 +1,64 @@
 """Command-line entry points for the YieldForge experiment loop."""
 
 import argparse
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast
 
+from pydantic import ValidationError
+
 from yieldforge.archive import CandidateArchive
 from yieldforge.datasets.fetch import fetch_file
+from yieldforge.datasets.lectra_audit import LectraAuditReport
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
+
+
+class DatasetAuditCheckError(ValueError):
+    """Raised when passive audit evidence does not match its pinned source."""
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _read_strict_json(path: Path, *, label: str) -> object:
+    try:
+        serialized = path.read_text(encoding="utf-8")
+        return json.loads(
+            serialized,
+            parse_constant=_reject_nonfinite_json,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise DatasetAuditCheckError(f"Invalid {label} {path}: {error}") from error
+
+
+def _load_audit_report(path: Path) -> LectraAuditReport:
+    payload = _read_strict_json(path, label="Lectra audit report")
+    try:
+        return LectraAuditReport.model_validate(payload)
+    except ValidationError as error:
+        raise DatasetAuditCheckError(f"Invalid Lectra audit report {path}: {error}") from error
+
+
+def _load_audit_manifest(path: Path) -> DatasetSourceManifest:
+    payload = _read_strict_json(path, label="dataset source manifest")
+    try:
+        return DatasetSourceManifest.model_validate(payload)
+    except ValidationError as error:
+        raise DatasetAuditCheckError(f"Invalid dataset source manifest {path}: {error}") from error
 
 
 def _generate_candidates(args: argparse.Namespace) -> int:
@@ -36,6 +85,31 @@ def _fetch_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_dataset_audit(args: argparse.Namespace) -> int:
+    report = _load_audit_report(args.report)
+    manifest = _load_audit_manifest(args.manifest)
+    if report.dataset_id != manifest.dataset_id:
+        raise DatasetAuditCheckError(
+            "Lectra audit dataset identity mismatch: "
+            f"report={report.dataset_id!r}, manifest={manifest.dataset_id!r}"
+        )
+
+    expected_checksums = {source.name: source.checksum for source in manifest.files}
+    if report.source_checksums != expected_checksums:
+        raise DatasetAuditCheckError(
+            "Lectra audit source checksum mismatch: "
+            f"report={report.source_checksums!r}, manifest={expected_checksums!r}"
+        )
+
+    rows = report.table_rows
+    print(
+        f"Validated {report.dataset_id} audit: "
+        f"tasks={rows['tasks']}, parts={rows['parts']}, "
+        f"shapes={rows['shapes']}, constraints={rows['constraints']}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -57,6 +131,15 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--manifest", type=Path, required=True, help="source manifest JSON path")
     fetch.add_argument("--output", type=Path, required=True, help="raw dataset directory")
     fetch.set_defaults(handler=_fetch_dataset)
+
+    audit_check = dataset_commands.add_parser(
+        "audit-check", help="validate a passive audit report against its pinned source"
+    )
+    audit_check.add_argument("--report", type=Path, required=True, help="audit report JSON path")
+    audit_check.add_argument(
+        "--manifest", type=Path, required=True, help="source manifest JSON path"
+    )
+    audit_check.set_defaults(handler=_check_dataset_audit)
     return parser
 
 
