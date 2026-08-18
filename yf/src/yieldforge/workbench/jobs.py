@@ -183,7 +183,9 @@ class SolverJobService:
         process_task: asyncio.Task[int] | None = None
         cancel_task: asyncio.Task[bool] | None = None
         timeout_task: asyncio.Task[None] | None = None
+        archive_task: asyncio.Task[Path] | None = None
         archive_staging = state.directory / "candidate-archive.staging"
+        deadline = time.monotonic() + state.request.max_runtime_seconds
         try:
             if state.cancel_requested.is_set():
                 self._finish_terminal(state, JobStatus.CANCELLED)
@@ -221,6 +223,10 @@ class SolverJobService:
                 await self._stop_process(process)
                 self._finish_terminal(state, JobStatus.CANCELLED)
                 return
+            if time.monotonic() >= deadline:
+                await self._stop_process(process)
+                self._finish_terminal(state, JobStatus.TIMED_OUT)
+                return
             state.status = JobStatus.RUNNING
             self._append_event(state, kind=JobEventKind.STATUS, status=JobStatus.RUNNING)
 
@@ -231,12 +237,19 @@ class SolverJobService:
             process_task = asyncio.create_task(process.wait())
             cancel_task = asyncio.create_task(state.cancel_requested.wait())
             timeout_task = asyncio.create_task(
-                asyncio.sleep(state.request.max_runtime_seconds)
+                asyncio.sleep(max(0.0, deadline - time.monotonic()))
             )
 
-            while True:
+            while not process_task.done():
+                waiting: set[asyncio.Task[Any]] = {
+                    process_task,
+                    cancel_task,
+                    timeout_task,
+                }
+                if not stdout_task.done():
+                    waiting.add(stdout_task)
                 done, _ = await asyncio.wait(
-                    {stdout_task, process_task, cancel_task, timeout_task},
+                    waiting,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if state.cancel_requested.is_set():
@@ -257,10 +270,33 @@ class SolverJobService:
                         await stderr_task
                     self._finish_failed(state, "worker_protocol", "solver worker failed")
                     return
-                if process_task in done:
-                    break
 
             return_code = await process_task
+            while not (stdout_task.done() and stderr_task.done()):
+                waiting = {cancel_task, timeout_task}
+                if not stdout_task.done():
+                    waiting.add(stdout_task)
+                if not stderr_task.done():
+                    waiting.add(stderr_task)
+                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                if state.cancel_requested.is_set():
+                    await self._stop_process(process)
+                    await self._settle_reader(stdout_task)
+                    await stderr_task
+                    self._finish_terminal(state, JobStatus.CANCELLED)
+                    return
+                if timeout_task in done:
+                    await self._stop_process(process)
+                    await self._settle_reader(stdout_task)
+                    await stderr_task
+                    self._finish_terminal(state, JobStatus.TIMED_OUT)
+                    return
+                if stdout_task in done and stdout_task.exception() is not None:
+                    await self._stop_process(process)
+                    with contextlib.suppress(Exception):
+                        await stderr_task
+                    self._finish_failed(state, "worker_protocol", "solver worker failed")
+                    return
             outcome = await stdout_task
             await stderr_task
             if outcome.failure_code is not None:
@@ -274,25 +310,51 @@ class SolverJobService:
             if state.cancel_requested.is_set():
                 self._finish_terminal(state, JobStatus.CANCELLED)
                 return
+            if time.monotonic() >= deadline:
+                self._finish_terminal(state, JobStatus.TIMED_OUT)
+                return
 
             archive_path = self.archive_root / state.job_id
-            try:
-                await asyncio.to_thread(
+            archive_error: Exception | None = None
+            archive_task = asyncio.create_task(
+                asyncio.to_thread(
                     CandidateArchive.create, archive_staging, outcome.result.batch
                 )
-            except Exception:
-                self._discard_path(archive_staging)
-                self._finish_failed(state, "archive_failure", "solver worker failed")
-                return
+            )
+            try:
+                await asyncio.wait(
+                    {archive_task, cancel_task, timeout_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                try:
+                    await archive_task
+                except Exception as error:
+                    archive_error = error
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(archive_task)
+                raise
             if state.cancel_requested.is_set():
                 self._discard_path(archive_staging)
                 self._finish_terminal(state, JobStatus.CANCELLED)
+                return
+            if timeout_task.done() or time.monotonic() >= deadline:
+                self._discard_path(archive_staging)
+                self._finish_terminal(state, JobStatus.TIMED_OUT)
+                return
+            if archive_error is not None:
+                self._discard_path(archive_staging)
+                self._finish_failed(state, "archive_failure", "solver worker failed")
                 return
             if archive_path.exists() or archive_path.is_symlink():
                 self._discard_path(archive_staging)
                 self._finish_failed(state, "archive_failure", "solver worker failed")
                 return
             archive_staging.rename(archive_path)
+            if time.monotonic() >= deadline:
+                self._discard_path(archive_path)
+                self._finish_terminal(state, JobStatus.TIMED_OUT)
+                return
             state.completion_committed = True
             state.archive_path = str(archive_path.resolve())
             self._finish_terminal(state, JobStatus.COMPLETED, batch=outcome.result.batch)
@@ -303,12 +365,22 @@ class SolverJobService:
             if state.status not in TERMINAL_JOB_STATUSES:
                 self._finish_failed(state, "supervisor_failure", "solver worker failed")
         finally:
+            if archive_task is not None and not archive_task.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(archive_task)
             if state.status is not JobStatus.COMPLETED:
                 self._discard_path(archive_staging)
             if state.process is not None:
                 with contextlib.suppress(Exception):
                     await asyncio.shield(self._stop_process(state.process))
-            cleanup_tasks = (stdout_task, stderr_task, cancel_task, timeout_task, process_task)
+            cleanup_tasks = (
+                stdout_task,
+                stderr_task,
+                cancel_task,
+                timeout_task,
+                process_task,
+                archive_task,
+            )
             for task in cleanup_tasks:
                 if task is not None and not task.done():
                     task.cancel()

@@ -362,6 +362,41 @@ def test_cancel_during_archive_staging_wins_before_publication(
     run(scenario())
 
 
+def test_hard_deadline_during_archive_staging_publishes_no_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_started = threading.Event()
+    allow_archive = threading.Event()
+    original_create = CandidateArchive.create
+
+    def slow_create(output: Path, batch: CandidateBatch) -> Path:
+        archive_started.set()
+        assert allow_archive.wait(timeout=3)
+        return original_create(output, batch)
+
+    monkeypatch.setattr(CandidateArchive, "create", slow_create)
+
+    async def scenario() -> None:
+        service = SolverJobService(
+            tmp_path / "jobs",
+            tmp_path / "archives",
+            worker_command=fake_command("complete"),
+        )
+        created = await service.start(make_request(budget=1.0))
+        assert await asyncio.to_thread(archive_started.wait, 1)
+
+        await asyncio.sleep(1.05)
+        allow_archive.set()
+        terminal = await service.wait(created.job_id)
+
+        assert terminal.status is JobStatus.TIMED_OUT
+        assert terminal.archive_path is None
+        assert not (tmp_path / "archives" / created.job_id).exists()
+        assert not (service.job_directory(created.job_id) / "candidate-archive.staging").exists()
+
+    run(scenario())
+
+
 def test_cancel_kills_worker_descendants_in_its_process_group(tmp_path: Path) -> None:
     async def scenario() -> None:
         service = SolverJobService(
