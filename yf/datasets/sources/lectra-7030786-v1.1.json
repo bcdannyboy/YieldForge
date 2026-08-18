@@ -1,0 +1,39 @@
+{
+  "schema_version": "yieldforge.dataset-source.v1",
+  "dataset_id": "lectra-7030786-v1.1",
+  "title": "Nesting Tasks Dataset for 2D-Nesting Efficiency Estimation",
+  "doi": "10.5281/zenodo.7030786",
+  "version": "1.1",
+  "license": "CC-BY-4.0",
+  "source_page": "https://zenodo.org/records/7030786",
+  "files": [
+    {
+      "name": "parts.gz",
+      "url": "https://zenodo.org/api/records/7030786/files/parts.gz/content",
+      "size_bytes": 22476589,
+      "checksum_algorithm": "md5",
+      "checksum": "d8b51403f0cab79ec990b95a40911c1c"
+    },
+    {
+      "name": "constraints.gz",
+      "url": "https://zenodo.org/api/records/7030786/files/constraints.gz/content",
+      "size_bytes": 16299551,
+      "checksum_algorithm": "md5",
+      "checksum": "e12581851bd2a357145a9dfccdad5363"
+    },
+    {
+      "name": "shapes.gz",
+      "url": "https://zenodo.org/api/records/7030786/files/shapes.gz/content",
+      "size_bytes": 147824458,
+      "checksum_algorithm": "md5",
+      "checksum": "ff1623f24adf031710450a30e72984f2"
+    },
+    {
+      "name": "tasks.gz",
+      "url": "https://zenodo.org/api/records/7030786/files/tasks.gz/content",
+      "size_bytes": 1208474,
+      "checksum_algorithm": "md5",
+      "checksum": "ac18fc58408a3fc832cfd6757b4b16ca"
+    }
+  ]
+}
