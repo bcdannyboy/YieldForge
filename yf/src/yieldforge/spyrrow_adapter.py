@@ -179,10 +179,18 @@ class SpyrrowAdapter:
 
         thread = Thread(target=solve, name="spyrrow-solve", daemon=True)
         thread.start()
+        drain_errors: list[BaseException] = []
         report_errors: list[BaseException] = []
 
         def drain_reports() -> None:
-            for report_type, solution in progress.drain():
+            if drain_errors or report_errors:
+                return
+            try:
+                reports = progress.drain()
+            except BaseException as error:
+                drain_errors.append(error)
+                return
+            for report_type, solution in reports:
                 if report_errors:
                     continue
                 try:
@@ -194,6 +202,8 @@ class SpyrrowAdapter:
             drain_reports()
             thread.join(timeout=0.05)
         drain_reports()
+        if drain_errors:
+            raise drain_errors[0]
         if report_errors:
             raise report_errors[0]
         if errors:

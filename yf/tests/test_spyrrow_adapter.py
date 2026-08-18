@@ -426,6 +426,77 @@ def test_returned_final_authoritatively_replaces_queued_final_identity() -> None
     assert result.duplicate_candidate_count == 1
 
 
+class FailingProgressQueue:
+    def __init__(self, api: "DrainFailureFakeSpyrrow") -> None:
+        self.api = api
+        self.drain_calls = 0
+
+    def drain(self) -> list[tuple[FakeReportType, SimpleNamespace]]:
+        self.drain_calls += 1
+        self.api.drain_attempted.set()
+        if self.drain_calls == 1:
+            raise RuntimeError("progress drain failed")
+        raise AssertionError("failed progress queue must not be drained again")
+
+
+class DrainFailureInstance:
+    def __init__(self, api: "DrainFailureFakeSpyrrow") -> None:
+        self.api = api
+
+    def solve(self, config: object, *, progress: FailingProgressQueue) -> SimpleNamespace:
+        try:
+            assert self.api.drain_attempted.wait(timeout=1)
+            assert self.api.allow_finish.wait(timeout=1)
+            self.api.solve_finished = True
+            return self.api.final_solution
+        finally:
+            self.api.solver_exited.set()
+
+
+class DrainFailureFakeSpyrrow(FakeSpyrrow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.drain_attempted = Event()
+        self.allow_finish = Event()
+        self.solver_exited = Event()
+        self.solve_finished = False
+        self.progress_queue: FailingProgressQueue | None = None
+
+    def StripPackingInstance(self, *args: object) -> DrainFailureInstance:
+        self.instance_args = args
+        return DrainFailureInstance(self)
+
+    def ProgressQueue(self) -> FailingProgressQueue:
+        self.progress_queue = FailingProgressQueue(self)
+        return self.progress_queue
+
+
+def test_run_waits_for_solver_and_does_not_redrain_after_progress_queue_error() -> None:
+    api = DrainFailureFakeSpyrrow()
+    callback_ids: list[str] = []
+    release_solver = Timer(0.05, api.allow_finish.set)
+    release_solver.start()
+    started_at = monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="progress drain failed"):
+            SpyrrowAdapter(api=api, spyrrow_version="test").run(
+                problem(),
+                SpyrrowRunConfig(seed=17, total_computation_time=1),
+                on_candidate=lambda candidate: callback_ids.append(candidate.candidate_id),
+            )
+    finally:
+        elapsed = monotonic() - started_at
+        api.allow_finish.set()
+        release_solver.cancel()
+        assert api.solver_exited.wait(timeout=1)
+
+    assert elapsed >= 0.04
+    assert api.solve_finished is True
+    assert api.progress_queue is not None
+    assert api.progress_queue.drain_calls == 1
+    assert callback_ids == []
+
+
 def test_run_preserves_native_solver_errors() -> None:
     api = FakeSpyrrow()
     api.solve_error = RuntimeError("native solver failed")
