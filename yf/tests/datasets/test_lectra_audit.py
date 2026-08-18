@@ -14,6 +14,7 @@ from yieldforge.datasets.lectra_audit import (
     NumericSummary,
     audit_frames,
     report_to_json,
+    validate_frame_schema,
 )
 
 TASK_COLUMNS = [
@@ -81,11 +82,11 @@ def trusted_frames() -> dict[str, pd.DataFrame]:
 
     parts = pd.DataFrame(
         [
-            {"tasks_index": 10, "parts_id": 1, "shape_hash": "shape-a"},
-            {"tasks_index": 10, "parts_id": 2, "shape_hash": "shape-a"},
-            {"tasks_index": 10, "parts_id": 2, "shape_hash": "shape-b"},
-            {"tasks_index": 11, "parts_id": 4, "shape_hash": "shape-c"},
-            {"tasks_index": 99, "parts_id": 3, "shape_hash": "shape-missing"},
+            {"tasks_index": 10, "part_id": 1, "shape_hash": "shape-a"},
+            {"tasks_index": 10, "part_id": 2, "shape_hash": "shape-a"},
+            {"tasks_index": 10, "part_id": 2, "shape_hash": "shape-b"},
+            {"tasks_index": 11, "part_id": 4, "shape_hash": "shape-c"},
+            {"tasks_index": 99, "part_id": 3, "shape_hash": "shape-missing"},
         ]
     )
     shapes = pd.DataFrame(
@@ -302,7 +303,7 @@ def test_malformed_constraint_task_key_is_counted_without_crashing() -> None:
 def test_missing_required_columns_fail_once_with_complete_map() -> None:
     frames = trusted_frames()
     frames["tasks"] = frames["tasks"].drop(columns=["efficiency", "duration"])
-    frames["parts"] = frames["parts"].drop(columns=["parts_id"])
+    frames["parts"] = frames["parts"].drop(columns=["part_id"])
     frames.pop("constraints")
 
     with pytest.raises(LectraMissingColumnsError) as caught:
@@ -314,12 +315,57 @@ def test_missing_required_columns_fail_once_with_complete_map() -> None:
 
     assert caught.value.missing_columns == {
         "tasks": ["duration", "efficiency"],
-        "parts": ["parts_id"],
+        "parts": ["part_id"],
         "shapes": [],
         "constraints": sorted(CONSTRAINT_COLUMNS),
     }
     assert "constraints" in str(caught.value)
     assert "efficiency" in str(caught.value)
+
+
+def test_validate_frame_schema_accepts_one_observed_table_without_other_frames() -> None:
+    frame = trusted_frames()["parts"]
+
+    observed = validate_frame_schema("parts", frame)
+
+    assert observed == ["tasks_index", "part_id", "shape_hash"]
+
+
+def test_legacy_parts_id_is_not_aliased_and_is_inventoried_as_schema_drift() -> None:
+    frame = trusted_frames()["parts"].rename(columns={"part_id": "parts_id"})
+
+    with pytest.raises(LectraMissingColumnsError) as caught:
+        validate_frame_schema("parts", frame)
+
+    assert caught.value.missing_columns == {"parts": ["part_id"]}
+    assert caught.value.unexpected_columns == {"parts": ["parts_id"]}
+    assert "parts_id" in str(caught.value)
+
+
+def test_audit_reuses_single_frame_validation_but_preserves_complete_missing_map() -> None:
+    frames = trusted_frames()
+    frames["parts"] = frames["parts"].rename(columns={"part_id": "parts_id"})
+    frames["tasks"] = frames["tasks"].drop(columns=["duration"])
+
+    with pytest.raises(LectraMissingColumnsError) as caught:
+        audit_frames(
+            frames,
+            dataset_id="lectra-test",
+            source_checksums={"tasks.gz": "a" * 32},
+        )
+
+    assert caught.value.missing_columns == {
+        "tasks": ["duration"],
+        "parts": ["part_id"],
+        "shapes": [],
+        "constraints": [],
+    }
+    assert caught.value.unexpected_columns == {
+        "tasks": ["future_column"],
+        "parts": ["parts_id"],
+        "shapes": [],
+        "constraints": [],
+    }
 
 
 def test_report_contract_is_strict_and_frozen() -> None:
@@ -621,7 +667,7 @@ def test_invalid_dataframe_column_labels_are_reported_before_schema_metrics() ->
     task_columns: list[object] = list(frames["tasks"].columns)
     task_columns[0] = 1
     frames["tasks"].columns = task_columns
-    frames["parts"].columns = ["tasks_index", "parts_id", "parts_id"]
+    frames["parts"].columns = ["tasks_index", "part_id", "part_id"]
     shape_columns: list[object] = [1, "1", "sizes"]
     frames["shapes"].columns = shape_columns
 
@@ -634,7 +680,7 @@ def test_invalid_dataframe_column_labels_are_reported_before_schema_metrics() ->
 
     assert caught.value.invalid_columns == {
         "tasks": ["column[0] has non-string label of type int: 1"],
-        "parts": ["column[2] duplicates string label 'parts_id' from column[1]"],
+        "parts": ["column[2] duplicates string label 'part_id' from column[1]"],
         "shapes": ["column[0] has non-string label of type int: 1"],
         "constraints": [],
     }

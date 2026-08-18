@@ -31,7 +31,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "is_val",
         "is_test",
     ),
-    "parts": ("tasks_index", "parts_id", "shape_hash"),
+    "parts": ("tasks_index", "part_id", "shape_hash"),
     "shapes": ("shape_hash", "raw", "sizes"),
     "constraints": (
         "type",
@@ -210,10 +210,23 @@ FAILURE_EVIDENCE_MAP: dict[tuple[str, str], str] = {
 class LectraMissingColumnsError(ValueError):
     """Raised once with every missing required column, before any metrics run."""
 
-    def __init__(self, missing_columns: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        missing_columns: dict[str, list[str]],
+        *,
+        unexpected_columns: dict[str, list[str]] | None = None,
+    ) -> None:
         self.missing_columns = missing_columns
-        detail = json.dumps(missing_columns, sort_keys=True, separators=(",", ":"))
-        super().__init__(f"Lectra frames are missing required columns: {detail}")
+        self.unexpected_columns = unexpected_columns or {table: [] for table in missing_columns}
+        detail = json.dumps(
+            {
+                "missing_columns": self.missing_columns,
+                "unexpected_columns": self.unexpected_columns,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        super().__init__(f"Lectra frame schema mismatch: {detail}")
 
 
 class LectraInvalidColumnsError(ValueError):
@@ -704,6 +717,32 @@ class _BoundedExamples:
         return {key: list(values) for key, values in sorted(self._values.items())}
 
 
+def validate_frame_schema(table_name: str, frame: Any) -> list[str]:
+    """Validate one trusted frame's observed labels and required source columns.
+
+    The return value preserves source column order for callers that need to
+    inventory dtypes or unexpected columns without retaining any other frame.
+    """
+
+    if table_name not in REQUIRED_COLUMNS:
+        raise ValueError(f"unknown Lectra table: {table_name!r}")
+
+    invalid_columns = {table_name: _column_label_issues(frame)}
+    if invalid_columns[table_name]:
+        raise LectraInvalidColumnsError(invalid_columns)
+
+    observed_columns = _frame_columns(frame)
+    missing_columns = sorted(set(REQUIRED_COLUMNS[table_name]) - set(observed_columns))
+    unexpected_columns = sorted(set(observed_columns) - set(REQUIRED_COLUMNS[table_name]))
+    if missing_columns:
+        raise LectraMissingColumnsError(
+            {table_name: missing_columns},
+            unexpected_columns={table_name: unexpected_columns},
+        )
+
+    return observed_columns
+
+
 def audit_frames(
     frames: Mapping[str, Any],
     *,
@@ -712,22 +751,37 @@ def audit_frames(
 ) -> LectraAuditReport:
     """Audit four already-trusted dataframe-like objects without source inference."""
 
-    invalid_columns = {
-        table: _column_label_issues(frames[table]) if table in frames else []
-        for table in TABLE_ORDER
-    }
+    invalid_columns = {table: [] for table in TABLE_ORDER}
+    observed_columns: dict[str, list[str]] = {table: [] for table in TABLE_ORDER}
+    missing_columns: dict[str, list[str]] = {table: [] for table in TABLE_ORDER}
+    unexpected_columns: dict[str, list[str]] = {table: [] for table in TABLE_ORDER}
+
+    for table in TABLE_ORDER:
+        if table not in frames:
+            missing_columns[table] = sorted(REQUIRED_COLUMNS[table])
+            continue
+        try:
+            observed_columns[table] = validate_frame_schema(table, frames[table])
+        except LectraInvalidColumnsError as error:
+            invalid_columns[table] = error.invalid_columns[table]
+        except LectraMissingColumnsError as error:
+            observed_columns[table] = _frame_columns(frames[table])
+            missing_columns[table] = error.missing_columns[table]
+            unexpected_columns[table] = error.unexpected_columns[table]
+
     if any(invalid_columns.values()):
         raise LectraInvalidColumnsError(invalid_columns)
 
-    observed_columns = {
-        table: _frame_columns(frames[table]) if table in frames else [] for table in TABLE_ORDER
-    }
-    missing_columns = {
-        table: sorted(set(REQUIRED_COLUMNS[table]) - set(observed_columns[table]))
-        for table in TABLE_ORDER
-    }
     if any(missing_columns.values()):
-        raise LectraMissingColumnsError(missing_columns)
+        for table in TABLE_ORDER:
+            if table in frames and not unexpected_columns[table]:
+                unexpected_columns[table] = sorted(
+                    set(observed_columns[table]) - set(REQUIRED_COLUMNS[table])
+                )
+        raise LectraMissingColumnsError(
+            missing_columns,
+            unexpected_columns=unexpected_columns,
+        )
 
     table_rows = {table: len(frames[table]) for table in TABLE_ORDER}
     dtypes = {table: _frame_dtypes(frames[table], observed_columns[table]) for table in TABLE_ORDER}
@@ -1032,7 +1086,7 @@ def _audit_parts(
     referenced_shapes: set[object] = set()
 
     for row_number, (task, part, shape) in enumerate(
-        _iter_rows(frame, ("tasks_index", "parts_id", "shape_hash"))
+        _iter_rows(frame, ("tasks_index", "part_id", "shape_hash"))
     ):
         valid_composite = _valid_key(task) and _is_integral(part)
         composite = (task, int(part)) if valid_composite else None
@@ -1431,8 +1485,7 @@ def _count_semantics() -> dict[str, str]:
             "task rows after the first occurrence of an already observed tasks_index"
         ),
         "part_composite_key_rows_beyond_first": (
-            "part rows after the first occurrence of an already observed "
-            "(tasks_index, parts_id) key"
+            "part rows after the first occurrence of an already observed (tasks_index, part_id) key"
         ),
         "shape_key_rows_beyond_first": (
             "shape rows after the first occurrence of an already observed shape_hash"
@@ -1442,7 +1495,7 @@ def _count_semantics() -> dict[str, str]:
         "constraint_rows_missing_task": ("constraint rows whose tasks_index is absent from tasks"),
         "constraint_part_reference_occurrences_missing_part": (
             "integral entries across parts_1 and parts_2 that do not resolve to an observed "
-            "(constraint tasks_index, referenced parts_id) part key"
+            "(constraint tasks_index, referenced part_id) part key"
         ),
         "task_repeated_shape_row_summary": (
             "per declared task, part-row count minus distinct observed shape_hash count"
