@@ -23,3 +23,21 @@ def test_installed_spyrrow_generates_a_feasible_candidate() -> None:
         len(candidate.placements) == sum(part.demand for part in problem.parts)
         for candidate in batch.candidates
     )
+
+
+@pytest.mark.integration
+def test_installed_spyrrow_streams_the_same_candidates_it_returns() -> None:
+    fixture = Path(__file__).parents[1] / "benchmarks" / "static" / "m0-smoke.json"
+    problem = StripPackingProblem.model_validate_json(fixture.read_text())
+    callback_ids: list[str] = []
+
+    result = SpyrrowAdapter().run(
+        problem,
+        SpyrrowRunConfig(seed=0, total_computation_time=1, num_workers=1),
+        on_candidate=lambda candidate: callback_ids.append(candidate.candidate_id),
+    )
+
+    candidate_ids = [candidate.candidate_id for candidate in result.batch.candidates]
+    assert callback_ids == candidate_ids
+    assert result.final_candidate_id in candidate_ids
+    assert result.native_report_count >= len(candidate_ids)

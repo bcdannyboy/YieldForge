@@ -102,3 +102,15 @@ class CandidateBatch(ContractModel):
     solver: SolverIdentity
     config: SpyrrowRunConfig
     candidates: list[Candidate]
+
+
+class SpyrrowRunResult(ContractModel):
+    """A completed adapter run with truthful native-report accounting."""
+
+    schema_version: Literal["yieldforge.spyrrow-run.v1"] = "yieldforge.spyrrow-run.v1"
+    batch: CandidateBatch
+    final_candidate_id: str | None
+    native_report_count: int = Field(ge=0)
+    ignored_report_count: int = Field(ge=0)
+    duplicate_candidate_count: int = Field(ge=0)
+    sheet_overflow_count: int = Field(ge=0)

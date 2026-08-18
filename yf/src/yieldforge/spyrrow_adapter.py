@@ -3,6 +3,7 @@
 import hashlib
 import importlib.metadata
 import json
+from collections.abc import Callable
 from threading import Thread
 from typing import Any
 
@@ -13,6 +14,7 @@ from yieldforge.domain import (
     Placement,
     SolverIdentity,
     SpyrrowRunConfig,
+    SpyrrowRunResult,
     StripPackingProblem,
 )
 
@@ -49,6 +51,18 @@ class SpyrrowAdapter:
         self.spyrrow_version = spyrrow_version or importlib.metadata.version("spyrrow")
 
     def generate(self, problem: StripPackingProblem, config: SpyrrowRunConfig) -> CandidateBatch:
+        """Generate a candidate batch using the legacy adapter interface."""
+
+        return self.run(problem, config).batch
+
+    def run(
+        self,
+        problem: StripPackingProblem,
+        config: SpyrrowRunConfig,
+        on_candidate: Callable[[Candidate], None] | None = None,
+    ) -> SpyrrowRunResult:
+        """Run Spyrrow and publish each accepted candidate as it is reported."""
+
         items = [
             self.api.Item(
                 part.id,
@@ -66,14 +80,30 @@ class SpyrrowAdapter:
             num_workers=config.num_workers,
             seed=config.seed,
         )
-        reports = self._solve_with_progress(instance, solver_config)
 
         candidates: list[Candidate] = []
         seen: set[str] = set()
-        for report_type, solution in reports:
+        final_candidate_id: str | None = None
+        native_report_count = 0
+        ignored_report_count = 0
+        duplicate_candidate_count = 0
+        sheet_overflow_count = 0
+
+        def process_report(report_type: Any, solution: Any) -> None:
+            nonlocal duplicate_candidate_count
+            nonlocal final_candidate_id
+            nonlocal ignored_report_count
+            nonlocal native_report_count
+            nonlocal sheet_overflow_count
+
+            native_report_count += 1
             normalized_type = self._normalize_report_type(report_type)
-            if normalized_type is None or solution.width > problem.sheet_length + 1e-9:
-                continue
+            if normalized_type is None:
+                ignored_report_count += 1
+                return
+            if solution.width > problem.sheet_length + 1e-9:
+                sheet_overflow_count += 1
+                return
             placements = [
                 Placement(
                     part_id=placed.id,
@@ -83,31 +113,49 @@ class SpyrrowAdapter:
                 for placed in solution.placed_items
             ]
             candidate_id = _candidate_id(solution.width, placements)
+            if normalized_type == CandidateReportType.FINAL:
+                final_candidate_id = candidate_id
             if candidate_id in seen:
-                continue
+                duplicate_candidate_count += 1
+                return
             seen.add(candidate_id)
-            candidates.append(
-                Candidate(
-                    candidate_id=candidate_id,
-                    report_type=normalized_type,
-                    seed=config.seed,
-                    width=solution.width,
-                    density=solution.density,
-                    placements=placements,
-                )
+            candidate = Candidate(
+                candidate_id=candidate_id,
+                report_type=normalized_type,
+                seed=config.seed,
+                width=solution.width,
+                density=solution.density,
+                placements=placements,
             )
+            candidates.append(candidate)
+            if on_candidate is not None:
+                on_candidate(candidate)
 
-        return CandidateBatch(
-            problem=problem,
-            solver=SolverIdentity(
-                spyrrow_version=self.spyrrow_version,
-                sparrow_revision=SPARROW_REVISION,
+        self._solve_with_progress(instance, solver_config, process_report)
+
+        return SpyrrowRunResult(
+            batch=CandidateBatch(
+                problem=problem,
+                solver=SolverIdentity(
+                    spyrrow_version=self.spyrrow_version,
+                    sparrow_revision=SPARROW_REVISION,
+                ),
+                config=config,
+                candidates=candidates,
             ),
-            config=config,
-            candidates=candidates,
+            final_candidate_id=final_candidate_id,
+            native_report_count=native_report_count,
+            ignored_report_count=ignored_report_count,
+            duplicate_candidate_count=duplicate_candidate_count,
+            sheet_overflow_count=sheet_overflow_count,
         )
 
-    def _solve_with_progress(self, instance: Any, config: Any) -> list[tuple[Any, Any]]:
+    def _solve_with_progress(
+        self,
+        instance: Any,
+        config: Any,
+        on_report: Callable[[Any, Any], None],
+    ) -> None:
         progress = self.api.ProgressQueue()
         result: list[Any] = []
         errors: list[BaseException] = []
@@ -120,15 +168,15 @@ class SpyrrowAdapter:
 
         thread = Thread(target=solve, name="spyrrow-solve", daemon=True)
         thread.start()
-        reports: list[tuple[Any, Any]] = []
         while thread.is_alive():
-            reports.extend(progress.drain())
+            for report_type, solution in progress.drain():
+                on_report(report_type, solution)
             thread.join(timeout=0.05)
-        reports.extend(progress.drain())
+        for report_type, solution in progress.drain():
+            on_report(report_type, solution)
         if errors:
             raise errors[0]
-        reports.append((self.api.ReportType.Final, result[0]))
-        return reports
+        on_report(self.api.ReportType.Final, result[0])
 
     def _normalize_report_type(self, report_type: Any) -> CandidateReportType | None:
         if report_type == self.api.ReportType.ExplFeas:
