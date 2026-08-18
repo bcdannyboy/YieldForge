@@ -221,6 +221,24 @@ def test_datasets_audit_check_rejects_malformed_or_nonfinite_report(
         )
 
 
+def test_datasets_audit_check_wraps_deep_json_recursion(tmp_path: Path) -> None:
+    report_path, manifest_path = write_audit_inputs(tmp_path)
+    depth = max(sys.getrecursionlimit() * 20, 20_000)
+    report_path.write_text("[" * depth + "0" + "]" * depth, encoding="utf-8")
+
+    with pytest.raises(DatasetAuditCheckError, match="nesting depth"):
+        main(
+            [
+                "datasets",
+                "audit-check",
+                "--report",
+                str(report_path),
+                "--manifest",
+                str(manifest_path),
+            ]
+        )
+
+
 def test_datasets_audit_check_rejects_duplicate_report_keys_recursively(tmp_path: Path) -> None:
     report_path, manifest_path = write_audit_inputs(tmp_path)
     report_json = report_path.read_text(encoding="utf-8")

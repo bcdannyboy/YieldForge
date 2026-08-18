@@ -201,6 +201,16 @@ def test_report_validation_is_size_bounded_strict_and_manifest_bound(tmp_path: P
         runner._validate_report(b'{"outer":{"x":1,"x":2}}', manifest, max_bytes=100_000)
 
 
+def test_runner_wraps_deep_json_recursion_as_qualification_error(tmp_path: Path) -> None:
+    runner = _load_runner()
+    _, manifest = _valid_fixture_report(tmp_path)
+    depth = max(sys.getrecursionlimit() * 20, 20_000)
+    payload = ("[" * depth + "0" + "]" * depth).encode()
+
+    with pytest.raises(runner.QualifierRunnerError, match="nesting depth"):
+        runner._validate_report(payload, manifest)
+
+
 def test_runner_delegates_passive_report_policy() -> None:
     source = RUNNER_PATH.read_text()
 

@@ -71,6 +71,10 @@ def decode_strict_json_bytes(
         else:
             detail = f"malformed JSON: {error.msg}"
         raise PassiveEvidenceError(f"Invalid {label}: {detail}") from error
+    except RecursionError as error:
+        raise PassiveEvidenceError(
+            f"Invalid {label}: JSON nesting depth exceeds the decoder limit"
+        ) from error
     except ValueError as error:
         raise PassiveEvidenceError(f"Invalid {label}: {error}") from error
 

@@ -93,6 +93,14 @@ def test_strict_decoder_rejects_payload_over_limit() -> None:
         )
 
 
+def test_strict_decoder_wraps_deep_json_recursion() -> None:
+    depth = max(sys.getrecursionlimit() * 20, 20_000)
+    payload = ("[" * depth + "0" + "]" * depth).encode()
+
+    with pytest.raises(PassiveEvidenceError, match="nesting depth"):
+        decode_strict_json_bytes(payload, label="test evidence")
+
+
 def test_reader_reads_one_regular_file_descriptor(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     evidence_path = tmp_path / "report.json"
     evidence_path.write_bytes(b'{"safe":true}')
