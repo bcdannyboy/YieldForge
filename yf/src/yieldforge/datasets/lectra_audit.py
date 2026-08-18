@@ -139,6 +139,16 @@ BOUNDED_EXAMPLE_KEYS = (
     "missing_sheet_type_tasks",
     *NUMERIC_EXAMPLE_KEYS,
 )
+RAW_ENCODING_KEYS = frozenset({"flat_numeric_even", "flat_numeric_odd", "point_pairs", "malformed"})
+SIZE_RELATION_KEYS = frozenset(
+    {
+        "not_evaluable",
+        "pointpairs_sum_sizes_eq_raw_length",
+        "twice_sum_sizes_eq_raw_length",
+        "sum_sizes_eq_raw_length",
+        "no_declared_relation",
+    }
+)
 EXACT_FIELD_KEYS: dict[str, tuple[str, ...]] = {
     "table_rows": TABLE_ORDER,
     "columns": TABLE_ORDER,
@@ -204,6 +214,15 @@ class LectraMissingColumnsError(ValueError):
         self.missing_columns = missing_columns
         detail = json.dumps(missing_columns, sort_keys=True, separators=(",", ":"))
         super().__init__(f"Lectra frames are missing required columns: {detail}")
+
+
+class LectraInvalidColumnsError(ValueError):
+    """Raised with all non-string or duplicate column labels before schema work."""
+
+    def __init__(self, invalid_columns: dict[str, list[str]]) -> None:
+        self.invalid_columns = invalid_columns
+        detail = json.dumps(invalid_columns, sort_keys=True, separators=(",", ":"))
+        super().__init__(f"Lectra frames have invalid column labels: {detail}")
 
 
 class NumericSummary(ContractModel):
@@ -368,6 +387,48 @@ class LectraAuditReport(ContractModel):
                     )
         return value
 
+    @field_validator("raw_encoding_frequency")
+    @classmethod
+    def require_known_raw_encoding_keys(
+        cls, value: dict[str, NonNegativeInt]
+    ) -> dict[str, NonNegativeInt]:
+        if not set(value).issubset(RAW_ENCODING_KEYS):
+            raise ValueError("raw encoding inventory key is not recognized")
+        return value
+
+    @field_validator("size_relation_frequency")
+    @classmethod
+    def require_known_size_relation_keys(
+        cls, value: dict[str, NonNegativeInt]
+    ) -> dict[str, NonNegativeInt]:
+        if not set(value).issubset(SIZE_RELATION_KEYS):
+            raise ValueError("size relation inventory key is not recognized")
+        return value
+
+    @field_validator("source_declared_subshape_count_frequency")
+    @classmethod
+    def require_canonical_subshape_count_keys(
+        cls, value: dict[str, NonNegativeInt]
+    ) -> dict[str, NonNegativeInt]:
+        for key in value:
+            try:
+                count = int(key)
+            except ValueError as error:
+                raise ValueError("subshape inventory key must be a positive integer") from error
+            if count < 1 or str(count) != key:
+                raise ValueError("subshape inventory key must be a canonical positive integer")
+        return value
+
+    @field_validator("constraint_parameter_shape")
+    @classmethod
+    def require_known_parameter_shape_keys(
+        cls, value: dict[str, dict[str, NonNegativeInt]]
+    ) -> dict[str, dict[str, NonNegativeInt]]:
+        for inventory in value.values():
+            if any(not _is_parameter_shape_key(key) for key in inventory):
+                raise ValueError("constraint parameter shape inventory key is not recognized")
+        return value
+
     @field_validator("count_semantics")
     @classmethod
     def require_nonempty_count_semantics(cls, value: dict[str, str]) -> dict[str, str]:
@@ -392,20 +453,209 @@ class LectraAuditReport(ContractModel):
     @model_validator(mode="after")
     def require_evidence_for_nonzero_failures(self) -> Self:
         for (field, metric), example_category in FAILURE_EVIDENCE_MAP.items():
-            if getattr(self, field)[metric] > 0 and not self.bounded_examples[example_category]:
+            count = getattr(self, field)[metric]
+            has_evidence = bool(self.bounded_examples[example_category])
+            if count > 0 and not has_evidence:
                 raise ValueError(
                     f"nonzero {field}.{metric} requires bounded evidence in {example_category}"
                 )
+            if count == 0 and has_evidence:
+                raise ValueError(f"zero count requires empty evidence in {example_category}")
         for column in NUMERIC_TASK_COLUMNS:
             summary: NumericSummary = getattr(self, f"{column}_summary")
             for classification in ("missing", "nonfinite", "invalid"):
                 count = getattr(summary, f"{classification}_count")
                 example_category = f"{column}_{classification}_values"
-                if count > 0 and not self.bounded_examples[example_category]:
+                has_evidence = bool(self.bounded_examples[example_category])
+                if count > 0 and not has_evidence:
                     raise ValueError(
                         f"nonzero {column}_summary.{classification}_count requires "
                         f"bounded evidence in {example_category}"
                     )
+                if count == 0 and has_evidence:
+                    raise ValueError(f"zero count requires empty evidence in {example_category}")
+        return self
+
+    @model_validator(mode="after")
+    def require_cross_field_consistency(self) -> Self:
+        task_rows = self.table_rows["tasks"]
+        part_rows = self.table_rows["parts"]
+        shape_rows = self.table_rows["shapes"]
+        constraint_rows = self.table_rows["constraints"]
+
+        for table in TABLE_ORDER:
+            observed = self.columns[table]
+            if len(observed) != len(set(observed)):
+                raise ValueError(f"{table} column inventory must be unique")
+            expected_missing = sorted(set(REQUIRED_COLUMNS[table]) - set(observed))
+            expected_unexpected = sorted(set(observed) - set(REQUIRED_COLUMNS[table]))
+            if self.missing_columns[table] != expected_missing:
+                raise ValueError(f"{table} missing-column inventory is inconsistent")
+            if expected_missing:
+                raise ValueError("complete audit reports cannot contain missing required columns")
+            if self.unexpected_columns[table] != expected_unexpected:
+                raise ValueError(f"{table} unexpected-column inventory is inconsistent")
+            if set(self.dtypes[table]) != set(observed):
+                raise ValueError(f"{table} dtype inventory must match observed columns")
+
+        for column in NUMERIC_TASK_COLUMNS:
+            if getattr(self, f"{column}_summary").count != task_rows:
+                raise ValueError("task numeric summary population must equal task rows")
+
+        valid_unique_tasks = _valid_unique_population(
+            row_count=task_rows,
+            invalid_count=self.key_failure_counts[KEY_FAILURE_KEYS[0]],
+            duplicate_count=self.duplicate_counts[DUPLICATE_KEYS[0]],
+            subject="task",
+        )
+        for field in (
+            "task_part_row_summary",
+            "task_unique_shape_summary",
+            "task_repeated_shape_row_summary",
+        ):
+            summary = getattr(self, field)
+            _require_count_population_summary(summary, field)
+            if summary.count != valid_unique_tasks:
+                raise ValueError("task recurrence summary population is inconsistent")
+
+        valid_unique_shapes = _valid_unique_population(
+            row_count=shape_rows,
+            invalid_count=self.key_failure_counts[KEY_FAILURE_KEYS[2]],
+            duplicate_count=self.duplicate_counts[DUPLICATE_KEYS[2]],
+            subject="shape",
+        )
+        for field in (
+            "shape_part_row_recurrence_summary",
+            "shape_distinct_task_recurrence_summary",
+        ):
+            summary = getattr(self, field)
+            _require_count_population_summary(summary, field)
+            if summary.count != valid_unique_shapes:
+                raise ValueError("shape recurrence summary population is inconsistent")
+
+        _require_inventory_total(self.sheet_type_frequency, task_rows, "sheet type inventory total")
+        _require_inventory_total(
+            self.raw_encoding_frequency, shape_rows, "raw encoding inventory total"
+        )
+        _require_inventory_total(
+            self.size_relation_frequency, shape_rows, "size relation inventory total"
+        )
+        if (
+            sum(self.source_declared_subshape_count_frequency.values())
+            + self.malformed_counts["sizes_rows"]
+            != shape_rows
+        ):
+            raise ValueError("subshape inventory total is inconsistent with shape rows")
+        _require_inventory_total(
+            self.constraint_type_frequency,
+            constraint_rows,
+            "constraint type inventory total",
+        )
+        for column in CONSTRAINT_PARAMETER_COLUMNS:
+            _require_inventory_total(
+                self.constraint_parameter_presence[column],
+                constraint_rows,
+                "constraint parameter presence inventory total",
+            )
+            _require_inventory_total(
+                self.constraint_parameter_shape[column],
+                constraint_rows,
+                "constraint parameter shape inventory total",
+            )
+
+        if (
+            self.raw_encoding_frequency.get("malformed", 0)
+            != self.malformed_counts["raw_encoding_rows"]
+        ):
+            raise ValueError("malformed raw inventory and count must agree")
+        if (
+            self.constraint_type_frequency.get("<missing>", 0)
+            != self.malformed_counts["constraint_type_rows"]
+        ):
+            raise ValueError("missing constraint type inventory and count must agree")
+        if (
+            self.sheet_type_frequency.get("<missing>", 0)
+            != self.sheet_type_violation_counts["task_rows_with_missing_sheet_type"]
+        ):
+            raise ValueError("missing sheet type inventory and count must agree")
+        if self.malformed_counts["sizes_rows"] > self.size_relation_frequency.get(
+            "not_evaluable", 0
+        ):
+            raise ValueError("malformed sizes must be represented as not evaluable")
+        if self.key_failure_counts[KEY_FAILURE_KEYS[3]] > self.join_failures[JOIN_FAILURE_KEYS[2]]:
+            raise ValueError("invalid constraint task keys must also fail the task join")
+        if (
+            self.partition_violation_counts[PARTITION_VIOLATION_KEYS[0]]
+            > (self.partition_violation_counts[PARTITION_VIOLATION_KEYS[1]])
+        ):
+            raise ValueError("non-boolean partition rows must also violate assignment")
+
+        population_limits = (
+            (self.key_failure_counts, KEY_FAILURE_KEYS[0], task_rows),
+            (self.key_failure_counts, KEY_FAILURE_KEYS[1], part_rows),
+            (self.key_failure_counts, KEY_FAILURE_KEYS[2], shape_rows),
+            (self.key_failure_counts, KEY_FAILURE_KEYS[3], constraint_rows),
+            (self.duplicate_counts, DUPLICATE_KEYS[0], task_rows),
+            (self.duplicate_counts, DUPLICATE_KEYS[1], part_rows),
+            (self.duplicate_counts, DUPLICATE_KEYS[2], shape_rows),
+            (self.join_failures, JOIN_FAILURE_KEYS[0], part_rows),
+            (self.join_failures, JOIN_FAILURE_KEYS[1], part_rows),
+            (self.join_failures, JOIN_FAILURE_KEYS[2], constraint_rows),
+            (self.malformed_counts, MALFORMED_KEYS[0], shape_rows),
+            (self.malformed_counts, MALFORMED_KEYS[1], shape_rows),
+            (self.malformed_counts, MALFORMED_KEYS[2], constraint_rows),
+            (self.malformed_counts, MALFORMED_KEYS[3], constraint_rows * 2),
+            (self.unused_record_counts, UNUSED_RECORD_KEYS[0], task_rows),
+            (self.unused_record_counts, UNUSED_RECORD_KEYS[1], shape_rows),
+            (
+                self.sheet_dimension_violation_counts,
+                SHEET_DIMENSION_VIOLATION_KEYS[0],
+                task_rows,
+            ),
+            (
+                self.sheet_dimension_violation_counts,
+                SHEET_DIMENSION_VIOLATION_KEYS[1],
+                task_rows,
+            ),
+            (
+                self.sheet_type_violation_counts,
+                SHEET_TYPE_VIOLATION_KEYS[0],
+                task_rows,
+            ),
+            (
+                self.partition_violation_counts,
+                PARTITION_VIOLATION_KEYS[0],
+                task_rows,
+            ),
+            (
+                self.partition_violation_counts,
+                PARTITION_VIOLATION_KEYS[1],
+                task_rows,
+            ),
+        )
+        for metrics, key, population in population_limits:
+            if metrics[key] > population:
+                raise ValueError(f"{key} exceeds its source population")
+
+        if self.sheet_length_unconstrained_sentinel_count > task_rows:
+            raise ValueError("sheet length sentinel count exceeds its source population")
+        if any(count > task_rows for count in self.partition_true_frequency.values()):
+            raise ValueError("partition true count exceeds its source population")
+        if self.unused_record_counts[UNUSED_RECORD_KEYS[0]] > (
+            task_rows - self.key_failure_counts[KEY_FAILURE_KEYS[0]]
+        ):
+            raise ValueError("unused task census exceeds valid task rows")
+        if self.unused_record_counts[UNUSED_RECORD_KEYS[1]] > (
+            shape_rows - self.key_failure_counts[KEY_FAILURE_KEYS[2]]
+        ):
+            raise ValueError("unused shape census exceeds valid shape rows")
+
+        _valid_unique_population(
+            row_count=part_rows,
+            invalid_count=self.key_failure_counts[KEY_FAILURE_KEYS[1]],
+            duplicate_count=self.duplicate_counts[DUPLICATE_KEYS[1]],
+            subject="part",
+        )
         return self
 
 
@@ -435,6 +685,13 @@ def audit_frames(
     source_checksums: dict[str, str],
 ) -> LectraAuditReport:
     """Audit four already-trusted dataframe-like objects without source inference."""
+
+    invalid_columns = {
+        table: _column_label_issues(frames[table]) if table in frames else []
+        for table in TABLE_ORDER
+    }
+    if any(invalid_columns.values()):
+        raise LectraInvalidColumnsError(invalid_columns)
 
     observed_columns = {
         table: _frame_columns(frames[table]) if table in frames else [] for table in TABLE_ORDER
@@ -824,9 +1081,10 @@ def _audit_constraints(
         references = remaining[: len(CONSTRAINT_REFERENCE_COLUMNS)]
         parameters = remaining[len(CONSTRAINT_REFERENCE_COLUMNS) :]
         task_example = _task_row_identifier(task, row_number)
+        missing_constraint_type = _is_null(constraint_type)
         type_key = _literal_frequency_key(constraint_type)
         type_frequency[type_key] += 1
-        if type_key == "<missing>":
+        if missing_constraint_type:
             missing_type_rows += 1
             examples.add("missing_constraint_type_rows", task_example)
         valid_task = _valid_key(task)
@@ -886,8 +1144,34 @@ def _audit_constraints(
     }
 
 
+def _column_label_issues(frame: Any) -> list[str]:
+    issues: list[str] = []
+    first_string_position: dict[str, int] = {}
+    for position, label in enumerate(frame.columns):
+        if not isinstance(label, str):
+            issues.append(
+                f"column[{position}] has non-string label of type "
+                f"{type(label).__name__}: {_stable_label_literal(label)}"
+            )
+            continue
+        if label in first_string_position:
+            issues.append(
+                f"column[{position}] duplicates string label {label!r} "
+                f"from column[{first_string_position[label]}]"
+            )
+            continue
+        first_string_position[label] = position
+    return issues
+
+
+def _stable_label_literal(label: object) -> str:
+    if label is None or isinstance(label, (bool, int, float, str)):
+        return repr(label)
+    return f"<{type(label).__module__}.{type(label).__qualname__}>"
+
+
 def _frame_columns(frame: Any) -> list[str]:
-    return [str(column) for column in frame.columns]
+    return list(frame.columns)
 
 
 def _frame_dtypes(frame: Any, columns: list[str]) -> dict[str, str]:
@@ -950,7 +1234,8 @@ def _is_exact_minus_one(value: object) -> bool:
 def _boolean_value(value: object) -> bool | None:
     if isinstance(value, bool):
         return value
-    if type(value).__name__ == "bool_":
+    value_type = type(value)
+    if value_type.__module__.startswith("numpy") and value_type.__name__ in {"bool", "bool_"}:
         return bool(value)
     return None
 
@@ -1003,7 +1288,22 @@ def _size_relation(encoding: str, raw_length: int | None, sizes: list[int]) -> s
 
 
 def _literal_frequency_key(value: object) -> str:
-    return "<missing>" if _is_null(value) else str(value)
+    if _is_null(value):
+        return "<missing>"
+    if isinstance(value, str):
+        if value == "<missing>" or value.startswith(("<string:", "<typed:")):
+            return f"<string:{json.dumps(value, ensure_ascii=True)}>"
+        return value
+    boolean = _boolean_value(value)
+    if boolean is not None:
+        return f"<typed:boolean:{str(boolean).lower()}>"
+    if _is_integral(value):
+        return f"<typed:integer:{int(value)}>"
+    if isinstance(value, Real):
+        return f"<typed:number:{float(value)!r}>"
+    type_name = f"{type(value).__module__}.{type(value).__qualname__}"
+    rendered = json.dumps(str(value), ensure_ascii=True)
+    return f"<typed:{type_name}:{rendered}>"
 
 
 def _value_shape(value: object) -> str:
@@ -1056,6 +1356,47 @@ def _display_composite(task: object, part: object) -> str:
 
 def _sorted_counter(counter: Counter[str]) -> dict[str, int]:
     return dict(sorted(counter.items()))
+
+
+def _is_parameter_shape_key(key: str) -> bool:
+    fixed = {"missing", "string", "boolean", "integer", "number", "mapping"}
+    if key in fixed:
+        return True
+    if key.startswith("sequence_length_"):
+        suffix = key.removeprefix("sequence_length_")
+        return suffix.isdigit() and str(int(suffix)) == suffix
+    if key.startswith("other:"):
+        return bool(key.removeprefix("other:"))
+    return False
+
+
+def _valid_unique_population(
+    *, row_count: int, invalid_count: int, duplicate_count: int, subject: str
+) -> int:
+    if invalid_count > row_count:
+        raise ValueError(f"{subject} invalid-key count exceeds its source population")
+    valid_rows = row_count - invalid_count
+    maximum_duplicates = max(valid_rows - 1, 0)
+    if duplicate_count > maximum_duplicates:
+        raise ValueError(f"{subject} duplicate count exceeds its valid source population")
+    return valid_rows - duplicate_count
+
+
+def _require_count_population_summary(summary: NumericSummary, subject: str) -> None:
+    if (
+        summary.finite_count != summary.count
+        or summary.missing_count
+        or summary.nonfinite_count
+        or summary.invalid_count
+    ):
+        raise ValueError(f"{subject} must summarize only finite computed counts")
+    if summary.minimum is not None and summary.minimum < 0:
+        raise ValueError(f"{subject} cannot contain negative computed counts")
+
+
+def _require_inventory_total(inventory: Mapping[str, int], expected: int, subject: str) -> None:
+    if sum(inventory.values()) != expected:
+        raise ValueError(f"{subject} is inconsistent with source rows")
 
 
 def _count_semantics() -> dict[str, str]:

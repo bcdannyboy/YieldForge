@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from yieldforge.datasets.lectra_audit import (
     LectraAuditReport,
+    LectraInvalidColumnsError,
     LectraMissingColumnsError,
     NumericSummary,
     audit_frames,
@@ -492,3 +493,150 @@ def test_unused_record_counts_are_documented_as_census_without_failure_examples(
     assert "census" in report.count_semantics["shape_records_without_part_rows"]
     assert "unused_task_records" not in report.bounded_examples
     assert "unused_shape_records" not in report.bounded_examples
+
+
+def test_passive_report_rejects_task_numeric_and_recurrence_population_mismatches() -> None:
+    numeric_payload = audit().model_dump()
+    numeric_payload["efficiency_summary"]["count"] += 1
+    numeric_payload["efficiency_summary"]["finite_count"] += 1
+    with pytest.raises(ValidationError, match="task numeric summary population"):
+        LectraAuditReport.model_validate(numeric_payload)
+
+    task_recurrence_payload = audit().model_dump()
+    replacement = NumericSummary.from_values([0, 1]).model_dump()
+    task_recurrence_payload["task_part_row_summary"] = replacement
+    with pytest.raises(ValidationError, match="task recurrence summary population"):
+        LectraAuditReport.model_validate(task_recurrence_payload)
+
+    shape_recurrence_payload = audit().model_dump()
+    shape_recurrence_payload["shape_part_row_recurrence_summary"] = replacement
+    with pytest.raises(ValidationError, match="shape recurrence summary population"):
+        LectraAuditReport.model_validate(shape_recurrence_payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "raw_encoding_total",
+        "size_relation_total",
+        "subshape_total",
+        "constraint_type_total",
+        "constraint_parameter_presence_total",
+        "constraint_parameter_shape_total",
+    ],
+)
+def test_passive_report_rejects_inventory_totals_inconsistent_with_rows(
+    mutation: str,
+) -> None:
+    payload = audit().model_dump()
+    if mutation == "raw_encoding_total":
+        payload["raw_encoding_frequency"]["malformed"] += 1
+    elif mutation == "size_relation_total":
+        payload["size_relation_frequency"]["not_evaluable"] += 1
+    elif mutation == "subshape_total":
+        payload["source_declared_subshape_count_frequency"]["1"] += 1
+    elif mutation == "constraint_type_total":
+        payload["constraint_type_frequency"]["opaque-a"] += 1
+    elif mutation == "constraint_parameter_presence_total":
+        payload["constraint_parameter_presence"]["p1_x"]["present"] += 1
+    elif mutation == "constraint_parameter_shape_total":
+        payload["constraint_parameter_shape"]["p1_x"]["number"] += 1
+    else:  # pragma: no cover - the parametrization is exhaustive
+        raise AssertionError(mutation)
+
+    with pytest.raises(ValidationError, match="inventory total"):
+        LectraAuditReport.model_validate(payload)
+
+
+def test_passive_report_rejects_counts_beyond_population_and_stale_evidence() -> None:
+    excessive = audit().model_dump()
+    excessive["join_failures"]["part_rows_missing_task"] = excessive["table_rows"]["parts"] + 1
+    with pytest.raises(ValidationError, match="exceeds its source population"):
+        LectraAuditReport.model_validate(excessive)
+
+    stale = audit().model_dump()
+    assert stale["duplicate_counts"]["task_key_rows_beyond_first"] == 0
+    stale["bounded_examples"]["duplicate_task_keys"] = ["task:10:row:0"]
+    with pytest.raises(ValidationError, match="zero count requires empty evidence"):
+        LectraAuditReport.model_validate(stale)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_key"),
+    [
+        ("raw_encoding_frequency", "unknown_encoding"),
+        ("size_relation_frequency", "unknown_relation"),
+        ("source_declared_subshape_count_frequency", "01"),
+    ],
+)
+def test_passive_report_rejects_unknown_inventory_keys(field: str, bad_key: str) -> None:
+    payload = audit().model_dump()
+    first_key = next(iter(payload[field]))
+    payload[field][bad_key] = payload[field].pop(first_key)
+
+    with pytest.raises(ValidationError, match="inventory key"):
+        LectraAuditReport.model_validate(payload)
+
+
+def test_passive_report_rejects_unknown_parameter_shape_inventory_key() -> None:
+    parameter_payload = audit().model_dump()
+    parameter_payload["constraint_parameter_shape"]["p1_x"] = {
+        "unknown_shape": parameter_payload["table_rows"]["constraints"]
+    }
+    with pytest.raises(ValidationError, match="shape inventory key"):
+        LectraAuditReport.model_validate(parameter_payload)
+
+
+def test_literal_frequency_inventory_preserves_missing_reserved_and_typed_values() -> None:
+    frames = trusted_frames()
+    frames["constraints"]["type"] = pd.Series(
+        [None, "<missing>", 1, "1"],
+        dtype=object,
+    )
+    frames["tasks"]["sheet_type"] = pd.Series([None, "<missing>", 1], dtype=object)
+
+    report = audit_frames(
+        frames,
+        dataset_id="lectra-test",
+        source_checksums={"tasks.gz": "a" * 32},
+    )
+
+    assert report.constraint_type_frequency == {
+        "1": 1,
+        "<missing>": 1,
+        '<string:"<missing>">': 1,
+        "<typed:integer:1>": 1,
+    }
+    assert report.malformed_counts["constraint_type_rows"] == 1
+    assert report.sheet_type_frequency == {
+        "<missing>": 1,
+        '<string:"<missing>">': 1,
+        "<typed:integer:1>": 1,
+    }
+    assert report.sheet_type_violation_counts == {"task_rows_with_missing_sheet_type": 1}
+
+
+def test_invalid_dataframe_column_labels_are_reported_before_schema_metrics() -> None:
+    frames = trusted_frames()
+    task_columns: list[object] = list(frames["tasks"].columns)
+    task_columns[0] = 1
+    frames["tasks"].columns = task_columns
+    frames["parts"].columns = ["tasks_index", "parts_id", "parts_id"]
+    shape_columns: list[object] = [1, "1", "sizes"]
+    frames["shapes"].columns = shape_columns
+
+    with pytest.raises(LectraInvalidColumnsError) as caught:
+        audit_frames(
+            frames,
+            dataset_id="lectra-test",
+            source_checksums={"tasks.gz": "a" * 32},
+        )
+
+    assert caught.value.invalid_columns == {
+        "tasks": ["column[0] has non-string label of type int: 1"],
+        "parts": ["column[2] duplicates string label 'parts_id' from column[1]"],
+        "shapes": ["column[0] has non-string label of type int: 1"],
+        "constraints": [],
+    }
+    assert "non-string" in str(caught.value)
+    assert "duplicates" in str(caught.value)
