@@ -1,12 +1,39 @@
 """Command-line entry points for the YieldForge experiment loop."""
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import cast
 
 from yieldforge.archive import CandidateArchive
+from yieldforge.datasets.fetch import fetch_file
+from yieldforge.datasets.source_manifest import DatasetSourceManifest
 from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
+
+
+def _generate_candidates(args: argparse.Namespace) -> int:
+    problem = StripPackingProblem.model_validate_json(args.input.read_text())
+    config = SpyrrowRunConfig(
+        seed=args.seed,
+        total_computation_time=args.seconds,
+        early_termination=args.early_termination,
+        num_workers=args.workers,
+        min_items_separation=args.min_separation,
+    )
+    batch = SpyrrowAdapter().generate(problem, config)
+    CandidateArchive.create(args.output, batch)
+    noun = "candidate" if len(batch.candidates) == 1 else "candidates"
+    print(f"Archived {len(batch.candidates)} {noun} to {args.output}")
+    return 0
+
+
+def _fetch_dataset(args: argparse.Namespace) -> int:
+    manifest = DatasetSourceManifest.model_validate_json(args.manifest.read_text())
+    for spec in manifest.files:
+        status = fetch_file(spec, args.output / spec.name)
+        print(f"{spec.name}: {status.value}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,24 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--workers", type=int, default=1)
     generate.add_argument("--min-separation", type=float)
     generate.add_argument("--early-termination", action="store_true")
+    generate.set_defaults(handler=_generate_candidates)
+
+    datasets = commands.add_parser("datasets", help="acquire and qualify external datasets")
+    dataset_commands = datasets.add_subparsers(dest="dataset_command", required=True)
+    fetch = dataset_commands.add_parser("fetch", help="download and verify a pinned dataset")
+    fetch.add_argument("--manifest", type=Path, required=True, help="source manifest JSON path")
+    fetch.add_argument("--output", type=Path, required=True, help="raw dataset directory")
+    fetch.set_defaults(handler=_fetch_dataset)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if (args.command, args.candidate_command) != ("candidates", "generate"):
-        raise AssertionError("unhandled command")
-
-    problem = StripPackingProblem.model_validate_json(args.input.read_text())
-    config = SpyrrowRunConfig(
-        seed=args.seed,
-        total_computation_time=args.seconds,
-        early_termination=args.early_termination,
-        num_workers=args.workers,
-        min_items_separation=args.min_separation,
-    )
-    batch = SpyrrowAdapter().generate(problem, config)
-    CandidateArchive.create(args.output, batch)
-    noun = "candidate" if len(batch.candidates) == 1 else "candidates"
-    print(f"Archived {len(batch.candidates)} {noun} to {args.output}")
-    return 0
+    handler = cast(Callable[[argparse.Namespace], int], args.handler)
+    return handler(args)

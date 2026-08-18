@@ -10,3 +10,6 @@ yf/**/__pycache__/
 yf/**/*.py[cod]
 yf/var/archives/*
 !yf/var/archives/.gitkeep
+yf/var/data/raw/
+yf/var/data/normalized/
+yf/var/data/reports/
