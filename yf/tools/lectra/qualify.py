@@ -2,136 +2,193 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
-import tempfile
+import stat
+import sys
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
-from yieldforge.datasets.source_manifest import DatasetSourceManifest
+from yieldforge.datasets.source_manifest import DatasetSourceManifest, SourceFile
 
 EXPECTED_FILENAMES = frozenset({"constraints.gz", "parts.gz", "shapes.gz", "tasks.gz"})
 APP_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = APP_ROOT / "datasets" / "sources" / "lectra-7030786-v1.1.json"
 INPUT_DIR = Path("/input")
-OUTPUT_DIR = Path("/output")
-REPORT_NAME = "lectra-audit.json"
 HASH_CHUNK_BYTES = 1024 * 1024
+MAX_REPORT_BYTES = 4 * 1024 * 1024
 
 
 class QualificationBoundaryError(RuntimeError):
-    """The mounted data or output violates the qualifier's closed boundary."""
+    """The mounted data violates the qualifier's closed boundary."""
 
 
 def _load_manifest(path: Path = MANIFEST_PATH) -> DatasetSourceManifest:
     if path.is_symlink() or not path.is_file():
         raise QualificationBoundaryError("the pinned source manifest is unavailable")
-    return DatasetSourceManifest.model_validate_json(path.read_text(encoding="utf-8"))
-
-
-def _md5_and_size(path: Path) -> tuple[int, str]:
-    digest = hashlib.md5(usedforsecurity=False)
-    size = 0
-    with path.open("rb") as source:
-        while chunk := source.read(HASH_CHUNK_BYTES):
-            size += len(chunk)
-            digest.update(chunk)
-    return size, digest.hexdigest()
-
-
-def _verify_input(input_dir: Path, manifest: DatasetSourceManifest) -> dict[str, Path]:
-    """Require the exact release file set and verify it before deserialization."""
-    if input_dir.is_symlink() or not input_dir.is_dir():
-        raise QualificationBoundaryError("/input must be a mounted directory")
-
-    manifest_names = {source.name for source in manifest.files}
-    if manifest_names != EXPECTED_FILENAMES:
+    manifest = DatasetSourceManifest.model_validate_json(path.read_text(encoding="utf-8"))
+    if {source.name for source in manifest.files} != EXPECTED_FILENAMES:
         raise QualificationBoundaryError("the pinned manifest must name exactly four release files")
-
-    entries = list(input_dir.iterdir())
-    actual_names = {entry.name for entry in entries}
-    if actual_names != EXPECTED_FILENAMES or len(entries) != len(EXPECTED_FILENAMES):
-        raise QualificationBoundaryError("/input must contain exactly the four release files")
-    if any(entry.is_symlink() or not entry.is_file() for entry in entries):
-        raise QualificationBoundaryError("/input entries must be regular files, not links")
-
-    verified: dict[str, Path] = {}
-    for source in sorted(manifest.files, key=lambda item: item.name):
-        path = input_dir / source.name
-        size, checksum = _md5_and_size(path)
-        if size != source.size_bytes:
-            raise QualificationBoundaryError(
-                f"{source.name} size mismatch: expected {source.size_bytes}, got {size}"
-            )
-        if checksum != source.checksum:
-            raise QualificationBoundaryError(f"{source.name} MD5 mismatch")
-        verified[source.name] = path
-    return verified
+    return manifest
 
 
-def _require_empty_output(output_dir: Path) -> None:
-    if output_dir.is_symlink() or not output_dir.is_dir():
-        raise QualificationBoundaryError("/output must be a mounted directory")
-    if any(output_dir.iterdir()):
-        raise QualificationBoundaryError("/output must be empty before qualification")
-
-
-def _atomic_write_report(output_dir: Path, payload: str) -> Path:
-    """Publish one complete report into a previously empty output mount."""
-    _require_empty_output(output_dir)
-    destination = output_dir / REPORT_NAME
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=output_dir, prefix=f".{REPORT_NAME}.", suffix=".tmp", text=True
+def _require_linux_memfd_sealing() -> None:
+    required = (
+        "F_ADD_SEALS",
+        "F_GET_SEALS",
+        "F_SEAL_WRITE",
+        "F_SEAL_GROW",
+        "F_SEAL_SHRINK",
+        "F_SEAL_SEAL",
     )
-    temporary = Path(temporary_name)
+    if sys.platform != "linux" or not hasattr(os, "memfd_create"):
+        raise QualificationBoundaryError("qualification requires Linux sealed memfd support")
+    if any(not hasattr(fcntl, name) for name in required):
+        raise QualificationBoundaryError("the Linux runtime does not expose required memfd seals")
+
+
+def _copy_verified_to_memfd(source_fd: int, source: SourceFile) -> int:
+    flags = os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+    memory_fd = os.memfd_create(f"lectra-{source.name}", flags)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if destination.exists() or destination.is_symlink():
-            raise QualificationBoundaryError("the audit report already exists")
-        os.replace(temporary, destination)
-        directory_descriptor = os.open(output_dir, os.O_RDONLY)
+        digest = hashlib.md5(usedforsecurity=False)
+        byte_count = 0
+        while chunk := os.read(source_fd, HASH_CHUNK_BYTES):
+            byte_count += len(chunk)
+            if byte_count > source.size_bytes:
+                raise QualificationBoundaryError(f"{source.name} exceeds its pinned size")
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(memory_fd, view)
+                if written <= 0:
+                    raise QualificationBoundaryError("failed to stage verified input")
+                view = view[written:]
+
+        if byte_count != source.size_bytes:
+            raise QualificationBoundaryError(
+                f"{source.name} size mismatch: expected {source.size_bytes}, got {byte_count}"
+            )
+        if digest.hexdigest() != source.checksum:
+            raise QualificationBoundaryError(f"{source.name} MD5 mismatch")
+
+        required_seals = (
+            fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        )
+        fcntl.fcntl(memory_fd, fcntl.F_ADD_SEALS, required_seals)
+        applied_seals = fcntl.fcntl(memory_fd, fcntl.F_GET_SEALS)
+        if applied_seals & required_seals != required_seals:
+            raise QualificationBoundaryError(f"failed to seal staged bytes for {source.name}")
+        os.lseek(memory_fd, 0, os.SEEK_SET)
+        return memory_fd
+    except BaseException:
+        os.close(memory_fd)
+        raise
+
+
+@contextmanager
+def _verified_memfds(
+    input_dir: Path, manifest: DatasetSourceManifest
+) -> Iterator[dict[str, BinaryIO]]:
+    """Yield sealed handles containing the exact bytes that passed verification."""
+    _require_linux_memfd_sealing()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    with ExitStack() as stack:
         try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+            directory_fd = os.open(input_dir, directory_flags)
+        except OSError as error:
+            raise QualificationBoundaryError("/input must be a real mounted directory") from error
+        stack.callback(os.close, directory_fd)
+
+        actual_names = set(os.listdir(directory_fd))
+        if actual_names != EXPECTED_FILENAMES:
+            raise QualificationBoundaryError("/input must contain exactly the four release files")
+
+        handles: dict[str, BinaryIO] = {}
+        for source in sorted(manifest.files, key=lambda item: item.name):
+            metadata = os.stat(source.name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise QualificationBoundaryError("/input entries must be regular files, not links")
+            if metadata.st_size != source.size_bytes:
+                raise QualificationBoundaryError(
+                    f"{source.name} size mismatch: expected {source.size_bytes}, "
+                    f"got {metadata.st_size}"
+                )
+
+            source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            try:
+                source_fd = os.open(source.name, source_flags, dir_fd=directory_fd)
+            except OSError as error:
+                raise QualificationBoundaryError(f"could not safely open {source.name}") from error
+            stack.callback(os.close, source_fd)
+            if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+                raise QualificationBoundaryError("opened input is not a regular file")
+
+            memory_fd = _copy_verified_to_memfd(source_fd, source)
+            stack.callback(os.close, memory_fd)
+            handle = stack.enter_context(os.fdopen(os.dup(memory_fd), "rb", closefd=True))
+            handles[source.name.removesuffix(".gz")] = handle
+
+        if set(os.listdir(directory_fd)) != EXPECTED_FILENAMES:
+            raise QualificationBoundaryError("/input changed while qualification was staging")
+        yield handles
 
 
-def _read_verified_pickle(path: Path) -> Any:
+def _read_verified_pickle(handle: BinaryIO) -> Any:
     # pandas stays inside this one production entry point by design.
     import pandas as pd
 
-    return pd.read_pickle(path, compression="gzip")
+    return pd.read_pickle(handle, compression="gzip")
 
 
-def main() -> None:
+def _qualify_payload() -> bytes:
     from yieldforge.datasets.lectra_audit import audit_frames, report_to_json
 
     manifest = _load_manifest()
-    verified = _verify_input(INPUT_DIR, manifest)
-    _require_empty_output(OUTPUT_DIR)
-
-    frames = {
-        name.removesuffix(".gz"): _read_verified_pickle(path)
-        for name, path in sorted(verified.items())
-    }
+    with _verified_memfds(INPUT_DIR, manifest) as staged:
+        frames = {name: _read_verified_pickle(handle) for name, handle in sorted(staged.items())}
     report = audit_frames(
         frames,
         dataset_id=manifest.dataset_id,
         source_checksums={source.name: source.checksum for source in manifest.files},
     )
-    payload = report_to_json(report, indent=2) + "\n"
-    destination = _atomic_write_report(OUTPUT_DIR, payload)
-    print(f"wrote {destination}")
+    payload = (report_to_json(report, indent=2) + "\n").encode("utf-8")
+    if len(payload) > MAX_REPORT_BYTES:
+        raise QualificationBoundaryError("audit report exceeds the qualifier size limit")
+    return payload
+
+
+def _write_all(file_descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(file_descriptor, view)
+        if written <= 0:
+            raise QualificationBoundaryError("failed to write qualifier output")
+        view = view[written:]
+
+
+def _entrypoint() -> None:
+    """Suppress untrusted stdout until one final JSON payload is ready."""
+    report_fd = os.dup(sys.stdout.fileno())
+    os.set_inheritable(report_fd, False)
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    try:
+        payload = _qualify_payload()
+        sys.stdout.flush()
+        _write_all(report_fd, payload)
+        _write_all(sys.stderr.fileno(), b"qualification completed\n")
+        exit_code = 0
+    except BaseException as error:
+        error_name = type(error).__name__.encode("ascii", errors="replace")
+        _write_all(sys.stderr.fileno(), b"qualification failed: " + error_name + b"\n")
+        exit_code = 1
+    finally:
+        os.close(report_fd)
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        raise SystemExit(f"qualification failed: {error}") from error
+    _entrypoint()

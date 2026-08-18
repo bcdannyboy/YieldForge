@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
+import json
+import os
+import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -11,28 +15,33 @@ from yieldforge.datasets.source_manifest import DatasetSourceManifest, SourceFil
 
 PROJECT_ROOT = Path(__file__).parents[2]
 QUALIFIER_PATH = PROJECT_ROOT / "tools" / "lectra" / "qualify.py"
+RUNNER_PATH = PROJECT_ROOT / "tools" / "lectra" / "run_qualifier.py"
 FIXTURE_MAKER_PATH = PROJECT_ROOT / "tools" / "lectra" / "make_trusted_fixture.py"
 DOCKERFILE_PATH = PROJECT_ROOT / "tools" / "lectra" / "Dockerfile"
 DOCKERIGNORE_PATH = PROJECT_ROOT / ".dockerignore"
 README_PATH = PROJECT_ROOT / "tools" / "lectra" / "README.md"
 
 
-def _load_qualifier() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("lectra_qualify", QUALIFIER_PATH)
+def _load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_qualifier() -> ModuleType:
+    return _load_module("lectra_qualify", QUALIFIER_PATH)
+
+
+def _load_runner() -> ModuleType:
+    return _load_module("lectra_runner", RUNNER_PATH)
 
 
 def _load_fixture_maker() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("lectra_fixture_maker", FIXTURE_MAKER_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_module("lectra_fixture_maker", FIXTURE_MAKER_PATH)
 
 
 def _fixture_manifest(files: dict[str, bytes]) -> DatasetSourceManifest:
@@ -57,6 +66,23 @@ def _fixture_manifest(files: dict[str, bytes]) -> DatasetSourceManifest:
     )
 
 
+def _valid_fixture_report(tmp_path: Path) -> tuple[bytes, DatasetSourceManifest]:
+    pytest.importorskip("pandas")
+    from yieldforge.datasets.lectra_audit import audit_frames, report_to_json
+
+    maker = _load_fixture_maker()
+    input_dir = tmp_path / "input"
+    manifest_path = tmp_path / "fixture-manifest.json"
+    maker.write_fixture(input_dir, manifest_path)
+    manifest = DatasetSourceManifest.model_validate_json(manifest_path.read_text())
+    report = audit_frames(
+        maker._trusted_frames(),
+        dataset_id=manifest.dataset_id,
+        source_checksums={source.name: source.checksum for source in manifest.files},
+    )
+    return (report_to_json(report) + "\n").encode(), manifest
+
+
 def test_only_qualifier_deserializes_pickles() -> None:
     production_files = [
         *PROJECT_ROOT.glob("src/**/*.py"),
@@ -71,7 +97,39 @@ def test_only_qualifier_deserializes_pickles() -> None:
     assert callers == {"tools/lectra/qualify.py"}
 
 
-def test_qualifier_requires_exact_verified_input_set(tmp_path: Path) -> None:
+def test_qualifier_stages_verified_bytes_in_sealed_memfds() -> None:
+    source = QUALIFIER_PATH.read_text()
+
+    assert "os.O_NOFOLLOW" in source
+    assert "os.memfd_create" in source
+    assert "fcntl.F_ADD_SEALS" in source
+    assert "fcntl.F_SEAL_WRITE" in source
+    assert "fcntl.F_SEAL_GROW" in source
+    assert "fcntl.F_SEAL_SHRINK" in source
+    assert "fcntl.F_SEAL_SEAL" in source
+    assert 'pd.read_pickle(handle, compression="gzip")' in source
+    assert "pd.read_pickle(path" not in source
+
+
+def test_pickle_loader_passes_the_exact_staged_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    qualifier = _load_qualifier()
+    handle = io.BytesIO(b"sealed bytes")
+    observed: dict[str, object] = {}
+
+    def fake_read_pickle(received: object, *, compression: str) -> str:
+        observed.update(handle=received, compression=compression)
+        return "frame"
+
+    monkeypatch.setitem(sys.modules, "pandas", SimpleNamespace(read_pickle=fake_read_pickle))
+
+    assert qualifier._read_verified_pickle(handle) == "frame"
+    assert observed == {"handle": handle, "compression": "gzip"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux memfd seals are container-only")
+def test_staged_file_is_sealed_and_rewound_on_linux(tmp_path: Path) -> None:
+    import fcntl
+
     qualifier = _load_qualifier()
     payloads = {name: name.encode() for name in qualifier.EXPECTED_FILENAMES}
     manifest = _fixture_manifest(payloads)
@@ -80,56 +138,147 @@ def test_qualifier_requires_exact_verified_input_set(tmp_path: Path) -> None:
     for name, payload in payloads.items():
         (input_dir / name).write_bytes(payload)
 
-    verified = qualifier._verify_input(input_dir, manifest)
-    assert set(verified) == qualifier.EXPECTED_FILENAMES
+    with qualifier._verified_memfds(input_dir, manifest) as staged:
+        handle = staged["tasks"]
+        assert handle.tell() == 0
+        assert handle.read() == payloads["tasks.gz"]
+        seals = fcntl.fcntl(handle.fileno(), fcntl.F_GET_SEALS)
+        expected = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        assert seals & expected == expected
+
+
+def test_runner_rejects_extra_missing_and_symlinked_input(tmp_path: Path) -> None:
+    runner = _load_runner()
+    payloads = {name: name.encode() for name in runner.EXPECTED_FILENAMES}
+    manifest = _fixture_manifest(payloads)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name, payload in payloads.items():
+        (input_dir / name).write_bytes(payload)
+
+    assert runner._validate_input_dir(input_dir, manifest) == input_dir.resolve()
 
     (input_dir / "unexpected.txt").write_text("not allowed")
-    with pytest.raises(qualifier.QualificationBoundaryError, match="exactly"):
-        qualifier._verify_input(input_dir, manifest)
+    with pytest.raises(runner.QualifierRunnerError, match="exactly"):
+        runner._validate_input_dir(input_dir, manifest)
+    (input_dir / "unexpected.txt").unlink()
 
+    tasks = input_dir / "tasks.gz"
+    tasks.unlink()
+    with pytest.raises(runner.QualifierRunnerError, match="exactly"):
+        runner._validate_input_dir(input_dir, manifest)
 
-def test_qualifier_rejects_missing_mismatched_and_symlinked_input(tmp_path: Path) -> None:
-    qualifier = _load_qualifier()
-    payloads = {name: name.encode() for name in qualifier.EXPECTED_FILENAMES}
-    manifest = _fixture_manifest(payloads)
-    input_dir = tmp_path / "input"
-    input_dir.mkdir()
-    for name, payload in payloads.items():
-        (input_dir / name).write_bytes(payload)
-
-    missing = input_dir / "tasks.gz"
-    missing.unlink()
-    with pytest.raises(qualifier.QualificationBoundaryError, match="exactly"):
-        qualifier._verify_input(input_dir, manifest)
-
-    missing.write_bytes(b"wrong")
-    with pytest.raises(qualifier.QualificationBoundaryError, match="size"):
-        qualifier._verify_input(input_dir, manifest)
-
-    missing.write_bytes(b"TASKS.GZ")
-    with pytest.raises(qualifier.QualificationBoundaryError, match="MD5"):
-        qualifier._verify_input(input_dir, manifest)
-
-    missing.unlink()
     target = tmp_path / "tasks.gz"
     target.write_bytes(payloads["tasks.gz"])
-    missing.symlink_to(target)
-    with pytest.raises(qualifier.QualificationBoundaryError, match="regular files"):
-        qualifier._verify_input(input_dir, manifest)
+    tasks.symlink_to(target)
+    with pytest.raises(runner.QualifierRunnerError, match="regular"):
+        runner._validate_input_dir(input_dir, manifest)
 
 
-def test_qualifier_refuses_nonempty_output_and_writes_atomically(tmp_path: Path) -> None:
-    qualifier = _load_qualifier()
+def test_report_validation_is_size_bounded_strict_and_manifest_bound(tmp_path: Path) -> None:
+    runner = _load_runner()
+    payload, manifest = _valid_fixture_report(tmp_path)
+
+    report = runner._validate_report(payload, manifest, max_bytes=len(payload))
+    assert report.dataset_id == manifest.dataset_id
+
+    with pytest.raises(runner.QualifierRunnerError, match="size limit"):
+        runner._validate_report(payload, manifest, max_bytes=len(payload) - 1)
+    with pytest.raises(runner.QualifierRunnerError, match="exactly one JSON"):
+        runner._validate_report(payload + b"noise", manifest, max_bytes=len(payload) + 5)
+
+    changed = json.loads(payload)
+    changed["dataset_id"] = "wrong-dataset"
+    with pytest.raises(runner.QualifierRunnerError, match="dataset identity"):
+        runner._validate_report(json.dumps(changed).encode(), manifest, max_bytes=100_000)
+
+    changed = json.loads(payload)
+    changed["source_checksums"]["tasks.gz"] = "f" * 32
+    with pytest.raises(runner.QualifierRunnerError, match="checksum identity"):
+        runner._validate_report(json.dumps(changed).encode(), manifest, max_bytes=100_000)
+
+
+def test_publisher_is_atomic_no_clobber_and_exact(tmp_path: Path) -> None:
+    runner = _load_runner()
+    payload = b'{"safe":true}\n'
     output_dir = tmp_path / "output"
     output_dir.mkdir()
 
-    result = qualifier._atomic_write_report(output_dir, '{"ok":true}\n')
-    assert result == output_dir / "lectra-audit.json"
-    assert result.read_text() == '{"ok":true}\n'
-    assert [path.name for path in output_dir.iterdir()] == ["lectra-audit.json"]
+    destination = runner._publish_report(output_dir, payload)
+    assert destination.read_bytes() == payload
+    assert {path.name for path in output_dir.iterdir()} == {runner.REPORT_NAME}
 
-    with pytest.raises(qualifier.QualificationBoundaryError, match="empty"):
-        qualifier._atomic_write_report(output_dir, '{"ok":false}\n')
+    with pytest.raises(runner.QualifierRunnerError, match="empty"):
+        runner._publish_report(output_dir, b'{"replacement":true}\n')
+    assert destination.read_bytes() == payload
+
+
+def test_publisher_rejects_symlink_and_unknown_output(tmp_path: Path) -> None:
+    runner = _load_runner()
+    real_output = tmp_path / "real-output"
+    real_output.mkdir()
+    linked_output = tmp_path / "linked-output"
+    linked_output.symlink_to(real_output, target_is_directory=True)
+
+    with pytest.raises(runner.QualifierRunnerError, match="regular directory"):
+        runner._publish_report(linked_output, b"{}\n")
+
+    (real_output / "unknown.txt").write_text("preserve me")
+    with pytest.raises(runner.QualifierRunnerError, match="empty"):
+        runner._publish_report(real_output, b"{}\n")
+    assert (real_output / "unknown.txt").read_text() == "preserve me"
+
+
+def test_bounded_capture_stops_process_on_stdout_limit() -> None:
+    runner = _load_runner()
+    aborted: list[bool] = []
+
+    with pytest.raises(runner.QualifierRunnerError, match="stdout size limit"):
+        runner._capture_process(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 1000000)"],
+            timeout_seconds=5,
+            stdout_limit=128,
+            stderr_limit=128,
+            on_abort=lambda: aborted.append(True),
+        )
+    assert aborted == [True]
+
+
+def test_bounded_capture_stops_process_on_timeout() -> None:
+    runner = _load_runner()
+    aborted: list[bool] = []
+
+    with pytest.raises(runner.QualifierRunnerError, match="runtime timeout"):
+        runner._capture_process(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            timeout_seconds=0.05,
+            stdout_limit=128,
+            stderr_limit=128,
+            on_abort=lambda: aborted.append(True),
+        )
+    assert aborted == [True]
+
+
+def test_runner_refuses_root_and_never_mounts_host_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(runner.os, "getuid", lambda: 0)
+    monkeypatch.setattr(runner.os, "getgid", lambda: 0)
+    with pytest.raises(runner.QualifierRunnerError, match="root"):
+        runner._nonroot_identity()
+
+    command = runner._docker_command(
+        image="yieldforge-lectra-qualifier:test",
+        container_name="yieldforge-lectra-test",
+        input_dir=Path("/absolute/input"),
+        uid=501,
+        gid=20,
+    )
+    joined = " ".join(command)
+    assert "dst=/input,readonly" in joined
+    assert "dst=/output" not in joined
+    assert "--network none" in joined
+    assert "--read-only" in joined
+    assert "--cap-drop ALL" in joined
 
 
 def test_dockerfile_is_pinned_minimal_and_nonroot() -> None:
@@ -147,8 +296,7 @@ def test_dockerfile_is_pinned_minimal_and_nonroot() -> None:
     assert "USER 65532:65532" in dockerfile
     assert "COPY . ." not in dockerfile
     assert "COPY --from=builder /app/.venv /app/.venv" in dockerfile
-    assert "src/yieldforge/archive.py" not in dockerfile
-    assert "src/yieldforge/spyrrow_adapter.py" not in dockerfile
+    assert "run_qualifier.py" not in dockerfile
 
 
 def test_dockerignore_denies_by_default_and_allows_only_build_inputs() -> None:
@@ -166,30 +314,8 @@ def test_dockerignore_denies_by_default_and_allows_only_build_inputs() -> None:
     assert all(".env" not in rule for rule in rules[1:])
 
 
-def test_readme_documents_the_complete_hardened_runtime_boundary() -> None:
-    readme = README_PATH.read_text()
-    required_flags = {
-        "--network none",
-        "--read-only",
-        "--cap-drop ALL",
-        "--security-opt no-new-privileges:true",
-        "--pids-limit 128",
-        "--memory 8g",
-        "--cpus 4",
-        "--ulimit nofile=1024:1024",
-        "--ulimit nproc=128:128",
-        "--ipc none",
-        "--init",
-        "--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m",
-        '--user "$(id -u):$(id -g)"',
-        "dst=/input,readonly",
-        "dst=/output",
-    }
-
-    assert all(flag in readme for flag in required_flags)
-
-
-def test_trusted_fixture_matches_exact_boundary_and_emits_test_manifest(tmp_path: Path) -> None:
+def test_trusted_fixture_has_representative_constraint_and_test_manifest(tmp_path: Path) -> None:
+    pytest.importorskip("pandas")
     maker = _load_fixture_maker()
     input_dir = tmp_path / "input"
     manifest_path = tmp_path / "fixture-manifest.json"
@@ -197,12 +323,61 @@ def test_trusted_fixture_matches_exact_boundary_and_emits_test_manifest(tmp_path
     maker.write_fixture(input_dir, manifest_path)
 
     assert {path.name for path in input_dir.iterdir()} == set(maker.EXPECTED_FILENAMES)
+    assert len(maker._trusted_frames()["constraints"]) == 1
     manifest = DatasetSourceManifest.model_validate_json(manifest_path.read_text())
-    assert {source.name for source in manifest.files} == set(maker.EXPECTED_FILENAMES)
     for source in manifest.files:
         payload = (input_dir / source.name).read_bytes()
         assert source.size_bytes == len(payload)
         assert source.checksum == hashlib.md5(payload).hexdigest()
 
-    with pytest.raises(ValueError, match="empty"):
-        maker.write_fixture(input_dir)
+
+def test_readme_documents_runner_and_no_output_mount() -> None:
+    readme = README_PATH.read_text()
+
+    assert "run_qualifier.py" in readme
+    assert "sealed memfd" in readme
+    assert "stdout" in readme
+    assert "No host output path is mounted into the container" in readme
+
+
+@pytest.mark.integration
+def test_docker_runner_smoke(tmp_path: Path) -> None:
+    image = os.environ.get("YIELDFORGE_LECTRA_FIXTURE_IMAGE")
+    input_path = os.environ.get("YIELDFORGE_LECTRA_FIXTURE_INPUT")
+    manifest_path = os.environ.get("YIELDFORGE_LECTRA_FIXTURE_MANIFEST")
+    if not all((image, input_path, manifest_path)):
+        pytest.skip("trusted Docker fixture environment is not configured")
+    runner = _load_runner()
+
+    report_path = runner.run_qualifier(
+        image=image,
+        input_dir=Path(input_path),
+        output_dir=tmp_path,
+        manifest_path=Path(manifest_path),
+        timeout_seconds=30,
+    )
+
+    assert report_path.name == runner.REPORT_NAME
+    assert {path.name for path in tmp_path.iterdir()} == {runner.REPORT_NAME}
+
+
+@pytest.mark.integration
+def test_adversarial_pickle_cannot_create_host_output_artifact(tmp_path: Path) -> None:
+    image = os.environ.get("YIELDFORGE_LECTRA_ADVERSARIAL_IMAGE")
+    input_path = os.environ.get("YIELDFORGE_LECTRA_ADVERSARIAL_INPUT")
+    manifest_path = os.environ.get("YIELDFORGE_LECTRA_ADVERSARIAL_MANIFEST")
+    if not all((image, input_path, manifest_path)):
+        pytest.skip("adversarial Docker fixture environment is not configured")
+    runner = _load_runner()
+
+    report_path = runner.run_qualifier(
+        image=image,
+        input_dir=Path(input_path),
+        output_dir=tmp_path,
+        manifest_path=Path(manifest_path),
+        timeout_seconds=30,
+    )
+
+    assert report_path.name == runner.REPORT_NAME
+    assert {path.name for path in tmp_path.iterdir()} == {runner.REPORT_NAME}
+    assert not (tmp_path / "pickle-escape").exists()

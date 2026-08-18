@@ -1,9 +1,16 @@
 # Locked Lectra qualifier
 
-The four Lectra source files are gzip-compressed Python pickles. Treat them as executable,
-untrusted input. The normal YieldForge process never imports pandas or opens them. This image
-is the only qualification boundary: it verifies the exact published byte count and MD5 for all
-four files before deserializing any of them, then emits one passive JSON report.
+The four Lectra source files are gzip-compressed Python pickles and therefore executable,
+untrusted input. The normal YieldForge process never opens them. Qualification has two separate
+halves:
+
+1. The untrusted container verifies each opened source while copying it into a Linux sealed memfd.
+   Pandas receives that same sealed, rewound handle; it never reopens a host path.
+2. The trusted host runner captures a single JSON report from stdout, validates it against the
+   pinned report schema and source manifest, then publishes it with atomic no-clobber semantics.
+
+No host output path is mounted into the container. The root filesystem is read-only, so pickle
+code has no writable route to the eventual report directory.
 
 ## Build the production image
 
@@ -16,55 +23,62 @@ docker build --pull \
   .
 ```
 
-Both the Python 3.12.11 base and uv 0.10.8 source are pinned by multi-architecture digest. The
-deny-by-default `.dockerignore` admits only the lock inputs and the minimal qualifier code. The
-runtime image receives the locked data-group environment, dataset contracts, audit code, pinned
-manifest, and entry point—no repository metadata, credentials, archives, or application solver.
+Python 3.12.11 and uv 0.10.8 are pinned by multi-architecture digest. The deny-by-default
+`.dockerignore` admits only the lock inputs and minimal qualifier code. The final image contains
+the locked data-group environment, contracts, audit code, pinned manifest, and qualifier—no Git
+metadata, credentials, host runner, normal solver, or repository home.
 
-## Run against the verified release
+## Qualify the verified release
 
-Create an empty host output directory first. The input must contain exactly `tasks.gz`,
-`parts.gz`, `shapes.gz`, and `constraints.gz` from the pinned release. Replace the two absolute
-host paths below; do not mount a home directory or a replacement manifest.
-
-On macOS Docker Desktop, add the numeric host identity shown below so the non-root process can
-write to the bind mount. `id -u` and `id -g` typically expand to values such as `501:20`; neither
-value may be zero. On Linux, either use the same override or make the empty output directory
-writable by the image's numeric `65532:65532` user.
+The input directory must contain exactly `tasks.gz`, `parts.gz`, `shapes.gz`, and
+`constraints.gz`. Create a new, empty output directory. Then run the trusted publisher from
+`yf/`, replacing the two absolute paths:
 
 ```bash
-docker run --rm --init \
-  --network none \
-  --read-only \
-  --cap-drop ALL \
-  --security-opt no-new-privileges:true \
-  --pids-limit 128 \
-  --memory 8g \
-  --cpus 4 \
-  --ulimit nofile=1024:1024 \
-  --ulimit nproc=128:128 \
-  --ipc none \
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-  --user "$(id -u):$(id -g)" \
-  --mount type=bind,src=/ABSOLUTE/PATH/TO/raw/lectra-7030786-v1.1,dst=/input,readonly \
-  --mount type=bind,src=/ABSOLUTE/PATH/TO/empty-report-directory,dst=/output \
-  yieldforge-lectra-qualifier:7030786-v1.1
+mkdir -p /ABSOLUTE/PATH/TO/empty-report-directory
+
+uv run python tools/lectra/run_qualifier.py \
+  --image yieldforge-lectra-qualifier:7030786-v1.1 \
+  --input /ABSOLUTE/PATH/TO/raw/lectra-7030786-v1.1 \
+  --output /ABSOLUTE/PATH/TO/empty-report-directory \
+  --manifest datasets/sources/lectra-7030786-v1.1.json \
+  --timeout-seconds 900
 ```
 
-The command refuses missing files, extra files, symbolic links, byte-count or checksum mismatch,
-and any pre-existing output entry. A successful run leaves exactly
-`/output/lectra-audit.json`. Keep the raw mount read-only and validate that passive report with
-the normal `yieldforge datasets audit-check` command.
+The runner refuses root UID or GID, symbolic links, extra input files, a nonempty output
+directory, oversized output, non-finite or trailing JSON, schema mismatch, and dataset/checksum
+identity mismatch. On macOS Docker Desktop it passes the numeric host UID and GID (commonly
+`501:20`) into the container so publication does not require a root container. Do not run the
+publisher with `sudo`.
 
-## Trusted boundary smoke test
+For each run the runner generates a unique container name. It invokes Docker without
+`shell=True` and applies:
 
-`make_trusted_fixture.py` creates—not reads—four tiny pandas pickle fixtures with the published
-table schema. Its optional manifest is test-only. To exercise the production Dockerfile without
-weakening the production image, assemble a temporary build context containing the same reviewed
-files but substitute the generated manifest there. Never copy that fixture manifest into this
-repository.
+- `--pull never`, `--network none`, and `--read-only`;
+- `--cap-drop ALL` and `--security-opt no-new-privileges:true`;
+- numeric non-root `--user`, `--pids-limit 128`, `--memory 8g`, `--memory-swap 8g`, and
+  `--cpus 4`;
+- `nofile` and `nproc` limits, `--ipc none`, an isolated 64 MiB `/tmp` tmpfs, and
+  `--log-driver none`;
+- exactly one bind mount: the input at `/input`, read-only.
 
-Use a new empty temporary path, then run from `yf/`:
+Stdout is capped at 4 MiB, stderr at 1 MiB, and runtime at the requested timeout. A timeout or
+limit violation stops and removes the named container. After a clean exit, the runner accepts
+exactly one finite JSON payload from stdout, validates the full Pydantic contract and pinned
+manifest identity, and atomically hard-links a completed temporary file as
+`lectra-audit.json`. It never overwrites. Its final postcondition requires exactly that one
+regular file with the captured bytes in the host output directory.
+
+## Trusted Docker smoke fixtures
+
+`make_trusted_fixture.py` creates—never reads—four tiny pandas pickle files with the published
+columns and a representative constraint. Its optional manifest is test-only. A separate flag
+adds a deliberate pickle code-execution probe that attempts to write `/output/pickle-escape`;
+the hardened container has no output mount, so the only host artifact remains the validated JSON
+published afterward by the trusted runner.
+
+Assemble a temporary build context rather than replacing the repository manifest. Starting with
+a new empty temporary path, run from `yf/`:
 
 ```bash
 uv run --group data python tools/lectra/make_trusted_fixture.py \
@@ -91,18 +105,13 @@ docker build \
   --tag yieldforge-lectra-qualifier:trusted-smoke \
   /tmp/yieldforge-lectra-fixture/context
 
-docker run --rm --init \
-  --network none --read-only --cap-drop ALL \
-  --security-opt no-new-privileges:true \
-  --pids-limit 128 --memory 2g --cpus 2 \
-  --ulimit nofile=1024:1024 --ulimit nproc=128:128 \
-  --ipc none --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-  --user "$(id -u):$(id -g)" \
-  --mount type=bind,src=/tmp/yieldforge-lectra-fixture/input,dst=/input,readonly \
-  --mount type=bind,src=/tmp/yieldforge-lectra-fixture/output,dst=/output \
-  yieldforge-lectra-qualifier:trusted-smoke
+uv run python tools/lectra/run_qualifier.py \
+  --image yieldforge-lectra-qualifier:trusted-smoke \
+  --input /tmp/yieldforge-lectra-fixture/input \
+  --output /tmp/yieldforge-lectra-fixture/output \
+  --manifest /tmp/yieldforge-lectra-fixture/fixture-manifest.json \
+  --timeout-seconds 30
 ```
 
-The smoke succeeds only if the output directory contains exactly `lectra-audit.json`. The test
-image and fixture manifest establish container mechanics only; they are not evidence about the
-published corpus.
+The smoke succeeds only when the output contains exactly `lectra-audit.json`. The fixture image
+tests isolation mechanics; it is not evidence about the published corpus.
