@@ -1,1 +1,4 @@
 .worktrees/
+docs/.obsidian/
+docs/.trash/
+.DS_Store
