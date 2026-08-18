@@ -59,3 +59,31 @@ def test_source_manifest_is_immutable_and_forbids_unknown_fields() -> None:
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         DatasetSourceManifest.model_validate({**manifest.model_dump(), "unexpected": True})
+
+    assert isinstance(manifest.files, tuple)
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        manifest.files[0] = manifest.files[0]  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "invalid_name",
+    ["", ".", "..", "/parts.gz", "nested/parts.gz", "../parts.gz", r"nested\parts.gz"],
+)
+def test_source_file_name_must_be_a_plain_basename(invalid_name: str) -> None:
+    path = Path(__file__).parents[2] / "datasets" / "sources" / "lectra-7030786-v1.1.json"
+    manifest_data = DatasetSourceManifest.model_validate_json(path.read_text()).model_dump()
+    manifest_data["files"][0]["name"] = invalid_name
+
+    with pytest.raises(ValidationError):
+        DatasetSourceManifest.model_validate(manifest_data)
+
+
+def test_source_manifest_rejects_duplicate_file_names() -> None:
+    path = Path(__file__).parents[2] / "datasets" / "sources" / "lectra-7030786-v1.1.json"
+    manifest_data = DatasetSourceManifest.model_validate_json(path.read_text()).model_dump()
+    files = list(manifest_data["files"])
+    files.append(files[0])
+    manifest_data["files"] = files
+
+    with pytest.raises(ValidationError, match="file names must be unique"):
+        DatasetSourceManifest.model_validate(manifest_data)
