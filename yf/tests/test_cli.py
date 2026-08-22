@@ -1,4 +1,5 @@
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -439,3 +440,70 @@ assert "pandas" not in sys.modules
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_experiments_validate_checks_the_frozen_bundle(capsys) -> None:  # type: ignore[no-untyped-def]
+    yf_root = Path(__file__).parents[1]
+
+    exit_code = main(
+        [
+            "experiments",
+            "validate",
+            "--m0",
+            str(yf_root / "experiments" / "m0-contract-v1.json"),
+            "--geometry",
+            str(yf_root / "experiments" / "pure-geometry-calibration-v1.json"),
+            "--catalog",
+            str(yf_root / "datasets" / "catalogs" / "lectra-7030786-v1.1" / "lectra-catalog.json"),
+            "--catalog-manifest",
+            str(
+                yf_root / "datasets" / "catalogs" / "lectra-7030786-v1.1" / "catalog-manifest.json"
+            ),
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out.strip()
+    assert "M0=yfm0-29b7efe8ac2a0a9995c4f907" in output
+    assert "geometry=yfgp-49906e93ed9ff0446705247b" in output
+    assert "calibration=51" in output
+    assert "evaluation=203" in output
+    assert "confirmation=disabled" in output
+
+
+def test_experiments_validate_fails_closed_on_tampered_contract(tmp_path: Path) -> None:
+    yf_root = Path(__file__).parents[1]
+    geometry = json.loads(
+        (yf_root / "experiments" / "pure-geometry-calibration-v1.json").read_text()
+    )
+    geometry["unexpected"] = True
+    tampered = tmp_path / "geometry.json"
+    tampered.write_text(json.dumps(geometry, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(ValueError, match="contract validation failed"):
+        main(
+            [
+                "experiments",
+                "validate",
+                "--m0",
+                str(yf_root / "experiments" / "m0-contract-v1.json"),
+                "--geometry",
+                str(tampered),
+                "--catalog",
+                str(
+                    yf_root
+                    / "datasets"
+                    / "catalogs"
+                    / "lectra-7030786-v1.1"
+                    / "lectra-catalog.json"
+                ),
+                "--catalog-manifest",
+                str(
+                    yf_root
+                    / "datasets"
+                    / "catalogs"
+                    / "lectra-7030786-v1.1"
+                    / "catalog-manifest.json"
+                ),
+            ]
+        )

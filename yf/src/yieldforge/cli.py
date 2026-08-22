@@ -14,6 +14,7 @@ from yieldforge.datasets.passive_report import (
 from yieldforge.datasets.postgres_catalog import import_catalog
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
+from yieldforge.experiments.contracts import validate_experiment_bundle
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 
 DatasetAuditCheckError = PassiveEvidenceError
@@ -70,6 +71,26 @@ def _import_dataset_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_experiment_contracts(args: argparse.Namespace) -> int:
+    bundle = validate_experiment_bundle(
+        m0_path=args.m0,
+        geometry_path=args.geometry,
+        catalog_path=args.catalog,
+        catalog_manifest_path=args.catalog_manifest,
+    )
+    geometry = bundle.geometry
+    confirmation = "enabled" if geometry.confirmation_enabled else "disabled"
+    print(
+        "Validated experiment bundle: "
+        f"M0={bundle.m0.contract_id} geometry={geometry.protocol_id} "
+        f"catalog={bundle.catalog_sha256} "
+        f"calibration={len(geometry.split.calibration_task_ids)} "
+        f"evaluation={len(geometry.split.evaluation_task_ids)} "
+        f"confirmation={confirmation}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -117,6 +138,18 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_import.add_argument("--audit-report", type=Path, required=True)
     catalog_import.add_argument("--database-url", required=True)
     catalog_import.set_defaults(handler=_import_dataset_catalog)
+
+    experiments = commands.add_parser("experiments", help="validate registered experiments")
+    experiment_commands = experiments.add_subparsers(dest="experiment_command", required=True)
+    validate = experiment_commands.add_parser(
+        "validate",
+        help="validate the frozen M0 and pure-geometry bundle",
+    )
+    validate.add_argument("--m0", type=Path, required=True)
+    validate.add_argument("--geometry", type=Path, required=True)
+    validate.add_argument("--catalog", type=Path, required=True)
+    validate.add_argument("--catalog-manifest", type=Path, required=True)
+    validate.set_defaults(handler=_validate_experiment_contracts)
     return parser
 
 
