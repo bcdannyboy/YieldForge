@@ -464,3 +464,65 @@ def test_live_cursor_member_rejects_filter_facet_mutation_with_stale_hash(
 
     with pytest.raises(PostgresCorpusError, match="runtime list identity"):
         service.list_tasks(limit=1, cursor=cursor, min_parts=1)
+
+
+def test_live_list_rejects_status_mutation_that_would_exclude_expected_member(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    with psycopg.connect(isolated_database_url) as connection:
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET support_status = 'view_only' "
+            "WHERE tasks_index = 13958"
+        )
+
+    with pytest.raises(PostgresCorpusError, match="runtime list identity"):
+        service.list_tasks(
+            task_id=13958,
+            status="runnable_with_explicit_assumptions",
+        )
+
+
+def test_live_list_rejects_source_order_mutation_across_cursor(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    cursor = service.list_tasks(limit=40).next_cursor
+    assert cursor is not None
+    next_tasks_index = service.list_tasks(limit=1, cursor=cursor).items[0].tasks_index
+    with psycopg.connect(isolated_database_url) as connection:
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET source_row_index = 999998 WHERE tasks_index = %s",
+            (next_tasks_index,),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="runtime list identity"):
+        service.list_tasks(limit=1, cursor=cursor)
+
+
+def test_live_list_and_detail_reject_deleted_expected_task(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    with psycopg.connect(isolated_database_url) as connection:
+        connection.execute("DELETE FROM yieldforge_catalog_task WHERE tasks_index = 13958")
+
+    with pytest.raises(PostgresCorpusError, match="expected page membership"):
+        service.list_tasks(task_id=13958)
+    with pytest.raises(PostgresCorpusError, match="expected task is missing"):
+        service.task_detail(13958)
+
+
+def test_live_list_and_detail_reject_mutated_expected_task_id(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    with psycopg.connect(isolated_database_url) as connection:
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET tasks_index = 999999 WHERE tasks_index = 13958"
+        )
+
+    with pytest.raises(PostgresCorpusError, match="expected page membership"):
+        service.list_tasks(task_id=13958)
+    with pytest.raises(PostgresCorpusError, match="expected task is missing"):
+        service.task_detail(13958)

@@ -85,20 +85,13 @@ _EXPECTED_MANIFEST = {
     },
     "schema_version": "yieldforge.catalog-manifest.v1",
 }
-_LIST_SQL = """
+_PAGE_SQL = """
     SELECT catalog_ordinal, tasks_index, source_row_index, sheet_type,
            is_train, is_val, is_test, normalization_status, support_status,
            projection_status, part_count, shape_count, constraint_count,
            constraint_types, summary_json, record_sha256
     FROM yieldforge_catalog_task
-    WHERE (%s::text IS NULL OR support_status = %s::text)
-      AND (%s::text IS NULL OR %s::text = ANY(constraint_types))
-      AND (%s::bigint IS NULL OR tasks_index = %s::bigint)
-      AND (%s::integer IS NULL OR part_count >= %s::integer)
-      AND (%s::integer IS NULL OR part_count <= %s::integer)
-      AND (source_row_index, tasks_index) > (%s::bigint, %s::bigint)
-    ORDER BY source_row_index, tasks_index
-    LIMIT %s
+    WHERE tasks_index = ANY(%s::bigint[])
 """
 _RUNTIME_LIST_IDENTITY_FIELDS = (
     "catalog_ordinal",
@@ -175,6 +168,9 @@ class PostgresCorpusQueryService:
         self._catalog_sha256: str
         self._record_hashes: dict[int, str]
         self._list_identities: dict[int, str]
+        self._task_summaries: tuple[TaskSummaryDto, ...]
+        self._task_summaries_by_id: dict[int, TaskSummaryDto]
+        self._task_summaries_by_source_key: dict[tuple[int, int], TaskSummaryDto]
         self._validate_startup()
 
     @contextmanager
@@ -388,6 +384,7 @@ class PostgresCorpusQueryService:
                 part_count = 0
                 previous_source_key = (-1, -1)
                 eligible_count = 0
+                validated_summaries: list[TaskSummaryDto] = []
                 for ordinal, row in enumerate(rows):
                     if row.get("catalog_ordinal") != ordinal or row.get("catalog_singleton") != 1:
                         raise PostgresCorpusError("catalog task source order is invalid")
@@ -399,6 +396,7 @@ class PostgresCorpusQueryService:
                         raise PostgresCorpusError("catalog task source order is invalid")
                     previous_source_key = source_key
                     task_summary, detail, _ = self._validate_task_record(row)
+                    validated_summaries.append(task_summary)
                     support_counts[task_summary.solve_capability.support_status.value] += 1
                     eligible_count += task_summary.solve_capability.can_solve
                     part_count += len(detail.parts)
@@ -451,6 +449,14 @@ class PostgresCorpusQueryService:
                 self._record_hashes = {row["tasks_index"]: row["record_sha256"] for row in rows}
                 self._list_identities = {
                     row["tasks_index"]: self._runtime_list_identity(row) for row in rows
+                }
+                self._task_summaries = tuple(validated_summaries)
+                self._task_summaries_by_id = {
+                    item.tasks_index: item for item in self._task_summaries
+                }
+                self._task_summaries_by_source_key = {
+                    (item.task.source_row_index, item.tasks_index): item
+                    for item in self._task_summaries
                 }
         except CatalogImportError as error:
             raise PostgresCorpusError(
@@ -578,32 +584,24 @@ class PostgresCorpusQueryService:
         return after[0], after[1]
 
     @staticmethod
-    def _list_parameters(
+    def _matches_summary(
+        summary: TaskSummaryDto,
         *,
         status: SupportStatus | None,
         constraint_type: str | None,
         task_id: int | None,
         min_parts: int | None,
         max_parts: int | None,
-        after: tuple[int, int],
-        limit: int,
-    ) -> tuple[object, ...]:
-        status_value = status.value if status is not None else None
-        return (
-            status_value,
-            status_value,
-            constraint_type,
-            constraint_type,
-            task_id,
-            task_id,
-            min_parts,
-            min_parts,
-            max_parts,
-            max_parts,
-            after[0],
-            after[1],
-            limit,
-        )
+    ) -> bool:
+        if status is not None and summary.solve_capability.support_status is not status:
+            return False
+        if constraint_type is not None and constraint_type not in summary.constraint_types:
+            return False
+        if task_id is not None and summary.tasks_index != task_id:
+            return False
+        if min_parts is not None and summary.part_count < min_parts:
+            return False
+        return max_parts is None or summary.part_count <= max_parts
 
     @staticmethod
     def _runtime_list_identity(row: dict[str, object]) -> str:
@@ -668,61 +666,66 @@ class PostgresCorpusQueryService:
             min_parts=min_parts,
             max_parts=max_parts,
         )
-        after = (
-            (-1, -1)
-            if cursor is None
-            else self._decode_cursor(
-                cursor,
-                filter_digest=filter_digest,
+        filtered = tuple(
+            summary
+            for summary in self._task_summaries
+            if self._matches_summary(
+                summary,
+                status=parsed_status,
+                constraint_type=parsed_constraint_type,
+                task_id=task_id,
+                min_parts=min_parts,
+                max_parts=max_parts,
             )
         )
-        with self._connection() as connection:
-            if cursor is not None:
-                member = connection.execute(
-                    "SELECT catalog_ordinal, tasks_index, source_row_index, sheet_type, "
-                    "is_train, is_val, is_test, normalization_status, support_status, "
-                    "projection_status, part_count, shape_count, constraint_count, "
-                    "constraint_types, summary_json, record_sha256 "
-                    "FROM yieldforge_catalog_task "
-                    "WHERE source_row_index = %s AND tasks_index = %s",
-                    after,
-                ).fetchone()
-                if member is None:
-                    raise InvalidCursorError("cursor does not identify a real task member")
-                self._validate_runtime_record_identity(member)
-                if (
-                    (parsed_status is not None and member["support_status"] != parsed_status.value)
-                    or (
-                        parsed_constraint_type is not None
-                        and parsed_constraint_type not in member["constraint_types"]
-                    )
-                    or (task_id is not None and member["tasks_index"] != task_id)
-                    or (min_parts is not None and member["part_count"] < min_parts)
-                    or (max_parts is not None and member["part_count"] > max_parts)
-                ):
-                    raise InvalidCursorError(
-                        "cursor does not identify a member of the exact filtered result"
-                    )
-            rows = connection.execute(
-                _LIST_SQL,
-                self._list_parameters(
-                    status=parsed_status,
-                    constraint_type=parsed_constraint_type,
-                    task_id=task_id,
-                    min_parts=min_parts,
-                    max_parts=max_parts,
-                    after=after,
-                    limit=limit + 1,
-                ),
-            ).fetchall()
+        cursor_summary: TaskSummaryDto | None = None
+        start = 0
+        if cursor is not None:
+            after = self._decode_cursor(cursor, filter_digest=filter_digest)
+            cursor_summary = self._task_summaries_by_source_key.get(after)
+            if cursor_summary is None:
+                raise InvalidCursorError("cursor does not identify a real task member")
+            if not self._matches_summary(
+                cursor_summary,
+                status=parsed_status,
+                constraint_type=parsed_constraint_type,
+                task_id=task_id,
+                min_parts=min_parts,
+                max_parts=max_parts,
+            ):
+                raise InvalidCursorError(
+                    "cursor does not identify a member of the exact filtered result"
+                )
+            start = next(
+                index + 1
+                for index, item in enumerate(filtered)
+                if item.tasks_index == cursor_summary.tasks_index
+            )
+        remaining = filtered[start:]
+        selected = remaining[:limit]
+        query_ids = [item.tasks_index for item in selected]
+        if cursor_summary is not None:
+            query_ids.append(cursor_summary.tasks_index)
+        rows: list[dict[str, object]] = []
+        if query_ids:
+            with self._connection() as connection:
+                rows = connection.execute(_PAGE_SQL, (query_ids,)).fetchall()
+        observed_ids = [row.get("tasks_index") for row in rows]
+        if len(rows) != len(query_ids) or set(observed_ids) != set(query_ids):
+            raise PostgresCorpusError(
+                "catalog expected page membership does not match validated startup state"
+            )
         for row in rows:
             self._validate_runtime_record_identity(row)
-        summaries = tuple(self._validate_summary_row(row) for row in rows[:limit])
+        rows_by_id = {row["tasks_index"]: row for row in rows}
+        summaries = tuple(
+            self._validate_summary_row(rows_by_id[item.tasks_index]) for item in selected
+        )
         next_cursor = None
-        if len(rows) > limit:
-            last = rows[limit - 1]
+        if len(remaining) > limit:
+            last = selected[-1]
             next_cursor = self._encode_cursor(
-                after=(last["source_row_index"], last["tasks_index"]),
+                after=(last.task.source_row_index, last.tasks_index),
                 filter_digest=filter_digest,
             )
         return TaskPageDto(items=summaries, next_cursor=next_cursor)
@@ -734,13 +737,17 @@ class PostgresCorpusQueryService:
             or not 0 <= tasks_index <= MAX_SAFE_JSON_INTEGER
         ):
             raise TaskNotFoundError("task was not found")
+        if tasks_index not in self._task_summaries_by_id:
+            raise TaskNotFoundError(f"task {tasks_index} was not found")
         with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM yieldforge_catalog_task WHERE tasks_index = %s",
                 (tasks_index,),
             ).fetchone()
         if row is None:
-            raise TaskNotFoundError(f"task {tasks_index} was not found")
+            raise PostgresCorpusError(
+                f"catalog expected task is missing from validated startup state: {tasks_index}"
+            )
         self._validate_runtime_record_identity(row)
         return row
 
