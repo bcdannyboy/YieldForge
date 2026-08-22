@@ -10,13 +10,19 @@ from yieldforge.experiments.contracts import (
     ExperimentContractError,
     FrozenExperimentModel,
     M0ExperimentContract,
+    PureGeometryCalibrationProtocol,
     canonical_pretty_json_bytes,
     load_frozen_json,
+    rank_task_ids,
     semantic_sha256,
+    validate_experiment_bundle,
 )
 
 YF_ROOT = Path(__file__).parents[2]
 M0_CONTRACT_PATH = YF_ROOT / "experiments" / "m0-contract-v1.json"
+GEOMETRY_PROTOCOL_PATH = YF_ROOT / "experiments" / "pure-geometry-calibration-v1.json"
+CATALOG_PATH = YF_ROOT / "datasets" / "catalogs" / "lectra-7030786-v1.1" / "lectra-catalog.json"
+CATALOG_MANIFEST_PATH = CATALOG_PATH.with_name("catalog-manifest.json")
 
 
 class TinyContract(FrozenExperimentModel):
@@ -164,3 +170,109 @@ def test_m0_contract_is_deeply_immutable() -> None:
 
     with pytest.raises(Exception, match="frozen"):
         contract.decision_gates.green.minimum_oracle_savings_percent = 2.0  # type: ignore[misc]
+
+
+def _committed_geometry_payload() -> dict[str, object]:
+    return json.loads(GEOMETRY_PROTOCOL_PATH.read_text())
+
+
+def _reidentify_geometry(payload: dict[str, object]) -> None:
+    digest = semantic_sha256(payload, excluded_fields={"protocol_id", "content_sha256"})
+    payload["content_sha256"] = f"sha256:{digest}"
+    payload["protocol_id"] = f"yfgp-{digest[:24]}"
+
+
+def test_task_ranking_is_stable_and_salt_scoped() -> None:
+    task_ids = (8, 3, 5, 1)
+
+    first = rank_task_ids(task_ids, salt="split-v1", catalog_sha256="a" * 64)
+    second = rank_task_ids(reversed(task_ids), salt="split-v1", catalog_sha256="a" * 64)
+    alternate = rank_task_ids(task_ids, salt="repeat-v1", catalog_sha256="a" * 64)
+
+    assert first == second
+    assert first != alternate
+    assert set(first) == set(task_ids)
+
+
+def test_committed_geometry_protocol_binds_the_complete_catalog_population() -> None:
+    bundle = validate_experiment_bundle(
+        m0_path=M0_CONTRACT_PATH,
+        geometry_path=GEOMETRY_PROTOCOL_PATH,
+        catalog_path=CATALOG_PATH,
+        catalog_manifest_path=CATALOG_MANIFEST_PATH,
+    )
+
+    protocol = bundle.geometry
+    assert protocol.status == "calibration_pending"
+    assert protocol.confirmation_enabled is False
+    assert protocol.budget.selected_seconds_per_seed is None
+    assert len(protocol.population.eligible_task_ids) == 254
+    assert tuple(item.tasks_index for item in protocol.population.blocked_tasks) == (4365, 25801)
+    assert len(protocol.population.flip_bearing_task_ids) == 185
+    assert len(protocol.split.calibration_task_ids) == 51
+    assert len(protocol.split.evaluation_task_ids) == 203
+    assert len(protocol.repeatability.task_ids) == 20
+    assert protocol.near_tie.primary_envelope_percent == 0.5
+    assert protocol.outcome.primary_denominator == 203
+    assert bundle.catalog_sha256 == protocol.references.catalog_artifact_sha256
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("projection", "primary_mode"), "force_flip_x_zero"),
+        (("projection", "sensitivity_in_primary"), True),
+        (("budget", "ordinary_seeds"), [0, 1, 2, 4]),
+        (("budget", "maximum_identical_retries"), 2),
+        (("near_tie", "primary_envelope_percent"), 1.0),
+        (("candidate_definition", "placement_order_changes_identity"), True),
+        (("outcome", "primary_denominator"), 202),
+        (("decision_rule", "proceed_minimum_percent"), 59.0),
+    ],
+)
+def test_geometry_protocol_rejects_reidentified_rule_drift(
+    path: tuple[str, ...], replacement: object
+) -> None:
+    payload = copy.deepcopy(_committed_geometry_payload())
+    _set_nested(payload, path, replacement)
+    _reidentify_geometry(payload)
+
+    with pytest.raises(ValueError, match="approved pure-geometry rules"):
+        PureGeometryCalibrationProtocol.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_geometry_protocol_cannot_enable_confirmation_before_calibration() -> None:
+    payload = copy.deepcopy(_committed_geometry_payload())
+    payload["confirmation_enabled"] = True
+    _reidentify_geometry(payload)
+
+    with pytest.raises(ValueError, match="Input should be False"):
+        PureGeometryCalibrationProtocol.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_geometry_protocol_rejects_reidentified_population_omission() -> None:
+    payload = copy.deepcopy(_committed_geometry_payload())
+    population = payload["population"]
+    assert isinstance(population, dict)
+    eligible = population["eligible_task_ids"]
+    assert isinstance(eligible, list)
+    eligible.pop()
+    _reidentify_geometry(payload)
+
+    with pytest.raises(ValueError, match="approved pure-geometry rules"):
+        PureGeometryCalibrationProtocol.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_bundle_rejects_forged_catalog_manifest(tmp_path: Path) -> None:
+    manifest = json.loads(CATALOG_MANIFEST_PATH.read_text())
+    manifest["artifact"]["sha256"] = "0" * 64
+    forged = tmp_path / "catalog-manifest.json"
+    forged.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    with pytest.raises(ExperimentContractError, match="catalog artifact SHA-256"):
+        validate_experiment_bundle(
+            m0_path=M0_CONTRACT_PATH,
+            geometry_path=GEOMETRY_PROTOCOL_PATH,
+            catalog_path=CATALOG_PATH,
+            catalog_manifest_path=forged,
+        )

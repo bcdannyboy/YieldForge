@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import stat
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Self
 
@@ -20,6 +22,9 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+
+from yieldforge.datasets.normalized_slice import NormalizedSlice, SupportStatus
+from yieldforge.datasets.projection import S1_FLIP_ASSUMPTION
 
 _MAX_ARTIFACT_BYTES = 1024 * 1024
 
@@ -283,6 +288,368 @@ class M0ExperimentContract(FrozenExperimentModel):
         return self
 
 
+class GeometryReferences(FrozenExperimentModel):
+    m0_contract_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    dataset_id: StrictStr
+    catalog_artifact_name: StrictStr
+    catalog_artifact_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    catalog_size_bytes: StrictInt
+    catalog_manifest_schema_version: StrictStr
+    conversion_ruleset_version: StrictStr
+
+
+class BlockedGeometryTask(FrozenExperimentModel):
+    tasks_index: StrictInt
+    reason_code: StrictStr
+
+
+class GeometryPopulation(FrozenExperimentModel):
+    eligible_task_ids: tuple[StrictInt, ...]
+    blocked_tasks: tuple[BlockedGeometryTask, ...]
+    flip_bearing_task_ids: tuple[StrictInt, ...]
+    eligibility_rule: StrictStr
+    population_role: StrictStr
+
+
+class GeometrySplit(FrozenExperimentModel):
+    algorithm: StrictStr
+    salt: StrictStr
+    calibration_count: StrictInt
+    evaluation_count: StrictInt
+    calibration_task_ids: tuple[StrictInt, ...]
+    evaluation_task_ids: tuple[StrictInt, ...]
+    source_partition_flags_used: StrictBool
+
+
+class GeometryRepeatability(FrozenExperimentModel):
+    algorithm: StrictStr
+    salt: StrictStr
+    task_count: StrictInt
+    task_ids: tuple[StrictInt, ...]
+    execution: StrictStr
+    reported_metrics: tuple[StrictStr, ...]
+
+
+class GeometryProjection(FrozenExperimentModel):
+    primary_mode: StrictStr
+    sensitivity_mode: StrictStr
+    sensitivity_population: StrictStr
+    sensitivity_task_ids: tuple[StrictInt, ...]
+    sensitivity_in_primary: StrictBool
+    required_assumption_codes: tuple[StrictStr, ...]
+    required_intervention_code: StrictStr
+
+
+class CalibrationSelector(FrozenExperimentModel):
+    reference_seconds_per_seed: StrictInt
+    maximum_qualifying_rate_gap_percentage_points: StrictFloat
+    maximum_median_best_length_degradation_percent: StrictFloat
+    maximum_p95_best_length_degradation_percent: StrictFloat
+    minimum_valid_archive_rate_percent: StrictFloat
+    selection_rule: StrictStr
+
+
+class GeometryBudget(FrozenExperimentModel):
+    ordinary_seeds: tuple[StrictInt, ...]
+    calibration_seconds_per_seed: tuple[StrictInt, ...]
+    selected_seconds_per_seed: StrictInt | None
+    num_workers: StrictInt
+    early_termination: StrictBool
+    min_items_separation: StrictFloat | None
+    selector: CalibrationSelector
+    expanded_search_seeds: tuple[StrictInt, ...]
+    expanded_search_role: StrictStr
+    outer_timeout_formula: StrictStr
+    maximum_identical_retries: StrictInt
+    retryable_causes: tuple[StrictStr, ...]
+    nonretryable_causes: tuple[StrictStr, ...]
+
+
+class NearTieProtocol(FrozenExperimentModel):
+    performance_measure: StrictStr
+    gap_formula: StrictStr
+    reference_candidate: StrictStr
+    envelope_grid_percent: tuple[StrictFloat, ...]
+    primary_envelope_percent: StrictFloat
+
+
+class CandidateDefinition(FrozenExperimentModel):
+    accepted_report_types: tuple[StrictStr, ...]
+    requires_finite_complete_placements: StrictBool
+    requires_valid_part_instance_ids: StrictBool
+    requires_verified_immutable_archive: StrictBool
+    fixed_sheet_acceptance: StrictStr
+    fixed_sheet_tolerance: StrictFloat
+    canonical_identity: StrictStr
+    placement_order_changes_identity: StrictBool
+    exact_rotation_or_position_change_is_distinct: StrictBool
+    tolerance_clustering_role: StrictStr
+    residual_equivalence_milestone: StrictStr
+    normalized_positional_difference: StrictStr
+    rotation_difference: StrictStr
+
+
+class GeometryOutcome(FrozenExperimentModel):
+    primary_name: StrictStr
+    primary_definition: StrictStr
+    primary_denominator: StrictInt
+    failure_treatment: StrictStr
+    uncertainty_interval: StrictStr
+    uncertainty_interpretation: StrictStr
+    supporting_outcomes: tuple[StrictStr, ...]
+
+
+class GeometryReporting(FrozenExperimentModel):
+    flip_presence: StrictBool
+    part_count_bands: tuple[StrictStr, ...]
+    unique_shape_count_bands: tuple[StrictStr, ...]
+    maximum_orientation_state_bands: tuple[StrictStr, ...]
+    sheet_aspect_strata: StrictStr
+    post_result_strata_allowed: StrictBool
+    source_efficiency_interpretation: StrictStr
+
+
+class GeometryDecisionRule(FrozenExperimentModel):
+    proceed_minimum_percent: StrictFloat
+    proceed_minimum_valid_archive_rate_percent: StrictFloat
+    redesign_minimum_percent_inclusive: StrictFloat
+    redesign_below_percent: StrictFloat
+    expanded_rescue_minimum_percent: StrictFloat
+    stop_ordinary_below_percent: StrictFloat
+    stop_expanded_below_percent: StrictFloat
+    permitted_positive_claim: StrictStr
+    forbidden_positive_claims: tuple[StrictStr, ...]
+
+
+_APPROVED_GEOMETRY_SEMANTIC_SHA256 = (
+    "49906e93ed9ff0446705247bf6f2519588265ccbd9e6d1c9676e98ad7ed05737"
+)
+
+
+class PureGeometryCalibrationProtocol(FrozenExperimentModel):
+    """Pre-registered calibration protocol preceding geometry confirmation."""
+
+    schema_version: Literal["yieldforge.pure-geometry-protocol.v1"] = (
+        "yieldforge.pure-geometry-protocol.v1"
+    )
+    protocol_id: StrictStr = Field(pattern=r"^yfgp-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    status: Literal["calibration_pending"]
+    confirmation_enabled: Literal[False]
+    references: GeometryReferences
+    population: GeometryPopulation
+    split: GeometrySplit
+    repeatability: GeometryRepeatability
+    projection: GeometryProjection
+    budget: GeometryBudget
+    near_tie: NearTieProtocol
+    candidate_definition: CandidateDefinition
+    outcome: GeometryOutcome
+    reporting: GeometryReporting
+    decision_rule: GeometryDecisionRule
+
+    @model_validator(mode="after")
+    def require_approved_semantics_and_identity(self) -> Self:
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"protocol_id", "content_sha256"},
+        )
+        if digest != _APPROVED_GEOMETRY_SEMANTIC_SHA256:
+            raise ValueError("protocol differs from the approved pure-geometry rules")
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("geometry content SHA-256 does not match its semantic content")
+        if self.protocol_id != f"yfgp-{digest[:24]}":
+            raise ValueError("geometry protocol ID does not match its semantic content")
+        return self
+
+
+def rank_task_ids(task_ids: Iterable[int], *, salt: str, catalog_sha256: str) -> tuple[int, ...]:
+    """Rank task IDs with the frozen SHA-256 selection rule."""
+
+    return tuple(
+        sorted(
+            task_ids,
+            key=lambda task_id: (
+                hashlib.sha256(f"{salt}:{catalog_sha256}:{task_id}".encode()).hexdigest(),
+                task_id,
+            ),
+        )
+    )
+
+
+class CatalogArtifact(FrozenExperimentModel):
+    name: StrictStr
+    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: StrictInt
+
+
+class CatalogEvidence(FrozenExperimentModel):
+    source_manifest_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_report_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    conversion_ruleset_version: StrictStr
+
+
+class CatalogCounts(FrozenExperimentModel):
+    tasks: StrictInt
+    parts: StrictInt
+    shapes: StrictInt
+    derived_geometry: StrictInt
+    constraints: StrictInt
+
+
+class CatalogCapabilityDistribution(FrozenExperimentModel):
+    runnable_with_explicit_assumptions: StrictInt
+    view_only: StrictInt
+
+
+class CatalogManifest(FrozenExperimentModel):
+    schema_version: Literal["yieldforge.catalog-manifest.v1"]
+    dataset_id: StrictStr
+    artifact: CatalogArtifact
+    evidence: CatalogEvidence
+    counts: CatalogCounts
+    capability_distribution: CatalogCapabilityDistribution
+
+
+@dataclass(frozen=True)
+class ValidatedExperimentBundle:
+    """Validated M0, geometry, and source-catalog identities."""
+
+    m0: M0ExperimentContract
+    geometry: PureGeometryCalibrationProtocol
+    catalog_sha256: str
+
+
+def _validate_json_syntax(data: bytes) -> None:
+    try:
+        json.loads(
+            data,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except ExperimentContractError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ExperimentContractError(f"artifact is not valid JSON: {error}") from error
+
+
+def _load_catalog_manifest(path: Path) -> CatalogManifest:
+    data = _read_bounded_regular_file(path)
+    _validate_json_syntax(data)
+    try:
+        return CatalogManifest.model_validate_json(data, strict=True)
+    except ValidationError as error:
+        raise ExperimentContractError(f"catalog manifest validation failed: {error}") from error
+
+
+def validate_experiment_bundle(
+    *,
+    m0_path: Path,
+    geometry_path: Path,
+    catalog_path: Path,
+    catalog_manifest_path: Path,
+) -> ValidatedExperimentBundle:
+    """Validate the frozen contracts against each other and the committed catalog."""
+
+    m0 = load_frozen_json(m0_path, M0ExperimentContract)
+    geometry = load_frozen_json(geometry_path, PureGeometryCalibrationProtocol)
+    if geometry.references.m0_contract_sha256 != m0.content_sha256:
+        raise ExperimentContractError("geometry protocol references a different M0 contract")
+
+    manifest = _load_catalog_manifest(catalog_manifest_path)
+    catalog_data = _read_bounded_regular_file(catalog_path, max_bytes=16 * 1024 * 1024)
+    catalog_sha256 = hashlib.sha256(catalog_data).hexdigest()
+    if manifest.artifact.sha256 != catalog_sha256:
+        raise ExperimentContractError("catalog artifact SHA-256 does not match its manifest")
+    if manifest.artifact.size_bytes != len(catalog_data):
+        raise ExperimentContractError("catalog artifact size does not match its manifest")
+    if manifest.artifact.name != catalog_path.name:
+        raise ExperimentContractError("catalog artifact name does not match its manifest")
+
+    references = geometry.references
+    if (
+        references.catalog_artifact_sha256 != catalog_sha256
+        or references.catalog_size_bytes != len(catalog_data)
+        or references.catalog_artifact_name != catalog_path.name
+        or references.catalog_manifest_schema_version != manifest.schema_version
+        or references.dataset_id != manifest.dataset_id
+        or references.conversion_ruleset_version != manifest.evidence.conversion_ruleset_version
+    ):
+        raise ExperimentContractError("geometry protocol catalog reference drifted")
+
+    _validate_json_syntax(catalog_data)
+    try:
+        catalog = NormalizedSlice.model_validate_json(catalog_data)
+    except ValidationError as error:
+        raise ExperimentContractError(f"catalog validation failed: {error}") from error
+    if (
+        catalog.source.dataset_id != references.dataset_id
+        or catalog.source.conversion_ruleset_version != references.conversion_ruleset_version
+    ):
+        raise ExperimentContractError("catalog source identity drifted")
+
+    eligible = tuple(
+        sorted(
+            item.tasks_index
+            for item in catalog.task_dispositions
+            if item.support_status is SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS
+        )
+    )
+    blocked = tuple(
+        BlockedGeometryTask(tasks_index=item.tasks_index, reason_code=item.reason_codes[0])
+        for item in catalog.task_dispositions
+        if item.support_status is SupportStatus.VIEW_ONLY
+    )
+    flip_bearing = tuple(
+        sorted(
+            item.tasks_index
+            for item in catalog.task_dispositions
+            if item.support_status is SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS
+            and S1_FLIP_ASSUMPTION in item.assumption_codes
+        )
+    )
+    population = geometry.population
+    if population.eligible_task_ids != eligible:
+        raise ExperimentContractError("geometry eligible population does not match catalog")
+    if population.blocked_tasks != blocked:
+        raise ExperimentContractError("geometry blocked population does not match catalog")
+    if population.flip_bearing_task_ids != flip_bearing:
+        raise ExperimentContractError("geometry flip-bearing population does not match catalog")
+    if geometry.projection.sensitivity_task_ids != flip_bearing:
+        raise ExperimentContractError("projection sensitivity population does not match catalog")
+    if (
+        manifest.capability_distribution.runnable_with_explicit_assumptions != len(eligible)
+        or manifest.capability_distribution.view_only != len(blocked)
+        or manifest.counts.tasks != len(catalog.tasks)
+    ):
+        raise ExperimentContractError("catalog manifest population counts drifted")
+
+    ranked = rank_task_ids(
+        eligible,
+        salt=geometry.split.salt,
+        catalog_sha256=catalog_sha256,
+    )
+    expected_calibration = ranked[: geometry.split.calibration_count]
+    expected_evaluation = ranked[geometry.split.calibration_count :]
+    if geometry.split.calibration_task_ids != expected_calibration:
+        raise ExperimentContractError("calibration split does not match frozen ranking")
+    if geometry.split.evaluation_task_ids != expected_evaluation:
+        raise ExperimentContractError("evaluation split does not match frozen ranking")
+    expected_repeatability = rank_task_ids(
+        expected_evaluation,
+        salt=geometry.repeatability.salt,
+        catalog_sha256=catalog_sha256,
+    )[: geometry.repeatability.task_count]
+    if geometry.repeatability.task_ids != expected_repeatability:
+        raise ExperimentContractError("repeatability subset does not match frozen ranking")
+
+    return ValidatedExperimentBundle(
+        m0=m0,
+        geometry=geometry,
+        catalog_sha256=catalog_sha256,
+    )
+
+
 def canonical_pretty_json_bytes(value: BaseModel) -> bytes:
     """Return the sole accepted committed encoding for one experiment artifact."""
 
@@ -310,15 +677,15 @@ def _reject_nonfinite_constant(value: str) -> None:
     raise ExperimentContractError(f"nonfinite JSON constant: {value}")
 
 
-def _read_bounded_regular_file(path: Path) -> bytes:
+def _read_bounded_regular_file(path: Path, *, max_bytes: int = _MAX_ARTIFACT_BYTES) -> bytes:
     try:
         file_stat = path.lstat()
     except OSError as error:
         raise ExperimentContractError(f"cannot inspect artifact: {error}") from error
     if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
         raise ExperimentContractError("artifact path must be a regular file and not a symlink")
-    if file_stat.st_size > _MAX_ARTIFACT_BYTES:
-        raise ExperimentContractError(f"artifact exceeds {_MAX_ARTIFACT_BYTES} bytes")
+    if file_stat.st_size > max_bytes:
+        raise ExperimentContractError(f"artifact exceeds {max_bytes} bytes")
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -326,11 +693,11 @@ def _read_bounded_regular_file(path: Path) -> bytes:
     except OSError as error:
         raise ExperimentContractError(f"cannot open artifact safely: {error}") from error
     try:
-        data = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1)
+        data = os.read(descriptor, max_bytes + 1)
     finally:
         os.close(descriptor)
-    if len(data) > _MAX_ARTIFACT_BYTES:
-        raise ExperimentContractError(f"artifact exceeds {_MAX_ARTIFACT_BYTES} bytes")
+    if len(data) > max_bytes:
+        raise ExperimentContractError(f"artifact exceeds {max_bytes} bytes")
     return data
 
 
