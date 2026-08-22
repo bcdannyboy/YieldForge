@@ -14,7 +14,7 @@ import math
 import secrets
 from collections import Counter
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Protocol, Self
 
 from pydantic import (
     BaseModel,
@@ -95,6 +95,33 @@ class TaskNotFoundError(CorpusQueryError):
 
 class TaskNotSolvableError(CorpusQueryError):
     """A task is blocked or its exact assumptions were not acknowledged."""
+
+
+class CorpusService(Protocol):
+    """Read-only corpus surface shared by passive-file and database adapters."""
+
+    def summary(self) -> CorpusSummaryDto: ...
+
+    def list_tasks(
+        self,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+        status: SupportStatus | str | None = None,
+        constraint_type: str | None = None,
+        task_id: int | None = None,
+        min_parts: int | None = None,
+        max_parts: int | None = None,
+    ) -> TaskPageDto: ...
+
+    def task_detail(self, tasks_index: int) -> TaskDetailDto: ...
+
+    def project_problem(
+        self,
+        tasks_index: int,
+        *,
+        acknowledged_assumption_codes: tuple[str, ...],
+    ) -> StripPackingProblem: ...
 
 
 class CorpusDto(BaseModel):
@@ -938,6 +965,7 @@ __all__ = [
     "CoordinateUnitDto",
     "CorpusQueryError",
     "CorpusQueryService",
+    "CorpusService",
     "CorpusSolveCapabilityDto",
     "CorpusSourceDto",
     "CorpusSummaryDto",

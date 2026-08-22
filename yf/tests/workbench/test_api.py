@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -18,6 +19,7 @@ from yieldforge.datasets.corpus import (
     CorpusSolveCapabilityDto,
     CorpusSourceDto,
     CorpusSummaryDto,
+    InvalidCursorError,
     SolveCapabilityDto,
     TaskDetailDto,
     TaskPageDto,
@@ -29,6 +31,7 @@ from yieldforge.datasets.normalized_slice import (
     ProjectionStatus,
     SupportStatus,
 )
+from yieldforge.datasets.postgres_corpus import PostgresCorpusError
 from yieldforge.domain import (
     Candidate,
     CandidateBatch,
@@ -339,6 +342,21 @@ def test_corpus_routes_delegate_bounded_queries_and_return_structured_not_found(
     ]
     assert missing.status_code == 404
     assert missing.json()["code"] == "task_not_found"
+
+
+def test_task_cursor_failure_has_a_distinct_public_error_code() -> None:
+    corpus = _FakeCorpus()
+
+    def reject_cursor(**_values: object) -> TaskPageDto:
+        raise InvalidCursorError("forged")
+
+    corpus.list_tasks = reject_cursor  # type: ignore[method-assign]
+    client, _, _ = _client(corpus=corpus)
+
+    response = client.get("/api/tasks", params={"cursor": "forged"})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_task_cursor"
 
 
 def test_unexpected_server_failure_is_sanitized_and_structured() -> None:
@@ -724,3 +742,38 @@ def test_default_factory_uses_server_owned_runtime_roots(
         (tmp_path / "runtime" / "jobs", tmp_path / "runtime" / "candidate-archives")
     ]
     assert observed_order_book_roots == [tmp_path / "runtime" / "order-books"]
+
+
+def test_default_factory_uses_the_configured_postgres_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.environ.get(
+        "YIELDFORGE_TEST_DATABASE_URL",
+        "postgresql://yieldforge:yieldforge-local@127.0.0.1:55433/yieldforge",
+    )
+    monkeypatch.setenv("YIELDFORGE_DATABASE_URL", database_url)
+    monkeypatch.setenv("YIELDFORGE_WORKBENCH_ROOT", str(tmp_path / "runtime"))
+
+    with TestClient(create_default_app()) as client:
+        response = client.get("/api/corpus/summary")
+
+    assert response.status_code == 200
+    assert response.json()["task_count"] == 256
+    assert response.json()["source"]["slice_sha256"] == (
+        "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138"
+    )
+
+
+def test_default_factory_fails_closed_for_an_unavailable_configured_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "YIELDFORGE_DATABASE_URL",
+        "postgresql://yieldforge:unused@127.0.0.1:1/yieldforge?connect_timeout=1",
+    )
+    monkeypatch.setenv("YIELDFORGE_WORKBENCH_ROOT", str(tmp_path / "runtime"))
+
+    with pytest.raises(PostgresCorpusError, match="unavailable"):
+        create_default_app()

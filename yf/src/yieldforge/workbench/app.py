@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from yieldforge.datasets.corpus import (
     CorpusQueryService,
+    CorpusService,
     CorpusSummaryDto,
     InvalidCursorError,
     InvalidTaskQueryError,
@@ -23,6 +24,7 @@ from yieldforge.datasets.corpus import (
     TaskNotSolvableError,
     TaskPageDto,
 )
+from yieldforge.datasets.postgres_corpus import PostgresCorpusQueryService
 from yieldforge.datasets.projection import placed_shape_svg_points
 from yieldforge.domain import Candidate, SourceTaskBinding, SpyrrowRunConfig
 from yieldforge.order_books.domain import GenerationRegime
@@ -179,7 +181,7 @@ def _candidate_summary(candidate: Candidate) -> CandidateSummary:
 
 def create_app(
     *,
-    corpus: CorpusQueryService,
+    corpus: CorpusService,
     jobs: SolverJobService,
     order_books: OrderBookService | None = None,
 ) -> FastAPI:
@@ -222,7 +224,9 @@ def create_app(
                 min_parts=min_parts,
                 max_parts=max_parts,
             )
-        except (InvalidCursorError, InvalidTaskQueryError):
+        except InvalidCursorError:
+            return _error(422, "invalid_task_cursor", "task cursor was rejected")
+        except InvalidTaskQueryError:
             return _error(422, "invalid_task_query", "task query was rejected")
 
     @app.get("/api/tasks/{tasks_index}", response_model=TaskDetailDto)
@@ -495,8 +499,16 @@ def create_default_app() -> FastAPI:
         if configured_root is not None
         else project_root / "var/workbench"
     )
+    configured_database_url = os.environ.get("YIELDFORGE_DATABASE_URL")
+    if configured_database_url is not None and not configured_database_url.strip():
+        raise ValueError("YIELDFORGE_DATABASE_URL must not be empty")
+    corpus: CorpusService = (
+        PostgresCorpusQueryService(configured_database_url)
+        if configured_database_url is not None
+        else CorpusQueryService.from_repository()
+    )
     return create_app(
-        corpus=CorpusQueryService.from_repository(),
+        corpus=corpus,
         jobs=SolverJobService(
             runtime_root / "jobs",
             runtime_root / "candidate-archives",

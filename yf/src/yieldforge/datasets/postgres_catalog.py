@@ -49,6 +49,10 @@ READ_MODEL_SCHEMA_VERSION = "yieldforge.postgres-catalog.v1"
 COMMITTED_CATALOG_MANIFEST_SHA256 = (
     "b6e915adcc51b2ee683eeebbbb5ce68a55fa306e2b3ddfd472a6a64f28829cc7"
 )
+COMMITTED_CATALOG_SHA256 = "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138"
+COMMITTED_CATALOG_LOGICAL_SHA256 = (
+    "c01669e5ef3b6bb879f16afea2fcc82594c8dde883d638ca1203e3dbee157778"
+)
 _EXPECTED_TASK_COUNT = 256
 _ADVISORY_LOCK_KEY = 5_947_313_481_882_363_281
 
@@ -717,6 +721,21 @@ def _ensure_schema(connection: psycopg.Connection[dict[str, object]]) -> None:
         _create_schema(connection)
     elif not catalog_exists or not task_exists:
         raise CatalogImportError("PostgreSQL has a partial or unexpected schema")
+    validate_read_model_schema(connection)
+
+
+def validate_read_model_schema(
+    connection: psycopg.Connection[dict[str, object]],
+) -> None:
+    """Validate the exact serving schema without creating or changing it."""
+
+    connection.execute("SELECT set_config('quote_all_identifiers', 'off', true)")
+    existence = connection.execute(
+        "SELECT to_regclass('yieldforge_catalog') IS NOT NULL AS catalog_exists, "
+        "to_regclass('yieldforge_catalog_task') IS NOT NULL AS task_exists"
+    ).fetchone()
+    if not existence["catalog_exists"] or not existence["task_exists"]:
+        raise CatalogImportError("PostgreSQL has a partial or unexpected schema")
     if (
         not _is_plain_permanent_table(connection, "yieldforge_catalog")
         or not _is_plain_permanent_table(connection, "yieldforge_catalog_task")
@@ -983,8 +1002,11 @@ def import_catalog(
 __all__ = [
     "CatalogImportError",
     "CatalogImportResult",
+    "COMMITTED_CATALOG_LOGICAL_SHA256",
     "COMMITTED_CATALOG_MANIFEST_SHA256",
+    "COMMITTED_CATALOG_SHA256",
     "MAX_CATALOG_BYTES",
     "READ_MODEL_SCHEMA_VERSION",
     "import_catalog",
+    "validate_read_model_schema",
 ]
