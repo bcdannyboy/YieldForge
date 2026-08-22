@@ -379,9 +379,6 @@ export function CorpusExplorer({
                 <div><dt>Shapes</dt><dd>{detail.summary.shape_count}</dd></div>
               </dl>
 
-              <h3><ProvenanceMark kind="derived" /> Polygon view</h3>
-              <SourceGeometry detail={detail} />
-
               <div className="action-row">
                 {detail.summary.solve_capability.can_solve ? (
                   <a className="button" href={taskHref("nest", detail.summary.tasks_index)}>
@@ -393,6 +390,9 @@ export function CorpusExplorer({
                   </button>
                 )}
               </div>
+
+              <h3><ProvenanceMark kind="derived" /> Polygon view</h3>
+              <SourceGeometry detail={detail} />
 
               <details>
                 <summary>Source part rows ({detail.parts.length})</summary>

@@ -30,7 +30,26 @@ test.describe("real local research workbench", () => {
     await expect(
       page.getByRole("article").getByText("Assumption-backed", { exact: true }),
     ).toBeVisible();
-    await page.getByRole("link", { name: "Solve task 13958" }).click();
+    const solveLink = page.getByRole("link", { name: "Solve task 13958" });
+    const geometryTop = await page
+      .getByLabel("Source polygon geometry")
+      .evaluate((element) => element.getBoundingClientRect().top);
+    const solveLinkBottom = await solveLink.evaluate(
+      (element) => element.getBoundingClientRect().bottom,
+    );
+    expect(solveLinkBottom).toBeLessThanOrEqual(geometryTop);
+    await solveLink.scrollIntoViewIfNeeded();
+    const hitTarget = await solveLink.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const target = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return {
+        linkBox: { x: box.x, y: box.y, width: box.width, height: box.height },
+        tagName: target?.tagName ?? null,
+        text: target?.textContent ?? null,
+      };
+    });
+    expect(hitTarget).toMatchObject({ tagName: "A", text: "Solve task 13958" });
+    await solveLink.click();
     await expect(page).toHaveURL(/view=nest&task=13958/);
     await expect(page.getByRole("button", { name: "Start solver job" })).toBeDisabled();
     await page.getByRole("checkbox", { name: /acknowledge exact assumption/i }).check();
