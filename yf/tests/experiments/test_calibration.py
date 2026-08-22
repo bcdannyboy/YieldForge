@@ -16,16 +16,21 @@ from yieldforge.datasets.passive_report import parse_normalized_slice
 from yieldforge.domain import ProjectionMode, SourceTaskBinding
 from yieldforge.experiments.calibration import (
     CalibrationApiClient,
+    CalibrationApiCompletedEvidence,
     CalibrationCandidateObservation,
     CalibrationCellEvidence,
+    CalibrationRunResult,
     evaluate_calibration,
     nearest_rank_percentile,
+    orchestrate_calibration,
     registered_cells,
 )
 from yieldforge.experiments.contracts import (
     PureGeometryCalibrationProtocol,
     load_frozen_json,
 )
+from yieldforge.workbench.api_contracts import CreateSolverJobRequest, JobView
+from yieldforge.workbench.contracts import JobStatus
 
 YF_ROOT = Path(__file__).parents[2]
 GEOMETRY_PROTOCOL_PATH = YF_ROOT / "experiments" / "pure-geometry-calibration-v1.json"
@@ -433,3 +438,152 @@ def test_api_client_rejects_unknown_response_fields() -> None:
                 task_count=256,
                 eligible_task_count=254,
             )
+
+
+class _ScriptedCalibrationClient:
+    def __init__(
+        self,
+        *,
+        terminal_scripts: dict[str, list[JobStatus]] | None = None,
+        interrupt_once_after_submit: bool = False,
+    ) -> None:
+        self.origin = "http://127.0.0.1:18082"
+        self.service = _catalog_service()
+        self.terminal_scripts = terminal_scripts or {}
+        self.interrupt_once_after_submit = interrupt_once_after_submit
+        self.submissions: list[tuple[str, bytes]] = []
+        self.jobs: dict[str, tuple[object, JobStatus]] = {}
+        self.active_job_id: str | None = None
+        self.bindings: dict[int, SourceTaskBinding] = {}
+
+    def task_detail(self, tasks_index: int):  # type: ignore[no-untyped-def]
+        return self.service.task_detail(tasks_index)
+
+    def _job_view(self, cell, job_id: str, status: JobStatus) -> JobView:  # type: ignore[no-untyped-def]
+        binding = self.bindings.get(cell.tasks_index)
+        if binding is None:
+            assumptions = self.task_detail(
+                cell.tasks_index
+            ).summary.solve_capability.assumption_codes
+            projected = self.service.project_task(
+                cell.tasks_index,
+                mode=ProjectionMode.SOURCE_AS_RECORDED,
+                acknowledged_assumption_codes=assumptions,
+                acknowledged_intervention_codes=(),
+            )
+            summary = self.service.summary()
+            binding = SourceTaskBinding(
+                dataset_id=summary.source.dataset_id,
+                source_slice_sha256=summary.source.slice_sha256,
+                tasks_index=cell.tasks_index,
+                acknowledged_assumption_codes=assumptions,
+                solver_projection=projected.projection,
+            )
+            self.bindings[cell.tasks_index] = binding
+        payload = {
+            "schema_version": "yieldforge.api-job.v1",
+            "job_id": job_id,
+            "status": status.value,
+            "created_at": NOW.isoformat(),
+            "updated_at": NOW.isoformat(),
+            "latest_event_id": 2 if status in {JobStatus.COMPLETED, JobStatus.TIMED_OUT} else 1,
+            "candidate_count": 0,
+            "source_task_binding": binding.model_dump(mode="json"),
+            "experiment_pair_id": None,
+            "experiment_arm": None,
+            "archive_available": status is JobStatus.COMPLETED,
+            "error_code": "solver_failure" if status is JobStatus.FAILED else None,
+            "error_message": "solver worker failed" if status is JobStatus.FAILED else None,
+        }
+        return JobView.model_validate_json(json.dumps(payload), strict=True)
+
+    def submit_request(
+        self,
+        cell,  # type: ignore[no-untyped-def]
+        request: CreateSolverJobRequest,
+    ) -> JobView:
+        assert self.active_job_id is None, "orchestration must submit only one job at a time"
+        attempt = 1 + sum(
+            saved_cell.cell_id == cell.cell_id for saved_cell, _ in self.jobs.values()
+        )
+        script = self.terminal_scripts.get(cell.cell_id, [JobStatus.COMPLETED])
+        terminal = script[min(attempt - 1, len(script) - 1)]
+        job_id = f"job-{len(self.jobs) + 1:04d}"
+        self.jobs[job_id] = (cell, terminal)
+        self.active_job_id = job_id
+        self.submissions.append((cell.cell_id, request.model_dump_json().encode()))
+        return self._job_view(cell, job_id, JobStatus.QUEUED)
+
+    def wait_for_terminal(self, job_id: str, *, poll_interval_seconds: float = 0.1) -> JobView:
+        del poll_interval_seconds
+        assert self.active_job_id in {None, job_id}
+        if self.interrupt_once_after_submit:
+            self.interrupt_once_after_submit = False
+            self.active_job_id = None
+            raise ConnectionError("scripted interruption")
+        cell, terminal = self.jobs[job_id]
+        self.active_job_id = None
+        return self._job_view(cell, job_id, terminal)
+
+    def completed_evidence(self, cell, job_id: str):  # type: ignore[no-untyped-def]
+        return CalibrationApiCompletedEvidence(
+            job_id=job_id,
+            batch_sha256=hashlib.sha256(job_id.encode()).hexdigest(),
+            candidates=(),
+        )
+
+
+def test_orchestration_resumes_saved_job_without_duplicate_submission(tmp_path: Path) -> None:
+    protocol = _protocol()
+    client = _ScriptedCalibrationClient(interrupt_once_after_submit=True)
+    output = tmp_path / "calibration"
+
+    with pytest.raises(ConnectionError, match="scripted interruption"):
+        orchestrate_calibration(protocol=protocol, client=client, output_root=output)
+
+    assert len(client.submissions) == 1
+    saved_job = next(output.glob("cells/*/attempt-1-job.json"))
+    saved_job_bytes = saved_job.read_bytes()
+
+    result = orchestrate_calibration(protocol=protocol, client=client, output_root=output)
+
+    assert isinstance(result, CalibrationRunResult)
+    assert len(result.evidence) == 612
+    assert len(client.submissions) == 612
+    assert saved_job.read_bytes() == saved_job_bytes
+    assert (output / "runtime-result.json").is_file()
+
+
+def test_orchestration_retries_only_registered_terminal_failure_once(tmp_path: Path) -> None:
+    protocol = _protocol()
+    first = registered_cells(protocol)[0]
+    client = _ScriptedCalibrationClient(
+        terminal_scripts={first.cell_id: [JobStatus.TIMED_OUT, JobStatus.COMPLETED]}
+    )
+
+    result = orchestrate_calibration(
+        protocol=protocol,
+        client=client,
+        output_root=tmp_path / "calibration",
+    )
+
+    first_submissions = [body for cell_id, body in client.submissions if cell_id == first.cell_id]
+    assert len(first_submissions) == 2
+    assert first_submissions[0] == first_submissions[1]
+    assert len(result.attempts) == 613
+    selected = next(item for item in result.evidence if item.cell == first)
+    assert selected.archive_valid is True
+
+
+def test_orchestration_rejects_output_bound_to_another_api(tmp_path: Path) -> None:
+    protocol = _protocol()
+    output = tmp_path / "calibration"
+    client = _ScriptedCalibrationClient()
+    orchestrate_calibration(protocol=protocol, client=client, output_root=output)
+    original_submission_count = len(client.submissions)
+    client.origin = "http://127.0.0.1:18083"
+
+    with pytest.raises(ValueError, match="run identity"):
+        orchestrate_calibration(protocol=protocol, client=client, output_root=output)
+
+    assert len(client.submissions) == original_submission_count
