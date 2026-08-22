@@ -429,3 +429,38 @@ def test_live_service_rejects_post_start_rehashed_record_mutation(
             13958,
             acknowledged_assumption_codes=(ASSUMPTION,),
         )
+
+
+def test_live_list_rejects_summary_and_matching_facet_mutation_with_stale_hash(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
+        summary = connection.execute(
+            "SELECT summary_json FROM yieldforge_catalog_task WHERE tasks_index = 13958"
+        ).fetchone()["summary_json"]
+        summary["shape_count"] += 1
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET summary_json = %s, shape_count = shape_count + 1 "
+            "WHERE tasks_index = 13958",
+            (Jsonb(summary),),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="runtime list identity"):
+        service.list_tasks(task_id=13958)
+
+
+def test_live_cursor_member_rejects_filter_facet_mutation_with_stale_hash(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    cursor = service.list_tasks(limit=40, min_parts=1).next_cursor
+    assert cursor is not None
+    with psycopg.connect(isolated_database_url) as connection:
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET part_count = part_count + 1 "
+            "WHERE tasks_index = 13958"
+        )
+
+    with pytest.raises(PostgresCorpusError, match="runtime list identity"):
+        service.list_tasks(limit=1, cursor=cursor, min_parts=1)

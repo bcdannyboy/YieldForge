@@ -100,6 +100,24 @@ _LIST_SQL = """
     ORDER BY source_row_index, tasks_index
     LIMIT %s
 """
+_RUNTIME_LIST_IDENTITY_FIELDS = (
+    "catalog_ordinal",
+    "tasks_index",
+    "source_row_index",
+    "sheet_type",
+    "is_train",
+    "is_val",
+    "is_test",
+    "normalization_status",
+    "support_status",
+    "projection_status",
+    "part_count",
+    "shape_count",
+    "constraint_count",
+    "constraint_types",
+    "summary_json",
+    "record_sha256",
+)
 
 
 class PostgresCorpusError(CorpusQueryError):
@@ -156,6 +174,7 @@ class PostgresCorpusQueryService:
         self._summary: CorpusSummaryDto
         self._catalog_sha256: str
         self._record_hashes: dict[int, str]
+        self._list_identities: dict[int, str]
         self._validate_startup()
 
     @contextmanager
@@ -430,6 +449,9 @@ class PostgresCorpusQueryService:
                         "catalog read-model root does not match the committed catalog"
                     )
                 self._record_hashes = {row["tasks_index"]: row["record_sha256"] for row in rows}
+                self._list_identities = {
+                    row["tasks_index"]: self._runtime_list_identity(row) for row in rows
+                }
         except CatalogImportError as error:
             raise PostgresCorpusError(
                 "configured PostgreSQL schema fingerprint is invalid"
@@ -583,6 +605,22 @@ class PostgresCorpusQueryService:
             limit,
         )
 
+    @staticmethod
+    def _runtime_list_identity(row: dict[str, object]) -> str:
+        try:
+            identity = {field: row[field] for field in _RUNTIME_LIST_IDENTITY_FIELDS}
+        except KeyError as error:
+            raise PostgresCorpusError(
+                "catalog runtime list identity is missing a required field"
+            ) from error
+        constraint_types = identity["constraint_types"]
+        if not isinstance(constraint_types, (list, tuple)) or any(
+            not isinstance(value, str) for value in constraint_types
+        ):
+            raise PostgresCorpusError("catalog runtime list identity is invalid")
+        identity["constraint_types"] = list(constraint_types)
+        return hashlib.sha256(_canonical_bytes(identity)).hexdigest()
+
     def _validate_runtime_record_identity(self, row: dict[str, object]) -> None:
         tasks_index = row.get("tasks_index")
         record_sha256 = row.get("record_sha256")
@@ -594,6 +632,14 @@ class PostgresCorpusQueryService:
         ):
             raise PostgresCorpusError(
                 "catalog runtime record identity does not match validated startup state"
+            )
+        expected_list_identity = self._list_identities.get(tasks_index)
+        if expected_list_identity is None or not hmac.compare_digest(
+            self._runtime_list_identity(row),
+            expected_list_identity,
+        ):
+            raise PostgresCorpusError(
+                "catalog runtime list identity does not match validated startup state"
             )
 
     def list_tasks(
@@ -633,8 +679,10 @@ class PostgresCorpusQueryService:
         with self._connection() as connection:
             if cursor is not None:
                 member = connection.execute(
-                    "SELECT support_status, constraint_types, tasks_index, part_count, "
-                    "record_sha256 "
+                    "SELECT catalog_ordinal, tasks_index, source_row_index, sheet_type, "
+                    "is_train, is_val, is_test, normalization_status, support_status, "
+                    "projection_status, part_count, shape_count, constraint_count, "
+                    "constraint_types, summary_json, record_sha256 "
                     "FROM yieldforge_catalog_task "
                     "WHERE source_row_index = %s AND tasks_index = %s",
                     after,
