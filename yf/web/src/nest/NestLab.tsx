@@ -1,13 +1,23 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import type { WorkbenchClient } from "../api";
-import type { CandidateGeometry, CandidateSummary, JobView, TaskDetail } from "../contracts";
+import type {
+  CandidateGeometry,
+  CandidateSummary,
+  CompletedRun,
+  JobView,
+  TaskDetail,
+} from "../contracts";
 import { ProvenanceMark } from "../components/Provenance";
 import { toSvgPoints, transformPlacedPoints } from "../geometry";
 import { initialJobState, jobReducer } from "../jobs/jobReducer";
 import { reconcileCandidates } from "../jobs/reconcile";
 
 const terminal = new Set(["cancelled", "timed_out", "failed", "completed"]);
+
+function completionTimestamp(value: string): string {
+  return new Date(value).toISOString().replace(".000Z", "Z").replace("T", " ");
+}
 
 function CandidateCanvas({ geometry }: { geometry: CandidateGeometry }) {
   return (
@@ -38,20 +48,50 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [job, setJob] = useState<JobView | null>(null);
+  const [completedRuns, setCompletedRuns] = useState<CompletedRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [stream, dispatch] = useReducer(jobReducer, initialJobState);
   const [terminalCandidates, setTerminalCandidates] = useState<CandidateSummary[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null);
   const [geometry, setGeometry] = useState<CandidateGeometry | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [geometryError, setGeometryError] = useState<string | null>(null);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const manualSelection = useRef(false);
   const lastSequence = useRef(0);
+  const candidateRequestGeneration = useRef(0);
+  const geometryRequestGeneration = useRef(0);
+  const refreshedCompletedJob = useRef<string | null>(null);
   const effectiveStatus = job
     ? stream.status === "idle"
       ? job.status
       : stream.status
     : "idle";
+  const hasActiveJob = Boolean(job && !terminal.has(effectiveStatus));
+
+  const resetArchiveView = useCallback(() => {
+    candidateRequestGeneration.current += 1;
+    geometryRequestGeneration.current += 1;
+    dispatch({ type: "reset" });
+    lastSequence.current = 0;
+    setTerminalCandidates([]);
+    setSelectedCandidate(null);
+    setGeometry(null);
+    setArchiveError(null);
+    setGeometryError(null);
+    manualSelection.current = false;
+    setReconnectAttempt(0);
+  }, []);
+
+  const selectCompletedRun = useCallback((run: CompletedRun) => {
+    resetArchiveView();
+    setSelectedRunId(run.job.job_id);
+    setJob(run.job);
+  }, [resetArchiveView]);
 
   useEffect(() => {
     if (tasksIndex === null) return;
@@ -59,25 +99,33 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
     setAcknowledged(false);
     setDetail(null);
     setJob(null);
-    dispatch({ type: "reset" });
-    lastSequence.current = 0;
-    setTerminalCandidates([]);
-    setSelectedCandidate(null);
-    setGeometry(null);
-    manualSelection.current = false;
-    setReconnectAttempt(0);
+    setCompletedRuns([]);
+    setSelectedRunId(null);
+    setHistoryLoaded(false);
+    setHistoryError(null);
+    refreshedCompletedJob.current = null;
+    resetArchiveView();
     setError(null);
-    void Promise.all([client.getTask(tasksIndex), client.listTaskJobs(tasksIndex)])
-      .then(([task, completedJobs]) => {
+    void client.getTask(tasksIndex)
+      .then((task) => active && setDetail(task))
+      .catch((reason: unknown) => active && setError(`Task: ${String(reason)}`));
+    void client.listCompletedRuns(tasksIndex)
+      .then((page) => {
         if (!active) return;
-        setDetail(task);
-        setJob(completedJobs.items.at(-1) ?? null);
+        setCompletedRuns(page.items);
+        setHistoryLoaded(true);
+        const newest = page.items[0];
+        if (newest) selectCompletedRun(newest);
       })
-      .catch((reason: unknown) => active && setError(String(reason)));
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setHistoryLoaded(true);
+        setHistoryError(`Run history: ${String(reason)}`);
+      });
     return () => {
       active = false;
     };
-  }, [client, tasksIndex]);
+  }, [client, resetArchiveView, selectCompletedRun, tasksIndex]);
 
   useEffect(() => {
     if (!job || terminal.has(job.status)) return;
@@ -129,27 +177,84 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   }, [stream.liveCandidateIds]);
 
   useEffect(() => {
-    if (!job || effectiveStatus !== "completed") return;
+    if (!job || effectiveStatus !== "completed" || selectedRunId !== job.job_id) return;
+    const generation = ++candidateRequestGeneration.current;
+    const jobId = job.job_id;
+    setArchiveError(null);
     void (async () => {
       const all: CandidateSummary[] = [];
       let cursor: string | undefined;
       do {
-        const page = await client.listCandidates(job.job_id, cursor);
+        const page = await client.listCandidates(jobId, cursor);
+        if (candidateRequestGeneration.current !== generation) return;
         all.push(...page.items);
         cursor = page.next_cursor ?? undefined;
       } while (cursor);
+      if (candidateRequestGeneration.current !== generation) return;
       setTerminalCandidates(all);
       if (!manualSelection.current) setSelectedCandidate(all.at(-1)?.candidate_id ?? null);
-    })().catch((reason: unknown) => setError(String(reason)));
-  }, [client, effectiveStatus, job]);
+    })().catch((reason: unknown) => {
+      if (candidateRequestGeneration.current === generation) {
+        setArchiveError(`Archive ${jobId}: ${String(reason)}`);
+      }
+    });
+    return () => {
+      if (candidateRequestGeneration.current === generation) {
+        candidateRequestGeneration.current += 1;
+      }
+    };
+  }, [client, effectiveStatus, job, selectedRunId]);
 
   useEffect(() => {
     if (!job || !selectedCandidate || effectiveStatus !== "completed") return;
+    const generation = ++geometryRequestGeneration.current;
+    const jobId = job.job_id;
+    const candidateId = selectedCandidate;
+    setGeometry(null);
+    setGeometryError(null);
     void client
-      .getCandidateGeometry(job.job_id, selectedCandidate)
-      .then(setGeometry)
-      .catch((reason: unknown) => setError(String(reason)));
+      .getCandidateGeometry(jobId, candidateId)
+      .then((value) => {
+        if (geometryRequestGeneration.current === generation) setGeometry(value);
+      })
+      .catch((reason: unknown) => {
+        if (geometryRequestGeneration.current === generation) {
+          setGeometryError(`Geometry ${jobId}/${candidateId}: ${String(reason)}`);
+        }
+      });
+    return () => {
+      if (geometryRequestGeneration.current === generation) {
+        geometryRequestGeneration.current += 1;
+      }
+    };
   }, [client, effectiveStatus, job, selectedCandidate]);
+
+  useEffect(() => {
+    if (
+      tasksIndex === null ||
+      !job ||
+      selectedRunId !== null ||
+      effectiveStatus !== "completed" ||
+      refreshedCompletedJob.current === job.job_id
+    ) {
+      return;
+    }
+    const completedJobId = job.job_id;
+    refreshedCompletedJob.current = completedJobId;
+    void client.listCompletedRuns(tasksIndex)
+      .then((page) => {
+        setCompletedRuns(page.items);
+        setHistoryLoaded(true);
+        setHistoryError(null);
+        const completedRun = page.items.find((run) => run.job.job_id === completedJobId);
+        if (completedRun) {
+          selectCompletedRun(completedRun);
+        } else {
+          setHistoryError(`Run history: completed archive ${completedJobId} was not returned`);
+        }
+      })
+      .catch((reason: unknown) => setHistoryError(`Run history: ${String(reason)}`));
+  }, [client, effectiveStatus, job, selectCompletedRun, selectedRunId, tasksIndex]);
 
   const candidates = useMemo(
     () => reconcileCandidates(stream.liveCandidateIds, terminalCandidates),
@@ -214,12 +319,9 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                     max_runtime_seconds: Number(data.get("seconds")) + 1,
                   })
                   .then((created) => {
-                    dispatch({ type: "reset" });
-                    lastSequence.current = 0;
-                    setTerminalCandidates([]);
-                    setSelectedCandidate(null);
-                    setGeometry(null);
-                    manualSelection.current = false;
+                    resetArchiveView();
+                    setSelectedRunId(null);
+                    refreshedCompletedJob.current = null;
                     setJob(created);
                   })
                   .catch((reason: unknown) => setError(String(reason)));
@@ -238,7 +340,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
               <label>Computation seconds<input name="seconds" type="number" min="1" max="9" defaultValue="5" required /></label>
               <label>Workers<input value="1" readOnly aria-label="Workers" /></label>
               <label><input name="early" type="checkbox" /> Early termination</label>
-              <button type="submit" disabled={!canSubmit || Boolean(job && !terminal.has(effectiveStatus))}>
+              <button type="submit" disabled={!canSubmit || hasActiveJob}>
                 Start solver job
               </button>
             </form>
@@ -267,6 +369,80 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
             ) : null}
           </aside>
 
+          <section
+            className="panel run-history-panel"
+            role="region"
+            aria-labelledby="run-history-heading"
+          >
+            <div className="run-history-heading">
+              <div>
+                <p className="eyebrow">Task-bound evidence</p>
+                <h2 id="run-history-heading">Completed run history</h2>
+              </div>
+              <span>{completedRuns.length}</span>
+            </div>
+            <p className="run-history-intro">
+              Verified immutable candidate archives, newest first. Selecting a run only browses
+              recorded output; it does not rerun or rank it.
+            </p>
+            {historyError ? <p className="notice notice--error">{historyError}</p> : null}
+            {!historyLoaded ? (
+              <p className="run-history-empty">Loading completed runs…</p>
+            ) : completedRuns.length === 0 && !historyError ? (
+              <p className="run-history-empty">No completed archive runs for this task yet.</p>
+            ) : (
+              <div className="run-history-list">
+                {completedRuns.map((run) => {
+                  const selected = selectedRunId === run.job.job_id;
+                  const assumptions =
+                    run.job.source_task_binding?.acknowledged_assumption_codes ?? [];
+                  return (
+                    <button
+                      key={run.job.job_id}
+                      type="button"
+                      className="run-history-card"
+                      aria-label={`Open completed run ${run.job.job_id}`}
+                      aria-pressed={selected}
+                      disabled={hasActiveJob}
+                      data-selected={selected}
+                      onClick={() => selectCompletedRun(run)}
+                    >
+                      <span className="run-history-card__topline">
+                        <strong>{selected ? "Selected archive" : "Completed archive"}</strong>
+                        <time dateTime={run.job.updated_at}>
+                          {completionTimestamp(run.job.updated_at)}
+                        </time>
+                      </span>
+                      <span className="mono run-history-card__job">{run.job.job_id}</span>
+                      <span className="run-history-card__facts">
+                        <span>Seed {run.settings.seed}</span>
+                        <span>Computation {run.settings.total_computation_time}s</span>
+                        <span>Runtime limit {run.settings.max_runtime_seconds}s</span>
+                        <span>Workers {run.settings.num_workers}</span>
+                        <span>Candidates {run.job.candidate_count}</span>
+                        <span>
+                          Early termination {run.settings.early_termination ? "on" : "off"}
+                        </span>
+                        <span>
+                          Min separation {run.settings.min_items_separation ?? "none"}
+                        </span>
+                      </span>
+                      <span className="run-history-card__assumptions">
+                        Assumptions: {assumptions.length > 0 ? assumptions.join(", ") : "none"}
+                      </span>
+                      <span className="mono run-history-card__hash">
+                        {run.archive.batch_sha256}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {hasActiveJob ? (
+              <p className="field-note">History is locked until the active solver job is terminal.</p>
+            ) : null}
+          </section>
+
           <div className="panel result-panel">
             <div className="candidate-toolbar">
               <h2>Candidate batch</h2>
@@ -287,6 +463,8 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                 </button>
               ))}
             </div>
+            {archiveError ? <p className="notice notice--error">{archiveError}</p> : null}
+            {geometryError ? <p className="notice notice--error">{geometryError}</p> : null}
             {geometry ? <CandidateCanvas geometry={geometry} /> : <p className="empty-state">Run a solve or select a completed candidate.</p>}
           </div>
         </div>

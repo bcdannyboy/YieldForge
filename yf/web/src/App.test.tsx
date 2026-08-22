@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { WorkbenchClient } from "./api";
 import {
+  completedRun,
   corpusSummary,
   job,
   orderBook,
@@ -348,57 +349,273 @@ describe("research workbench", () => {
     );
   });
 
-  it("rediscovers and renders a completed immutable candidate archive", async () => {
+  it("defaults to the newest completed archive and browses an older run", async () => {
     const api = client();
-    const completedJob = {
-      ...job,
-      status: "completed" as const,
-      latest_event_id: 5,
-      candidate_count: 1,
-      archive_available: true,
-    };
-    const candidate = {
-      candidate_id: "candidate-archived",
-      report_type: "final" as const,
-      seed: 23,
-      width: 42,
-      density: 0.75,
-      placement_count: 1,
-    };
-    vi.mocked(api.listTaskJobs).mockResolvedValue({
-      schema_version: "yieldforge.api-task-jobs.v1",
-      items: [completedJob],
+    const newer = completedRun("job-newer");
+    newer.job.updated_at = "2026-08-18T01:00:00Z";
+    newer.settings.seed = 29;
+    newer.archive.batch_sha256 = "d".repeat(64);
+    const older = completedRun("job-older");
+    older.settings.early_termination = true;
+    older.settings.min_items_separation = 0.25;
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [newer, older],
     });
-    vi.mocked(api.listCandidates).mockResolvedValue({
+    vi.mocked(api.listCandidates).mockImplementation((jobId) => Promise.resolve({
       schema_version: "yieldforge.api-candidate-page.v1",
-      items: [candidate],
+      items: [{
+        candidate_id: `${jobId}-candidate`,
+        report_type: "final",
+        seed: jobId === "job-newer" ? 29 : 23,
+        width: 42,
+        density: 0.75,
+        placement_count: 1,
+      }],
       next_cursor: null,
-    });
-    vi.mocked(api.getCandidateGeometry).mockResolvedValue({
+    }));
+    vi.mocked(api.getCandidateGeometry).mockImplementation((_jobId, candidateId) => Promise.resolve({
       schema_version: "yieldforge.api-candidate-geometry.v1",
-      candidate,
+      candidate: {
+        candidate_id: candidateId,
+        report_type: "final",
+        seed: 23,
+        width: 42,
+        density: 0.75,
+        placement_count: 1,
+      },
       sheet: { length: 100, width: 50 },
       provenance: "derived",
-      placements: [
-        {
-          part_id: "part-1",
-          rotation: 0,
-          translation: [10, 10],
-          projected_shape: [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]],
-          svg_points: [[10, 40], [11, 40], [11, 39], [10, 39], [10, 40]],
-        },
-      ],
-    });
+      placements: [{
+        part_id: "part-1",
+        rotation: 0,
+        translation: [10, 10],
+        projected_shape: [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]],
+        svg_points: [[10, 40], [11, 40], [11, 39], [10, 39], [10, 40]],
+      }],
+    }));
     window.history.replaceState({}, "", "/?view=nest&task=13958");
 
     render(<App client={api} />);
 
-    expect(await screen.findByText("candidate-archived")).toBeVisible();
+    const history = await screen.findByRole("region", { name: "Completed run history" });
+    const runButtons = within(history).getAllByRole("button");
+    expect(runButtons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Open completed run job-newer",
+      "Open completed run job-older",
+    ]);
+    expect(runButtons[0]).toHaveAttribute("aria-pressed", "true");
+    expect(within(history).getByText("d".repeat(64))).toBeVisible();
+    expect(within(runButtons[0]!).getByText(/Seed 29/)).toBeVisible();
+    expect(await screen.findByText("job-newer-candidate")).toBeVisible();
+
+    await userEvent.setup().click(runButtons[1]!);
+
+    expect(await screen.findByText("job-older-candidate")).toBeVisible();
+    expect(runButtons[1]).toHaveAttribute("aria-pressed", "true");
     expect(
-      await screen.findByRole("img", { name: /candidate candidate-archived placement geometry/i }),
+      await screen.findByRole("img", { name: /candidate job-older-candidate placement geometry/i }),
     ).toBeVisible();
-    expect(api.listTaskJobs).toHaveBeenCalledWith(13958);
-    expect(api.listCandidates).toHaveBeenCalledWith("job-1", undefined);
+    expect(api.listCompletedRuns).toHaveBeenCalledWith(13958);
+    expect(api.listCandidates).toHaveBeenCalledWith("job-older", undefined);
+  });
+
+  it("shows completed-run empty and independent error states", async () => {
+    const emptyApi = client();
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    const { unmount } = render(<App client={emptyApi} />);
+
+    expect(await screen.findByText("No completed archive runs for this task yet.")).toBeVisible();
+    expect(screen.getByRole("button", { name: /start solver job/i })).toBeDisabled();
+    unmount();
+
+    const errorApi = client();
+    vi.mocked(errorApi.listCompletedRuns).mockRejectedValue(new Error("history unavailable"));
+    render(<App client={errorApi} />);
+
+    expect(await screen.findByText(/Run history: Error: history unavailable/)).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Task 13958" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: /acknowledge exact assumption/i })).toBeVisible();
+  });
+
+  it("locks history during an active job and selects it after archive completion", async () => {
+    const api = client();
+    const older = completedRun("job-older");
+    const fresh = completedRun("job-fresh");
+    fresh.settings.seed = 31;
+    fresh.archive.batch_sha256 = "e".repeat(64);
+    vi.mocked(api.listCompletedRuns)
+      .mockResolvedValueOnce({
+        schema_version: "yieldforge.api-completed-run-page.v1",
+        items: [older],
+      })
+      .mockResolvedValue({
+        schema_version: "yieldforge.api-completed-run-page.v1",
+        items: [fresh, older],
+      });
+    vi.mocked(api.createJob).mockResolvedValue({
+      ...job,
+      job_id: "job-fresh",
+      source_task_binding: older.job.source_task_binding,
+    });
+    let releaseStream: (() => void) | undefined;
+    vi.mocked(api.streamJobEvents).mockImplementation(
+      (jobId, _after, _signal, onEvent) => new Promise<void>((resolve) => {
+        releaseStream = () => {
+          onEvent({
+            schema_version: "yieldforge.api-job-event.v1",
+            job_id: jobId,
+            sequence: 1,
+            occurred_at: "2026-08-18T02:00:00Z",
+            kind: "status",
+            status: "running",
+            phase: null,
+            candidate_id: null,
+            candidate_count: 0,
+            archive_available: false,
+            error_code: null,
+            error_message: null,
+          });
+          onEvent({
+            schema_version: "yieldforge.api-job-event.v1",
+            job_id: jobId,
+            sequence: 2,
+            occurred_at: "2026-08-18T02:00:01Z",
+            kind: "terminal",
+            status: "completed",
+            phase: null,
+            candidate_id: null,
+            candidate_count: 1,
+            archive_available: true,
+            error_code: null,
+            error_message: null,
+          });
+          resolve();
+        };
+      }),
+    );
+    vi.mocked(api.listCandidates).mockResolvedValue({
+      schema_version: "yieldforge.api-candidate-page.v1",
+      items: [],
+      next_cursor: null,
+    });
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+    const user = userEvent.setup();
+
+    const oldButton = await screen.findByRole("button", { name: "Open completed run job-older" });
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge exact assumption/i }));
+    await user.clear(screen.getByRole("spinbutton", { name: "Seed" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Seed" }), "31");
+    await user.click(screen.getByRole("button", { name: /start solver job/i }));
+
+    await waitFor(() => expect(oldButton).toBeDisabled());
+    expect(oldButton).toHaveAttribute("aria-pressed", "false");
+    await act(async () => releaseStream?.());
+
+    const freshButton = await screen.findByRole("button", { name: "Open completed run job-fresh" });
+    expect(freshButton).toHaveAttribute("aria-pressed", "true");
+    expect(freshButton).toBeEnabled();
+    expect(api.listCompletedRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a stale archive response cross a run selection", async () => {
+    const api = client();
+    const newer = completedRun("job-newer");
+    const older = completedRun("job-older");
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [newer, older],
+    });
+    let resolveNewCandidates: ((value: Awaited<ReturnType<WorkbenchClient["listCandidates"]>>) => void) | undefined;
+    vi.mocked(api.listCandidates).mockImplementation((jobId) => {
+      if (jobId === "job-newer") {
+        return new Promise((resolve) => { resolveNewCandidates = resolve; });
+      }
+      return Promise.resolve({
+        schema_version: "yieldforge.api-candidate-page.v1",
+        items: [{ candidate_id: "older-candidate", report_type: "final", seed: 23, width: 4, density: 0.5, placement_count: 1 }],
+        next_cursor: null,
+      });
+    });
+    const geometryFor = (candidateId: string) => ({
+      schema_version: "yieldforge.api-candidate-geometry.v1" as const,
+      candidate: { candidate_id: candidateId, report_type: "final" as const, seed: 23, width: 4, density: 0.5, placement_count: 1 },
+      sheet: { length: 10, width: 5 },
+      provenance: "derived" as const,
+      placements: [{ part_id: "part", rotation: 0, translation: [0, 0] as [number, number], projected_shape: [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]] as Array<[number, number]>, svg_points: [[0, 5], [1, 5], [1, 4], [0, 4], [0, 5]] as Array<[number, number]> }],
+    });
+    vi.mocked(api.getCandidateGeometry).mockImplementation((_jobId, candidateId) =>
+      Promise.resolve(geometryFor(candidateId)));
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+
+    await userEvent.setup().click(
+      await screen.findByRole("button", { name: "Open completed run job-older" }),
+    );
+    expect(await screen.findByText("older-candidate")).toBeVisible();
+    expect(await screen.findByRole("img", { name: /older-candidate placement geometry/i })).toBeVisible();
+
+    await act(async () => resolveNewCandidates?.({
+      schema_version: "yieldforge.api-candidate-page.v1",
+      items: [{ candidate_id: "newer-candidate", report_type: "final", seed: 29, width: 3, density: 0.6, placement_count: 1 }],
+      next_cursor: null,
+    }));
+    expect(screen.queryByText("newer-candidate")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /older-candidate placement geometry/i })).toBeVisible();
+  });
+
+  it("does not let stale geometry cross a run selection", async () => {
+    const api = client();
+    const newer = completedRun("job-newer");
+    const older = completedRun("job-older");
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [newer, older],
+    });
+    const candidateFor = (jobId: string) => ({
+      candidate_id: `${jobId}-candidate`,
+      report_type: "final" as const,
+      seed: 23,
+      width: 4,
+      density: 0.5,
+      placement_count: 1,
+    });
+    vi.mocked(api.listCandidates).mockImplementation((jobId) => Promise.resolve({
+      schema_version: "yieldforge.api-candidate-page.v1",
+      items: [candidateFor(jobId)],
+      next_cursor: null,
+    }));
+    const geometryFor = (candidateId: string) => ({
+      schema_version: "yieldforge.api-candidate-geometry.v1" as const,
+      candidate: { ...candidateFor(candidateId.replace("-candidate", "")), candidate_id: candidateId },
+      sheet: { length: 10, width: 5 },
+      provenance: "derived" as const,
+      placements: [{ part_id: "part", rotation: 0, translation: [0, 0] as [number, number], projected_shape: [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]] as Array<[number, number]>, svg_points: [[0, 5], [1, 5], [1, 4], [0, 4], [0, 5]] as Array<[number, number]> }],
+    });
+    let resolveNewGeometry: ((value: Awaited<ReturnType<WorkbenchClient["getCandidateGeometry"]>>) => void) | undefined;
+    vi.mocked(api.getCandidateGeometry).mockImplementation((jobId, candidateId) => {
+      if (jobId === "job-newer") {
+        return new Promise((resolve) => { resolveNewGeometry = resolve; });
+      }
+      return Promise.resolve(geometryFor(candidateId));
+    });
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+
+    await waitFor(() => expect(api.getCandidateGeometry).toHaveBeenCalledWith(
+      "job-newer",
+      "job-newer-candidate",
+    ));
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "Open completed run job-older" }),
+    );
+    expect(await screen.findByRole("img", { name: /job-older-candidate placement geometry/i })).toBeVisible();
+
+    await act(async () => resolveNewGeometry?.(geometryFor("job-newer-candidate")));
+
+    expect(screen.queryByRole("img", { name: /job-newer-candidate placement geometry/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /job-older-candidate placement geometry/i })).toBeVisible();
   });
 
   it("shows immutable order-book identity, provenance, diagnostics, and task navigation", async () => {

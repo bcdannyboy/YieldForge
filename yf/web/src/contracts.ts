@@ -378,6 +378,17 @@ function nullableText(value: unknown, label: string): string | null {
   return value === null ? null : text(value, label);
 }
 
+function timestamp(value: unknown, label: string): string {
+  const parsed = text(value, label);
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(parsed) ||
+    Number.isNaN(Date.parse(parsed))
+  ) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return parsed;
+}
+
 function strings(value: unknown, label: string): string[] {
   return list(value, label).map((item, index) => text(item, `${label}[${index}]`));
 }
@@ -680,8 +691,8 @@ function completedJob(value: unknown): JobView {
   if (parsed.status !== "completed" || !parsed.archive_available) {
     throw new TypeError("completed run.job must identify an available completed archive");
   }
-  text(parsed.created_at, "completed run.job.created_at");
-  text(parsed.updated_at, "completed run.job.updated_at");
+  timestamp(parsed.created_at, "completed run.job.created_at");
+  timestamp(parsed.updated_at, "completed run.job.updated_at");
   if (parsed.source_task_binding === null) {
     throw new TypeError("completed run.job.source_task_binding is required");
   }

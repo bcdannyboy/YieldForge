@@ -122,6 +122,10 @@ describe("browser transport validation", () => {
     uppercaseHash.items[0]!.archive.batch_sha256 = "C".repeat(64);
     expect(() => parseCompletedRunPage(uppercaseHash)).toThrow(/sha256/i);
 
+    const invalidCompletion = structuredClone(valid);
+    invalidCompletion.items[0]!.job.updated_at = "not-a-timestamp";
+    expect(() => parseCompletedRunPage(invalidCompletion)).toThrow(/updated_at/i);
+
     const pathLeak = structuredClone(valid) as unknown as {
       items: Array<{ archive: Record<string, unknown> }>;
     };
