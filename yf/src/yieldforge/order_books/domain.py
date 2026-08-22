@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Self
 
@@ -220,7 +220,7 @@ class GenerationRequest(FrozenContract):
     def require_aware_start(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("starts_at must be timezone-aware")
-        return value
+        return value.astimezone(UTC)
 
 
 class ChronologicalLoad(FrozenContract):

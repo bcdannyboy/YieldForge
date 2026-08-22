@@ -6,11 +6,11 @@
 
 ## Current objective
 
-Make the first bounded, source-real Lectra task inspectable and runnable while preserving the evidence and assumption boundary. The reusable implementation remains in the single `yf/` project.
+Use the local research workbench to inspect the committed Lectra slice, exercise the one assumption-backed Spyrrow projection, and inspect deterministic generated order books without crossing the experiment's evidence boundary. The reusable implementation remains in the single `yf/` project.
 
 ## Next step
 
-Build the local workbench job boundary, API, and UI described in [[2026-08-17-normalized-slice-and-workbench-implementation]]. It should let us inspect the committed tasks, run the eligible projection through Spyrrow, and watch progressive candidates without implying that the job service exists before it is committed and verified.
+Keep M0's outcome and comparison contract ahead of new experiment capabilities. The next bounded local-product task is to expose explicit completed-run history and selection in Nest Lab, including run settings and immutable archive identity. Do not begin arbitrary sheet-and-parts input, residual geometry, remnant reuse, simulation, or oracle UI yet.
 
 ## Evidence bridge completed
 
@@ -20,7 +20,12 @@ Build the local workbench job boundary, API, and UI described in [[2026-08-17-no
 - A bounded, source-lossless fixture committed and documented in [[Lectra Representative Slice]].
 - Task `13958` projected through a fail-closed solver boundary under one explicit `s1` orientation assumption; task `25801` remains view-only because its `c8` semantics are unresolved.
 - Progressive feasible solutions normalized, fixed-sheet filtered, deduplicated, archived, and exposed through the adapter callback boundary.
+- A local FastAPI service owns corpus queries, solver-job lifecycle, SSE replay, completed candidate archives, derived placement geometry, and deterministic order-book publication.
+- Corpus Explorer, Nest Lab, and Order Book Lab are implemented under `yf/web/`; the real browser suite exercises the frontend-to-API-to-Spyrrow path and archive rediscovery.
+- The visible corpus remains the two committed tasks. Order-book chronology/economics are generated and material is assumed; the UI labels those fields and treats full manifests as analysis-only.
 
 ## Experiment status
 
-This foundation still does not pass M0 or M2. The primary outcome, cost accounting, oracle comparison, remnant rules, and success threshold remain unresolved. No economic benchmark result, residual-geometry proof, future-aware policy result, or validated savings claim exists yet.
+This local workbench slice still does not pass M0 or M2. The primary outcome, cost accounting, oracle comparison, remnant rules, and success threshold remain unresolved. No residual-geometry proof, remnant reuse, chronological simulator, future-aware policy, economic benchmark, or validated savings claim exists yet.
+
+See [[Research Workbench]] for local setup, runtime storage, and verification commands.

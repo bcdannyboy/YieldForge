@@ -25,13 +25,17 @@ from yieldforge.datasets.corpus import (
 )
 from yieldforge.datasets.projection import placed_shape_svg_points
 from yieldforge.domain import Candidate, SourceTaskBinding, SpyrrowRunConfig
+from yieldforge.order_books.domain import GenerationRegime
 from yieldforge.workbench.api_contracts import (
     ApiError,
     CandidateGeometry,
     CandidatePage,
     CandidateSummary,
     CreateSolverJobRequest,
+    GenerateOrderBookInput,
     JobView,
+    OrderBookPage,
+    OrderBookView,
     PlacementGeometry,
     PublicJobEvent,
     SheetGeometry,
@@ -45,6 +49,14 @@ from yieldforge.workbench.contracts import (
     SolveRequest,
 )
 from yieldforge.workbench.jobs import ActiveJobError, SolverJobService
+from yieldforge.workbench.order_books import (
+    InvalidOrderBookCursorError,
+    InvalidOrderBookRequestError,
+    OrderBookCapacityError,
+    OrderBookIntegrityError,
+    OrderBookNotFoundError,
+    OrderBookService,
+)
 
 _SSE_POLL_SECONDS = 0.1
 _SSE_REPLAY_CHUNK = 100
@@ -165,7 +177,12 @@ def _candidate_summary(candidate: Candidate) -> CandidateSummary:
     )
 
 
-def create_app(*, corpus: CorpusQueryService, jobs: SolverJobService) -> FastAPI:
+def create_app(
+    *,
+    corpus: CorpusQueryService,
+    jobs: SolverJobService,
+    order_books: OrderBookService | None = None,
+) -> FastAPI:
     """Create an application around explicit, already-configured local services."""
 
     app = FastAPI(title="YieldForge Research Workbench", version="0.1.0")
@@ -416,7 +433,52 @@ def create_app(*, corpus: CorpusQueryService, jobs: SolverJobService) -> FastAPI
         completed = tuple(
             snapshot for snapshot in snapshots if snapshot.status is JobStatus.COMPLETED
         )
-        return TaskJobPage(items=tuple(_job_view(snapshot) for snapshot in completed[:limit]))
+        return TaskJobPage(items=tuple(_job_view(snapshot) for snapshot in completed[-limit:]))
+
+    @app.get("/api/order-books", response_model=OrderBookPage)
+    async def list_order_books(
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+        cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+        regime: GenerationRegime | None = None,
+    ) -> OrderBookPage | JSONResponse:
+        if order_books is None:
+            return _error(503, "order_books_unavailable", "order-book service is unavailable")
+        try:
+            return order_books.list_books(limit=limit, cursor=cursor, regime=regime)
+        except InvalidOrderBookCursorError:
+            return _error(422, "invalid_order_book_cursor", "order-book cursor was rejected")
+        except InvalidOrderBookRequestError:
+            return _error(422, "invalid_order_book_request", "order-book query was rejected")
+        except OrderBookIntegrityError:
+            return _error(500, "order_book_integrity", "order-book catalog failed validation")
+
+    @app.post("/api/order-books", response_model=OrderBookView, status_code=201)
+    async def generate_order_book(body: GenerateOrderBookInput) -> OrderBookView | JSONResponse:
+        if order_books is None:
+            return _error(503, "order_books_unavailable", "order-book service is unavailable")
+        try:
+            return order_books.generate(body)
+        except InvalidOrderBookRequestError:
+            return _error(
+                422,
+                "invalid_order_book_request",
+                "order-book generation request was rejected",
+            )
+        except OrderBookCapacityError:
+            return _error(409, "order_book_catalog_full", "order-book catalog is full")
+        except OrderBookIntegrityError:
+            return _error(500, "order_book_integrity", "order-book catalog failed validation")
+
+    @app.get("/api/order-books/{order_book_id}", response_model=OrderBookView)
+    async def order_book_detail(order_book_id: str) -> OrderBookView | JSONResponse:
+        if order_books is None:
+            return _error(503, "order_books_unavailable", "order-book service is unavailable")
+        try:
+            return order_books.detail(order_book_id)
+        except OrderBookNotFoundError:
+            return _error(404, "order_book_not_found", "order book was not found")
+        except OrderBookIntegrityError:
+            return _error(500, "order_book_integrity", "order-book catalog failed validation")
 
     return app
 
@@ -438,6 +500,9 @@ def create_default_app() -> FastAPI:
         jobs=SolverJobService(
             runtime_root / "jobs",
             runtime_root / "candidate-archives",
+        ),
+        order_books=OrderBookService.from_repository(
+            runtime_archive_dir=runtime_root / "order-books"
         ),
     )
 

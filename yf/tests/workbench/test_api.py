@@ -247,6 +247,7 @@ class _FakeJobs:
         self._start_lock = threading.Lock()
         self._active = False
         self.snapshot = _snapshot()
+        self.source_snapshots: tuple[JobSnapshot, ...] | None = None
         self.batch: CandidateBatch | None = None
         self.event_records: list[JobEvent] = []
 
@@ -291,7 +292,7 @@ class _FakeJobs:
             13958,
         ):
             return ()
-        return (self.snapshot,)
+        return self.source_snapshots or (self.snapshot,)
 
 
 def _solve_payload(*, tasks_index: int = 13958, assumptions: list[str] | None = None) -> dict:
@@ -652,6 +653,22 @@ def test_completed_jobs_for_task_are_source_bound_and_hide_internal_state() -> N
     assert "worker_pid" not in response.text
 
 
+def test_completed_jobs_for_task_returns_the_latest_bounded_window() -> None:
+    jobs = _FakeJobs()
+    jobs.source_snapshots = tuple(
+        _snapshot(JobStatus.COMPLETED, sequence=3).model_copy(update={"job_id": f"job_{index:02d}"})
+        for index in range(25)
+    )
+    client, _, _ = _client(jobs=jobs)
+
+    response = client.get("/api/tasks/13958/solver-jobs", params={"limit": 20})
+
+    assert response.status_code == 200
+    assert [item["job_id"] for item in response.json()["items"]] == [
+        f"job_{index:02d}" for index in range(5, 25)
+    ]
+
+
 def test_api_import_does_not_load_pandas_or_pickle() -> None:
     completed = subprocess.run(
         [
@@ -675,6 +692,8 @@ def test_default_factory_uses_server_owned_runtime_roots(
     corpus = _FakeCorpus()
     jobs = _FakeJobs()
     observed: list[tuple[Path, Path]] = []
+    observed_order_book_roots: list[Path] = []
+    order_books = object()
 
     monkeypatch.setenv("YIELDFORGE_WORKBENCH_ROOT", str(tmp_path / "runtime"))
     monkeypatch.setattr(
@@ -688,6 +707,15 @@ def test_default_factory_uses_server_owned_runtime_roots(
         return jobs
 
     monkeypatch.setattr(app_module, "SolverJobService", job_service)
+    monkeypatch.setattr(
+        app_module.OrderBookService,
+        "from_repository",
+        classmethod(
+            lambda _cls, *, runtime_archive_dir: (
+                observed_order_book_roots.append(runtime_archive_dir) or order_books
+            )
+        ),
+    )
 
     application = create_default_app()
 
@@ -695,3 +723,4 @@ def test_default_factory_uses_server_owned_runtime_roots(
     assert observed == [
         (tmp_path / "runtime" / "jobs", tmp_path / "runtime" / "candidate-archives")
     ]
+    assert observed_order_book_roots == [tmp_path / "runtime" / "order-books"]

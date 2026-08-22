@@ -2,7 +2,7 @@
 
 YieldForge is a research project testing whether future demand should change which high-quality 2D nesting layout a manufacturer chooses today.
 
-> **Current status:** M0—the experiment contract—is active. The reusable `yf/` development foundation and Spyrrow candidate adapter are working, but M0 has not passed and no savings result or commercial claim exists.
+> **Current status:** M0—the experiment contract—is active. The repository now includes a local research workbench over a committed two-task Lectra slice, but M0 has not passed and no residual-geometry, remnant-reuse, simulator, oracle, savings, or commercial result exists.
 
 ## The idea
 
@@ -52,6 +52,16 @@ The perfect-information MVP intentionally excludes:
 - production UI, authentication, hosted services, and customer dashboards;
 - claims that synthetic results prove real-world or commercial value.
 
+## Local research workbench
+
+The browser workbench under `yf/web/` is a local research instrument, not a production application:
+
+- **Corpus Explorer** exposes the two committed source-lossless Lectra tasks and their server-owned support states.
+- **Nest Lab** keeps task `25801` view-only, requires acknowledgement of `interpret_s1_degenerate_entries_as_allowed_rotations` for task `13958`, and runs bounded Spyrrow jobs through the FastAPI worker boundary. Completed immutable candidate archives can be rediscovered and rendered.
+- **Order Book Lab** opens three committed deterministic books and can generate additional immutable local books. Geometry and task composition are source-observed; chronology and economics are generated; material is assumed.
+
+The visible corpus is still only the committed tasks `13958` and `25801`. The workbench does not calculate residual geometry, reuse remnants, simulate inventory, compare a baseline with an oracle, or report savings. See [Research Workbench](Docs/Development/Research%20Workbench.md) for the exact source-evidence reproduction, direct API, local runtime, and verification commands.
+
 ## Repository documentation
 
 The repository's primary project and developer documentation is an Obsidian vault under [`Docs/`](Docs/Home.md). The original DOCX is preserved inside the vault, while its contents are split into section-sized Markdown notes for easier navigation and maintenance.
@@ -74,19 +84,25 @@ All implementation work accumulates in one directory: `yf/`. Milestones extend t
 
 ```bash
 cd yf
-uv sync
-uv run pytest
+uv sync --locked --all-groups
+uv run --all-groups pytest
 uv run yieldforge candidates generate \
   --input benchmarks/static/m0-smoke.json \
   --output var/archives/m0-smoke-seed-0 \
   --seed 0 --seconds 1 --workers 1
+
+cd web
+npm ci
+npm run playwright:install
+npm test
+npm run build
 ```
 
 Candidate output directories are immutable. Choose a new output path for every run; committed source and tests never depend on generated archives.
 
 ## Current next step
 
-Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md), beginning with the primary outcome and comparison: what “better” means, which costs count, and how the oracle will be compared with the strongest legitimate baseline.
+Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md), beginning with the primary outcome and comparison: what “better” means, which costs count, and how the oracle will be compared with the strongest legitimate baseline. The next bounded local-product task is an explicit completed-run history/selector in Nest Lab so researchers can compare immutable run settings and archives; arbitrary sheet input and downstream residual/simulator work remain deferred.
 
 ## Name status
 

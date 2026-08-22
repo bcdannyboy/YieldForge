@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, Self
 
 from pydantic import (
@@ -21,6 +21,17 @@ from yieldforge.domain import (
     CandidateReportType,
     Point,
     SourceTaskBinding,
+)
+from yieldforge.order_books.domain import (
+    EconomicFields,
+    FieldFamilyProvenance,
+    GenerationRegime,
+    GenerationRequest,
+    GeneratorIdentity,
+    MaterialAssignment,
+    OrderBookDiagnostics,
+    OrderBookManifest,
+    SourceSliceIdentity,
 )
 from yieldforge.workbench.contracts import JobEventKind, JobStatus
 
@@ -149,6 +160,131 @@ class TaskJobPage(ApiContract):
     items: tuple[JobView, ...]
 
 
+class GenerateOrderBookInput(ApiContract):
+    """The only caller-controlled inputs accepted by the order-book generator."""
+
+    regime: GenerationRegime
+    seed: StrictInt = Field(ge=-(2**53 - 1), le=2**53 - 1)
+    event_count: StrictInt = Field(ge=2, le=100)
+    starts_at: datetime
+    interval_minutes: StrictInt = Field(gt=0, le=525_600)
+
+    @field_validator("regime", mode="before")
+    @classmethod
+    def accept_json_regime(cls, value: object) -> object:
+        if isinstance(value, str):
+            try:
+                return GenerationRegime(value)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("starts_at", mode="before")
+    @classmethod
+    def accept_iso_json_datetime(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+
+    @field_validator("starts_at")
+    @classmethod
+    def require_aware_start(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("starts_at must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class PublicSourceTaskReference(ApiContract):
+    """Source composition with opaque signed shape hashes safe for JavaScript."""
+
+    dataset_id: StrictStr = Field(min_length=1)
+    tasks_index: StrictInt = Field(ge=0)
+    task_source_row_index: StrictInt = Field(ge=0)
+    part_ids: tuple[StrictInt, ...] = Field(min_length=1)
+    part_source_row_indices: tuple[StrictInt, ...] = Field(min_length=1)
+    shape_hashes: tuple[StrictStr, ...] = Field(min_length=1)
+
+    @field_validator("shape_hashes")
+    @classmethod
+    def require_canonical_decimal_hashes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(raw != str(int(raw)) or raw == "-0" for raw in value):
+            raise ValueError("shape hashes must be canonical decimal strings")
+        return value
+
+
+class PublicOrderEvent(ApiContract):
+    sequence: StrictInt = Field(ge=0)
+    event_id: StrictStr = Field(pattern=r"^evt-[0-9a-f]{20}$")
+    occurred_at: datetime
+    source_task: PublicSourceTaskReference
+    material: MaterialAssignment
+    economics: EconomicFields
+
+
+_ANALYSIS_WARNING = (
+    "Analysis-only full manifest; future events and generator-only regime labels are excluded "
+    "from baseline-facing views."
+)
+
+
+class OrderBookView(ApiContract):
+    """Verified full-manifest analysis view with an explicit leakage warning."""
+
+    schema_version: Literal["yieldforge.api-order-book.v1"] = "yieldforge.api-order-book.v1"
+    manifest_schema_version: Literal["yieldforge.order-book.v1"] = "yieldforge.order-book.v1"
+    analysis_scope: Literal["analysis_only_full_manifest"] = "analysis_only_full_manifest"
+    analysis_warning: Literal[_ANALYSIS_WARNING] = _ANALYSIS_WARNING
+    order_book_id: StrictStr = Field(pattern=r"^yfob-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generator: GeneratorIdentity
+    source_slice: SourceSliceIdentity
+    request: GenerationRequest
+    field_provenance: tuple[FieldFamilyProvenance, ...] = Field(min_length=6, max_length=6)
+    events: tuple[PublicOrderEvent, ...] = Field(min_length=2, max_length=100)
+    diagnostics: OrderBookDiagnostics
+
+    @classmethod
+    def from_manifest(cls, manifest: OrderBookManifest) -> OrderBookView:
+        return cls(
+            order_book_id=manifest.order_book_id,
+            content_sha256=manifest.content_sha256,
+            generator=manifest.generator,
+            source_slice=manifest.source_slice,
+            request=manifest.request,
+            field_provenance=manifest.field_provenance,
+            events=tuple(
+                PublicOrderEvent(
+                    sequence=event.sequence,
+                    event_id=event.event_id,
+                    occurred_at=event.occurred_at,
+                    source_task=PublicSourceTaskReference(
+                        dataset_id=event.source_task.dataset_id,
+                        tasks_index=event.source_task.tasks_index,
+                        task_source_row_index=event.source_task.task_source_row_index,
+                        part_ids=event.source_task.part_ids,
+                        part_source_row_indices=event.source_task.part_source_row_indices,
+                        shape_hashes=tuple(str(value) for value in event.source_task.shape_hashes),
+                    ),
+                    material=event.material,
+                    economics=event.economics,
+                )
+                for event in manifest.events
+            ),
+            diagnostics=manifest.diagnostics,
+        )
+
+
+class OrderBookPage(ApiContract):
+    schema_version: Literal["yieldforge.api-order-book-page.v1"] = (
+        "yieldforge.api-order-book-page.v1"
+    )
+    items: tuple[OrderBookView, ...]
+    next_cursor: StrictStr | None = Field(default=None, min_length=1, max_length=512)
+
+
 __all__ = [
     "ApiError",
     "CandidateGeometry",
@@ -156,6 +292,9 @@ __all__ = [
     "CandidateSummary",
     "CreateSolverJobRequest",
     "JobView",
+    "GenerateOrderBookInput",
+    "OrderBookPage",
+    "OrderBookView",
     "PlacementGeometry",
     "PublicJobEvent",
     "SheetGeometry",

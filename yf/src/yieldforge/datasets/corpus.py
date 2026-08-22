@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import math
+import secrets
 from collections import Counter
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -64,6 +65,7 @@ COMMITTED_SLICE_PATH = YF_ROOT / "datasets/fixtures/lectra-representative-slice.
 COMMITTED_MANIFEST_PATH = YF_ROOT / "datasets/sources/lectra-7030786-v1.1.json"
 BOUND_AUDIT_REPORT_PATH = YF_ROOT / "var/data/reports/lectra-7030786-v1.1/lectra-audit.json"
 COMMITTED_SLICE_SHA256 = "d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8"
+MIN_CURSOR_SIGNING_KEY_BYTES = 32
 
 MAX_SAFE_JSON_INTEGER = 2**53 - 1
 DecimalInteger = Annotated[StrictStr, Field(pattern=r"^-?(0|[1-9][0-9]*)$")]
@@ -427,7 +429,13 @@ def _provenance_dto(group: ProvenanceGroup) -> ProvenanceDto:
 
 
 class CorpusQueryService:
-    """Read-only indexed view of one content-pinned normalized slice."""
+    """Read-only indexed view of one content-pinned normalized slice.
+
+    Opaque cursors are stable for this service's lifetime.  The default random
+    private key intentionally invalidates cursors after process restart; a
+    future server may inject a persistent private key when restart stability is
+    required.
+    """
 
     def __init__(
         self,
@@ -438,13 +446,22 @@ class CorpusQueryService:
             "content_pinned_with_manifest_identity",
             "fully_bound_to_local_audit_evidence",
         ],
+        cursor_signing_key: bytes | None = None,
     ) -> None:
+        if cursor_signing_key is None:
+            cursor_signing_key = secrets.token_bytes(MIN_CURSOR_SIGNING_KEY_BYTES)
+        elif (
+            type(cursor_signing_key) is not bytes
+            or len(cursor_signing_key) < MIN_CURSOR_SIGNING_KEY_BYTES
+        ):
+            raise ValueError("cursor signing key must contain at least 32 private bytes")
         self._normalized = normalized
         self._slice_sha256 = slice_sha256
         self._tasks = tuple(
             sorted(normalized.tasks, key=lambda row: (row.source_row_index, row.tasks_index))
         )
-        self._task_keys = frozenset((row.source_row_index, row.tasks_index) for row in self._tasks)
+        self._tasks_by_key = {(row.source_row_index, row.tasks_index): row for row in self._tasks}
+        self._task_keys = frozenset(self._tasks_by_key)
         self._tasks_by_id = {row.tasks_index: row for row in self._tasks}
         self._parts_by_task = {
             task.tasks_index: tuple(
@@ -483,14 +500,7 @@ class CorpusQueryService:
             literal_label=normalized.source.source_unit.literal_label,
             interpretation=normalized.source.source_unit.interpretation,
         )
-        self._cursor_key = hashlib.sha256(
-            (
-                "yieldforge.corpus-cursor.v1\0"
-                + slice_sha256
-                + normalized.source.source_manifest_sha256
-                + normalized.source.audit_report_sha256
-            ).encode("ascii")
-        ).digest()
+        self._cursor_key = cursor_signing_key
 
     @classmethod
     def load_bound(
@@ -499,6 +509,7 @@ class CorpusQueryService:
         slice_path: Path,
         report_path: Path,
         manifest_path: Path,
+        cursor_signing_key: bytes | None = None,
     ) -> CorpusQueryService:
         """Load through exact slice, audit-report, and manifest evidence binding."""
 
@@ -525,6 +536,7 @@ class CorpusQueryService:
             normalized,
             slice_sha256=hashlib.sha256(slice_payload_before).hexdigest(),
             evidence_status="fully_bound_to_local_audit_evidence",
+            cursor_signing_key=cursor_signing_key,
         )
 
     @staticmethod
@@ -560,7 +572,11 @@ class CorpusQueryService:
             )
 
     @classmethod
-    def from_repository(cls) -> CorpusQueryService:
+    def from_repository(
+        cls,
+        *,
+        cursor_signing_key: bytes | None = None,
+    ) -> CorpusQueryService:
         """Load the exact committed slice and manifest without claiming a fresh audit bind."""
 
         slice_payload = read_passive_evidence_file(
@@ -587,6 +603,7 @@ class CorpusQueryService:
             normalized,
             slice_sha256=actual_slice_sha256,
             evidence_status="content_pinned_with_manifest_identity",
+            cursor_signing_key=cursor_signing_key,
         )
 
     def summary(self) -> CorpusSummaryDto:
@@ -762,6 +779,29 @@ class CorpusQueryService:
             raise InvalidCursorError("cursor does not identify a real task member")
         return after_key
 
+    def _matches_filters(
+        self,
+        task: TaskSourceRow,
+        *,
+        status: SupportStatus | None,
+        constraint_type: str | None,
+        task_id: int | None,
+        min_parts: int | None,
+        max_parts: int | None,
+    ) -> bool:
+        parts = self._parts_by_task[task.tasks_index]
+        constraints = self._constraints_by_task[task.tasks_index]
+        disposition = self._dispositions[task.tasks_index]
+        if status is not None and disposition.support_status is not status:
+            return False
+        if constraint_type is not None and all(row.type != constraint_type for row in constraints):
+            return False
+        if task_id is not None and task.tasks_index != task_id:
+            return False
+        if min_parts is not None and len(parts) < min_parts:
+            return False
+        return max_parts is None or len(parts) <= max_parts
+
     def list_tasks(
         self,
         *,
@@ -788,28 +828,34 @@ class CorpusQueryService:
             min_parts=min_parts,
             max_parts=max_parts,
         )
-        after = (
-            (-1, -1) if cursor is None else self._decode_cursor(cursor, filter_digest=filter_digest)
-        )
+        if cursor is None:
+            after = (-1, -1)
+        else:
+            after = self._decode_cursor(cursor, filter_digest=filter_digest)
+            if not self._matches_filters(
+                self._tasks_by_key[after],
+                status=parsed_status,
+                constraint_type=parsed_constraint_type,
+                task_id=task_id,
+                min_parts=min_parts,
+                max_parts=max_parts,
+            ):
+                raise InvalidCursorError(
+                    "cursor does not identify a member of the exact filtered result"
+                )
         matches: list[TaskSourceRow] = []
         for task in self._tasks:
             task_key = (task.source_row_index, task.tasks_index)
             if task_key <= after:
                 continue
-            parts = self._parts_by_task[task.tasks_index]
-            constraints = self._constraints_by_task[task.tasks_index]
-            disposition = self._dispositions[task.tasks_index]
-            if parsed_status is not None and disposition.support_status is not parsed_status:
-                continue
-            if parsed_constraint_type is not None and all(
-                row.type != parsed_constraint_type for row in constraints
+            if not self._matches_filters(
+                task,
+                status=parsed_status,
+                constraint_type=parsed_constraint_type,
+                task_id=task_id,
+                min_parts=min_parts,
+                max_parts=max_parts,
             ):
-                continue
-            if task_id is not None and task.tasks_index != task_id:
-                continue
-            if min_parts is not None and len(parts) < min_parts:
-                continue
-            if max_parts is not None and len(parts) > max_parts:
                 continue
             matches.append(task)
 

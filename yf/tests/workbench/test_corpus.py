@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import subprocess
 import sys
@@ -23,6 +25,45 @@ from yieldforge.datasets.passive_report import parse_normalized_slice
 YF_ROOT = Path(__file__).resolve().parents[2]
 COMMITTED_SLICE = YF_ROOT / "datasets/fixtures/lectra-representative-slice.json"
 COMMITTED_MANIFEST = YF_ROOT / "datasets/sources/lectra-7030786-v1.1.json"
+
+
+def signed_cursor(
+    *,
+    signing_key: bytes,
+    slice_sha256: str,
+    after: tuple[int, int],
+    status: str | None = None,
+    constraint_type: str | None = None,
+    task_id: int | None = None,
+    min_parts: int | None = None,
+    max_parts: int | None = None,
+) -> str:
+    filter_payload = json.dumps(
+        {
+            "constraint_type": constraint_type,
+            "max_parts": max_parts,
+            "min_parts": min_parts,
+            "status": status,
+            "task_id": task_id,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    payload = json.dumps(
+        {
+            "after": list(after),
+            "filters": hashlib.sha256(filter_payload).hexdigest(),
+            "slice": slice_sha256,
+            "v": 1,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    body = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+    signature = hmac.new(signing_key, payload, hashlib.sha256).hexdigest()
+    return f"{body}.{signature}"
 
 
 @pytest.fixture
@@ -116,6 +157,79 @@ def test_task_pages_are_stably_sorted_and_cursor_bound_to_filters(
     )
     with pytest.raises(InvalidCursorError, match="member"):
         service.list_tasks(limit=1, cursor=forged_member)
+
+
+def test_public_corpus_values_cannot_forge_an_accepted_cursor(
+    service: CorpusQueryService,
+) -> None:
+    source = service.summary().source
+    public_member = service.task_detail(13958).summary.task
+    publicly_derived_key = hashlib.sha256(
+        (
+            "yieldforge.corpus-cursor.v1\0"
+            + source.slice_sha256
+            + source.source_manifest_sha256
+            + source.audit_report_sha256
+        ).encode("ascii")
+    ).digest()
+    forged = signed_cursor(
+        signing_key=publicly_derived_key,
+        slice_sha256=source.slice_sha256,
+        after=(public_member.source_row_index, public_member.tasks_index),
+    )
+
+    with pytest.raises(InvalidCursorError, match="tampered"):
+        service.list_tasks(limit=1, cursor=forged)
+
+
+def test_default_cursor_is_intentionally_invalid_after_service_restart() -> None:
+    first = CorpusQueryService.from_repository()
+    cursor = first.list_tasks(limit=1).next_cursor
+    assert cursor is not None
+    restarted = CorpusQueryService.from_repository()
+
+    with pytest.raises(InvalidCursorError, match="tampered"):
+        restarted.list_tasks(limit=1, cursor=cursor)
+
+
+def test_explicit_private_cursor_key_can_preserve_cursors_across_services() -> None:
+    private_key = b"k" * 32
+    first = CorpusQueryService.from_repository(cursor_signing_key=private_key)
+    restarted = CorpusQueryService.from_repository(cursor_signing_key=private_key)
+    cursor = first.list_tasks(limit=1).next_cursor
+    assert cursor is not None
+
+    assert [item.tasks_index for item in restarted.list_tasks(limit=1, cursor=cursor).items] == [
+        25801
+    ]
+
+
+@pytest.mark.parametrize("invalid_key", [b"short", "k" * 32])
+def test_explicit_cursor_key_requires_private_byte_strength(invalid_key: object) -> None:
+    with pytest.raises(ValueError, match="32 private bytes"):
+        CorpusQueryService.from_repository(  # type: ignore[arg-type]
+            cursor_signing_key=invalid_key
+        )
+
+
+def test_cursor_after_member_must_belong_to_exact_filtered_result() -> None:
+    private_key = b"m" * 32
+    service = CorpusQueryService.from_repository(cursor_signing_key=private_key)
+    source = service.summary().source
+    view_only = service.task_detail(25801).summary.task
+    forged = signed_cursor(
+        signing_key=private_key,
+        slice_sha256=source.slice_sha256,
+        after=(view_only.source_row_index, view_only.tasks_index),
+        status="runnable_with_explicit_assumptions",
+    )
+
+    with pytest.raises(InvalidCursorError, match="filtered result"):
+        service.list_tasks(
+            limit=1,
+            cursor=forged,
+            status="runnable_with_explicit_assumptions",
+        )
 
 
 def test_default_repository_load_is_content_pinned_and_needs_no_ignored_audit(

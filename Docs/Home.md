@@ -8,6 +8,7 @@ This repository is the working notebook for the YieldForge proposal and perfect-
 - [[Milestone Roadmap]] — the working implementation sequence in plain language.
 - [[Current Work]] — what we are discussing and doing now.
 - [[Development/Getting Started|Developer setup]] — install, test, and run the current system.
+- [[Development/Research Workbench|Research workbench]] — local UI/API workflow and evidence boundary.
 - [[Development/Spyrrow Adapter|Spyrrow adapter]] — the candidate boundary and archive semantics.
 - [[Research/Technical Sources|Technical sources]] — upstream projects and dataset leads.
 

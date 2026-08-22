@@ -1,5 +1,5 @@
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -85,6 +85,29 @@ def test_generation_request_rejects_unpinned_source_content() -> None:
             interval_minutes=60,
             source_slice_sha256="a" * 64,
         )
+
+
+def test_generation_request_canonicalizes_equivalent_instants_to_utc() -> None:
+    utc = GenerationRequest(
+        regime=GenerationRegime.EXACT_RECURRENCE,
+        seed=17,
+        event_count=2,
+        starts_at=datetime(2026, 1, 1, tzinfo=UTC),
+        interval_minutes=60,
+        source_slice_sha256=COMMITTED_SLICE_SHA256,
+    )
+    offset = GenerationRequest(
+        regime=GenerationRegime.EXACT_RECURRENCE,
+        seed=17,
+        event_count=2,
+        starts_at=datetime(2025, 12, 31, 16, tzinfo=timezone(-timedelta(hours=8))),
+        interval_minutes=60,
+        source_slice_sha256=COMMITTED_SLICE_SHA256,
+    )
+
+    assert offset == utc
+    assert offset.starts_at == utc.starts_at
+    assert offset.starts_at.tzinfo is UTC
 
 
 def test_regime_thresholds_reject_empty_and_incoherent_declarations() -> None:
