@@ -12,6 +12,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from yieldforge.datasets.corpus import (
     InvalidCursorError,
@@ -22,6 +23,7 @@ from yieldforge.datasets.postgres_corpus import (
     PostgresCorpusError,
     PostgresCorpusQueryService,
 )
+from yieldforge.domain import StripPackingProblem
 
 YF_ROOT = Path(__file__).resolve().parents[2]
 CATALOG = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
@@ -90,6 +92,24 @@ def _signed_cursor(
     body = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
     signature = hmac.new(CURSOR_KEY, payload, hashlib.sha256).hexdigest()
     return f"{body}.{signature}"
+
+
+def _record_hash(
+    summary: dict[str, object],
+    detail: dict[str, object],
+    problem: dict[str, object] | None,
+) -> str:
+    payload = json.dumps(
+        {
+            "detail": detail,
+            "solver_problem": problem,
+            "summary": summary,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def test_summary_and_two_stable_fifty_task_pages(
@@ -236,4 +256,100 @@ def test_startup_rejects_task_record_tamper(isolated_database_url: str) -> None:
         )
 
     with pytest.raises(PostgresCorpusError, match="record hash"):
+        _service(isolated_database_url)
+
+
+def test_startup_hashes_raw_problem_before_strict_numeric_validation(
+    isolated_database_url: str,
+) -> None:
+    with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
+        row = connection.execute(
+            "SELECT summary_json, detail_json, solver_problem_json "
+            "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
+        ).fetchone()
+        problem = row["solver_problem_json"]
+        problem["strip_height"] = str(problem["strip_height"])
+        assert StripPackingProblem.model_validate(problem).strip_height > 0
+        record_hash = _record_hash(row["summary_json"], row["detail_json"], problem)
+        connection.execute(
+            "UPDATE yieldforge_catalog_task "
+            "SET solver_problem_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(problem), record_hash),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="solver problem.*strict JSON"):
+        _service(isolated_database_url)
+
+
+@pytest.mark.parametrize("mutation", ["direct-with-assumption", "duplicate-assumption"])
+def test_startup_rejects_rehashed_malformed_capability_semantics(
+    isolated_database_url: str,
+    mutation: str,
+) -> None:
+    with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
+        row = connection.execute(
+            "SELECT summary_json, detail_json, solver_problem_json "
+            "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
+        ).fetchone()
+        summary = row["summary_json"]
+        detail = row["detail_json"]
+        if mutation == "direct-with-assumption":
+            summary["solve_capability"]["support_status"] = "directly_supported"
+            detail["summary"]["solve_capability"]["support_status"] = "directly_supported"
+            support_status = "directly_supported"
+        else:
+            assumptions = [ASSUMPTION, ASSUMPTION]
+            summary["solve_capability"]["assumption_codes"] = assumptions
+            detail["summary"]["solve_capability"]["assumption_codes"] = assumptions
+            support_status = "runnable_with_explicit_assumptions"
+        record_hash = _record_hash(summary, detail, row["solver_problem_json"])
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET summary_json = %s, detail_json = %s, "
+            "support_status = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(summary), Jsonb(detail), support_status, record_hash),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="capability semantics"):
+        _service(isolated_database_url)
+
+
+def test_startup_reconciles_the_directly_supported_count(
+    isolated_database_url: str,
+) -> None:
+    with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
+        row = connection.execute(
+            "SELECT summary_json, detail_json, solver_problem_json "
+            "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
+        ).fetchone()
+        summary = row["summary_json"]
+        detail = row["detail_json"]
+        capability = summary["solve_capability"]
+        capability["support_status"] = "directly_supported"
+        capability["assumption_codes"] = []
+        capability["requires_assumption_acknowledgement"] = False
+        detail["summary"]["solve_capability"] = capability
+        record_hash = _record_hash(summary, detail, row["solver_problem_json"])
+        connection.execute(
+            "UPDATE yieldforge_catalog_task SET summary_json = %s, detail_json = %s, "
+            "support_status = 'directly_supported', record_sha256 = %s "
+            "WHERE tasks_index = 13958",
+            (Jsonb(summary), Jsonb(detail), record_hash),
+        )
+        catalog_summary = connection.execute(
+            "SELECT summary_json FROM yieldforge_catalog WHERE singleton = 1"
+        ).fetchone()["summary_json"]
+        support_counts = {
+            item["name"]: item["count"] for item in catalog_summary["support_status_counts"]
+        }
+        support_counts["runnable_with_explicit_assumptions"] -= 1
+        support_counts["directly_supported"] = 1
+        catalog_summary["support_status_counts"] = [
+            {"name": name, "count": count} for name, count in sorted(support_counts.items())
+        ]
+        connection.execute(
+            "UPDATE yieldforge_catalog SET summary_json = %s WHERE singleton = 1",
+            (Jsonb(catalog_summary),),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="directly supported count"):
         _service(isolated_database_url)

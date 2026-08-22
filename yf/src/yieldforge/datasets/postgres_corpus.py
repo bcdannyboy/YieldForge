@@ -31,7 +31,12 @@ from yieldforge.datasets.corpus import (
     TaskPageDto,
     TaskSummaryDto,
 )
-from yieldforge.datasets.normalized_slice import ProjectionStatus, SupportStatus
+from yieldforge.datasets.normalized_slice import (
+    NormalizationStatus,
+    ProjectionStatus,
+    SupportStatus,
+    TaskDisposition,
+)
 from yieldforge.datasets.passive_report import PassiveEvidenceError, decode_strict_json_bytes
 from yieldforge.datasets.postgres_catalog import (
     COMMITTED_CATALOG_LOGICAL_SHA256,
@@ -209,6 +214,18 @@ class PostgresCorpusQueryService:
         self,
         row: dict[str, object],
     ) -> tuple[TaskSummaryDto, TaskDetailDto, StripPackingProblem | None]:
+        raw_summary = row.get("summary_json")
+        raw_detail = row.get("detail_json")
+        raw_problem = row.get("solver_problem_json")
+        if (
+            not isinstance(raw_summary, dict)
+            or not isinstance(raw_detail, dict)
+            or (raw_problem is not None and not isinstance(raw_problem, dict))
+        ):
+            raise PostgresCorpusError("catalog task record JSON must contain strict objects")
+        if row.get("record_sha256") != _record_hash(raw_summary, raw_detail, raw_problem):
+            raise PostgresCorpusError("catalog task record hash does not revalidate")
+
         summary = self._validate_summary_row(row)
         try:
             detail = TaskDetailDto.model_validate(row["detail_json"])
@@ -220,14 +237,52 @@ class PostgresCorpusQueryService:
             or detail.coordinate_unit != self._unit
         ):
             raise PostgresCorpusError("catalog task summary/detail identity is inconsistent")
-        problem_json = row.get("solver_problem_json")
+        try:
+            TaskDisposition(
+                tasks_index=summary.tasks_index,
+                normalization_status=summary.solve_capability.normalization_status,
+                support_status=summary.solve_capability.support_status,
+                projection_status=summary.solve_capability.projection_status,
+                reason_codes=summary.solve_capability.reason_codes,
+                assumption_codes=summary.solve_capability.assumption_codes,
+            )
+        except ValidationError as error:
+            raise PostgresCorpusError("catalog task capability semantics are invalid") from error
+        capability = summary.solve_capability
+        eligible_projection = capability.projection_status in {
+            ProjectionStatus.ELIGIBLE,
+            ProjectionStatus.PROJECTED,
+        }
+        if capability.support_status is SupportStatus.DIRECTLY_SUPPORTED and (
+            capability.normalization_status is not NormalizationStatus.SOURCE_LOSSLESS
+            or not eligible_projection
+            or bool(capability.reason_codes)
+            or bool(capability.assumption_codes)
+            or capability.requires_assumption_acknowledgement
+        ):
+            raise PostgresCorpusError("catalog task capability semantics are invalid")
+        if capability.support_status is SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS and (
+            capability.normalization_status is not NormalizationStatus.SOURCE_LOSSLESS
+            or not eligible_projection
+            or bool(capability.reason_codes)
+            or not capability.assumption_codes
+            or not capability.requires_assumption_acknowledgement
+        ):
+            raise PostgresCorpusError("catalog task capability semantics are invalid")
+        if capability.support_status is SupportStatus.VIEW_ONLY and capability.assumption_codes:
+            raise PostgresCorpusError("catalog task capability semantics are invalid")
+
+        problem_json = raw_problem
         can_solve = summary.solve_capability.can_solve
         if can_solve is not (problem_json is not None):
             raise PostgresCorpusError("catalog task capability and solver payload are inconsistent")
         problem: StripPackingProblem | None = None
         if problem_json is not None:
             try:
-                problem = StripPackingProblem.model_validate(problem_json)
+                problem = StripPackingProblem.model_validate_json(
+                    _canonical_bytes(problem_json),
+                    strict=True,
+                )
             except ValidationError as error:
                 raise PostgresCorpusError(
                     "catalog task solver problem contains invalid strict JSON"
@@ -236,11 +291,6 @@ class PostgresCorpusQueryService:
                 raise PostgresCorpusError(
                     "catalog task solver problem source identity is inconsistent"
                 )
-        summary_json = summary.model_dump(mode="json")
-        detail_json = detail.model_dump(mode="json")
-        problem_dump = problem.model_dump(mode="json") if problem is not None else None
-        if row.get("record_sha256") != _record_hash(summary_json, detail_json, problem_dump):
-            raise PostgresCorpusError("catalog task record hash does not revalidate")
         return summary, detail, problem
 
     def _validate_startup(self) -> None:
@@ -345,6 +395,26 @@ class PostgresCorpusQueryService:
                     != self._summary.solve_capability.blocked_task_count
                 ):
                     raise PostgresCorpusError("catalog aggregate counts do not revalidate")
+                directly_supported_count = support_counts.get(
+                    SupportStatus.DIRECTLY_SUPPORTED.value,
+                    0,
+                )
+                if (
+                    directly_supported_count
+                    != self._summary.solve_capability.directly_supported_task_count
+                ):
+                    raise PostgresCorpusError(
+                        "catalog directly supported count does not revalidate"
+                    )
+                if support_counts != Counter(
+                    {
+                        SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS.value: 69,
+                        SupportStatus.VIEW_ONLY.value: 187,
+                    }
+                ):
+                    raise PostgresCorpusError(
+                        "catalog capability distribution does not match its committed manifest"
+                    )
         except CatalogImportError as error:
             raise PostgresCorpusError(
                 "configured PostgreSQL schema fingerprint is invalid"
@@ -578,7 +648,11 @@ class PostgresCorpusQueryService:
         return TaskPageDto(items=summaries, next_cursor=next_cursor)
 
     def _task_record(self, tasks_index: int) -> dict[str, object]:
-        if isinstance(tasks_index, bool) or not isinstance(tasks_index, int) or tasks_index < 0:
+        if (
+            isinstance(tasks_index, bool)
+            or not isinstance(tasks_index, int)
+            or not 0 <= tasks_index <= MAX_SAFE_JSON_INTEGER
+        ):
             raise TaskNotFoundError("task was not found")
         with self._connection() as connection:
             row = connection.execute(
