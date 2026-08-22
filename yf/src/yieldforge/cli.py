@@ -17,9 +17,15 @@ from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
 from yieldforge.experiments.calibration import (
     CalibrationApiClient,
     orchestrate_calibration,
+    orchestrate_confirmation,
     registered_cells,
+    registered_confirmation_cells,
 )
-from yieldforge.experiments.contracts import validate_experiment_bundle
+from yieldforge.experiments.contracts import (
+    PureGeometryConfirmationProtocol,
+    load_frozen_json,
+    validate_experiment_bundle,
+)
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 
 DatasetAuditCheckError = PassiveEvidenceError
@@ -144,6 +150,47 @@ def _calibrate_geometry_api(args: argparse.Namespace) -> int:
     return 0
 
 
+def _confirm_geometry_api(args: argparse.Namespace) -> int:
+    protocol = load_frozen_json(args.geometry, PureGeometryConfirmationProtocol)
+    cells = registered_confirmation_cells(protocol)
+    client = CalibrationApiClient(args.api_origin)
+    client.require_corpus(
+        dataset_id=protocol.references.dataset_id,
+        catalog_sha256=protocol.references.catalog_artifact_sha256,
+        task_count=(
+            len(protocol.population.eligible_task_ids) + len(protocol.population.blocked_tasks)
+        ),
+        eligible_task_count=len(protocol.population.eligible_task_ids),
+    )
+    print(
+        "Validated registered geometry confirmation: "
+        f"protocol={protocol.protocol_id} registered_cells={len(cells)} api={client.origin}"
+    )
+    if args.preflight_only:
+        return 0
+
+    def report_progress(completed: int, total: int, evidence) -> None:  # type: ignore[no-untyped-def]
+        if completed == 1 or completed % 25 == 0 or completed == total:
+            archive = "valid" if evidence.archive_valid else "invalid"
+            print(f"Confirmation progress: {completed}/{total} latest_archive={archive}")
+
+    result = orchestrate_confirmation(
+        protocol=protocol,
+        client=client,
+        output_root=args.output,
+        progress=report_progress,
+    )
+    evaluation = result.evaluation
+    print(
+        "Confirmation finished: "
+        f"decision={evaluation.decision} "
+        f"qualifying_task_rate_percent={evaluation.qualifying_task_rate_percent} "
+        f"valid_archive_rate_percent={evaluation.valid_archive_rate_percent} "
+        f"output={args.output}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -216,6 +263,16 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--output", type=Path, required=True)
     calibrate.add_argument("--preflight-only", action="store_true")
     calibrate.set_defaults(handler=_calibrate_geometry_api)
+
+    confirm = experiment_commands.add_parser(
+        "confirm-geometry-api",
+        help="execute or resume the registered 203-task geometry confirmation",
+    )
+    confirm.add_argument("--geometry", type=Path, required=True)
+    confirm.add_argument("--api-origin", required=True)
+    confirm.add_argument("--output", type=Path, required=True)
+    confirm.add_argument("--preflight-only", action="store_true")
+    confirm.set_defaults(handler=_confirm_geometry_api)
     return parser
 
 

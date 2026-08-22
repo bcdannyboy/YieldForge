@@ -594,3 +594,52 @@ def test_calibration_command_runs_registered_orchestrator(
     assert calls[0]["output_root"] == output
     assert calls[0]["protocol"].protocol_id == "yfgp-49906e93ed9ff0446705247b"
     assert "selected_seconds_per_seed=3" in capsys.readouterr().out
+
+
+def test_confirmation_command_runs_exact_registered_evaluation(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    yf_root = Path(__file__).parents[1]
+    output = tmp_path / "confirmation"
+    calls = []
+
+    class FakeClient:
+        def __init__(self, origin: str) -> None:
+            self.origin = origin
+
+        def require_corpus(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+
+    def fake_orchestrate(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(
+            evaluation=SimpleNamespace(
+                decision="proceed_to_m3",
+                qualifying_task_rate_percent=100.0,
+                valid_archive_rate_percent=100.0,
+            )
+        )
+
+    monkeypatch.setattr("yieldforge.cli.CalibrationApiClient", FakeClient)
+    monkeypatch.setattr("yieldforge.cli.orchestrate_confirmation", fake_orchestrate)
+
+    exit_code = main(
+        [
+            "experiments",
+            "confirm-geometry-api",
+            "--geometry",
+            str(yf_root / "experiments/pure-geometry-confirmation-v2.json"),
+            "--api-origin",
+            "http://127.0.0.1:18082",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["output_root"] == output
+    assert calls[0]["protocol"].protocol_id == "yfgp-392644d98bb7035fdc218512"
+    assert "registered_cells=812" in capsys.readouterr().out

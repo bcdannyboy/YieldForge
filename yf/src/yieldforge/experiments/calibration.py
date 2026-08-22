@@ -34,6 +34,7 @@ from yieldforge.domain import ProjectionMode
 from yieldforge.experiments.contracts import (
     FrozenExperimentModel,
     PureGeometryCalibrationProtocol,
+    PureGeometryConfirmationProtocol,
     semantic_sha256,
 )
 from yieldforge.workbench.api_contracts import (
@@ -423,6 +424,31 @@ class CalibrationRunResult(FrozenExperimentModel):
     evaluation: CalibrationEvaluation
 
 
+class ConfirmationRunIdentity(FrozenExperimentModel):
+    schema_version: Literal["yieldforge.geometry-confirmation-run.v1"] = (
+        "yieldforge.geometry-confirmation-run.v1"
+    )
+    parent_protocol_id: StrictStr
+    parent_protocol_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    m0_contract_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    calibration_result_id: StrictStr = Field(pattern=r"^yfgcr-[0-9a-f]{24}$")
+    calibration_result_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    dataset_id: StrictStr
+    catalog_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    api_origin: StrictStr
+    registered_cell_ids: tuple[StrictStr, ...] = Field(min_length=1)
+
+
+class ConfirmationRunResult(FrozenExperimentModel):
+    schema_version: Literal["yieldforge.geometry-confirmation-runtime-result.v1"] = (
+        "yieldforge.geometry-confirmation-runtime-result.v1"
+    )
+    run: ConfirmationRunIdentity
+    attempts: tuple[CalibrationAttemptOutcome, ...]
+    evidence: tuple[CalibrationCellEvidence, ...]
+    evaluation: GeometryConfirmationEvaluation
+
+
 class CalibrationSelectedAttempt(FrozenExperimentModel):
     cell_id: StrictStr
     attempt_number: Literal[1, 2]
@@ -706,6 +732,91 @@ def orchestrate_calibration(
     return result
 
 
+def orchestrate_confirmation(
+    *,
+    protocol: PureGeometryConfirmationProtocol,
+    client: CalibrationApiClient,
+    output_root: Path,
+    progress: Callable[[int, int, CalibrationCellEvidence], None] | None = None,
+) -> ConfirmationRunResult:
+    """Execute or resume the exact confirmation, one API job at a time."""
+
+    cells = registered_confirmation_cells(protocol)
+    run = ConfirmationRunIdentity(
+        parent_protocol_id=protocol.protocol_id,
+        parent_protocol_sha256=protocol.content_sha256,
+        m0_contract_sha256=protocol.references.m0_contract_sha256,
+        calibration_result_id=protocol.calibration_result.result_id,
+        calibration_result_sha256=protocol.calibration_result.content_sha256,
+        dataset_id=protocol.references.dataset_id,
+        catalog_sha256=protocol.references.catalog_artifact_sha256,
+        api_origin=client.origin,
+        registered_cell_ids=tuple(cell.cell_id for cell in cells),
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    _require_or_create(
+        output_root / "run.json",
+        run,
+        ConfirmationRunIdentity,
+        label="run identity",
+    )
+
+    attempts: list[CalibrationAttemptOutcome] = []
+    evidence: list[CalibrationCellEvidence] = []
+    for index, cell in enumerate(cells, start=1):
+        directory = _cell_directory(output_root, cell)
+        directory.mkdir(parents=True, exist_ok=True)
+        _require_or_create(
+            directory / "cell.json",
+            cell,
+            CalibrationCell,
+            label="cell identity",
+        )
+        selected: CalibrationAttemptOutcome | None = None
+        for attempt_number in (1, 2):
+            outcome_path = directory / f"attempt-{attempt_number}-outcome.json"
+            if outcome_path.exists():
+                outcome = _load_model(outcome_path, CalibrationAttemptOutcome)
+                if outcome.cell != cell or outcome.attempt_number != attempt_number:
+                    raise ValueError("persisted confirmation outcome does not match run identity")
+            else:
+                outcome = _attempt_outcome(
+                    cell=cell,
+                    attempt_number=attempt_number,
+                    client=client,
+                    cell_directory=directory,
+                )
+            attempts.append(outcome)
+            if attempt_number == 1 and _is_retryable(outcome):
+                continue
+            selected = outcome
+            break
+        if selected is None:
+            raise ValueError("registered retry did not produce a terminal outcome")
+        cell_evidence = CalibrationCellEvidence(
+            cell=cell,
+            archive_valid=selected.archive_valid,
+            candidates=selected.candidates,
+        )
+        evidence.append(cell_evidence)
+        if progress is not None:
+            progress(index, len(cells), cell_evidence)
+
+    result = ConfirmationRunResult(
+        run=run,
+        attempts=tuple(attempts),
+        evidence=tuple(evidence),
+        evaluation=evaluate_confirmation(protocol, tuple(evidence)),
+    )
+    _require_or_create(
+        output_root / "runtime-result.json",
+        result,
+        ConfirmationRunResult,
+        label="runtime result",
+    )
+    return result
+
+
 class CalibrationDurationSummary(FrozenExperimentModel):
     """Registered-population summary for one solver duration."""
 
@@ -748,8 +859,23 @@ class CalibrationEvaluation(FrozenExperimentModel):
         return self
 
 
+class GeometryConfirmationEvaluation(FrozenExperimentModel):
+    """Frozen primary M2 outcome over the 203-task confirmation population."""
+
+    registered_task_count: StrictInt = Field(gt=0)
+    registered_cell_count: StrictInt = Field(gt=0)
+    valid_archive_count: StrictInt = Field(ge=0)
+    valid_archive_rate_percent: StrictFloat = Field(ge=0, le=100)
+    qualifying_task_count: StrictInt = Field(ge=0)
+    qualifying_task_rate_percent: StrictFloat = Field(ge=0, le=100)
+    wilson_95_lower_percent: StrictFloat = Field(ge=0, le=100)
+    wilson_95_upper_percent: StrictFloat = Field(ge=0, le=100)
+    decision: Literal["proceed_to_m3", "redesign", "expanded_search_required"]
+
+
 CalibrationRunResult.model_rebuild()
 GeometryCalibrationResult.model_rebuild()
+ConfirmationRunResult.model_rebuild()
 
 
 def registered_cells(
@@ -768,6 +894,25 @@ def registered_cells(
         )
         for tasks_index in protocol.split.calibration_task_ids
         for seconds in protocol.budget.calibration_seconds_per_seed
+        for seed in protocol.budget.ordinary_seeds
+    )
+
+
+def registered_confirmation_cells(
+    protocol: PureGeometryConfirmationProtocol,
+) -> tuple[CalibrationCell, ...]:
+    """Enumerate the exact source-recorded ordinary confirmation cells."""
+
+    if not protocol.confirmation_enabled or protocol.budget.selected_seconds_per_seed != 10:
+        raise ValueError("confirmation cells require the approved confirmation-ready protocol")
+    return tuple(
+        CalibrationCell(
+            parent_protocol_id=protocol.protocol_id,
+            tasks_index=tasks_index,
+            seconds_per_seed=10,
+            seed=seed,
+        )
+        for tasks_index in protocol.split.evaluation_task_ids
         for seed in protocol.budget.ordinary_seeds
     )
 
@@ -933,6 +1078,65 @@ def evaluate_calibration(
             evaluations[seconds].summary for seconds in protocol.budget.calibration_seconds_per_seed
         ),
         comparisons=tuple(comparisons),
+    )
+
+
+def evaluate_confirmation(
+    protocol: PureGeometryConfirmationProtocol,
+    evidence: tuple[CalibrationCellEvidence, ...],
+) -> GeometryConfirmationEvaluation:
+    """Apply the frozen primary M2 geometry gate to exact confirmation evidence."""
+
+    expected = registered_confirmation_cells(protocol)
+    expected_by_id = {cell.cell_id: cell for cell in expected}
+    observed_by_id = {item.cell.cell_id: item for item in evidence}
+    if len(observed_by_id) != len(evidence) or set(observed_by_id) != set(expected_by_id):
+        raise ValueError("confirmation evidence does not cover the exact registered cells")
+    if any(observed_by_id[cell_id].cell != cell for cell_id, cell in expected_by_id.items()):
+        raise ValueError("confirmation evidence changes a registered cell")
+    ordered = tuple(observed_by_id[cell.cell_id] for cell in expected)
+    duration = _evaluate_duration(
+        seconds=10,
+        task_ids=protocol.split.evaluation_task_ids,
+        evidence=ordered,
+        envelope_percent=protocol.near_tie.primary_envelope_percent,
+    ).summary
+    successes = duration.qualifying_task_count
+    total = duration.registered_task_count
+    probability = successes / total
+    z = 1.959963984540054
+    denominator = 1 + z**2 / total
+    center = (probability + z**2 / (2 * total)) / denominator
+    half_width = (
+        z * math.sqrt(probability * (1 - probability) / total + z**2 / (4 * total**2)) / denominator
+    )
+    lower = max(0.0, center - half_width) * 100
+    upper = min(1.0, center + half_width) * 100
+    if (
+        duration.valid_archive_rate_percent
+        >= protocol.decision_rule.proceed_minimum_valid_archive_rate_percent
+        and duration.qualifying_task_rate_percent >= protocol.decision_rule.proceed_minimum_percent
+    ):
+        decision = "proceed_to_m3"
+    elif (
+        duration.valid_archive_rate_percent
+        < protocol.decision_rule.proceed_minimum_valid_archive_rate_percent
+        or duration.qualifying_task_rate_percent
+        >= protocol.decision_rule.redesign_minimum_percent_inclusive
+    ):
+        decision = "redesign"
+    else:
+        decision = "expanded_search_required"
+    return GeometryConfirmationEvaluation(
+        registered_task_count=total,
+        registered_cell_count=duration.registered_cell_count,
+        valid_archive_count=duration.valid_archive_count,
+        valid_archive_rate_percent=duration.valid_archive_rate_percent,
+        qualifying_task_count=successes,
+        qualifying_task_rate_percent=duration.qualifying_task_rate_percent,
+        wilson_95_lower_percent=lower,
+        wilson_95_upper_percent=upper,
+        decision=decision,
     )
 
 

@@ -22,17 +22,23 @@ from yieldforge.experiments.calibration import (
     CalibrationCellEvidence,
     CalibrationRunIdentity,
     CalibrationRunResult,
+    ConfirmationRunResult,
     GeometryCalibrationResult,
+    GeometryConfirmationEvaluation,
     build_geometry_calibration_result,
     evaluate_calibration,
+    evaluate_confirmation,
     load_geometry_calibration_result,
     nearest_rank_percentile,
     orchestrate_calibration,
+    orchestrate_confirmation,
     registered_cells,
+    registered_confirmation_cells,
     validate_geometry_calibration_result,
 )
 from yieldforge.experiments.contracts import (
     PureGeometryCalibrationProtocol,
+    PureGeometryConfirmationProtocol,
     load_frozen_json,
 )
 from yieldforge.workbench.api_contracts import CreateSolverJobRequest, JobView
@@ -40,6 +46,7 @@ from yieldforge.workbench.contracts import JobStatus
 
 YF_ROOT = Path(__file__).parents[2]
 GEOMETRY_PROTOCOL_PATH = YF_ROOT / "experiments" / "pure-geometry-calibration-v1.json"
+GEOMETRY_CONFIRMATION_PATH = YF_ROOT / "experiments" / "pure-geometry-confirmation-v2.json"
 CATALOG_PATH = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
 CALIBRATION_RESULT_PATH = (
     YF_ROOT / "experiments/results/pure-geometry-calibration-yfgcr-c333f934c363abc0d78082ec.json"
@@ -49,6 +56,10 @@ NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
 def _protocol() -> PureGeometryCalibrationProtocol:
     return load_frozen_json(GEOMETRY_PROTOCOL_PATH, PureGeometryCalibrationProtocol)
+
+
+def _confirmation_protocol() -> PureGeometryConfirmationProtocol:
+    return load_frozen_json(GEOMETRY_CONFIRMATION_PATH, PureGeometryConfirmationProtocol)
 
 
 def test_registered_cells_are_exactly_the_frozen_calibration_population() -> None:
@@ -661,3 +672,78 @@ def test_committed_calibration_result_is_canonical_and_recomputes() -> None:
     assert len(result.attempts) == 612
     assert len(result.selected_attempts) == 612
     validate_geometry_calibration_result(_protocol(), result)
+
+
+def test_registered_confirmation_cells_are_exactly_the_frozen_evaluation_population() -> None:
+    protocol = _confirmation_protocol()
+
+    cells = registered_confirmation_cells(protocol)
+
+    assert len(cells) == 812
+    assert {cell.tasks_index for cell in cells} == set(protocol.split.evaluation_task_ids)
+    assert not {cell.tasks_index for cell in cells} & set(protocol.split.calibration_task_ids)
+    assert {cell.seed for cell in cells} == {0, 1, 2, 3}
+    assert {cell.seconds_per_seed for cell in cells} == {10}
+    assert {cell.parent_protocol_id for cell in cells} == {protocol.protocol_id}
+
+
+def _complete_confirmation_evidence() -> tuple[CalibrationCellEvidence, ...]:
+    evidence = []
+    for cell in registered_confirmation_cells(_confirmation_protocol()):
+        candidates: tuple[CalibrationCandidateObservation, ...] = ()
+        if cell.seed in {0, 1}:
+            candidates = (
+                CalibrationCandidateObservation(
+                    candidate_id=f"confirm_{cell.tasks_index}_{cell.seed}",
+                    width=100.0 if cell.seed == 0 else 100.4,
+                    density=0.5,
+                ),
+            )
+        evidence.append(
+            CalibrationCellEvidence(
+                cell=cell,
+                archive_valid=True,
+                candidates=candidates,
+            )
+        )
+    return tuple(evidence)
+
+
+def test_confirmation_evaluation_applies_frozen_proceed_gate() -> None:
+    evaluation = evaluate_confirmation(
+        _confirmation_protocol(),
+        _complete_confirmation_evidence(),
+    )
+
+    assert isinstance(evaluation, GeometryConfirmationEvaluation)
+    assert evaluation.registered_task_count == 203
+    assert evaluation.registered_cell_count == 812
+    assert evaluation.valid_archive_rate_percent == 100.0
+    assert evaluation.qualifying_task_rate_percent == 100.0
+    assert evaluation.decision == "proceed_to_m3"
+    assert 98.0 < evaluation.wilson_95_lower_percent < 100.0
+    assert evaluation.wilson_95_upper_percent == 100.0
+
+
+def test_confirmation_orchestration_executes_only_registered_cells_sequentially(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    client = _ScriptedCalibrationClient()
+    monkeypatch.setattr("yieldforge.experiments.calibration.os.fsync", lambda descriptor: None)
+
+    result = orchestrate_confirmation(
+        protocol=_confirmation_protocol(),
+        client=client,
+        output_root=tmp_path / "confirmation",
+    )
+
+    assert isinstance(result, ConfirmationRunResult)
+    assert len(result.evidence) == 812
+    assert len(client.submissions) == 812
+    assert {item.cell.tasks_index for item in result.evidence} == set(
+        _confirmation_protocol().split.evaluation_task_ids
+    )
+    assert not {item.cell.tasks_index for item in result.evidence} & set(
+        _confirmation_protocol().split.calibration_task_ids
+    )
