@@ -272,6 +272,68 @@ def _ranked_candidates(frames: Mapping[str, Any]) -> list[_RankedCandidate]:
     return _all_ranked_candidates(frames)[:MAX_RANKED_CANDIDATES]
 
 
+def _malformed_integral_task_alias(value: Any, task_ids: set[int]) -> int | None:
+    value = _python_scalar(value)
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or not number.is_integer():
+        return None
+    task_id = int(number)
+    return task_id if task_id in task_ids else None
+
+
+def _catalog_ranked_candidates(frames: Mapping[str, Any]) -> list[_RankedCandidate]:
+    parts = frames["parts"]
+    dtype_kind = getattr(getattr(parts["tasks_index"], "dtype", None), "kind", None)
+    if dtype_kind in {"i", "u"}:
+        return _all_ranked_candidates(frames)
+
+    tasks = frames["tasks"]
+    task_positions = _task_rows_by_id(tasks)
+    task_ids = set(task_positions)
+    part_counts: dict[int, int] = {}
+    shape_hashes: dict[int, set[int]] = {}
+    malformed_task_ids: set[int] = set()
+    for raw_task_id, raw_shape_hash in zip(parts["tasks_index"], parts["shape_hash"], strict=True):
+        try:
+            task_id = _source_int(raw_task_id, label="parts tasks_index", nonnegative=True)
+        except ValueError:
+            alias = _malformed_integral_task_alias(raw_task_id, task_ids)
+            if alias is not None:
+                malformed_task_ids.add(alias)
+            continue
+        if task_id not in task_ids:
+            continue
+        part_counts[task_id] = part_counts.get(task_id, 0) + 1
+        try:
+            shape_hash = _source_int(raw_shape_hash, label="shape_hash")
+        except ValueError:
+            malformed_task_ids.add(task_id)
+            continue
+        shape_hashes.setdefault(task_id, set()).add(shape_hash)
+
+    candidates: list[_RankedCandidate] = []
+    for task_id, part_count in part_counts.items():
+        if task_id in malformed_task_ids:
+            continue
+        task_position = task_positions[task_id]
+        if not _base_task_is_eligible(tasks, task_position):
+            continue
+        if not MIN_PARTS <= part_count <= MAX_PARTS:
+            continue
+        unique_shapes = len(shape_hashes.get(task_id, ()))
+        repeated_rows = part_count - unique_shapes
+        score = (
+            abs(part_count - TARGET_PARTS)
+            + abs(unique_shapes - TARGET_UNIQUE_SHAPES)
+            + abs(repeated_rows - TARGET_REPEATED_PART_ROWS)
+        )
+        candidates.append(_RankedCandidate(tasks_index=task_id, rank_score=score))
+    candidates.sort(key=lambda item: (item.rank_score, item.tasks_index))
+    return candidates
+
+
 def _subset_positions(frame: Any, task_ids: set[int]) -> dict[int, list[int]]:
     result = {task_id: [] for task_id in task_ids}
     mask = frame["tasks_index"].isin(task_ids)
@@ -279,6 +341,24 @@ def _subset_positions(frame: Any, task_ids: set[int]) -> dict[int, list[int]]:
         if not bool(mask.iloc[position]):
             continue
         task_id = _source_int(_cell(frame, position, "tasks_index"), label="tasks_index")
+        if task_id in result:
+            result[task_id].append(position)
+    return result
+
+
+def _catalog_subset_positions(frame: Any, task_ids: set[int]) -> dict[int, list[int]]:
+    dtype_kind = getattr(getattr(frame["tasks_index"], "dtype", None), "kind", None)
+    if dtype_kind in {"i", "u"}:
+        return _subset_positions(frame, task_ids)
+
+    result = {task_id: [] for task_id in task_ids}
+    for position, raw_task_id in enumerate(frame["tasks_index"]):
+        try:
+            task_id = _source_int(raw_task_id, label="tasks_index", nonnegative=True)
+        except ValueError:
+            task_id = _malformed_integral_task_alias(raw_task_id, task_ids)
+            if task_id is None:
+                continue
         if task_id in result:
             result[task_id].append(position)
     return result
@@ -667,10 +747,10 @@ def select_catalog_task_ids(
             f"target_count must be an integer at least {len(CATALOG_CONTINUITY_TASK_IDS)}"
         )
 
-    ranked = _all_ranked_candidates(frames)
+    ranked = _catalog_ranked_candidates(frames)
     ranked_ids = {candidate.tasks_index for candidate in ranked}
-    parts_by_task = _subset_positions(frames["parts"], ranked_ids)
-    constraints_by_task = _subset_positions(frames["constraints"], ranked_ids)
+    parts_by_task = _catalog_subset_positions(frames["parts"], ranked_ids)
+    constraints_by_task = _catalog_subset_positions(frames["constraints"], ranked_ids)
     shape_positions = _catalog_shape_positions_for_candidates(
         frames["shapes"], frames["parts"], parts_by_task
     )

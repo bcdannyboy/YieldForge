@@ -330,6 +330,18 @@ def test_catalog_isolates_malformed_part_shape_hash_to_its_task() -> None:
     assert selection.task_ids == (13_958, 25_801, 30_001)
 
 
+@pytest.mark.parametrize("table", ["parts", "constraints"])
+def test_catalog_isolates_float_tasks_index_to_affected_candidate(table: str) -> None:
+    frames = _catalog_frames(filler_count=2)
+    frames[table]["tasks_index"] = frames[table]["tasks_index"].astype(object)
+    row = frames[table].index[frames[table]["tasks_index"] == 30_000][0]
+    frames[table].at[row, "tasks_index"] = 30_000.0
+
+    selection = select_catalog_task_ids(frames, target_count=3)
+
+    assert selection.task_ids == (13_958, 25_801, 30_001)
+
+
 def test_catalog_export_ignores_malformed_unselected_shape_rows() -> None:
     frames = _catalog_frames(filler_count=0)
     frames["shapes"] = pd.concat(
