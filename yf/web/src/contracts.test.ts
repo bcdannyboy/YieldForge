@@ -104,6 +104,12 @@ describe("browser transport validation", () => {
     };
     expect(parseCompletedRunPage(valid).items[0]?.archive.batch_sha256).toBe("c".repeat(64));
 
+    const missingBindingSchema = structuredClone(valid) as unknown as {
+      items: Array<{ job: { source_task_binding: Record<string, unknown> } }>;
+    };
+    delete missingBindingSchema.items[0]!.job.source_task_binding.schema_version;
+    expect(() => parseCompletedRunPage(missingBindingSchema)).toThrow(/source_task_binding.*fields/i);
+
     const wrongSchema = structuredClone(valid);
     wrongSchema.schema_version = "yieldforge.api-completed-run-page.v2";
     expect(() => parseCompletedRunPage(wrongSchema)).toThrow(/schema/i);

@@ -46,11 +46,11 @@ test.describe("real local research workbench", () => {
     }
   });
 
-  test("runs Spyrrow, reopens its archive, and generates a deterministic order book", async ({
+  test("runs Spyrrow twice, browses immutable history, and generates a deterministic order book", async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== "desktop", "The real solver mutation runs once.");
-    test.setTimeout(60_000);
+    test.setTimeout(90_000);
 
     await page.goto("/?view=nest&task=13958");
     await expect(
@@ -99,8 +99,51 @@ test.describe("real local research workbench", () => {
     expect(completed.candidate_count).toBeGreaterThan(0);
     expect(completed.archive_available).toBe(true);
 
+    const firstRun = page.getByRole("button", {
+      name: `Open completed run ${created.job_id}`,
+    });
+    await expect(firstRun).toBeVisible();
+    await expect(firstRun).toHaveAttribute("aria-pressed", "true");
+    const firstArchiveHash = await firstRun.locator(".run-history-card__hash").textContent();
+    expect(firstArchiveHash).toMatch(/^[0-9a-f]{64}$/);
+
+    await page.getByRole("spinbutton", { name: "Seed" }).fill("424");
+    await page.getByRole("spinbutton", { name: "Computation seconds" }).fill("2");
+    const secondCreateResponsePromise = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/solver-jobs") && response.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "Start solver job" }).click();
+    const secondCreateResponse = await secondCreateResponsePromise;
+    expect(secondCreateResponse.status()).toBe(202);
+    const secondCreated = (await secondCreateResponse.json()) as { job_id: string };
+    expect(secondCreated.job_id).not.toBe(created.job_id);
+
+    await expect(page.getByText("live sample").first()).toBeVisible({ timeout: 20_000 });
+    const secondRun = page.getByRole("button", {
+      name: `Open completed run ${secondCreated.job_id}`,
+    });
+    await expect(secondRun).toBeVisible({ timeout: 30_000 });
+    await expect(secondRun).toHaveAttribute("aria-pressed", "true");
+    await expect(firstRun).toHaveAttribute("aria-pressed", "false");
+
+    const firstArchiveRequest = page.waitForResponse((response) =>
+      response.url().includes(`/api/solver-jobs/${created.job_id}/candidates`),
+    );
+    await firstRun.click();
+    expect((await firstArchiveRequest).status()).toBe(200);
+    await expect(firstRun).toHaveAttribute("aria-pressed", "true");
+    await expect(firstRun.locator(".run-history-card__hash")).toHaveText(firstArchiveHash ?? "");
+    await expect(
+      page.getByRole("group", { name: "Candidates" }).getByRole("button").first(),
+    ).toBeVisible();
+    await expect(page.getByRole("img", { name: /placement geometry/i })).toBeVisible();
+
     await page.reload();
     await expect(page.getByText("Status: completed")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Open completed run ${secondCreated.job_id}` }),
+    ).toHaveAttribute("aria-pressed", "true");
     await expect(
       page.getByRole("group", { name: "Candidates" }).getByRole("button").first(),
     ).toBeVisible();

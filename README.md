@@ -57,7 +57,7 @@ The perfect-information MVP intentionally excludes:
 The browser workbench under `yf/web/` is a local research instrument, not a production application:
 
 - **Corpus Explorer** pages through the committed 256-task source-lossless Lectra catalog and its server-owned support states. The catalog is a bounded research selection, not a prevalence sample of the full release.
-- **Nest Lab** keeps task `25801` view-only, requires acknowledgement of `interpret_s1_degenerate_entries_as_allowed_rotations` for task `13958`, and runs bounded Spyrrow jobs through the FastAPI worker boundary. Completed immutable candidate archives can be rediscovered and rendered.
+- **Nest Lab** keeps task `25801` view-only, requires acknowledgement of `interpret_s1_degenerate_entries_as_allowed_rotations` for task `13958`, and runs bounded Spyrrow jobs through the FastAPI worker boundary. Its newest-first completed-run history records exact solver settings and verified archive SHA-256 identities; researchers can reopen any listed immutable candidate archive and render its derived geometry.
 - **Order Book Lab** opens three committed deterministic books and can generate additional immutable local books. Geometry and task composition are source-observed; chronology and economics are generated; material is assumed.
 
 The expanded view requires the documented local Postgres service; without `YIELDFORGE_DATABASE_URL`, the API deliberately falls back to the original two-task fixture. The workbench does not calculate residual geometry, reuse remnants, simulate inventory, compare a baseline with an oracle, or report savings. See [Research Workbench](Docs/Development/Research%20Workbench.md) for the exact source-evidence reproduction, database import, direct API, local runtime, and verification commands.
@@ -102,7 +102,7 @@ Candidate output directories are immutable. Choose a new output path for every r
 
 ## Current next step
 
-Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md), beginning with the primary outcome and comparison: what “better” means, which costs count, and how the oracle will be compared with the strongest legitimate baseline. The next bounded local-product task is an explicit completed-run history/selector in Nest Lab so researchers can compare immutable run settings and archives; arbitrary sheet input and downstream residual/simulator work remain deferred.
+Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md), beginning with the primary outcome and comparison: what “better” means, which costs count, and how the oracle will be compared with the strongest legitimate baseline. The next bounded local-product task is a read-only two-run comparison over recorded solver settings and descriptive candidate/archive fields, with no ranking or economic preference claim. Arbitrary sheet input and downstream residual/simulator work remain deferred.
 
 ## Name status
 

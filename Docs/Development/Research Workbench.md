@@ -14,7 +14,7 @@ Corpus geometry and task composition are source-observed. Candidate placement ge
 ## Views
 
 - **Corpus Explorer** pages through the committed catalog, filters on server-owned facets, and shows source rows, constraint types, support state, exclusion reasons, and source polygon geometry.
-- **Nest Lab** enforces the server-owned solve gate, streams durable job events, shows progressive candidates, reconciles the complete terminal archive, renders derived SVG placements, and rediscovers the latest completed archive for a task.
+- **Nest Lab** enforces the server-owned solve gate, streams durable job events, shows progressive candidates, and reconciles complete terminal archives. Its completed-run history is newest-first, exposes exact recorded solver settings and the verified batch SHA-256 without internal paths, and can reopen any listed immutable archive to render derived SVG placements.
 - **Order Book Lab** lists and opens the three committed deterministic fixtures, displays chronology/diagnostics/provenance, links events to corpus and eligible nest views, and publishes deterministic local books without overwriting an existing identity.
 
 ## Reproduce the source evidence
@@ -126,7 +126,10 @@ curl -N "$API_ORIGIN/api/solver-jobs/JOB_ID/events"
 curl -fsS "$API_ORIGIN/api/solver-jobs/JOB_ID"
 curl -fsS "$API_ORIGIN/api/solver-jobs/JOB_ID/candidates?limit=25"
 curl -fsS "$API_ORIGIN/api/solver-jobs/JOB_ID/candidates/CANDIDATE_ID/geometry"
+curl -fsS "$API_ORIGIN/api/tasks/13958/completed-runs?limit=20"
 ```
+
+The completed-run response contains only task/source-bound completed jobs whose archives can be reopened and verified. It is newest-first and publishes recorded solver settings plus the archive batch SHA-256; it never publishes the server archive path or worker PID.
 
 List the committed and locally generated immutable order books, then publish an idempotent deterministic request:
 
@@ -165,4 +168,4 @@ The real E2E is a completion gate only when it reaches the actual FastAPI servic
 
 ## Claim ceiling
 
-This catalog workbench proves local inspection of a bounded 256-task selection, bounded assumption-backed job execution, transport contracts, immutable candidate/archive browsing, and deterministic provenance-labeled order-book generation. It does not establish corpus representativeness or source-unit meaning, and it does not provide residual geometry, remnant reuse, inventory conservation, a chronological simulator, a strong baseline, an oracle, material savings, production fitness, or buyer value.
+This catalog workbench proves local inspection of a bounded 256-task selection, bounded assumption-backed job execution, transport contracts, task-bound completed-run rediscovery, immutable candidate/archive browsing, and deterministic provenance-labeled order-book generation. Run history records settings and verified archive identity; it does not compare runs scientifically or prove solver optimality. The workbench does not establish corpus representativeness or source-unit meaning, and it does not provide residual geometry, remnant reuse, inventory conservation, a chronological simulator, a strong baseline, an oracle, material savings, production fitness, or buyer value.

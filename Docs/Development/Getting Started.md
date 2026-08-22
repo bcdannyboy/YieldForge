@@ -76,7 +76,7 @@ YIELDFORGE_E2E_EXTERNAL=true \
 npm run e2e
 ```
 
-The mutating desktop scenario creates a real task `13958` job, observes progressive candidates, verifies the completed immutable archive and derived SVG geometry, then exercises deterministic order-book generation. It never enables task `25801`.
+The mutating desktop scenario creates two real task `13958` jobs with different seeds, observes progressive candidates, verifies newest-first immutable run history, reopens the older archive by exact job ID and content hash, renders its derived SVG geometry, then exercises deterministic order-book generation. It never enables task `25801`. The corresponding mobile mutation is deliberately skipped so the same local single-worker state is not mutated twice.
 
 ## Generate a smoke archive
 
@@ -101,12 +101,12 @@ Archives are write-once: rerunning against an existing output directory fails. G
 - `src/yieldforge/archive.py` — deterministic immutable archive writer.
 - `src/yieldforge/cli.py` — command-line workflow.
 - `src/yieldforge/datasets/` — pinned corpus contracts, sealed catalog/import boundary, Postgres read model, projection boundary, and two-task fallback.
-- `src/yieldforge/workbench/` — FastAPI contracts, solver-job supervision, SSE, candidate/archive views, and order-book service.
+- `src/yieldforge/workbench/` — FastAPI contracts, solver-job supervision, SSE, verified completed-run/candidate archive views, and order-book service.
 - `src/yieldforge/order_books/` — deterministic hybrid order-book contracts, generator, and immutable archive.
 - `benchmarks/static/` — small authored static fixtures.
 - `web/` — React/Vite Corpus Explorer, Nest Lab, Order Book Lab, unit tests, and Playwright E2E.
 - `tests/` — contract, adapter, native integration, archive, API, and CLI tests.
 
-Generated runtime state is server-owned and ignored under `yf/var/workbench/`. Committed corpus and order-book fixtures remain immutable evidence; local jobs and generated books are not silently promoted into the committed dataset.
+Generated runtime state is server-owned and ignored under `yf/var/workbench/`. Nest Lab history reads those local immutable job archives; it does not promote them into the committed corpus. Committed corpus and order-book fixtures remain immutable evidence, and generated books are likewise not silently promoted.
 
 See [[Research Workbench]] for exact source fetch, locked qualification, fixed-slice export, direct solver-job/order-book API, runtime, and verification commands. See also [[Spyrrow Adapter]] and [[../Milestones/M0 - Experiment contract|M0 — Experiment contract]].

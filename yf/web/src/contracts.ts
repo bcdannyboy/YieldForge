@@ -159,6 +159,7 @@ export interface JobView {
   latest_event_id: number;
   candidate_count: number;
   source_task_binding: {
+    schema_version: "yieldforge.source-task-binding.v1";
     dataset_id: string;
     source_slice_sha256: string;
     tasks_index: number;
@@ -700,6 +701,7 @@ function completedJob(value: unknown): JobView {
   exactFields(
     binding,
     [
+      "schema_version",
       "dataset_id",
       "source_slice_sha256",
       "tasks_index",
@@ -707,6 +709,9 @@ function completedJob(value: unknown): JobView {
     ],
     "completed run.job.source_task_binding",
   );
+  if (binding.schema_version !== "yieldforge.source-task-binding.v1") {
+    throw new TypeError("completed run.job.source_task_binding schema is invalid");
+  }
   text(binding.dataset_id, "completed run.job.source_task_binding.dataset_id");
   if (
     typeof binding.source_slice_sha256 !== "string" ||

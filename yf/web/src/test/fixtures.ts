@@ -163,6 +163,7 @@ export const job: JobView = {
   latest_event_id: 1,
   candidate_count: 0,
   source_task_binding: {
+    schema_version: "yieldforge.source-task-binding.v1",
     dataset_id: "lectra-7030786-v1.1",
     source_slice_sha256: source.slice_sha256,
     tasks_index: 13958,

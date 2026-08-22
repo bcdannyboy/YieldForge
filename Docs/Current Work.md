@@ -10,7 +10,7 @@ Use the local research workbench to inspect the committed 256-task Lectra catalo
 
 ## Next step
 
-Keep M0's outcome and comparison contract ahead of new experiment capabilities. The next bounded local-product task is to expose explicit completed-run history and selection in Nest Lab, including run settings and immutable archive identity. Do not begin arbitrary sheet-and-parts input, residual geometry, remnant reuse, simulation, or oracle UI yet.
+Keep M0's outcome and comparison contract ahead of new experiment capabilities. The next bounded local-product task is a read-only two-run comparison over the immutable history already exposed in Nest Lab: recorded settings and descriptive candidate/archive fields only, with no ranking, solver-optimality inference, or economic preference claim. Do not begin arbitrary sheet-and-parts input, residual geometry, remnant reuse, simulation, or oracle UI yet.
 
 ## Evidence bridge completed
 
@@ -20,9 +20,9 @@ Keep M0's outcome and comparison contract ahead of new experiment capabilities. 
 - A bounded, source-lossless two-task fixture committed and documented in [[Lectra Representative Slice]], plus a deterministic 256-task catalog produced through the same sealed qualifier boundary.
 - Task `13958` projected through a fail-closed solver boundary under one explicit `s1` orientation assumption; task `25801` remains view-only because its `c8` semantics are unresolved.
 - Progressive feasible solutions normalized, fixed-sheet filtered, deduplicated, archived, and exposed through the adapter callback boundary.
-- A local FastAPI service owns corpus queries, solver-job lifecycle, SSE replay, completed candidate archives, derived placement geometry, and deterministic order-book publication.
+- A local FastAPI service owns corpus queries, solver-job lifecycle, SSE replay, completed candidate archives, verified completed-run history with exact settings and archive hashes, derived placement geometry, and deterministic order-book publication.
 - A dedicated local Postgres read model serves the validated committed catalog with signed pagination, server-owned filtering, lazy detail loading, strict startup identity checks, and no database authority over the evidence artifact.
-- Corpus Explorer, Nest Lab, and Order Book Lab are implemented under `yf/web/`; the real browser suite exercises multiple corpus pages, the frontend-to-API-to-Spyrrow path, and archive rediscovery.
+- Corpus Explorer, Nest Lab, and Order Book Lab are implemented under `yf/web/`; the real browser suite exercises multiple corpus pages, creates two distinct frontend-to-API-to-Spyrrow runs, selects the newer completed archive, reopens the older archive, renders its geometry, and verifies deterministic order-book generation.
 - The Postgres-backed visible corpus is exactly the 256-task committed selection; the no-database fallback remains the two original tasks. Order-book chronology/economics are generated and material is assumed; the UI labels those fields and treats full manifests as analysis-only.
 
 ## Experiment status
