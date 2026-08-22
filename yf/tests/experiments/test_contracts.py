@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 from typing import Literal
@@ -8,9 +9,14 @@ from pydantic import StrictInt
 from yieldforge.experiments.contracts import (
     ExperimentContractError,
     FrozenExperimentModel,
+    M0ExperimentContract,
     canonical_pretty_json_bytes,
     load_frozen_json,
+    semantic_sha256,
 )
+
+YF_ROOT = Path(__file__).parents[2]
+M0_CONTRACT_PATH = YF_ROOT / "experiments" / "m0-contract-v1.json"
 
 
 class TinyContract(FrozenExperimentModel):
@@ -85,3 +91,76 @@ def test_frozen_json_rejects_oversized_file(tmp_path: Path) -> None:
 
     with pytest.raises(ExperimentContractError, match="exceeds 1048576 bytes"):
         load_frozen_json(path, TinyContract)
+
+
+def _committed_m0_payload() -> dict[str, object]:
+    return json.loads(M0_CONTRACT_PATH.read_text())
+
+
+def _set_nested(payload: dict[str, object], path: tuple[str, ...], value: object) -> None:
+    target = payload
+    for key in path[:-1]:
+        nested = target[key]
+        assert isinstance(nested, dict)
+        target = nested
+    target[path[-1]] = value
+
+
+def _reidentify_m0(payload: dict[str, object]) -> None:
+    digest = semantic_sha256(payload, excluded_fields={"contract_id", "content_sha256"})
+    payload["content_sha256"] = f"sha256:{digest}"
+    payload["contract_id"] = f"yfm0-{digest[:24]}"
+
+
+def test_committed_m0_contract_is_canonical_and_content_addressed() -> None:
+    contract = load_frozen_json(M0_CONTRACT_PATH, M0ExperimentContract)
+
+    assert contract.status == "frozen_pending_geometry_calibration"
+    assert contract.primary_outcome.name == "oracle_savings"
+    assert contract.decision_gates.green.minimum_oracle_savings_percent == 2.5
+    assert contract.content_sha256[7:31] == contract.contract_id[5:]
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("primary_outcome", "net_cost_formula"), "full_sheet_purchases"),
+        (("cost_accounting", "purchase_accrual"), "when_area_is_consumed"),
+        (("terminal_inventory", "primary_treatment"), "bounded_continuation_credit"),
+        (
+            ("comparators", "unknown_future_contribution_formula"),
+            "(baseline_cost-full_oracle_cost)/baseline_cost",
+        ),
+        (("event_timing", "released_work_fulfillment"), "may_be_delayed"),
+        (("candidate_parity", "shared_candidate_archive_hashes"), False),
+        (("remnant_eligibility", "primary", "minimum_area_sheet_fraction"), 0.02),
+        (("failure_handling", "maximum_identical_retries"), 2),
+        (("statistics", "bootstrap_resamples"), 9999),
+        (("decision_gates", "green", "minimum_oracle_savings_percent"), 2.49),
+        (("immutability", "threshold_changes_after_evaluation"), "allowed_with_note"),
+    ],
+)
+def test_m0_contract_rejects_reidentified_rule_drift(
+    path: tuple[str, ...], replacement: object
+) -> None:
+    payload = copy.deepcopy(_committed_m0_payload())
+    _set_nested(payload, path, replacement)
+    _reidentify_m0(payload)
+
+    with pytest.raises(ValueError, match="approved M0 rules"):
+        M0ExperimentContract.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_m0_contract_rejects_forged_content_identity() -> None:
+    payload = _committed_m0_payload()
+    payload["content_sha256"] = "sha256:" + "0" * 64
+
+    with pytest.raises(ValueError, match="content SHA-256"):
+        M0ExperimentContract.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_m0_contract_is_deeply_immutable() -> None:
+    contract = load_frozen_json(M0_CONTRACT_PATH, M0ExperimentContract)
+
+    with pytest.raises(Exception, match="frozen"):
+        contract.decision_gates.green.minimum_oracle_savings_percent = 2.0  # type: ignore[misc]

@@ -1,0 +1,270 @@
+{
+  "candidate_parity": {
+    "baseline_action_fallback": true,
+    "expanded_search_treatment": "separate_search_gap_analysis_only",
+    "parity_failure_treatment": "invalidate_paired_stream",
+    "shared_candidate_archive_hashes": true,
+    "shared_ordinary_compute_budget": true,
+    "shared_projection": true,
+    "shared_solver_configuration": true,
+    "shared_solver_seeds": true,
+    "shared_stock_and_remnant_eligibility": true
+  },
+  "claim_ceiling": {
+    "excluded_claims": [
+      "candidate_population_richness",
+      "residual_geometry_truth",
+      "remnant_utility",
+      "material_savings",
+      "solver_optimality",
+      "physical_recoverability",
+      "commercial_value"
+    ],
+    "permitted_claim": "pre_registered_experiment_rules_only"
+  },
+  "comparators": {
+    "baseline_selection": "lowest_mean_net_cost_on_calibration_then_frozen",
+    "baseline_selection_unit": "registered_calibration_streams",
+    "common_denominator": "baseline_cost",
+    "evaluation_stream_selection": "no_per_stream_ex_post_baseline_selection",
+    "full_oracle": "same_action_set_with_entire_realized_future_visible",
+    "known_only_control": "same_oracle_algorithm_and_compute_with_unknown_future_masked",
+    "unknown_future_contribution_formula": "(known_only_oracle_cost-full_oracle_cost)/baseline_cost"
+  },
+  "content_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+  "contract_id": "yfm0-29b7efe8ac2a0a9995c4f907",
+  "cost_accounting": {
+    "excluded_process_costs": [
+      "cutting_labor",
+      "cutting_time",
+      "energy",
+      "tool_wear",
+      "setup",
+      "lateness",
+      "financing",
+      "tax",
+      "overhead",
+      "purchasing_lead_time",
+      "stockout"
+    ],
+    "process_loss_treatment": "kerf_and_clearance_affect_geometry_not_separate_money",
+    "purchase_accrual": "when_standard_sheet_opened_at_full_acquisition_cost",
+    "rate_manifest_requirement": "exact_nonnegative_rates_and_units_frozen_before_economic_evaluation",
+    "remnant_retrieval_handling_accrual": "when_remnant_leaves_inventory_for_cutting",
+    "remnant_return_handling_accrual": "when_eligible_remnant_enters_inventory",
+    "scrap_proceeds_accrual": "only_when_material_is_actually_scrapped",
+    "storage_formula": "retained_remnant_area*elapsed_time*declared_storage_rate",
+    "storage_interval": "half_open_previous_timestamp_to_current_timestamp"
+  },
+  "decision_gates": {
+    "green": {
+      "combination": "both",
+      "minimum_oracle_savings_percent": 2.5,
+      "minimum_unknown_future_percentage_points": 1.5,
+      "requires_all_supporting_gates": true
+    },
+    "precedence": "invalid_then_red_then_yellow_then_green",
+    "red": {
+      "combination": "either",
+      "oracle_savings_below_percent": 1.5,
+      "unknown_future_below_percentage_points": 0.5
+    },
+    "supporting": {
+      "maximum_mean_immediate_sacrifice_percent": 0.5,
+      "maximum_top_10_decision_savings_share_percent": 25.0,
+      "minimum_geometry_corpora_with_positive_evidence": 2,
+      "minimum_lower_mean_confidence_bound_percent_exclusive": 0.0,
+      "minimum_median_savings_percent_exclusive": 0.0,
+      "minimum_opportunity_frequency_percent": 20.0,
+      "minimum_ordinary_candidate_availability_percent": 60.0,
+      "minimum_positive_stream_fraction_percent_exclusive": 50.0,
+      "minimum_remnant_realization_percent": 60.0,
+      "negative_oracle_savings_treatment": "invalid_beyond_declared_numeric_tolerance",
+      "no_signal_above_investigate_treatment": "invalid_pending_diagnosis",
+      "no_signal_green_maximum_percent": 0.3,
+      "no_signal_green_minimum_percent": 0.0,
+      "no_signal_investigate_maximum_percent": 0.5,
+      "terminal_band_invariance_required": true
+    },
+    "yellow": {
+      "combination": "worst_metric_band_after_red",
+      "oracle_savings_below_percent": 2.5,
+      "oracle_savings_minimum_percent": 1.5,
+      "unknown_future_below_percentage_points": 1.5,
+      "unknown_future_minimum_percentage_points": 0.5
+    }
+  },
+  "event_timing": {
+    "compatible_batching": "all_and_only_compatible_work_released_at_same_timestamp",
+    "horizon_close": "after_final_registered_action_then_storage_to_explicit_horizon_end_then_liquidation",
+    "multi_sheet_treatment": "deterministic_pre_policy_sheet_sized_sub_batches",
+    "ordered_stages": [
+      "accrue_storage_to_t",
+      "reveal_orders_released_at_t",
+      "form_compatible_released_batch",
+      "select_action",
+      "execute_and_fulfill_atomically",
+      "record_purchase_handling_and_scrap",
+      "return_eligible_remnants_at_t"
+    ],
+    "released_work_fulfillment": "immediate_at_release_timestamp",
+    "scheduled_work_treatment": "may_inform_planning_but_cannot_be_cut_early"
+  },
+  "experimental_controls": {
+    "exact_small_case_green_requirement": "beam_matches_exact_optimum_on_every_registered_case_within_accounting_tolerance",
+    "required_controls": [
+      "no_signal",
+      "common_persisted_seeds",
+      "known_only_information_ablation",
+      "exact_small_case_search",
+      "terminal_value_sensitivity",
+      "remnant_eligibility_sensitivity",
+      "ordinary_vs_expanded_search",
+      "rollout_vs_beam",
+      "strong_vs_myopic_baseline"
+    ],
+    "scalable_oracle_label": "perfect_information_policy_benchmark_not_upper_bound"
+  },
+  "failure_handling": {
+    "blocked_source_semantics": "pre_registered_exclusion_reported_in_population",
+    "economic_stream_failure": "invalidates_registered_cell_and_verdict",
+    "geometry_failure_denominator": "included_as_nonqualifying_task",
+    "incomplete_stream_treatment": "visible_invalid_no_numeric_savings",
+    "invalidating_economic_failures": [
+      "solver_timeout",
+      "zero_candidates",
+      "worker_failure",
+      "invalid_geometry",
+      "archive_verification_failure",
+      "infeasible_task",
+      "missing_baseline_action",
+      "incomplete_stream"
+    ],
+    "maximum_identical_retries": 1,
+    "missing_baseline_action_treatment": "invalid_never_silently_substituted",
+    "nonretryable_causes": [
+      "zero_candidates",
+      "invalid_geometry",
+      "archive_verification_failure",
+      "infeasible_task",
+      "missing_baseline_action",
+      "incomplete_stream"
+    ],
+    "retryable_causes": [
+      "worker_failure",
+      "outer_timeout"
+    ]
+  },
+  "immutability": {
+    "confirmation_prerequisites": [
+      "validated_m0_contract",
+      "validated_geometry_protocol_with_selected_budget",
+      "validated_numeric_economic_rate_manifest",
+      "all_registered_candidate_archives_verified"
+    ],
+    "old_artifact_treatment": "preserve_immutable_and_report",
+    "semantic_change_treatment": "new_contract_version_and_experiment_id",
+    "threshold_changes_after_evaluation": "forbidden"
+  },
+  "information_sets": {
+    "commercial_as_of_time_baseline": "myopic_view+remnant_age+regularity+declared_cost_state",
+    "forbidden_baseline_information": "later_realized_demand+hidden_regime_labels+oracle_only_diagnostics",
+    "known_only_oracle_control": "oracle_algorithm_with_events_not_known_at_timestamp_masked",
+    "known_order_lookahead_baseline": "commercial_view+released_or_firmly_scheduled_work_known_at_timestamp",
+    "myopic_geometry_policy": "released_batch+current_inventory+immediate_candidate_facts",
+    "perfect_information_beam_search": "entire_realized_future_at_each_decision_within_registered_beam",
+    "perfect_information_rollout": "entire_realized_future_for_current_action_then_frozen_strong_policy"
+  },
+  "primary_outcome": {
+    "formula": "(baseline_cost-full_oracle_cost)/baseline_cost",
+    "immediate_utilization_role": "diagnostic_only",
+    "included_terms": [
+      "full_sheet_purchases",
+      "storage",
+      "remnant_return_handling",
+      "remnant_retrieval_handling",
+      "realized_scrap_proceeds",
+      "terminal_scrap_credit"
+    ],
+    "name": "oracle_savings",
+    "net_cost_formula": "full_sheet_purchases+storage+remnant_return_handling+remnant_retrieval_handling-realized_scrap_proceeds-terminal_scrap_credit",
+    "required_positive_denominator": true
+  },
+  "remnant_eligibility": {
+    "component_treatment": "retain_only_eligible_exterior_connected_components",
+    "conservative_sensitivity": {
+      "effective_width_test": "nonempty_inward_buffer_by_half_minimum_width",
+      "minimum_area_sheet_fraction": 0.025,
+      "minimum_effective_width_short_side_fraction": 0.05,
+      "minimum_exterior_access_short_side_fraction": 0.05,
+      "name": "conservative_operational",
+      "requires_exterior_connection": true
+    },
+    "handling_eligibility": "return_and_retrieval_each_accrue_once_per_event",
+    "hole_treatment": "preserve_exactly_and_exclude_hole_area_from_material",
+    "lineage_rule": "immutable_acyclic_single_parent_no_duplicate_inventory_use",
+    "material_compatibility_fields": [
+      "material",
+      "grade",
+      "thickness",
+      "surface",
+      "grain"
+    ],
+    "permissive_sensitivity": {
+      "effective_width_test": "nonempty_inward_buffer_by_half_minimum_width",
+      "minimum_area_sheet_fraction": 0.0025,
+      "minimum_effective_width_short_side_fraction": 0.005,
+      "minimum_exterior_access_short_side_fraction": 0.0,
+      "name": "permissive_operational",
+      "requires_exterior_connection": true
+    },
+    "primary": {
+      "effective_width_test": "nonempty_inward_buffer_by_half_minimum_width",
+      "minimum_area_sheet_fraction": 0.01,
+      "minimum_effective_width_short_side_fraction": 0.02,
+      "minimum_exterior_access_short_side_fraction": 0.02,
+      "name": "nominal_operational",
+      "requires_exterior_connection": true
+    },
+    "storage_eligibility": "only_eligible_retained_components",
+    "threshold_unit_rationale": "relative_because_source_physical_unit_is_uninterpreted"
+  },
+  "schema_version": "yieldforge.m0-contract.v1",
+  "statistics": {
+    "bootstrap_method": "stratified_paired_percentile",
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 0,
+    "calibration_evaluation_separation": "calibration_never_enters_confirmation",
+    "common_persisted_seeds": true,
+    "comparison_unit": "paired_stream",
+    "confidence_level": 0.95,
+    "lower_tail_statistics": [
+      "p10",
+      "worst_decile_mean"
+    ],
+    "outlier_concentration": [
+      "top_10_stream_share",
+      "top_10_decision_share"
+    ],
+    "paired": true,
+    "positive_stream_definition": "oracle_savings_greater_than_zero",
+    "positive_stream_interval": "wilson_95_percent",
+    "registered_results_reporting": "every_registered_regime_and_seed_including_failures",
+    "reported_location_statistics": [
+      "mean",
+      "median"
+    ]
+  },
+  "status": "frozen_pending_geometry_calibration",
+  "terminal_inventory": {
+    "bounded_continuation_max_virgin_fraction": 1.0,
+    "green_may_depend_on_continuation_credit": false,
+    "green_requires_scrap_zero_band_invariance": true,
+    "primary_option_value": 0.0,
+    "primary_treatment": "scrap_only_liquidation_at_horizon_close",
+    "required_sensitivities": [
+      "zero_total_terminal_credit",
+      "bounded_continuation_credit"
+    ]
+  }
+}
