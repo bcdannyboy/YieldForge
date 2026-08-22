@@ -10,6 +10,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from yieldforge.datasets import postgres_catalog
 from yieldforge.datasets.postgres_catalog import (
     CatalogImportError,
     import_catalog,
@@ -216,6 +217,69 @@ def test_rejects_lookalike_schema_without_exact_relational_guarantees(
 
     with pytest.raises(CatalogImportError, match="partial or unexpected schema"):
         _import(database_url)
+
+
+@pytest.mark.parametrize(
+    "mutations",
+    [
+        (
+            "CREATE FUNCTION yieldforge_test_trigger() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+            "CREATE TRIGGER yieldforge_unexpected_trigger BEFORE INSERT "
+            "ON yieldforge_catalog_task FOR EACH ROW "
+            "EXECUTE FUNCTION yieldforge_test_trigger()",
+        ),
+        (
+            "CREATE RULE yieldforge_unexpected_rule AS ON INSERT "
+            "TO yieldforge_catalog_task DO INSTEAD NOTHING",
+        ),
+        ("ALTER TABLE yieldforge_catalog_task ENABLE ROW LEVEL SECURITY",),
+        (
+            "ALTER TABLE yieldforge_catalog_task ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE yieldforge_catalog_task FORCE ROW LEVEL SECURITY",
+        ),
+    ],
+    ids=("trigger", "rewrite-rule", "row-security", "forced-row-security"),
+)
+def test_rejects_unexpected_table_execution_hooks(
+    database_url: str,
+    mutations: tuple[str, ...],
+) -> None:
+    _import(database_url)
+    with psycopg.connect(database_url) as connection:
+        for statement in mutations:
+            connection.execute(statement)
+
+    with pytest.raises(CatalogImportError, match="partial or unexpected schema"):
+        _import(database_url)
+
+
+def test_revalidates_new_rows_before_committing(
+    database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_ensure_schema = postgres_catalog._ensure_schema  # noqa: SLF001
+
+    def ensure_then_install_mutating_trigger(connection):  # type: ignore[no-untyped-def]
+        original_ensure_schema(connection)
+        connection.execute(
+            "CREATE FUNCTION yieldforge_test_tamper_hash() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ "
+            "BEGIN NEW.record_sha256 = repeat('0', 64); RETURN NEW; END $$"
+        )
+        connection.execute(
+            "CREATE TRIGGER yieldforge_tamper_hash BEFORE INSERT "
+            "ON yieldforge_catalog_task FOR EACH ROW "
+            "EXECUTE FUNCTION yieldforge_test_tamper_hash()"
+        )
+
+    monkeypatch.setattr(postgres_catalog, "_ensure_schema", ensure_then_install_mutating_trigger)
+
+    with pytest.raises(CatalogImportError, match="record hash"):
+        _import(database_url)
+
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT to_regclass('yieldforge_catalog')").fetchone() == (None,)
 
 
 def test_rejects_duplicate_source_keys_before_connecting(

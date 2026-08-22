@@ -675,17 +675,38 @@ def _is_plain_permanent_table(
     table: str,
 ) -> bool:
     row = connection.execute(
-        "SELECT relkind, relpersistence, relispartition FROM pg_class WHERE oid = to_regclass(%s)",
+        "SELECT relkind, relpersistence, relispartition, relrowsecurity, relforcerowsecurity "
+        "FROM pg_class WHERE oid = to_regclass(%s)",
         (table,),
     ).fetchone()
     return row == {
         "relkind": "r",
         "relpersistence": "p",
         "relispartition": False,
+        "relrowsecurity": False,
+        "relforcerowsecurity": False,
     }
 
 
+def _has_unexpected_execution_hooks(
+    connection: psycopg.Connection[dict[str, object]],
+    table: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT "
+        "EXISTS (SELECT 1 FROM pg_trigger "
+        "WHERE tgrelid = to_regclass(%s) AND NOT tgisinternal) AS has_user_triggers, "
+        "EXISTS (SELECT 1 FROM pg_rewrite "
+        "WHERE ev_class = to_regclass(%s)) AS has_rewrite_rules, "
+        "EXISTS (SELECT 1 FROM pg_policy "
+        "WHERE polrelid = to_regclass(%s)) AS has_row_security_policies",
+        (table, table, table),
+    ).fetchone()
+    return any(bool(value) for value in row.values())
+
+
 def _ensure_schema(connection: psycopg.Connection[dict[str, object]]) -> None:
+    connection.execute("SELECT set_config('quote_all_identifiers', 'off', true)")
     existence = connection.execute(
         "SELECT to_regclass('yieldforge_catalog') IS NOT NULL AS catalog_exists, "
         "to_regclass('yieldforge_catalog_task') IS NOT NULL AS task_exists"
@@ -694,12 +715,13 @@ def _ensure_schema(connection: psycopg.Connection[dict[str, object]]) -> None:
     task_exists = existence["task_exists"]
     if not catalog_exists and not task_exists:
         _create_schema(connection)
-        return
-    if not catalog_exists or not task_exists:
+    elif not catalog_exists or not task_exists:
         raise CatalogImportError("PostgreSQL has a partial or unexpected schema")
     if (
         not _is_plain_permanent_table(connection, "yieldforge_catalog")
         or not _is_plain_permanent_table(connection, "yieldforge_catalog_task")
+        or _has_unexpected_execution_hooks(connection, "yieldforge_catalog")
+        or _has_unexpected_execution_hooks(connection, "yieldforge_catalog_task")
         or _table_signature(connection, "yieldforge_catalog") != _CATALOG_COLUMN_SIGNATURE
         or _table_signature(connection, "yieldforge_catalog_task") != _TASK_COLUMN_SIGNATURE
         or _constraint_signature(connection, "yieldforge_catalog") != _CATALOG_CONSTRAINT_SIGNATURE
@@ -939,6 +961,14 @@ def import_catalog(
                 if task_count != 0:
                     raise CatalogImportError("PostgreSQL contains a partially populated catalog")
                 _insert_catalog(connection, prepared)
+                inserted_catalog_rows = connection.execute(
+                    "SELECT * FROM yieldforge_catalog ORDER BY singleton"
+                ).fetchall()
+                if len(inserted_catalog_rows) != 1:
+                    raise CatalogImportError(
+                        "PostgreSQL catalog insert did not produce exactly one catalog row"
+                    )
+                _revalidate_existing(connection, prepared, inserted_catalog_rows[0])
             elif len(catalog_rows) == 1:
                 _revalidate_existing(connection, prepared, catalog_rows[0])
             else:
