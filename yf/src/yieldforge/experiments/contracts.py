@@ -463,6 +463,122 @@ class PureGeometryCalibrationProtocol(FrozenExperimentModel):
         return self
 
 
+_APPROVED_GEOMETRY_CALIBRATION_RESULT_ID = "yfgcr-c333f934c363abc0d78082ec"
+_APPROVED_GEOMETRY_CALIBRATION_RESULT_SHA256 = (
+    "sha256:c333f934c363abc0d78082ecdb60d8020ee0be8a08992b9e80e5caf4e349cbec"
+)
+
+
+class GeometryCalibrationResultReference(FrozenExperimentModel):
+    result_id: StrictStr = Field(pattern=r"^yfgcr-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    selected_seconds_per_seed: Literal[10]
+
+
+class PureGeometryConfirmationProtocol(FrozenExperimentModel):
+    """Confirmation-ready protocol preserving every frozen v1 rule."""
+
+    schema_version: Literal["yieldforge.pure-geometry-protocol.v2"] = (
+        "yieldforge.pure-geometry-protocol.v2"
+    )
+    protocol_id: StrictStr = Field(pattern=r"^yfgp-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    status: Literal["confirmation_ready"]
+    confirmation_enabled: Literal[True]
+    calibration_result: GeometryCalibrationResultReference
+    references: GeometryReferences
+    population: GeometryPopulation
+    split: GeometrySplit
+    repeatability: GeometryRepeatability
+    projection: GeometryProjection
+    budget: GeometryBudget
+    near_tie: NearTieProtocol
+    candidate_definition: CandidateDefinition
+    outcome: GeometryOutcome
+    reporting: GeometryReporting
+    decision_rule: GeometryDecisionRule
+
+    @model_validator(mode="after")
+    def require_exact_calibration_and_frozen_rules(self) -> Self:
+        if (
+            self.calibration_result.result_id != _APPROVED_GEOMETRY_CALIBRATION_RESULT_ID
+            or self.calibration_result.content_sha256
+            != _APPROVED_GEOMETRY_CALIBRATION_RESULT_SHA256
+            or self.budget.selected_seconds_per_seed
+            != self.calibration_result.selected_seconds_per_seed
+        ):
+            raise ValueError("confirmation protocol does not bind the approved calibration result")
+        PureGeometryCalibrationProtocol(
+            protocol_id="yfgp-49906e93ed9ff0446705247b",
+            content_sha256=(
+                "sha256:49906e93ed9ff0446705247bf6f2519588265ccbd9e6d1c9676e98ad7ed05737"
+            ),
+            status="calibration_pending",
+            confirmation_enabled=False,
+            references=self.references,
+            population=self.population,
+            split=self.split,
+            repeatability=self.repeatability,
+            projection=self.projection,
+            budget=self.budget.model_copy(update={"selected_seconds_per_seed": None}),
+            near_tie=self.near_tie,
+            candidate_definition=self.candidate_definition,
+            outcome=self.outcome,
+            reporting=self.reporting,
+            decision_rule=self.decision_rule,
+        )
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"protocol_id", "content_sha256"},
+        )
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("geometry content SHA-256 does not match its semantic content")
+        if self.protocol_id != f"yfgp-{digest[:24]}":
+            raise ValueError("geometry protocol ID does not match its semantic content")
+        return self
+
+
+def build_geometry_confirmation_protocol(
+    calibration: PureGeometryCalibrationProtocol,
+    *,
+    result_id: str,
+    result_sha256: str,
+    selected_seconds_per_seed: int,
+) -> PureGeometryConfirmationProtocol:
+    """Create the sole confirmation-ready successor permitted by calibration v1."""
+
+    payload = calibration.model_dump(mode="json")
+    payload.update(
+        {
+            "schema_version": "yieldforge.pure-geometry-protocol.v2",
+            "status": "confirmation_ready",
+            "confirmation_enabled": True,
+            "calibration_result": {
+                "result_id": result_id,
+                "content_sha256": result_sha256,
+                "selected_seconds_per_seed": selected_seconds_per_seed,
+            },
+        }
+    )
+    budget = dict(payload["budget"])
+    budget["selected_seconds_per_seed"] = selected_seconds_per_seed
+    payload["budget"] = budget
+    digest = semantic_sha256(payload, excluded_fields={"protocol_id", "content_sha256"})
+    return PureGeometryConfirmationProtocol.model_validate_json(
+        json.dumps(
+            {
+                **payload,
+                "protocol_id": f"yfgp-{digest[:24]}",
+                "content_sha256": f"sha256:{digest}",
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        strict=True,
+    )
+
+
 def rank_task_ids(task_ids: Iterable[int], *, salt: str, catalog_sha256: str) -> tuple[int, ...]:
     """Rank task IDs with the frozen SHA-256 selection rule."""
 

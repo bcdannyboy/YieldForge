@@ -17,13 +17,19 @@ from yieldforge.domain import ProjectionMode, SourceTaskBinding
 from yieldforge.experiments.calibration import (
     CalibrationApiClient,
     CalibrationApiCompletedEvidence,
+    CalibrationAttemptOutcome,
     CalibrationCandidateObservation,
     CalibrationCellEvidence,
+    CalibrationRunIdentity,
     CalibrationRunResult,
+    GeometryCalibrationResult,
+    build_geometry_calibration_result,
     evaluate_calibration,
+    load_geometry_calibration_result,
     nearest_rank_percentile,
     orchestrate_calibration,
     registered_cells,
+    validate_geometry_calibration_result,
 )
 from yieldforge.experiments.contracts import (
     PureGeometryCalibrationProtocol,
@@ -35,6 +41,9 @@ from yieldforge.workbench.contracts import JobStatus
 YF_ROOT = Path(__file__).parents[2]
 GEOMETRY_PROTOCOL_PATH = YF_ROOT / "experiments" / "pure-geometry-calibration-v1.json"
 CATALOG_PATH = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
+CALIBRATION_RESULT_PATH = (
+    YF_ROOT / "experiments/results/pure-geometry-calibration-yfgcr-c333f934c363abc0d78082ec.json"
+)
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
 
@@ -587,3 +596,68 @@ def test_orchestration_rejects_output_bound_to_another_api(tmp_path: Path) -> No
         orchestrate_calibration(protocol=protocol, client=client, output_root=output)
 
     assert len(client.submissions) == original_submission_count
+
+
+def _synthetic_runtime_result() -> CalibrationRunResult:
+    protocol = _protocol()
+    evidence = _complete_evidence()
+    attempts = tuple(
+        CalibrationAttemptOutcome(
+            cell=item.cell,
+            attempt_number=1,
+            job_id=f"job-{index:04d}",
+            status=JobStatus.COMPLETED,
+            error_code=None,
+            archive_valid=True,
+            batch_sha256=hashlib.sha256(f"archive-{index}".encode()).hexdigest(),
+            candidates=item.candidates,
+        )
+        for index, item in enumerate(evidence)
+    )
+    cells = registered_cells(protocol)
+    return CalibrationRunResult(
+        run=CalibrationRunIdentity(
+            parent_protocol_id=protocol.protocol_id,
+            parent_protocol_sha256=protocol.content_sha256,
+            m0_contract_sha256=protocol.references.m0_contract_sha256,
+            dataset_id=protocol.references.dataset_id,
+            catalog_sha256=protocol.references.catalog_artifact_sha256,
+            api_origin="http://127.0.0.1:18082",
+            registered_cell_ids=tuple(cell.cell_id for cell in cells),
+        ),
+        attempts=attempts,
+        evidence=evidence,
+        evaluation=evaluate_calibration(protocol, evidence),
+    )
+
+
+def test_calibration_result_is_content_addressed_and_recomputes_selector() -> None:
+    runtime = _synthetic_runtime_result()
+
+    result = build_geometry_calibration_result(_protocol(), runtime)
+
+    assert isinstance(result, GeometryCalibrationResult)
+    assert result.result_id == f"yfgcr-{result.content_sha256[7:31]}"
+    assert len(result.attempts) == 612
+    assert len(result.selected_attempts) == 612
+    validate_geometry_calibration_result(_protocol(), result)
+
+
+def test_calibration_result_rejects_tampered_attempt_evidence() -> None:
+    result = build_geometry_calibration_result(_protocol(), _synthetic_runtime_result())
+    payload = result.model_dump(mode="json")
+    payload["attempts"][0]["batch_sha256"] = "f" * 64
+
+    with pytest.raises(ValueError, match="content SHA-256"):
+        GeometryCalibrationResult.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_committed_calibration_result_is_canonical_and_recomputes() -> None:
+    result = load_geometry_calibration_result(CALIBRATION_RESULT_PATH)
+
+    assert result.result_id == "yfgcr-c333f934c363abc0d78082ec"
+    assert result.evaluation.valid is True
+    assert result.evaluation.selected_seconds_per_seed == 10
+    assert len(result.attempts) == 612
+    assert len(result.selected_attempts) == 612
+    validate_geometry_calibration_result(_protocol(), result)

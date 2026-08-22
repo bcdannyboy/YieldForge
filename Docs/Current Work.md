@@ -2,17 +2,20 @@
 
 ## Active milestone
 
-[[M0 - Experiment contract]]
+[[M2 - Static data and Sparrow]]
 
 ## Current objective
 
-Preserve the frozen executable M0 constitution and prepare the exact 51-task pure-geometry calibration without crossing into confirmatory evaluation. The reusable implementation remains in the single `yf/` project.
+Execute the exact 203-task pure-geometry confirmation under the newly frozen 10-second ordinary
+budget. The reusable implementation remains in the single `yf/` project.
 
 ## Next step
 
-Run only the 51 task IDs prelisted in `yf/experiments/pure-geometry-calibration-v1.json`, using `source_as_recorded`, seeds `[0, 1, 2, 3]`, and 1, 3, and 10 seconds per seed. Persist every attempt and verified archive, then apply the frozen budget-selection rule. Calibration may choose only the practical seconds-per-seed value. It may not change the population, split, seeds, 0.5% primary envelope, metrics, retry rules, or gates.
-
-Do not run any of the 203 evaluation tasks until a new content-addressed protocol records the selected duration, validates against the same catalog and M0 identities, and explicitly enables confirmation. Do not begin arbitrary sheet-and-parts input, residual geometry, remnant reuse, simulation, baseline/oracle implementation, or oracle UI.
+Run only the 203 evaluation task IDs prelisted in
+`yf/experiments/pure-geometry-confirmation-v2.json`, using `source_as_recorded`, seeds
+`[0, 1, 2, 3]`, and 10 seconds per seed. Persist and verify every attempt and archive, then apply
+the frozen 0.5% near-tie and 60% proceed gates. Do not begin residual geometry, remnant reuse,
+simulation, baseline/oracle implementation, or oracle UI before the M2 result is frozen.
 
 ## Evidence bridge completed
 
@@ -33,6 +36,12 @@ Do not run any of the 203 evaluation tasks until a new content-addressed protoco
 
 The M0 economic constitution is frozen and executable: net cost, information sets, event order, candidate parity, remnant eligibility, failures, reporting, and economic thresholds are explicit. The pure-geometry population, split, arms, calibration ladder, candidate identity, 0.5% primary outcome, supporting strata, and pass/redesign/stop rules are also pre-registered.
 
-M0 is still Active rather than Passed because `selected_seconds_per_seed` is null and confirmation is disabled until calibration. The matched workbench arms establish execution and provenance only. No calibration result, confirmatory geometry result, residual-geometry proof, remnant reuse, chronological simulator, future-aware policy, economic benchmark, solver-optimality result, or validated savings claim exists.
+M0 is Passed. The registered calibration completed all 612 cells with 100% archive validity and no
+retry. Every calibration task qualified at every duration, but the shorter budgets exceeded the
+frozen best-length degradation limits, so 10 seconds per seed was selected. Protocol v2 enables
+confirmation without changing the population, split, seeds, 0.5% envelope, metrics, retry rules,
+or gates. No confirmatory geometry result, residual-geometry proof, remnant reuse, chronological
+simulator, future-aware policy, economic benchmark, solver-optimality result, or validated savings
+claim exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

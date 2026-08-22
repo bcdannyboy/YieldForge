@@ -1,6 +1,6 @@
 # M0 — Experiment contract
 
-**Status:** Active — economic constitution frozen; geometry calibration budget pending
+**Status:** Passed — economic constitution frozen; 10-second geometry budget selected
 
 M0 decides what experiment we are actually running before observed results can influence the
 rules. It gives precise meanings to savings, future information, usable remnants, fair policy
@@ -15,6 +15,12 @@ machine-readable artifacts are:
 - `yf/experiments/pure-geometry-calibration-v1.json` — ID
   `yfgp-49906e93ed9ff0446705247b`, semantic SHA-256
   `49906e93ed9ff0446705247bf6f2519588265ccbd9e6d1c9676e98ad7ed05737`;
+- `yf/experiments/results/pure-geometry-calibration-yfgcr-c333f934c363abc0d78082ec.json` —
+  ID `yfgcr-c333f934c363abc0d78082ec`, semantic SHA-256
+  `c333f934c363abc0d78082ecdb60d8020ee0be8a08992b9e80e5caf4e349cbec`;
+- `yf/experiments/pure-geometry-confirmation-v2.json` — ID
+  `yfgp-392644d98bb7035fdc218512`, semantic SHA-256
+  `392644d98bb7035fdc218512c9c28cd5f3120a38f8add211fd9b953456166b31`;
 - the committed Lectra catalog — artifact SHA-256
   `0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad`.
 
@@ -24,10 +30,10 @@ contracts and their tests control over this prose if they disagree.
 
 ## Acceptance boundary and claim ceiling
 
-M0 passes only after the registered calibration selects the final seconds-per-seed budget. The
-economic constitution is frozen, but the geometry protocol has `status = calibration_pending`,
-`selected_seconds_per_seed = null`, and `confirmation_enabled = false`. M0 therefore remains
-Active and geometry evaluation is prohibited.
+M0 passed after all 612 registered calibration cells completed with verified archives and the
+frozen selector selected 10 seconds per seed. Protocol v2 has `status = confirmation_ready`,
+`selected_seconds_per_seed = 10`, and `confirmation_enabled = true`. The 203-task geometry
+evaluation is now authorized under that exact protocol.
 
 Passing M0 will prove only that the experiment was defined before confirmation. It will not prove
 candidate richness, residual geometry, remnant utility, material savings, solver optimality,
@@ -238,11 +244,10 @@ uv run yieldforge experiments validate \
   --catalog-manifest datasets/catalogs/lectra-7030786-v1.1/catalog-manifest.json
 ```
 
-The current summary must report `calibration=51`, `evaluation=203`, and
-`confirmation=disabled`.
+The immutable v1 artifact still reports `confirmation=disabled` because it is the preregistration
+input. The committed calibration result and protocol v2 record the observed handoff without
+rewriting v1.
 
-The exact next task is to run only the 51 calibration tasks under `source_as_recorded`, for seeds
-`[0, 1, 2, 3]` at 1, 3, and 10 seconds per seed; persist every attempt and verified archive; apply
-the frozen budget rule; and publish a new content-addressed protocol. Do not change the population,
-split, seeds, 0.5% envelope, metrics, or gates. Do not run evaluation until that protocol validates
-and enables confirmation.
+The next experiment is the 203-task confirmatory geometry evaluation under `source_as_recorded`,
+seeds `[0, 1, 2, 3]`, and 10 seconds per seed. It may not change the population, split, seeds,
+0.5% envelope, metrics, or gates.

@@ -11,6 +11,8 @@ from yieldforge.experiments.contracts import (
     FrozenExperimentModel,
     M0ExperimentContract,
     PureGeometryCalibrationProtocol,
+    PureGeometryConfirmationProtocol,
+    build_geometry_confirmation_protocol,
     canonical_pretty_json_bytes,
     load_frozen_json,
     rank_task_ids,
@@ -21,6 +23,7 @@ from yieldforge.experiments.contracts import (
 YF_ROOT = Path(__file__).parents[2]
 M0_CONTRACT_PATH = YF_ROOT / "experiments" / "m0-contract-v1.json"
 GEOMETRY_PROTOCOL_PATH = YF_ROOT / "experiments" / "pure-geometry-calibration-v1.json"
+GEOMETRY_CONFIRMATION_PATH = YF_ROOT / "experiments" / "pure-geometry-confirmation-v2.json"
 CATALOG_PATH = YF_ROOT / "datasets" / "catalogs" / "lectra-7030786-v1.1" / "lectra-catalog.json"
 CATALOG_MANIFEST_PATH = CATALOG_PATH.with_name("catalog-manifest.json")
 
@@ -276,3 +279,48 @@ def test_bundle_rejects_forged_catalog_manifest(tmp_path: Path) -> None:
             catalog_path=CATALOG_PATH,
             catalog_manifest_path=forged,
         )
+
+
+def test_confirmation_protocol_changes_only_calibrated_budget_and_status() -> None:
+    calibration = load_frozen_json(GEOMETRY_PROTOCOL_PATH, PureGeometryCalibrationProtocol)
+
+    confirmation = build_geometry_confirmation_protocol(
+        calibration,
+        result_id="yfgcr-c333f934c363abc0d78082ec",
+        result_sha256="sha256:c333f934c363abc0d78082ecdb60d8020ee0be8a08992b9e80e5caf4e349cbec",
+        selected_seconds_per_seed=10,
+    )
+
+    assert confirmation.status == "confirmation_ready"
+    assert confirmation.confirmation_enabled is True
+    assert confirmation.budget.selected_seconds_per_seed == 10
+    assert confirmation.calibration_result.result_id == "yfgcr-c333f934c363abc0d78082ec"
+    assert confirmation.protocol_id == f"yfgp-{confirmation.content_sha256[7:31]}"
+
+
+def test_confirmation_protocol_rejects_reidentified_frozen_rule_drift() -> None:
+    calibration = load_frozen_json(GEOMETRY_PROTOCOL_PATH, PureGeometryCalibrationProtocol)
+    confirmation = build_geometry_confirmation_protocol(
+        calibration,
+        result_id="yfgcr-c333f934c363abc0d78082ec",
+        result_sha256="sha256:c333f934c363abc0d78082ecdb60d8020ee0be8a08992b9e80e5caf4e349cbec",
+        selected_seconds_per_seed=10,
+    )
+    payload = confirmation.model_dump(mode="json")
+    payload["near_tie"]["primary_envelope_percent"] = 1.0
+    _reidentify_geometry(payload)
+
+    with pytest.raises(ValueError, match="approved pure-geometry rules"):
+        PureGeometryConfirmationProtocol.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_committed_confirmation_protocol_is_canonical_and_enabled() -> None:
+    confirmation = load_frozen_json(
+        GEOMETRY_CONFIRMATION_PATH,
+        PureGeometryConfirmationProtocol,
+    )
+
+    assert confirmation.protocol_id == "yfgp-392644d98bb7035fdc218512"
+    assert confirmation.confirmation_enabled is True
+    assert confirmation.budget.selected_seconds_per_seed == 10
+    assert confirmation.calibration_result.result_id == "yfgcr-c333f934c363abc0d78082ec"

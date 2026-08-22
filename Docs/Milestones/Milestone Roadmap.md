@@ -27,8 +27,7 @@ The milestones answer a chain of increasingly expensive questions:
 
 Only the active milestone receives a detailed implementation plan. Later milestone notes explain their meaning and acceptance boundary, but we will plan them when we reach them.
 
-M0 now has a frozen executable economic constitution and a calibration-pending pure-geometry
-protocol. Its only permitted handoff into M2 is the prelisted 51-task solver-budget calibration.
-The 203-task evaluation remains blocked until that calibration selects seconds per seed and a new
-validated protocol enables confirmation. This dependency does not authorize residual geometry or
-later economic implementation.
+M0 has passed with a frozen executable economic constitution, a complete 51-task calibration, and
+a confirmation-ready protocol selecting 10 seconds per seed. M2 is active. Its next permitted work
+is the prelisted 203-task confirmatory geometry evaluation; this does not authorize residual
+geometry or later economic implementation.
