@@ -405,7 +405,7 @@ def test_api_client_requires_matching_completed_archive_evidence() -> None:
     stub = _HttpStub()
     stub.respond(
         "GET",
-        f"/api/tasks/{cell.tasks_index}/completed-runs?limit=100",
+        f"/api/tasks/{cell.tasks_index}/completed-runs?limit=50",
         completed,
     )
     stub.respond(

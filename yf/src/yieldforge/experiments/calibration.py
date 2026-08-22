@@ -314,7 +314,7 @@ class CalibrationApiClient:
         job_id: str,
     ) -> CalibrationApiCompletedEvidence:
         page = self._get_model(
-            f"/api/tasks/{cell.tasks_index}/completed-runs?limit=100",
+            f"/api/tasks/{cell.tasks_index}/completed-runs?limit=50",
             CompletedRunPage,
         )
         matching = tuple(item for item in page.items if item.job.job_id == job_id)
