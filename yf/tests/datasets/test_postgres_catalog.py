@@ -166,6 +166,58 @@ def test_rejects_an_unexpected_existing_column_type(database_url: str) -> None:
         _import(database_url)
 
 
+@pytest.mark.parametrize(
+    "mutations",
+    [
+        (
+            "ALTER TABLE yieldforge_catalog DROP CONSTRAINT yieldforge_catalog_pkey CASCADE",
+            "CREATE INDEX yieldforge_catalog_pkey ON yieldforge_catalog (singleton)",
+        ),
+        (
+            "ALTER TABLE yieldforge_catalog_task DROP CONSTRAINT "
+            "yieldforge_catalog_task_catalog_ordinal_key",
+            "CREATE INDEX yieldforge_catalog_task_catalog_ordinal_key "
+            "ON yieldforge_catalog_task (catalog_ordinal)",
+        ),
+        (
+            "ALTER TABLE yieldforge_catalog_task DROP CONSTRAINT "
+            "yieldforge_catalog_task_catalog_singleton_fkey",
+        ),
+        ("ALTER TABLE yieldforge_catalog DROP CONSTRAINT yieldforge_catalog_singleton_check",),
+        (
+            "DROP INDEX yieldforge_catalog_task_constraint_types_idx",
+            "CREATE INDEX yieldforge_catalog_task_constraint_types_idx "
+            "ON yieldforge_catalog_task (tasks_index)",
+        ),
+        (
+            "CREATE INDEX yieldforge_catalog_task_unexpected_idx "
+            "ON yieldforge_catalog_task (shape_count)",
+        ),
+        ("ALTER TABLE yieldforge_catalog ALTER COLUMN created_at DROP DEFAULT",),
+    ],
+    ids=(
+        "primary-key",
+        "unique-constraint",
+        "foreign-key",
+        "check-constraint",
+        "index-definition",
+        "extra-index",
+        "created-at-default",
+    ),
+)
+def test_rejects_lookalike_schema_without_exact_relational_guarantees(
+    database_url: str,
+    mutations: tuple[str, ...],
+) -> None:
+    _import(database_url)
+    with psycopg.connect(database_url) as connection:
+        for statement in mutations:
+            connection.execute(statement)
+
+    with pytest.raises(CatalogImportError, match="partial or unexpected schema"):
+        _import(database_url)
+
+
 def test_rejects_duplicate_source_keys_before_connecting(
     database_url: str,
     tmp_path: Path,

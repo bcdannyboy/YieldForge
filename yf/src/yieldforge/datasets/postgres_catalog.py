@@ -354,57 +354,174 @@ def _prepare_catalog(
     )
 
 
-_REQUIRED_INDEXES = frozenset(
-    {
-        "yieldforge_catalog_task_pkey",
-        "yieldforge_catalog_task_catalog_ordinal_key",
-        "yieldforge_catalog_task_source_row_index_key",
-        "yieldforge_catalog_task_source_order_idx",
-        "yieldforge_catalog_task_support_status_idx",
-        "yieldforge_catalog_task_part_count_idx",
-        "yieldforge_catalog_task_constraint_types_idx",
-    }
-)
 _CATALOG_COLUMN_SIGNATURE = {
-    "singleton": ("int2", "NO"),
-    "schema_version": ("text", "NO"),
-    "dataset_id": ("text", "NO"),
-    "catalog_sha256": ("bpchar", "NO"),
-    "catalog_logical_sha256": ("bpchar", "NO"),
-    "catalog_manifest_sha256": ("bpchar", "NO"),
-    "source_manifest_sha256": ("bpchar", "NO"),
-    "audit_report_sha256": ("bpchar", "NO"),
-    "conversion_ruleset_version": ("text", "NO"),
-    "task_count": ("int4", "NO"),
-    "part_count": ("int4", "NO"),
-    "shape_count": ("int4", "NO"),
-    "constraint_count": ("int4", "NO"),
-    "source_json": ("jsonb", "NO"),
-    "coordinate_unit_json": ("jsonb", "NO"),
-    "summary_json": ("jsonb", "NO"),
-    "catalog_manifest_json": ("jsonb", "NO"),
-    "created_at": ("timestamptz", "NO"),
+    "singleton": ("smallint", True, "", "", None),
+    "schema_version": ("text", True, "", "", None),
+    "dataset_id": ("text", True, "", "", None),
+    "catalog_sha256": ("character(64)", True, "", "", None),
+    "catalog_logical_sha256": ("character(64)", True, "", "", None),
+    "catalog_manifest_sha256": ("character(64)", True, "", "", None),
+    "source_manifest_sha256": ("character(64)", True, "", "", None),
+    "audit_report_sha256": ("character(64)", True, "", "", None),
+    "conversion_ruleset_version": ("text", True, "", "", None),
+    "task_count": ("integer", True, "", "", None),
+    "part_count": ("integer", True, "", "", None),
+    "shape_count": ("integer", True, "", "", None),
+    "constraint_count": ("integer", True, "", "", None),
+    "source_json": ("jsonb", True, "", "", None),
+    "coordinate_unit_json": ("jsonb", True, "", "", None),
+    "summary_json": ("jsonb", True, "", "", None),
+    "catalog_manifest_json": ("jsonb", True, "", "", None),
+    "created_at": (
+        "timestamp with time zone",
+        True,
+        "",
+        "",
+        "statement_timestamp()",
+    ),
 }
 _TASK_COLUMN_SIGNATURE = {
-    "catalog_singleton": ("int2", "NO"),
-    "catalog_ordinal": ("int4", "NO"),
-    "tasks_index": ("int8", "NO"),
-    "source_row_index": ("int8", "NO"),
-    "sheet_type": ("int8", "NO"),
-    "is_train": ("bool", "NO"),
-    "is_val": ("bool", "NO"),
-    "is_test": ("bool", "NO"),
-    "normalization_status": ("text", "NO"),
-    "support_status": ("text", "NO"),
-    "projection_status": ("text", "NO"),
-    "part_count": ("int4", "NO"),
-    "shape_count": ("int4", "NO"),
-    "constraint_count": ("int4", "NO"),
-    "constraint_types": ("_text", "NO"),
-    "summary_json": ("jsonb", "NO"),
-    "detail_json": ("jsonb", "NO"),
-    "solver_problem_json": ("jsonb", "YES"),
-    "record_sha256": ("bpchar", "NO"),
+    "catalog_singleton": ("smallint", True, "", "", None),
+    "catalog_ordinal": ("integer", True, "", "", None),
+    "tasks_index": ("bigint", True, "", "", None),
+    "source_row_index": ("bigint", True, "", "", None),
+    "sheet_type": ("bigint", True, "", "", None),
+    "is_train": ("boolean", True, "", "", None),
+    "is_val": ("boolean", True, "", "", None),
+    "is_test": ("boolean", True, "", "", None),
+    "normalization_status": ("text", True, "", "", None),
+    "support_status": ("text", True, "", "", None),
+    "projection_status": ("text", True, "", "", None),
+    "part_count": ("integer", True, "", "", None),
+    "shape_count": ("integer", True, "", "", None),
+    "constraint_count": ("integer", True, "", "", None),
+    "constraint_types": ("text[]", True, "", "", None),
+    "summary_json": ("jsonb", True, "", "", None),
+    "detail_json": ("jsonb", True, "", "", None),
+    "solver_problem_json": ("jsonb", False, "", "", None),
+    "record_sha256": ("character(64)", True, "", "", None),
+}
+_CATALOG_CONSTRAINT_SIGNATURE = {
+    "yieldforge_catalog_pkey": (
+        "p",
+        False,
+        False,
+        True,
+        "PRIMARY KEY (singleton)",
+    ),
+    "yieldforge_catalog_singleton_check": (
+        "c",
+        False,
+        False,
+        True,
+        "CHECK (singleton = 1)",
+    ),
+}
+_TASK_CONSTRAINT_SIGNATURE = {
+    "yieldforge_catalog_task_catalog_ordinal_key": (
+        "u",
+        False,
+        False,
+        True,
+        "UNIQUE (catalog_ordinal)",
+    ),
+    "yieldforge_catalog_task_catalog_singleton_fkey": (
+        "f",
+        False,
+        False,
+        True,
+        "FOREIGN KEY (catalog_singleton) REFERENCES yieldforge_catalog(singleton)",
+    ),
+    "yieldforge_catalog_task_pkey": (
+        "p",
+        False,
+        False,
+        True,
+        "PRIMARY KEY (tasks_index)",
+    ),
+    "yieldforge_catalog_task_source_row_index_key": (
+        "u",
+        False,
+        False,
+        True,
+        "UNIQUE (source_row_index)",
+    ),
+}
+_CATALOG_INDEX_SIGNATURE = {
+    "yieldforge_catalog_pkey": (
+        "btree",
+        True,
+        True,
+        True,
+        True,
+        False,
+        "USING btree (singleton)",
+    ),
+}
+_TASK_INDEX_SIGNATURE = {
+    "yieldforge_catalog_task_catalog_ordinal_key": (
+        "btree",
+        True,
+        False,
+        True,
+        True,
+        False,
+        "USING btree (catalog_ordinal)",
+    ),
+    "yieldforge_catalog_task_constraint_types_idx": (
+        "gin",
+        False,
+        False,
+        True,
+        True,
+        False,
+        "USING gin (constraint_types)",
+    ),
+    "yieldforge_catalog_task_part_count_idx": (
+        "btree",
+        False,
+        False,
+        True,
+        True,
+        False,
+        "USING btree (part_count)",
+    ),
+    "yieldforge_catalog_task_pkey": (
+        "btree",
+        True,
+        True,
+        True,
+        True,
+        False,
+        "USING btree (tasks_index)",
+    ),
+    "yieldforge_catalog_task_source_order_idx": (
+        "btree",
+        False,
+        False,
+        True,
+        True,
+        False,
+        "USING btree (source_row_index, tasks_index)",
+    ),
+    "yieldforge_catalog_task_source_row_index_key": (
+        "btree",
+        True,
+        False,
+        True,
+        True,
+        False,
+        "USING btree (source_row_index)",
+    ),
+    "yieldforge_catalog_task_support_status_idx": (
+        "btree",
+        False,
+        False,
+        True,
+        True,
+        False,
+        "USING btree (support_status)",
+    ),
 }
 
 
@@ -479,14 +596,92 @@ def _create_schema(connection: psycopg.Connection[dict[str, object]]) -> None:
 def _table_signature(
     connection: psycopg.Connection[dict[str, object]],
     table: str,
-) -> dict[str, tuple[str, str]]:
+) -> dict[str, tuple[str, bool, str, str, str | None]]:
     rows = connection.execute(
-        "SELECT column_name, udt_name, is_nullable FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = %s",
+        "SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS type_name, "
+        "a.attnotnull, a.attidentity, a.attgenerated, "
+        "pg_get_expr(d.adbin, d.adrelid, true) AS default_expr "
+        "FROM pg_attribute a "
+        "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
+        "WHERE a.attrelid = to_regclass(%s) AND a.attnum > 0 AND NOT a.attisdropped "
+        "ORDER BY a.attnum",
         (table,),
     ).fetchall()
     return {
-        str(row["column_name"]): (str(row["udt_name"]), str(row["is_nullable"])) for row in rows
+        str(row["attname"]): (
+            str(row["type_name"]),
+            bool(row["attnotnull"]),
+            str(row["attidentity"]),
+            str(row["attgenerated"]),
+            str(row["default_expr"]) if row["default_expr"] is not None else None,
+        )
+        for row in rows
+    }
+
+
+def _constraint_signature(
+    connection: psycopg.Connection[dict[str, object]],
+    table: str,
+) -> dict[str, tuple[str, bool, bool, bool, str]]:
+    rows = connection.execute(
+        "SELECT conname, contype, condeferrable, condeferred, convalidated, "
+        "pg_get_constraintdef(oid, true) AS definition "
+        "FROM pg_constraint WHERE conrelid = to_regclass(%s) ORDER BY conname",
+        (table,),
+    ).fetchall()
+    return {
+        str(row["conname"]): (
+            str(row["contype"]),
+            bool(row["condeferrable"]),
+            bool(row["condeferred"]),
+            bool(row["convalidated"]),
+            str(row["definition"]),
+        )
+        for row in rows
+    }
+
+
+def _index_signature(
+    connection: psycopg.Connection[dict[str, object]],
+    table: str,
+) -> dict[str, tuple[str, bool, bool, bool, bool, bool, str]]:
+    rows = connection.execute(
+        "SELECT i.relname AS index_name, am.amname, x.indisunique, x.indisprimary, "
+        "x.indisvalid, x.indisready, x.indnullsnotdistinct, "
+        "regexp_replace(pg_get_indexdef(x.indexrelid), "
+        "'^CREATE (UNIQUE )?INDEX [^ ]+ ON [^ ]+ ', '') AS definition "
+        "FROM pg_index x "
+        "JOIN pg_class i ON i.oid = x.indexrelid "
+        "JOIN pg_am am ON am.oid = i.relam "
+        "WHERE x.indrelid = to_regclass(%s) ORDER BY i.relname",
+        (table,),
+    ).fetchall()
+    return {
+        str(row["index_name"]): (
+            str(row["amname"]),
+            bool(row["indisunique"]),
+            bool(row["indisprimary"]),
+            bool(row["indisvalid"]),
+            bool(row["indisready"]),
+            bool(row["indnullsnotdistinct"]),
+            str(row["definition"]),
+        )
+        for row in rows
+    }
+
+
+def _is_plain_permanent_table(
+    connection: psycopg.Connection[dict[str, object]],
+    table: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT relkind, relpersistence, relispartition FROM pg_class WHERE oid = to_regclass(%s)",
+        (table,),
+    ).fetchone()
+    return row == {
+        "relkind": "r",
+        "relpersistence": "p",
+        "relispartition": False,
     }
 
 
@@ -503,16 +698,16 @@ def _ensure_schema(connection: psycopg.Connection[dict[str, object]]) -> None:
     if not catalog_exists or not task_exists:
         raise CatalogImportError("PostgreSQL has a partial or unexpected schema")
     if (
-        _table_signature(connection, "yieldforge_catalog") != _CATALOG_COLUMN_SIGNATURE
+        not _is_plain_permanent_table(connection, "yieldforge_catalog")
+        or not _is_plain_permanent_table(connection, "yieldforge_catalog_task")
+        or _table_signature(connection, "yieldforge_catalog") != _CATALOG_COLUMN_SIGNATURE
         or _table_signature(connection, "yieldforge_catalog_task") != _TASK_COLUMN_SIGNATURE
+        or _constraint_signature(connection, "yieldforge_catalog") != _CATALOG_CONSTRAINT_SIGNATURE
+        or _constraint_signature(connection, "yieldforge_catalog_task")
+        != _TASK_CONSTRAINT_SIGNATURE
+        or _index_signature(connection, "yieldforge_catalog") != _CATALOG_INDEX_SIGNATURE
+        or _index_signature(connection, "yieldforge_catalog_task") != _TASK_INDEX_SIGNATURE
     ):
-        raise CatalogImportError("PostgreSQL has a partial or unexpected schema")
-    index_rows = connection.execute(
-        "SELECT indexname FROM pg_indexes "
-        "WHERE schemaname = current_schema() AND tablename = 'yieldforge_catalog_task'"
-    ).fetchall()
-    indexes = {str(row["indexname"]) for row in index_rows}
-    if not _REQUIRED_INDEXES.issubset(indexes):
         raise CatalogImportError("PostgreSQL has a partial or unexpected schema")
 
 
