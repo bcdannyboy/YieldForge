@@ -16,10 +16,14 @@ from yieldforge.datasets.normalized_slice import (
     SupportStatus,
 )
 from yieldforge.datasets.projection import (
+    NO_FLIP_ABLATION,
+    S1_FLIP_ASSUMPTION,
     ProjectionError,
     placed_shape_svg_points,
     project_task,
+    reflect_local_x,
 )
+from yieldforge.domain import ProjectionMode
 
 S1_ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
 
@@ -54,6 +58,20 @@ def _with_constraint_value(index: int, value: dict[str, object]) -> NormalizedSl
     return NormalizedSlice.model_validate(data)
 
 
+def _flip_projectable_slice() -> NormalizedSlice:
+    data = _projectable_slice().model_dump()
+    values = list(data["constraints"][0]["values"])
+    values[5] = _sequence(
+        OpaqueInteger(kind="integer", value=1),
+        OpaqueInteger(kind="integer", value=1),
+    )
+    data["constraints"][0]["values"] = tuple(values)
+    data["task_dispositions"][0]["assumption_codes"] = tuple(
+        sorted((S1_ASSUMPTION, S1_FLIP_ASSUMPTION))
+    )
+    return NormalizedSlice.model_validate(data)
+
+
 def test_project_task_preserves_source_geometry_and_closes_only_solver_ring() -> None:
     data = _projectable_slice().model_dump()
     data["shapes"][0].update(raw=(2, 1.0, 4, 1.0, 2, 4.0), sizes=(6,))
@@ -66,7 +84,8 @@ def test_project_task_preserves_source_geometry_and_closes_only_solver_ring() ->
     normalized = NormalizedSlice.model_validate(data)
     before = normalized.model_dump()
 
-    problem = project_task(normalized, 17)
+    projected = project_task(normalized, 17)
+    problem = projected.problem
 
     assert problem.name == "lectra-task-17"
     assert problem.strip_height == 14500.0
@@ -80,7 +99,74 @@ def test_project_task_preserves_source_geometry_and_closes_only_solver_ring() ->
     ]
     assert problem.parts[0].demand == 1
     assert problem.parts[0].allowed_orientations == [0.0, 90.0]
+    assert projected.projection.mode is ProjectionMode.SOURCE_AS_RECORDED
+    assert projected.projection.source_flip_part_count == 0
     assert normalized.model_dump() == before
+
+
+def test_project_task_reflects_uniform_flip_before_rotation_without_mutating_source() -> None:
+    data = _flip_projectable_slice().model_dump()
+    data["shapes"][0].update(raw=(1, 2.0, 4, 2.0, 2, 5.0), sizes=(6,))
+    data["derived_geometry"][0].update(
+        paired_points=((1, 2.0), (4, 2.0), (2, 5.0)),
+        closed_ring=((1, 2.0), (4, 2.0), (2, 5.0), (1, 2.0)),
+        area=4.5,
+        bounds=(1, 2.0, 4, 5.0),
+    )
+    normalized = NormalizedSlice.model_validate(data)
+    before = normalized.model_dump()
+
+    projected = project_task(normalized, 17)
+
+    assert projected.problem.parts[0].shape == [
+        (-1.0, 2.0),
+        (-4.0, 2.0),
+        (-2.0, 5.0),
+        (-1.0, 2.0),
+    ]
+    assert projected.problem.parts[0].allowed_orientations == [0.0, 90.0]
+    assert projected.projection.assumption_codes == tuple(
+        sorted((S1_ASSUMPTION, S1_FLIP_ASSUMPTION))
+    )
+    assert projected.projection.intervention_codes == ()
+    assert projected.projection.source_flip_part_count == 1
+    assert normalized.model_dump() == before
+
+
+def test_no_flip_ablation_is_distinct_and_keeps_original_polygon() -> None:
+    normalized = _flip_projectable_slice()
+
+    recorded = project_task(normalized, 17)
+    ablation = project_task(normalized, 17, mode=ProjectionMode.FORCE_FLIP_X_ZERO)
+
+    assert recorded.problem.parts[0].shape != ablation.problem.parts[0].shape
+    assert ablation.problem.parts[0].shape == [(0.0, 0.0), (2.0, 0.0), (0.0, 3.0), (0.0, 0.0)]
+    assert ablation.projection.intervention_codes == (NO_FLIP_ABLATION,)
+    assert ablation.projection.projection_sha256 != recorded.projection.projection_sha256
+
+
+def test_reflection_is_an_area_preserving_involution() -> None:
+    shape = ((1.0, 2.0), (4.0, 2.0), (2.0, 5.0), (1.0, 2.0))
+
+    reflected = reflect_local_x(shape)
+
+    assert reflect_local_x(reflected) == shape
+    source_area = abs(
+        sum(
+            shape[index][0] * shape[index + 1][1] - shape[index + 1][0] * shape[index][1]
+            for index in range(len(shape) - 1)
+        )
+        / 2
+    )
+    reflected_area = abs(
+        sum(
+            reflected[index][0] * reflected[index + 1][1]
+            - reflected[index + 1][0] * reflected[index][1]
+            for index in range(len(reflected) - 1)
+        )
+        / 2
+    )
+    assert reflected_area == source_area
 
 
 def test_project_task_keeps_repeated_shapes_as_distinct_source_parts() -> None:
@@ -96,7 +182,7 @@ def test_project_task_keeps_repeated_shapes_as_distinct_source_parts() -> None:
     data["constraints"] = (*data["constraints"], second_constraint)
     normalized = NormalizedSlice.model_validate(data)
 
-    problem = project_task(normalized, 17)
+    problem = project_task(normalized, 17).problem
 
     assert [part.id for part in problem.parts] == [
         "lectra:17:part:7",
@@ -172,7 +258,7 @@ def test_project_task_accepts_an_already_projected_disposition() -> None:
     data["task_dispositions"][0]["projection_status"] = ProjectionStatus.PROJECTED
     normalized = NormalizedSlice.model_validate(data)
 
-    assert project_task(normalized, 17).parts[0].id == "lectra:17:part:7"
+    assert project_task(normalized, 17).problem.parts[0].id == "lectra:17:part:7"
 
 
 def test_project_task_rejects_non_s1_constraints() -> None:
@@ -264,7 +350,7 @@ def test_project_task_rejects_malformed_orientation_sequences(
         project_task(normalized, 17)
 
 
-def test_project_task_rejects_interval_or_mirror_orientation_data() -> None:
+def test_project_task_rejects_interval_or_mixed_flip_orientation_data() -> None:
     interval = _with_constraint_value(
         4,
         _sequence(
@@ -275,15 +361,28 @@ def test_project_task_rejects_interval_or_mirror_orientation_data() -> None:
     with pytest.raises(ProjectionError, match="degenerate.*start.*end"):
         project_task(interval, 17)
 
-    mirrored = _with_constraint_value(
+    mixed = _with_constraint_value(
         5,
         _sequence(
             OpaqueInteger(kind="integer", value=0),
             OpaqueInteger(kind="integer", value=1),
         ),
     )
-    with pytest.raises(ProjectionError, match="flip flags.*integer zero"):
-        project_task(mirrored, 17)
+    with pytest.raises(ProjectionError, match="flip states.*uniform"):
+        project_task(mixed, 17)
+
+
+def test_project_task_rejects_nonbinary_flip_state() -> None:
+    invalid = _with_constraint_value(
+        5,
+        _sequence(
+            OpaqueInteger(kind="integer", value=2),
+            OpaqueInteger(kind="integer", value=2),
+        ),
+    )
+
+    with pytest.raises(ProjectionError, match="flip flags.*zero or one"):
+        project_task(invalid, 17)
 
 
 def test_project_task_compares_large_integer_interval_endpoints_before_float_conversion() -> None:

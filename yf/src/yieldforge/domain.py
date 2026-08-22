@@ -24,6 +24,44 @@ class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class ProjectionMode(StrEnum):
+    """Server-owned solver interpretation selected for one source task."""
+
+    SOURCE_AS_RECORDED = "source_as_recorded"
+    FORCE_FLIP_X_ZERO = "force_flip_x_zero"
+
+
+class SolverProjectionBinding(ContractModel):
+    """Canonical evidence for one source-to-solver projection."""
+
+    schema_version: Literal["yieldforge.solver-projection-binding.v1"] = (
+        "yieldforge.solver-projection-binding.v1"
+    )
+    mode: ProjectionMode
+    transform_convention: Literal["local_x_coordinate_negation_before_rotation"] = (
+        "local_x_coordinate_negation_before_rotation"
+    )
+    projection_sha256: Sha256
+    assumption_codes: tuple[AssumptionCode, ...]
+    intervention_codes: tuple[AssumptionCode, ...] = ()
+    source_flip_part_count: StrictInt = Field(ge=0)
+
+    @field_validator("assumption_codes", "intervention_codes")
+    @classmethod
+    def require_sorted_unique_codes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("projection codes must be sorted and unique")
+        return value
+
+    @model_validator(mode="after")
+    def require_mode_consistent_interventions(self) -> Self:
+        if self.mode is ProjectionMode.SOURCE_AS_RECORDED and self.intervention_codes:
+            raise ValueError("recorded projection cannot carry intervention codes")
+        if self.mode is ProjectionMode.FORCE_FLIP_X_ZERO and not self.intervention_codes:
+            raise ValueError("no-flip ablation requires an intervention code")
+        return self
+
+
 class SourceTaskBinding(ContractModel):
     """Immutable provenance tying a solve to one normalized source task."""
 
@@ -34,6 +72,7 @@ class SourceTaskBinding(ContractModel):
     source_slice_sha256: Sha256
     tasks_index: StrictInt = Field(ge=0)
     acknowledged_assumption_codes: tuple[AssumptionCode, ...] = ()
+    solver_projection: SolverProjectionBinding | None = None
 
     @field_validator("acknowledged_assumption_codes")
     @classmethod
@@ -41,6 +80,15 @@ class SourceTaskBinding(ContractModel):
         if value != tuple(sorted(set(value))):
             raise ValueError("acknowledged assumption codes must be sorted and unique")
         return value
+
+    @model_validator(mode="after")
+    def require_projection_assumptions_were_acknowledged(self) -> Self:
+        if (
+            self.solver_projection is not None
+            and self.acknowledged_assumption_codes != self.solver_projection.assumption_codes
+        ):
+            raise ValueError("acknowledged assumptions must match the solver projection")
+        return self
 
 
 class Part(ContractModel):
@@ -76,6 +124,14 @@ class StripPackingProblem(ContractModel):
         if len(ids) != len(set(ids)):
             raise ValueError("part IDs must be unique")
         return self
+
+
+class ProjectedTask(ContractModel):
+    """One immutable solver problem plus its source projection evidence."""
+
+    schema_version: Literal["yieldforge.projected-task.v1"] = "yieldforge.projected-task.v1"
+    problem: StripPackingProblem
+    projection: SolverProjectionBinding
 
 
 class SpyrrowRunConfig(ContractModel):
