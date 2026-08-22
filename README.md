@@ -2,7 +2,7 @@
 
 YieldForge is a research project testing whether future demand should change which high-quality 2D nesting layout a manufacturer chooses today.
 
-> **Current status:** M0—the experiment contract—is active. The repository now includes a local research workbench over a committed two-task Lectra slice, but M0 has not passed and no residual-geometry, remnant-reuse, simulator, oracle, savings, or commercial result exists.
+> **Current status:** M0—the experiment contract—is active. The repository now includes a local research workbench over a committed, deterministically selected 256-task Lectra catalog, but M0 has not passed and no residual-geometry, remnant-reuse, simulator, oracle, savings, or commercial result exists.
 
 ## The idea
 
@@ -56,11 +56,11 @@ The perfect-information MVP intentionally excludes:
 
 The browser workbench under `yf/web/` is a local research instrument, not a production application:
 
-- **Corpus Explorer** exposes the two committed source-lossless Lectra tasks and their server-owned support states.
+- **Corpus Explorer** pages through the committed 256-task source-lossless Lectra catalog and its server-owned support states. The catalog is a bounded research selection, not a prevalence sample of the full release.
 - **Nest Lab** keeps task `25801` view-only, requires acknowledgement of `interpret_s1_degenerate_entries_as_allowed_rotations` for task `13958`, and runs bounded Spyrrow jobs through the FastAPI worker boundary. Completed immutable candidate archives can be rediscovered and rendered.
 - **Order Book Lab** opens three committed deterministic books and can generate additional immutable local books. Geometry and task composition are source-observed; chronology and economics are generated; material is assumed.
 
-The visible corpus is still only the committed tasks `13958` and `25801`. The workbench does not calculate residual geometry, reuse remnants, simulate inventory, compare a baseline with an oracle, or report savings. See [Research Workbench](Docs/Development/Research%20Workbench.md) for the exact source-evidence reproduction, direct API, local runtime, and verification commands.
+The expanded view requires the documented local Postgres service; without `YIELDFORGE_DATABASE_URL`, the API deliberately falls back to the original two-task fixture. The workbench does not calculate residual geometry, reuse remnants, simulate inventory, compare a baseline with an oracle, or report savings. See [Research Workbench](Docs/Development/Research%20Workbench.md) for the exact source-evidence reproduction, database import, direct API, local runtime, and verification commands.
 
 ## Repository documentation
 

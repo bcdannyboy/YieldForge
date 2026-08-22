@@ -2,17 +2,18 @@
 
 YieldForge's workbench is a local research instrument under `yf/`; it is not a hosted or production application. The Python service owns source evidence, solver eligibility, process supervision, immutable archives, and order-book generation. The React client renders those browser-safe contracts without reinterpreting source constraints.
 
-## Current visible slice
+## Current visible catalog
 
 - Task `13958` is runnable only after acknowledging `interpret_s1_degenerate_entries_as_allowed_rotations` exactly.
 - Task `25801` is source-lossless and view-only because its non-`s1` `c8` semantics remain unresolved.
-- No other corpus tasks are visible in this committed slice.
+- With the documented Postgres read model enabled, Corpus Explorer exposes exactly 256 fully exported tasks: 69 assumption-backed and 187 view-only. This deterministic selection is not a prevalence sample of the full Lectra release.
+- Without `YIELDFORGE_DATABASE_URL`, the API deliberately retains the original two-task committed-fixture fallback.
 
 Corpus geometry and task composition are source-observed. Candidate placement geometry is derived from a verified immutable archive. Order-book chronology and economics are generated, while material assignment is assumed. Full order-book manifests reveal future events and generator-only regime labels, so the UI marks them analysis-only rather than baseline-facing.
 
 ## Views
 
-- **Corpus Explorer** lists the committed tasks, source rows, constraint types, support state, exclusion reasons, and source polygon geometry.
+- **Corpus Explorer** pages through the committed catalog, filters on server-owned facets, and shows source rows, constraint types, support state, exclusion reasons, and source polygon geometry.
 - **Nest Lab** enforces the server-owned solve gate, streams durable job events, shows progressive candidates, reconciles the complete terminal archive, renders derived SVG placements, and rediscovers the latest completed archive for a task.
 - **Order Book Lab** lists and opens the three committed deterministic fixtures, displays chronology/diagnostics/provenance, links events to corpus and eligible nest views, and publishes deterministic local books without overwriting an existing identity.
 
@@ -55,11 +56,39 @@ uv run python tools/lectra/run_qualifier.py \
 
 The generated `var/data/raw/`, `var/data/reports/`, and `var/data/slices/` trees stay ignored. The canonical committed slice and hand-inspectable order-book fixtures live under `datasets/fixtures/` and are immutable inputs to tests and the local API. See [`tools/lectra/README.md`](../../yf/tools/lectra/README.md) for the qualifier's security boundary, resource limits, expected artifacts, and trusted-fixture smoke.
 
+The committed 256-task catalog was produced with the qualifier's separate `catalog` mode and 64 MiB publication ceiling. To reproduce it, choose another new empty directory and bind the same audit bytes:
+
+```bash
+mkdir -p var/data/catalogs/lectra-7030786-v1.1-repro
+uv run python tools/lectra/run_qualifier.py \
+  --mode catalog \
+  --image yieldforge-lectra-qualifier:7030786-v1.1 \
+  --input "$PWD/var/data/raw/lectra-7030786-v1.1" \
+  --output "$PWD/var/data/catalogs/lectra-7030786-v1.1-repro" \
+  --manifest datasets/sources/lectra-7030786-v1.1.json \
+  --audit-report "$PWD/var/data/reports/lectra-7030786-v1.1-repro/lectra-audit.json" \
+  --timeout-seconds 900
+```
+
+The successful output is only `lectra-catalog.json`; it must match the logical and byte identities in the committed `datasets/catalogs/lectra-7030786-v1.1/catalog-manifest.json` before it can replace any evidence artifact.
+
 ## Local runtime
 
 The default factory stores mutable state under ignored `yf/var/workbench/` directories for jobs, candidate archives, and generated order books. Set `YIELDFORGE_WORKBENCH_ROOT` before starting FastAPI to use another local runtime root. These files are execution evidence, not committed source data.
 
-Install and start the API from `yf/`:
+Start the dedicated Postgres service and populate its read model from `yf/`. This example uses the canonical audit already present in the ignored reproduction directory:
+
+```bash
+docker compose up -d postgres
+export YIELDFORGE_DATABASE_URL=postgresql://yieldforge:yieldforge-local@127.0.0.1:55433/yieldforge
+uv run yieldforge datasets catalog-import \
+  --catalog datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json \
+  --manifest datasets/sources/lectra-7030786-v1.1.json \
+  --audit-report var/data/reports/lectra-7030786-v1.1/lectra-audit.json \
+  --database-url "$YIELDFORGE_DATABASE_URL"
+```
+
+Then install and start the API with that environment still set:
 
 ```bash
 uv sync --locked --all-groups
@@ -136,4 +165,4 @@ The real E2E is a completion gate only when it reaches the actual FastAPI servic
 
 ## Claim ceiling
 
-This slice proves local inspection, bounded job execution, transport contracts, immutable candidate/archive browsing, and deterministic provenance-labeled order-book generation. It does not provide residual geometry, remnant reuse, inventory conservation, a chronological simulator, a strong baseline, an oracle, material savings, production fitness, or buyer value.
+This catalog workbench proves local inspection of a bounded 256-task selection, bounded assumption-backed job execution, transport contracts, immutable candidate/archive browsing, and deterministic provenance-labeled order-book generation. It does not establish corpus representativeness or source-unit meaning, and it does not provide residual geometry, remnant reuse, inventory conservation, a chronological simulator, a strong baseline, an oracle, material savings, production fitness, or buyer value.

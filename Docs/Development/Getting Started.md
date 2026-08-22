@@ -8,6 +8,7 @@ YieldForge has one implementation tree: `yf/`. Every milestone extends this pack
 - [`uv`](https://docs.astral.sh/uv/)
 - A platform supported by the pinned Spyrrow wheel
 - Node.js and npm
+- Docker with Compose for the expanded 256-task corpus
 - Chromium installed through the repository's Playwright script
 
 ## Install and verify
@@ -29,6 +30,22 @@ npm run build
 ```
 
 `uv.lock` is committed. Do not manually install a different Spyrrow version into the project environment.
+
+## Prepare the expanded corpus
+
+The committed catalog is the evidence artifact; Postgres is only its local indexed read model. Start the dedicated loopback-only service from `yf/`, then import the catalog using the validated audit already reproduced under the ignored `var/data/` tree:
+
+```bash
+docker compose up -d postgres
+export YIELDFORGE_DATABASE_URL=postgresql://yieldforge:yieldforge-local@127.0.0.1:55433/yieldforge
+uv run yieldforge datasets catalog-import \
+  --catalog datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json \
+  --manifest datasets/sources/lectra-7030786-v1.1.json \
+  --audit-report var/data/reports/lectra-7030786-v1.1/lectra-audit.json \
+  --database-url "$YIELDFORGE_DATABASE_URL"
+```
+
+The import is transactional and idempotent only for the identical pinned catalog. A clean clone must first reproduce the audit using the sealed acquisition steps in [[Research Workbench]]; the raw pickle-bearing files remain ignored and are never opened by the normal host process. If `YIELDFORGE_DATABASE_URL` is absent, the API deliberately serves only the original two-task fixture.
 
 ## Run the local workbench
 
@@ -83,7 +100,7 @@ Archives are write-once: rerunning against an existing output directory fails. G
 - `src/yieldforge/spyrrow_adapter.py` — native solver boundary.
 - `src/yieldforge/archive.py` — deterministic immutable archive writer.
 - `src/yieldforge/cli.py` — command-line workflow.
-- `src/yieldforge/datasets/` — pinned two-task corpus contracts, projection boundary, and query service.
+- `src/yieldforge/datasets/` — pinned corpus contracts, sealed catalog/import boundary, Postgres read model, projection boundary, and two-task fallback.
 - `src/yieldforge/workbench/` — FastAPI contracts, solver-job supervision, SSE, candidate/archive views, and order-book service.
 - `src/yieldforge/order_books/` — deterministic hybrid order-book contracts, generator, and immutable archive.
 - `benchmarks/static/` — small authored static fixtures.

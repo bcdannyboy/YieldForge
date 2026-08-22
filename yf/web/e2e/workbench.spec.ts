@@ -10,7 +10,18 @@ test.describe("real local research workbench", () => {
   test("inspects blocked and assumption-backed tasks, then opens the exact solve gate", async ({
     page,
   }) => {
-    await page.goto("/?view=corpus&task=25801");
+    await page.goto("/?view=corpus");
+    await expect(page.getByText("Loaded 50 of 256 tasks")).toBeVisible();
+    await page.getByRole("button", { name: "Load next 50 tasks" }).click();
+    await expect(page.getByText("Loaded 100 of 256 tasks")).toBeVisible();
+
+    await page.getByRole("button", { name: "16369" }).click();
+    await expect(page.getByRole("heading", { name: "Task 16369" })).toBeVisible();
+    await expect(
+      page.getByLabel("Source polygon geometry").getByRole("img").first(),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "25801" }).click();
     await expect(page.getByText("m^-4 · interpretation unresolved")).toBeVisible();
     await expect(page.getByText("Blocked from solver projection")).toBeVisible();
     await expect(page.getByRole("button", { name: "Solve task 25801" })).toBeDisabled();
