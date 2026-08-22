@@ -396,3 +396,36 @@ def test_startup_rejects_rehashed_semantically_valid_problem_tamper_by_root(
 
     with pytest.raises(PostgresCorpusError, match="read-model root"):
         _service(isolated_database_url)
+
+
+def test_live_service_rejects_post_start_rehashed_record_mutation(
+    isolated_database_url: str,
+) -> None:
+    service = _service(isolated_database_url)
+    cursor = service.list_tasks(limit=40).next_cursor
+    assert cursor is not None
+    with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
+        row = connection.execute(
+            "SELECT summary_json, detail_json, solver_problem_json "
+            "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
+        ).fetchone()
+        problem = row["solver_problem_json"]
+        problem["sheet_length"] += 1.0
+        record_hash = _record_hash(row["summary_json"], row["detail_json"], problem)
+        connection.execute(
+            "UPDATE yieldforge_catalog_task "
+            "SET solver_problem_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(problem), record_hash),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="runtime record identity"):
+        service.list_tasks(task_id=13958)
+    with pytest.raises(PostgresCorpusError, match="runtime record identity"):
+        service.list_tasks(limit=1, cursor=cursor)
+    with pytest.raises(PostgresCorpusError, match="runtime record identity"):
+        service.task_detail(13958)
+    with pytest.raises(PostgresCorpusError, match="runtime record identity"):
+        service.project_problem(
+            13958,
+            acknowledged_assumption_codes=(ASSUMPTION,),
+        )

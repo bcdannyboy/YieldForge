@@ -89,7 +89,7 @@ _LIST_SQL = """
     SELECT catalog_ordinal, tasks_index, source_row_index, sheet_type,
            is_train, is_val, is_test, normalization_status, support_status,
            projection_status, part_count, shape_count, constraint_count,
-           constraint_types, summary_json
+           constraint_types, summary_json, record_sha256
     FROM yieldforge_catalog_task
     WHERE (%s::text IS NULL OR support_status = %s::text)
       AND (%s::text IS NULL OR %s::text = ANY(constraint_types))
@@ -155,6 +155,7 @@ class PostgresCorpusQueryService:
         self._unit: CoordinateUnitDto
         self._summary: CorpusSummaryDto
         self._catalog_sha256: str
+        self._record_hashes: dict[int, str]
         self._validate_startup()
 
     @contextmanager
@@ -428,6 +429,7 @@ class PostgresCorpusQueryService:
                     raise PostgresCorpusError(
                         "catalog read-model root does not match the committed catalog"
                     )
+                self._record_hashes = {row["tasks_index"]: row["record_sha256"] for row in rows}
         except CatalogImportError as error:
             raise PostgresCorpusError(
                 "configured PostgreSQL schema fingerprint is invalid"
@@ -581,6 +583,19 @@ class PostgresCorpusQueryService:
             limit,
         )
 
+    def _validate_runtime_record_identity(self, row: dict[str, object]) -> None:
+        tasks_index = row.get("tasks_index")
+        record_sha256 = row.get("record_sha256")
+        expected = self._record_hashes.get(tasks_index) if type(tasks_index) is int else None
+        if (
+            not isinstance(record_sha256, str)
+            or expected is None
+            or not hmac.compare_digest(record_sha256, expected)
+        ):
+            raise PostgresCorpusError(
+                "catalog runtime record identity does not match validated startup state"
+            )
+
     def list_tasks(
         self,
         *,
@@ -618,13 +633,15 @@ class PostgresCorpusQueryService:
         with self._connection() as connection:
             if cursor is not None:
                 member = connection.execute(
-                    "SELECT support_status, constraint_types, tasks_index, part_count "
+                    "SELECT support_status, constraint_types, tasks_index, part_count, "
+                    "record_sha256 "
                     "FROM yieldforge_catalog_task "
                     "WHERE source_row_index = %s AND tasks_index = %s",
                     after,
                 ).fetchone()
                 if member is None:
                     raise InvalidCursorError("cursor does not identify a real task member")
+                self._validate_runtime_record_identity(member)
                 if (
                     (parsed_status is not None and member["support_status"] != parsed_status.value)
                     or (
@@ -650,6 +667,8 @@ class PostgresCorpusQueryService:
                     limit=limit + 1,
                 ),
             ).fetchall()
+        for row in rows:
+            self._validate_runtime_record_identity(row)
         summaries = tuple(self._validate_summary_row(row) for row in rows[:limit])
         next_cursor = None
         if len(rows) > limit:
@@ -674,6 +693,7 @@ class PostgresCorpusQueryService:
             ).fetchone()
         if row is None:
             raise TaskNotFoundError(f"task {tasks_index} was not found")
+        self._validate_runtime_record_identity(row)
         return row
 
     def task_detail(self, tasks_index: int) -> TaskDetailDto:
