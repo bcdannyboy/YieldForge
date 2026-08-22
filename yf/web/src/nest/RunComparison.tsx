@@ -33,6 +33,18 @@ function sourceSliceHash(run: CompletedRun): string {
   return run.job.source_task_binding?.source_slice_sha256 ?? "unavailable";
 }
 
+function projectionField(
+  run: CompletedRun,
+  field: "mode" | "projection_sha256" | "transform_convention",
+): string {
+  return run.job.source_task_binding?.solver_projection?.[field] ?? "unavailable";
+}
+
+function interventions(run: CompletedRun): string {
+  const codes = run.job.source_task_binding?.solver_projection?.intervention_codes ?? [];
+  return codes.length > 0 ? codes.join(", ") : "none";
+}
+
 function comparisonRows(runA: CompletedRun, runB: CompletedRun): ComparisonRow[] {
   return [
     { label: "Job ID", runA: runA.job.job_id, runB: runB.job.job_id, mono: true },
@@ -74,6 +86,37 @@ function comparisonRows(runA: CompletedRun, runB: CompletedRun): ComparisonRow[]
       runB: String(runB.job.candidate_count),
     },
     { label: "Acknowledged assumptions", runA: assumptions(runA), runB: assumptions(runB) },
+    {
+      label: "Projection mode",
+      runA: projectionField(runA, "mode"),
+      runB: projectionField(runB, "mode"),
+      mono: true,
+    },
+    {
+      label: "Projection SHA-256",
+      runA: projectionField(runA, "projection_sha256"),
+      runB: projectionField(runB, "projection_sha256"),
+      mono: true,
+    },
+    {
+      label: "Transform convention",
+      runA: projectionField(runA, "transform_convention"),
+      runB: projectionField(runB, "transform_convention"),
+      mono: true,
+    },
+    { label: "Interventions", runA: interventions(runA), runB: interventions(runB), mono: true },
+    {
+      label: "Experiment pair ID",
+      runA: runA.job.experiment_pair_id ?? "none",
+      runB: runB.job.experiment_pair_id ?? "none",
+      mono: true,
+    },
+    {
+      label: "Experiment arm",
+      runA: runA.job.experiment_arm ?? "none",
+      runB: runB.job.experiment_arm ?? "none",
+      mono: true,
+    },
     { label: "Dataset", runA: dataset(runA), runB: dataset(runB), mono: true },
     {
       label: "Source slice SHA-256",

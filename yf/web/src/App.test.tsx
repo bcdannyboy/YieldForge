@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { WorkbenchClient } from "./api";
+import type { CompletedRun, JobView, ProjectionMode } from "./contracts";
 import {
   completedRun,
   corpusSummary,
@@ -50,6 +51,49 @@ const client = (): WorkbenchClient => ({
   getOrderBook: vi.fn().mockResolvedValue(orderBook),
   generateOrderBook: vi.fn().mockResolvedValue(orderBook),
 });
+
+const pairedJob = (
+  jobId: string,
+  mode: ProjectionMode,
+  status: JobView["status"] = "queued",
+): JobView => {
+  const paired = structuredClone(job);
+  const assumptions = [
+    "interpret_s1_degenerate_entries_as_allowed_rotations",
+    "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation",
+  ];
+  paired.job_id = jobId;
+  paired.status = status;
+  paired.source_task_binding = {
+    schema_version: "yieldforge.source-task-binding.v1",
+    dataset_id: "lectra-7030786-v1.1",
+    source_slice_sha256: corpusSummary.source.slice_sha256,
+    tasks_index: 6669,
+    acknowledged_assumption_codes: assumptions,
+    solver_projection: {
+      schema_version: "yieldforge.solver-projection-binding.v1",
+      mode,
+      transform_convention: "local_x_coordinate_negation_before_rotation",
+      projection_sha256: mode === "source_as_recorded" ? "1".repeat(64) : "2".repeat(64),
+      assumption_codes: assumptions,
+      intervention_codes:
+        mode === "force_flip_x_zero" ? ["force_s1_flip_x_zero_for_ablation"] : [],
+      source_flip_part_count: 6,
+    },
+  };
+  paired.experiment_pair_id = "pair-6669";
+  paired.experiment_arm = mode;
+  paired.archive_available = status === "completed";
+  paired.candidate_count = status === "completed" ? 1 : 0;
+  return paired;
+};
+
+const pairedRun = (jobId: string, mode: ProjectionMode): CompletedRun => {
+  const run = completedRun(jobId);
+  run.job = pairedJob(jobId, mode, "completed");
+  run.archive.batch_sha256 = mode === "source_as_recorded" ? "3".repeat(64) : "4".repeat(64);
+  return run;
+};
 
 describe("research workbench", () => {
   it("paginates with the exact active filters and keeps appended rows while selecting", async () => {
@@ -395,6 +439,168 @@ describe("research workbench", () => {
     );
   });
 
+  it("offers only authoritative flip actions and submits the derived ablation exactly", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?view=nest&task=6669");
+    render(<App client={api} />);
+
+    const recorded = await screen.findByRole("button", { name: "Run recorded projection" });
+    const ablation = screen.getByRole("button", { name: "Run no-flip ablation" });
+    const matched = screen.getByRole("button", { name: "Run matched experiment" });
+    expect(recorded).toBeDisabled();
+    expect(ablation).toBeDisabled();
+    expect(matched).toBeDisabled();
+    expect(screen.getByText(/6 source parts carry recorded flip_x = 1/i)).toBeVisible();
+
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge exact assumptions/i }));
+    expect(recorded).toBeEnabled();
+    expect(ablation).toBeDisabled();
+    await user.click(
+      screen.getByRole("checkbox", { name: /acknowledge derived no-flip intervention/i }),
+    );
+    expect(ablation).toBeEnabled();
+    expect(matched).toBeEnabled();
+    await user.click(ablation);
+
+    await waitFor(() =>
+      expect(api.createJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          schema_version: "yieldforge.api-solver-job-request.v2",
+          tasks_index: 6669,
+          projection_mode: "force_flip_x_zero",
+          acknowledged_assumption_codes: [
+            "interpret_s1_degenerate_entries_as_allowed_rotations",
+            "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation",
+          ],
+          acknowledged_intervention_codes: ["force_s1_flip_x_zero_for_ablation"],
+        }),
+      ),
+    );
+  });
+
+  it("starts linked matched arms and exposes source-arm progressive candidates", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    const sourceArm = pairedJob("job-recorded", "source_as_recorded");
+    const ablationArm = pairedJob("job-ablation", "force_flip_x_zero");
+    vi.mocked(api.createMatchedJobs).mockResolvedValue({
+      schema_version: "yieldforge.api-matched-solver-jobs.v1",
+      experiment_pair_id: "pair-6669",
+      source_as_recorded: sourceArm,
+      force_flip_x_zero: ablationArm,
+    });
+    vi.mocked(api.getJob).mockResolvedValue(ablationArm);
+    vi.mocked(api.streamJobEvents).mockImplementation(
+      (jobId, _after, _signal, onEvent) =>
+        new Promise<void>(() => {
+          onEvent({
+            schema_version: "yieldforge.api-job-event.v1",
+            job_id: jobId,
+            sequence: 1,
+            occurred_at: "2026-08-18T02:00:00Z",
+            kind: "candidate",
+            status: "running",
+            phase: null,
+            candidate_id: "candidate-progressive",
+            candidate_count: 1,
+            archive_available: false,
+            error_code: null,
+            error_message: null,
+          });
+        }),
+    );
+    window.history.replaceState({}, "", "/?view=nest&task=6669");
+    render(<App client={api} />);
+
+    await user.click(await screen.findByRole("checkbox", { name: /acknowledge exact assumptions/i }));
+    await user.click(
+      screen.getByRole("checkbox", { name: /acknowledge derived no-flip intervention/i }),
+    );
+    await user.click(screen.getByRole("button", { name: "Run matched experiment" }));
+
+    await waitFor(() => expect(api.createMatchedJobs).toHaveBeenCalledTimes(1));
+    expect(api.createMatchedJobs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tasks_index: 6669,
+        acknowledged_intervention_codes: ["force_s1_flip_x_zero_for_ablation"],
+      }),
+    );
+    expect(await screen.findByText("job-recorded")).toBeVisible();
+    expect(screen.getByText("job-ablation")).toBeVisible();
+    expect(screen.getByText("candidate-progressive")).toBeVisible();
+    expect(screen.getByText("Matched pair pair-6669")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel recorded projection" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel no-flip ablation" })).toBeVisible();
+  });
+
+  it("refreshes both completed matched archives and auto-opens their comparison", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    const sourceActive = pairedJob("job-recorded", "source_as_recorded");
+    const ablationActive = pairedJob("job-ablation", "force_flip_x_zero");
+    const recorded = pairedRun("job-recorded", "source_as_recorded");
+    const ablation = pairedRun("job-ablation", "force_flip_x_zero");
+    vi.mocked(api.listCompletedRuns)
+      .mockResolvedValueOnce({
+        schema_version: "yieldforge.api-completed-run-page.v1",
+        items: [],
+      })
+      .mockResolvedValue({
+        schema_version: "yieldforge.api-completed-run-page.v1",
+        items: [recorded, ablation],
+      });
+    vi.mocked(api.createMatchedJobs).mockResolvedValue({
+      schema_version: "yieldforge.api-matched-solver-jobs.v1",
+      experiment_pair_id: "pair-6669",
+      source_as_recorded: sourceActive,
+      force_flip_x_zero: ablationActive,
+    });
+    vi.mocked(api.getJob).mockResolvedValue(ablation.job);
+    vi.mocked(api.streamJobEvents).mockImplementation(
+      (jobId, _after, _signal, onEvent) => {
+        onEvent({
+          schema_version: "yieldforge.api-job-event.v1",
+          job_id: jobId,
+          sequence: 1,
+          occurred_at: "2026-08-18T02:00:01Z",
+          kind: "terminal",
+          status: "completed",
+          phase: null,
+          candidate_id: null,
+          candidate_count: 1,
+          archive_available: true,
+          error_code: null,
+          error_message: null,
+        });
+        return Promise.resolve();
+      },
+    );
+    window.history.replaceState({}, "", "/?view=nest&task=6669");
+    render(<App client={api} />);
+
+    await user.click(await screen.findByRole("checkbox", { name: /acknowledge exact assumptions/i }));
+    await user.click(
+      screen.getByRole("checkbox", { name: /acknowledge derived no-flip intervention/i }),
+    );
+    await user.click(screen.getByRole("button", { name: "Run matched experiment" }));
+
+    const comparison = await screen.findByRole("region", { name: "Read-only run comparison" });
+    await waitFor(() =>
+      expect(
+        within(comparison).getByRole("combobox", { name: "Compare open run with" }),
+      ).toHaveValue("job-ablation"),
+    );
+    expect(within(comparison).getByRole("row", {
+      name: /Experiment pair ID pair-6669 pair-6669 Same/i,
+    })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open completed run job-recorded" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(api.listCompletedRuns).toHaveBeenCalledTimes(2);
+  });
+
   it("caps the solver supervision margin at ten seconds", async () => {
     const api = client();
     const user = userEvent.setup();
@@ -567,6 +773,44 @@ describe("research workbench", () => {
     expect(
       within(comparison).queryByText(/better|winner|improvement|optimal|savings/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("compares matched projection evidence with neutral same/different relations", async () => {
+    const api = client();
+    const recorded = pairedRun("job-recorded", "source_as_recorded");
+    const ablation = pairedRun("job-ablation", "force_flip_x_zero");
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [recorded, ablation],
+    });
+    window.history.replaceState({}, "", "/?view=nest&task=6669");
+    render(<App client={api} />);
+
+    const comparison = await screen.findByRole("region", { name: "Read-only run comparison" });
+    await userEvent.setup().selectOptions(
+      within(comparison).getByRole("combobox", { name: "Compare open run with" }),
+      "job-ablation",
+    );
+    const evidence = within(comparison).getByRole("table", { name: "Recorded run evidence" });
+    expect(within(evidence).getByRole("row", {
+      name: /Projection mode source_as_recorded force_flip_x_zero Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: new RegExp(`Projection SHA-256 ${"1".repeat(64)} ${"2".repeat(64)} Different`, "i"),
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Transform convention local_x_coordinate_negation_before_rotation local_x_coordinate_negation_before_rotation Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Interventions none force_s1_flip_x_zero_for_ablation Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Experiment pair ID pair-6669 pair-6669 Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Experiment arm source_as_recorded force_flip_x_zero Different/i,
+    })).toBeVisible();
+    expect(within(comparison).queryByText(/better|winner|improvement|optimal|savings/i)).not.toBeInTheDocument();
   });
 
   it("preserves the run comparison pair when Run B is opened as Run A", async () => {

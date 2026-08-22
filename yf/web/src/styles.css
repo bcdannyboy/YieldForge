@@ -98,6 +98,7 @@ input, select { min-height: 36px; min-width: 0; border: 1px solid #aba596; borde
 label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 0.5rem; padding-block: 0.3rem; }
 input[type="checkbox"] { min-height: 18px; width: 18px; }
 .control-panel form { display: grid; gap: 0.7rem; }
+.projection-actions { display: grid; gap: 0.45rem; }
 
 .inspector-title, .candidate-toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: start; border-bottom: 1px solid var(--rule); margin-bottom: 0.8rem; padding-bottom: 0.65rem; }
 .status { display: inline-flex; align-items: center; min-height: 26px; border: 1px solid currentColor; padding: 0.2rem 0.45rem; font: 650 0.7rem ui-monospace, monospace; text-transform: uppercase; }
@@ -139,6 +140,7 @@ summary { cursor: pointer; font-weight: 650; }
 
 .job-status { margin-top: 1rem; border-top: 1px solid var(--rule); padding-top: 0.8rem; font-size: 0.82rem; }
 .job-status p { margin-bottom: 0.35rem; }
+.paired-job-status { margin-top: 0.75rem; border-top: 1px solid var(--rule); padding-top: 0.7rem; }
 .button--danger { border-color: var(--red); background: var(--red); }
 .run-history-heading { display: flex; justify-content: space-between; gap: 0.75rem; border-bottom: 1px solid var(--rule); margin-bottom: 0.7rem; padding-bottom: 0.6rem; }
 .run-history-heading h2, .run-history-heading p { margin-bottom: 0; }
@@ -154,6 +156,7 @@ summary { cursor: pointer; font-weight: 650; }
 .run-history-card__job { overflow: hidden; font-size: 0.7rem; text-overflow: ellipsis; }
 .run-history-card__facts { display: grid; grid-template-columns: 1fr 1fr; gap: 0.15rem 0.5rem; font-size: 0.68rem; }
 .run-history-card__assumptions { overflow-wrap: anywhere; color: var(--amber); font-size: 0.66rem; }
+.run-history-card__projection, .run-history-card__pair { overflow-wrap: anywhere; color: #5c536d; font-size: 0.64rem; }
 .run-history-card__hash { overflow-wrap: anywhere; border-top: 1px solid var(--rule); padding-top: 0.35rem; color: var(--muted); font-size: 0.62rem; }
 .run-comparison { margin: 0.85rem 0; border-block: 1px solid var(--rule); padding-block: 0.8rem; }
 .run-comparison h3 { margin: 0 0 0.25rem; }
