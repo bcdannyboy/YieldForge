@@ -155,9 +155,10 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
     () => reconcileCandidates(stream.liveCandidateIds, terminalCandidates),
     [stream.liveCandidateIds, terminalCandidates],
   );
+  const assumptionCodes = detail?.summary.solve_capability.assumption_codes ?? [];
   const canSubmit = Boolean(
     detail?.summary.solve_capability.can_solve &&
-      (!detail.summary.solve_capability.requires_assumption_acknowledgement || acknowledged),
+      (assumptionCodes.length === 0 || acknowledged),
   );
   const phase = [...stream.events].reverse().find((event) => event.phase)?.phase ?? "waiting";
   const elapsedSeconds = job
@@ -184,10 +185,15 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                 <strong>Blocked from solver projection</strong>
                 <p>{detail.summary.solve_capability.reason_codes.join(", ")}</p>
               </div>
-            ) : (
+            ) : assumptionCodes.length > 0 ? (
               <div className="notice notice--assumed">
                 <ProvenanceMark kind="assumed" />
-                <p className="mono">{detail.summary.solve_capability.assumption_codes.join(", ")}</p>
+                <p className="mono">{assumptionCodes.join(", ")}</p>
+              </div>
+            ) : (
+              <div className="notice notice--success">
+                <strong>Directly supported projection</strong>
+                <p>No assumption acknowledgement required.</p>
               </div>
             )}
             <form
@@ -219,14 +225,15 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                   .catch((reason: unknown) => setError(String(reason)));
               }}
             >
-              <label>
-                <input
-                  type="checkbox"
-                  checked={acknowledged}
-                  disabled={!detail.summary.solve_capability.can_solve}
-                  onChange={(event) => setAcknowledged(event.target.checked)}
-                /> Acknowledge exact assumption
-              </label>
+              {assumptionCodes.length > 0 ? (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={acknowledged}
+                    onChange={(event) => setAcknowledged(event.target.checked)}
+                  /> Acknowledge exact assumption
+                </label>
+              ) : null}
               <label>Seed<input name="seed" type="number" defaultValue="23" required /></label>
               <label>Computation seconds<input name="seconds" type="number" min="1" max="9" defaultValue="5" required /></label>
               <label>Workers<input value="1" readOnly aria-label="Workers" /></label>

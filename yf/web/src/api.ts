@@ -6,6 +6,7 @@ import {
   type JobEvent,
   type JobView,
   type OrderBook,
+  type SupportStatus,
   type TaskDetail,
   type TaskPage,
   parseCandidateGeometry,
@@ -19,7 +20,7 @@ import {
 } from "./contracts";
 
 export interface TaskFilters {
-  status?: string;
+  status?: SupportStatus;
   constraintType?: string;
   taskId?: number;
   minParts?: number;

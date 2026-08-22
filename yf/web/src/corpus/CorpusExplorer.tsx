@@ -1,69 +1,183 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { TaskDetail, TaskPage } from "../contracts";
 import type { TaskFilters, WorkbenchClient } from "../api";
+import type {
+  CorpusSummary,
+  SupportStatus,
+  TaskDetail,
+  TaskSummary,
+} from "../contracts";
 import { ProvenanceMark } from "../components/Provenance";
 import { SourceGeometry } from "../components/SourceGeometry";
 
+type ListPhase = "idle" | "loading" | "loading-more" | "ready";
+type DetailPhase = "idle" | "loading" | "ready";
+
 function taskHref(view: "corpus" | "nest", tasksIndex: number) {
   return `/?view=${view}&task=${tasksIndex}`;
+}
+
+function supportLabel(status: SupportStatus) {
+  switch (status) {
+    case "directly_supported":
+      return "Directly supported";
+    case "runnable_with_explicit_assumptions":
+      return "Assumption-backed";
+    case "view_only":
+      return "View only";
+  }
+}
+
+function tableSupportLabel(item: TaskSummary) {
+  return item.solve_capability.support_status === "view_only"
+    ? "View only · blocked"
+    : supportLabel(item.solve_capability.support_status);
+}
+
+function appendUnique(current: TaskSummary[], incoming: TaskSummary[]) {
+  const known = new Set(current.map((item) => item.tasks_index));
+  return [...current, ...incoming.filter((item) => !known.has(item.tasks_index))];
 }
 
 export function CorpusExplorer({
   client,
   initialTask,
   navigate,
+  summary,
+  summaryLoading,
+  summaryError,
 }: {
   client: WorkbenchClient;
   initialTask: number | null;
   navigate: (url: string) => void;
+  summary: CorpusSummary | null;
+  summaryLoading: boolean;
+  summaryError: string | null;
 }) {
-  const [page, setPage] = useState<TaskPage | null>(null);
-  const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const [items, setItems] = useState<TaskSummary[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [filters, setFilters] = useState<TaskFilters>({});
-  const [error, setError] = useState<string | null>(null);
+  const [listPhase, setListPhase] = useState<ListPhase>("idle");
+  const [listError, setListError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const [selectedTask, setSelectedTask] = useState<number | null>(initialTask);
+  const [detailPhase, setDetailPhase] = useState<DetailPhase>("idle");
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const listGeneration = useRef(0);
+  const detailGeneration = useRef(0);
+  const initialTaskRef = useRef(initialTask);
+  const filtersRef = useRef(filters);
+  initialTaskRef.current = initialTask;
+  filtersRef.current = filters;
+
+  const clearDetail = useCallback(() => {
+    detailGeneration.current += 1;
+    setSelectedTask(null);
+    setDetail(null);
+    setDetailPhase("idle");
+    setDetailError(null);
+  }, []);
+
+  const requestDetail = useCallback(
+    (tasksIndex: number) => {
+      const generation = ++detailGeneration.current;
+      setSelectedTask(tasksIndex);
+      setDetail(null);
+      setDetailPhase("loading");
+      setDetailError(null);
+      void client
+        .getTask(tasksIndex)
+        .then((value) => {
+          if (generation !== detailGeneration.current) return;
+          setDetail(value);
+          setDetailPhase("ready");
+        })
+        .catch((reason: unknown) => {
+          if (generation !== detailGeneration.current) return;
+          setDetailPhase("idle");
+          setDetailError(String(reason));
+        });
+    },
+    [client],
+  );
 
   useEffect(() => {
-    let active = true;
-    setError(null);
-    setPage(null);
-    setDetail(null);
-    client
-      .listTasks(filters)
-      .then((value) => {
-        if (!active) return;
-        setPage(value);
-        const selected = initialTask !== null && value.items.some((item) => item.tasks_index === initialTask)
-          ? initialTask
-          : value.items[0]?.tasks_index;
-        if (selected !== undefined) return client.getTask(selected);
-        return null;
-      })
-      .then((value) => {
-        if (active) setDetail(value ?? null);
-      })
-      .catch((reason: unknown) => active && setError(String(reason)));
-    return () => {
-      active = false;
-    };
-  }, [client, filters, initialTask]);
+    if (initialTask !== null) requestDetail(initialTask);
+  }, [initialTask, requestDetail]);
 
-  const selectTask = (tasksIndex: number) => {
-    navigate(taskHref("corpus", tasksIndex));
-    void client.getTask(tasksIndex).then(setDetail).catch((reason: unknown) => setError(String(reason)));
+  useEffect(() => {
+    const generation = ++listGeneration.current;
+    setItems([]);
+    setNextCursor(null);
+    setListPhase("loading");
+    setListError(null);
+    void client
+      .listTasks(filters)
+      .then((page) => {
+        if (generation !== listGeneration.current) return;
+        setItems(page.items);
+        setNextCursor(page.next_cursor);
+        setListPhase("ready");
+        if (initialTaskRef.current === null) {
+          const firstTask = page.items[0]?.tasks_index;
+          if (firstTask === undefined) clearDetail();
+          else requestDetail(firstTask);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (generation !== listGeneration.current) return;
+        setListPhase("idle");
+        setListError(String(reason));
+      });
+    return () => {
+      if (listGeneration.current === generation) listGeneration.current += 1;
+    };
+  }, [clearDetail, client, filters, requestDetail]);
+
+  const resetForFilters = (nextFilters: TaskFilters) => {
+    listGeneration.current += 1;
+    clearDetail();
+    navigate("/?view=corpus");
+    setFilters(nextFilters);
+  };
+
+  const loadNext = () => {
+    if (nextCursor === null || listPhase === "loading-more") return;
+    const generation = listGeneration.current;
+    const cursor = nextCursor;
+    setListPhase("loading-more");
+    setListError(null);
+    void client
+      .listTasks({ ...filtersRef.current, cursor })
+      .then((page) => {
+        if (generation !== listGeneration.current) return;
+        setItems((current) => appendUnique(current, page.items));
+        setNextCursor(page.next_cursor);
+        setListPhase("ready");
+      })
+      .catch((reason: unknown) => {
+        if (generation !== listGeneration.current) return;
+        setListPhase("ready");
+        setListError(String(reason));
+      });
   };
 
   return (
     <section aria-labelledby="corpus-heading">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Normalized source slice</p>
+          <p className="eyebrow">Qualified source catalog</p>
           <h1 id="corpus-heading">Corpus Explorer</h1>
         </div>
         <ProvenanceMark kind="source_real" />
       </div>
 
+      {summaryLoading ? <p role="status">Loading corpus summary…</p> : null}
+      {summaryError ? <p className="notice notice--error">Corpus summary: {summaryError}</p> : null}
+
       <form
+        ref={formRef}
         className="filter-bar"
         aria-label="Task filters"
         onSubmit={(event) => {
@@ -71,46 +185,82 @@ export function CorpusExplorer({
           const data = new FormData(event.currentTarget);
           const taskId = String(data.get("taskId") ?? "").trim();
           const minParts = String(data.get("minParts") ?? "").trim();
-          const status = String(data.get("status") ?? "");
+          const maxParts = String(data.get("maxParts") ?? "").trim();
+          const status = String(data.get("status") ?? "") as SupportStatus | "";
           const constraintType = String(data.get("constraintType") ?? "");
-          setFilters({
+          resetForFilters({
             ...(status ? { status } : {}),
             ...(constraintType ? { constraintType } : {}),
             ...(taskId ? { taskId: Number(taskId) } : {}),
             ...(minParts ? { minParts: Number(minParts) } : {}),
+            ...(maxParts ? { maxParts: Number(maxParts) } : {}),
           });
         }}
       >
         <label>
           Task ID
-          <input name="taskId" inputMode="numeric" />
+          <input name="taskId" inputMode="numeric" pattern="[0-9]*" />
         </label>
         <label>
           Status
           <select name="status" defaultValue="">
             <option value="">All</option>
-            <option value="runnable_with_explicit_assumptions">Assumption-backed</option>
-            <option value="view_only">View only</option>
+            {summary?.support_status_counts.map((entry) => (
+              <option key={entry.name} value={entry.name}>
+                {supportLabel(entry.name)} ({entry.count})
+              </option>
+            ))}
           </select>
         </label>
         <label>
           Constraint
           <select name="constraintType" defaultValue="">
             <option value="">All</option>
-            <option value="s1">s1</option>
-            <option value="c8">c8</option>
+            {summary?.constraint_type_counts.map((entry) => (
+              <option key={entry.name} value={entry.name}>
+                {entry.name} ({entry.count} rows)
+              </option>
+            ))}
           </select>
         </label>
         <label>
           Min parts
           <input name="minParts" type="number" min="0" />
         </label>
-        <button type="submit">Apply filters</button>
+        <label>
+          Max parts
+          <input name="maxParts" type="number" min="0" />
+        </label>
+        <div className="filter-actions">
+          <button type="submit">Apply filters</button>
+          <button
+            type="button"
+            className="button--secondary"
+            onClick={() => {
+              formRef.current?.reset();
+              resetForFilters({});
+            }}
+          >
+            Clear filters
+          </button>
+        </div>
       </form>
 
-      {error ? <p className="notice notice--error">{error}</p> : null}
+      {listError ? <p className="notice notice--error">Task list: {listError}</p> : null}
       <div className="workbench-grid workbench-grid--corpus">
         <div className="panel table-panel">
+          <div className="table-toolbar">
+            <p aria-live="polite">
+              {listPhase === "loading"
+                ? "Loading first 50 tasks…"
+                : `Loaded ${items.length} of ${summary?.task_count ?? "?"} tasks`}
+            </p>
+            {nextCursor !== null ? (
+              <button type="button" disabled={listPhase === "loading-more"} onClick={loadNext}>
+                {listPhase === "loading-more" ? "Loading next 50 tasks…" : "Load next 50 tasks"}
+              </button>
+            ) : null}
+          </div>
           <table aria-label="Corpus tasks">
             <caption>Tasks in stable source order</caption>
             <thead>
@@ -122,16 +272,20 @@ export function CorpusExplorer({
               </tr>
             </thead>
             <tbody>
-              {page?.items.map((item) => (
-                <tr key={item.tasks_index} data-selected={detail?.summary.tasks_index === item.tasks_index}>
+              {items.map((item) => (
+                <tr key={item.tasks_index} data-selected={selectedTask === item.tasks_index}>
                   <th scope="row">
-                    <button className="link-button" onClick={() => selectTask(item.tasks_index)}>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => navigate(taskHref("corpus", item.tasks_index))}
+                    >
                       {item.tasks_index}
                     </button>
                   </th>
                   <td>{item.part_count}</td>
                   <td>{item.constraint_types.join(", ")}</td>
-                  <td>{item.solve_capability.can_solve ? "ASM · eligible" : "blocked"}</td>
+                  <td>{tableSupportLabel(item)}</td>
                 </tr>
               ))}
             </tbody>
@@ -139,6 +293,7 @@ export function CorpusExplorer({
         </div>
 
         <article className="panel inspector">
+          {detailError ? <p className="notice notice--error">Task detail: {detailError}</p> : null}
           {detail ? (
             <>
               <div className="inspector-title">
@@ -146,17 +301,25 @@ export function CorpusExplorer({
                   <p className="eyebrow">Task source row {detail.summary.task.source_row_index}</p>
                   <h2>Task {detail.summary.tasks_index}</h2>
                 </div>
-                {detail.summary.solve_capability.can_solve ? (
+                {detail.summary.solve_capability.support_status === "directly_supported" ? (
+                  <span className="status status--success">Directly supported</span>
+                ) : detail.summary.solve_capability.support_status ===
+                  "runnable_with_explicit_assumptions" ? (
                   <span className="status status--assumed">Assumption-backed</span>
                 ) : (
-                  <span className="status status--blocked">Blocked</span>
+                  <span className="status status--blocked">View only</span>
                 )}
               </div>
 
-              {detail.summary.solve_capability.can_solve ? (
+              {detail.summary.solve_capability.assumption_codes.length > 0 ? (
                 <div className="notice notice--assumed">
                   <ProvenanceMark kind="assumed" />
                   <p>{detail.summary.solve_capability.assumption_codes.join(", ")}</p>
+                </div>
+              ) : detail.summary.solve_capability.can_solve ? (
+                <div className="notice notice--success">
+                  <strong>Directly supported projection</strong>
+                  <p>No assumption acknowledgement required.</p>
                 </div>
               ) : (
                 <div className="notice notice--error">
@@ -216,7 +379,13 @@ export function CorpusExplorer({
               </details>
             </>
           ) : (
-            <p>{page && page.items.length === 0 ? "No tasks match the current filters." : "Loading task evidence…"}</p>
+            <p>
+              {items.length === 0 && listPhase === "ready"
+                ? "No tasks match the current filters."
+                : detailPhase === "loading"
+                  ? "Loading task evidence…"
+                  : "Select a task to inspect its evidence."}
+            </p>
           )}
         </article>
       </div>

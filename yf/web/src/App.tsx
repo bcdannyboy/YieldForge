@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { WorkbenchClient } from "./api";
+import type { CorpusSummary } from "./contracts";
 import { CorpusExplorer } from "./corpus/CorpusExplorer";
 import { NestLab } from "./nest/NestLab";
 import { OrderBookLab } from "./order-books/OrderBookLab";
@@ -23,6 +24,8 @@ function currentLocation() {
 export function App({ client }: { client: WorkbenchClient }) {
   const [location, setLocation] = useState(currentLocation);
   const [apiStatus, setApiStatus] = useState<"checking" | "ready" | "unavailable">("checking");
+  const [corpusSummary, setCorpusSummary] = useState<CorpusSummary | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
 
   useEffect(() => {
     const update = () => setLocation(currentLocation());
@@ -32,10 +35,21 @@ export function App({ client }: { client: WorkbenchClient }) {
 
   useEffect(() => {
     let active = true;
+    setApiStatus("checking");
+    setCorpusSummary(null);
+    setSummaryError(null);
     client
       .getCorpusSummary()
-      .then(() => active && setApiStatus("ready"))
-      .catch(() => active && setApiStatus("unavailable"));
+      .then((summary) => {
+        if (!active) return;
+        setCorpusSummary(summary);
+        setApiStatus("ready");
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setSummaryError(String(reason));
+        setApiStatus("unavailable");
+      });
     return () => {
       active = false;
     };
@@ -85,7 +99,14 @@ export function App({ client }: { client: WorkbenchClient }) {
       </aside>
       <main id="workspace">
         {location.view === "corpus" ? (
-          <CorpusExplorer client={client} initialTask={location.task} navigate={navigate} />
+          <CorpusExplorer
+            client={client}
+            initialTask={location.task}
+            navigate={navigate}
+            summary={corpusSummary}
+            summaryLoading={apiStatus === "checking"}
+            summaryError={summaryError}
+          />
         ) : null}
         {location.view === "nest" ? <NestLab client={client} tasksIndex={location.task} /> : null}
         {location.view === "order-books" ? (

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { parseJobEvent, parseOrderBook, parseTaskDetail } from "./contracts";
-import { orderBook, taskDetail } from "./test/fixtures";
+import {
+  parseCorpusSummary,
+  parseJobEvent,
+  parseOrderBook,
+  parseTaskDetail,
+} from "./contracts";
+import { corpusSummary, orderBook, taskDetail } from "./test/fixtures";
 
 describe("browser transport validation", () => {
   it("accepts decimal-string shape hashes and opaque integers", () => {
@@ -49,5 +54,45 @@ describe("browser transport validation", () => {
       error_code: null,
       error_message: null,
     });
+  });
+
+  it("accepts every authoritative support status and rejects unknown statuses", () => {
+    for (const supportStatus of [
+      "directly_supported",
+      "runnable_with_explicit_assumptions",
+      "view_only",
+    ] as const) {
+      const detail = structuredClone(taskDetail(supportStatus === "view_only" ? 25801 : 13958));
+      detail.summary.solve_capability.support_status = supportStatus;
+      if (supportStatus === "directly_supported") {
+        detail.summary.solve_capability.requires_assumption_acknowledgement = false;
+        detail.summary.solve_capability.assumption_codes = [];
+      }
+      expect(parseTaskDetail(detail).summary.solve_capability.support_status).toBe(supportStatus);
+    }
+
+    const detail = structuredClone(taskDetail(13958));
+    detail.summary.solve_capability.support_status = "unreviewed" as never;
+    expect(() => parseTaskDetail(detail)).toThrow(/support_status.*invalid/i);
+  });
+
+  it("strictly validates summary filter facets", () => {
+    const parsed = parseCorpusSummary(corpusSummary);
+    expect(parsed.support_status_counts[0]).toEqual({
+      name: "runnable_with_explicit_assumptions",
+      count: 1,
+    });
+
+    const unknownStatus = structuredClone(corpusSummary);
+    unknownStatus.support_status_counts[0]!.name = "unreviewed" as never;
+    expect(() => parseCorpusSummary(unknownStatus)).toThrow(/support_status_counts.*invalid/i);
+
+    const unsafeConstraintCount = structuredClone(corpusSummary);
+    unsafeConstraintCount.constraint_type_counts[0]!.count = 2 ** 53;
+    expect(() => parseCorpusSummary(unsafeConstraintCount)).toThrow(/safe integer/i);
+
+    const negativeSupportCount = structuredClone(corpusSummary);
+    negativeSupportCount.support_status_counts[0]!.count = -1;
+    expect(() => parseCorpusSummary(negativeSupportCount)).toThrow(/nonnegative/i);
   });
 });

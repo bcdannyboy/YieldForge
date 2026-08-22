@@ -1,6 +1,12 @@
 export const MAX_SAFE_JSON_INTEGER = Number.MAX_SAFE_INTEGER;
 
 export type ProvenanceKind = "source_real" | "derived" | "generated" | "assumed";
+export type NormalizationStatus = "source_lossless" | "rejected";
+export type SupportStatus =
+  | "directly_supported"
+  | "runnable_with_explicit_assumptions"
+  | "view_only";
+export type ProjectionStatus = "not_attempted" | "eligible" | "blocked" | "projected";
 export type JobStatus =
   | "queued"
   | "running"
@@ -32,9 +38,9 @@ export interface CoordinateUnit {
 export interface SolveCapability {
   can_solve: boolean;
   requires_assumption_acknowledgement: boolean;
-  normalization_status: string;
-  support_status: string;
-  projection_status: string;
+  normalization_status: NormalizationStatus;
+  support_status: SupportStatus;
+  projection_status: ProjectionStatus;
   reason_codes: string[];
   assumption_codes: string[];
 }
@@ -70,7 +76,7 @@ export interface CorpusSummary {
   part_count: number;
   shape_count: number;
   constraint_count: number;
-  support_status_counts: Array<{ name: string; count: number }>;
+  support_status_counts: Array<{ name: SupportStatus; count: number }>;
   constraint_type_counts: Array<{ name: string; count: number }>;
   solve_capability: {
     eligible_task_count: number;
@@ -312,6 +318,12 @@ function safeInteger(value: unknown, label: string): number {
   return number;
 }
 
+function nonnegativeSafeInteger(value: unknown, label: string): number {
+  const number = safeInteger(value, label);
+  if (number < 0) throw new TypeError(`${label} must be nonnegative`);
+  return number;
+}
+
 function decimal(value: unknown, label: string): string {
   if (typeof value !== "string" || !decimalPattern.test(value)) {
     throw new TypeError(`${label} must be a decimal string`);
@@ -362,15 +374,73 @@ function source(value: unknown): CorpusSource {
 
 function capability(value: unknown): SolveCapability {
   const item = record(value, "solve_capability");
-  bool(item.can_solve, "solve_capability.can_solve");
-  bool(
+  const canSolve = bool(item.can_solve, "solve_capability.can_solve");
+  const requiresAcknowledgement = bool(
     item.requires_assumption_acknowledgement,
     "solve_capability.requires_assumption_acknowledgement",
   );
-  text(item.support_status, "solve_capability.support_status");
-  strings(item.reason_codes, "solve_capability.reason_codes");
-  strings(item.assumption_codes, "solve_capability.assumption_codes");
+  if (
+    !new Set<NormalizationStatus>(["source_lossless", "rejected"]).has(
+      item.normalization_status as NormalizationStatus,
+    )
+  ) {
+    throw new TypeError("solve_capability.normalization_status is invalid");
+  }
+  const supportStatus = supportStatusValue(
+    item.support_status,
+    "solve_capability.support_status",
+  );
+  if (
+    !new Set<ProjectionStatus>(["not_attempted", "eligible", "blocked", "projected"]).has(
+      item.projection_status as ProjectionStatus,
+    )
+  ) {
+    throw new TypeError("solve_capability.projection_status is invalid");
+  }
+  const reasonCodes = strings(item.reason_codes, "solve_capability.reason_codes");
+  const assumptionCodes = strings(item.assumption_codes, "solve_capability.assumption_codes");
+  const projectionEligible =
+    item.projection_status === "eligible" || item.projection_status === "projected";
+  if (canSolve !== projectionEligible) {
+    throw new TypeError("solve_capability.can_solve must match projection_status");
+  }
+  if (requiresAcknowledgement !== (projectionEligible && assumptionCodes.length > 0)) {
+    throw new TypeError("solve_capability acknowledgement requirement is invalid");
+  }
+  if (supportStatus === "directly_supported" && assumptionCodes.length > 0) {
+    throw new TypeError("directly supported capability cannot carry assumptions");
+  }
+  if (supportStatus === "runnable_with_explicit_assumptions" && assumptionCodes.length === 0) {
+    throw new TypeError("assumption-backed capability requires assumption codes");
+  }
+  if (
+    (supportStatus === "view_only" || item.projection_status === "blocked") &&
+    reasonCodes.length === 0
+  ) {
+    throw new TypeError("blocked capability requires reason codes");
+  }
   return item as unknown as SolveCapability;
+}
+
+const supportStatuses = new Set<SupportStatus>([
+  "directly_supported",
+  "runnable_with_explicit_assumptions",
+  "view_only",
+]);
+
+function supportStatusValue(value: unknown, label: string): SupportStatus {
+  if (typeof value !== "string" || !supportStatuses.has(value as SupportStatus)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value as SupportStatus;
+}
+
+function namedCount(value: unknown, label: string): { name: string; count: number } {
+  const item = record(value, label);
+  return {
+    name: text(item.name, `${label}.name`),
+    count: nonnegativeSafeInteger(item.count, `${label}.count`),
+  };
 }
 
 function taskSource(value: unknown): TaskSource {
@@ -439,7 +509,24 @@ export function parseCorpusSummary(value: unknown): CorpusSummary {
   source(item.source);
   coordinateUnit(item.coordinate_unit);
   for (const field of ["task_count", "part_count", "shape_count", "constraint_count"] as const) {
-    safeInteger(item[field], `corpus summary.${field}`);
+    nonnegativeSafeInteger(item[field], `corpus summary.${field}`);
+  }
+  list(item.support_status_counts, "corpus summary.support_status_counts").forEach(
+    (entry, index) => {
+      const count = namedCount(entry, `corpus summary.support_status_counts[${index}]`);
+      supportStatusValue(count.name, `corpus summary.support_status_counts[${index}].name`);
+    },
+  );
+  list(item.constraint_type_counts, "corpus summary.constraint_type_counts").forEach(
+    (entry, index) => namedCount(entry, `corpus summary.constraint_type_counts[${index}]`),
+  );
+  const solveCapability = record(item.solve_capability, "corpus summary.solve_capability");
+  for (const field of [
+    "eligible_task_count",
+    "blocked_task_count",
+    "directly_supported_task_count",
+  ] as const) {
+    nonnegativeSafeInteger(solveCapability[field], `corpus summary.solve_capability.${field}`);
   }
   return item as unknown as CorpusSummary;
 }

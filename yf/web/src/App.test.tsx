@@ -1,15 +1,22 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { WorkbenchClient } from "./api";
-import { corpusSummary, job, orderBook, taskDetail, taskPage } from "./test/fixtures";
+import {
+  corpusSummary,
+  job,
+  orderBook,
+  taskDetail,
+  taskPage,
+  taskSummary,
+} from "./test/fixtures";
 
 const client = (): WorkbenchClient => ({
   getCorpusSummary: vi.fn().mockResolvedValue(corpusSummary),
   listTasks: vi.fn().mockResolvedValue(taskPage),
-  getTask: vi.fn((id: number) => Promise.resolve(taskDetail(id as 13958 | 25801))),
+  getTask: vi.fn((id: number) => Promise.resolve(taskDetail(id))),
   createJob: vi.fn().mockResolvedValue(job),
   getJob: vi.fn().mockResolvedValue(job),
   cancelJob: vi.fn().mockResolvedValue({ ...job, status: "cancelled" }),
@@ -34,6 +41,240 @@ const client = (): WorkbenchClient => ({
 });
 
 describe("research workbench", () => {
+  it("paginates with the exact active filters and keeps appended rows while selecting", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    vi.mocked(api.getCorpusSummary).mockResolvedValue({ ...corpusSummary, task_count: 256 });
+    vi.mocked(api.listTasks)
+      .mockResolvedValueOnce({
+        schema_version: "yieldforge.task-page.v1",
+        items: [taskSummary(13958)],
+        next_cursor: "unfiltered-cursor",
+      })
+      .mockResolvedValueOnce({
+        schema_version: "yieldforge.task-page.v1",
+        items: [taskSummary(13958)],
+        next_cursor: "filtered-cursor-50",
+      })
+      .mockResolvedValueOnce({
+        schema_version: "yieldforge.task-page.v1",
+        items: [taskSummary(13958), taskSummary(25801)],
+        next_cursor: "cursor-100",
+      });
+    window.history.replaceState({}, "", "/?view=corpus");
+    render(<App client={api} />);
+
+    expect(await screen.findByText("Loaded 1 of 256 tasks")).toBeVisible();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Constraint" }), "s1");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() =>
+      expect(api.listTasks).toHaveBeenNthCalledWith(2, { constraintType: "s1" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Load next 50 tasks" }));
+
+    expect(await screen.findByText("Loaded 2 of 256 tasks")).toBeVisible();
+    expect(api.listTasks).toHaveBeenNthCalledWith(1, {});
+    expect(api.listTasks).toHaveBeenNthCalledWith(3, {
+      constraintType: "s1",
+      cursor: "filtered-cursor-50",
+    });
+    const table = screen.getByRole("table", { name: /corpus tasks/i });
+    expect(within(table).getAllByText("13958")).toHaveLength(1);
+    await user.click(within(table).getByRole("button", { name: "25801" }));
+    expect(await screen.findByRole("heading", { name: "Task 25801" })).toBeVisible();
+    expect(api.listTasks).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets pagination for filters, forwards maximum parts, and clears filters", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    vi.mocked(api.getCorpusSummary).mockResolvedValue({ ...corpusSummary, task_count: 256 });
+    vi.mocked(api.listTasks).mockImplementation((filters) => {
+      if (filters?.status === "view_only") {
+        return Promise.resolve({
+          schema_version: "yieldforge.task-page.v1",
+          items: [taskSummary(25801)],
+          next_cursor: null,
+        });
+      }
+      return Promise.resolve({
+        schema_version: "yieldforge.task-page.v1",
+        items: [taskSummary(13958)],
+        next_cursor: "cursor-50",
+      });
+    });
+    window.history.replaceState({}, "", "/?view=corpus");
+    render(<App client={api} />);
+
+    await screen.findByText("Loaded 1 of 256 tasks");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Status" }), "view_only");
+    await user.type(screen.getByRole("spinbutton", { name: "Min parts" }), "10");
+    await user.type(screen.getByRole("spinbutton", { name: "Max parts" }), "40");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() =>
+      expect(api.listTasks).toHaveBeenLastCalledWith({
+        status: "view_only",
+        minParts: 10,
+        maxParts: 40,
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "Load next 50 tasks" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Task 25801" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(api.listTasks).toHaveBeenLastCalledWith({}));
+    expect(screen.getByRole("combobox", { name: "Status" })).toHaveValue("");
+    expect(screen.getByRole("spinbutton", { name: "Max parts" })).toHaveValue(null);
+    expect(await screen.findByRole("heading", { name: "Task 13958" })).toBeVisible();
+  });
+
+  it("ignores stale list responses after filters change", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    let resolveInitial!: (value: typeof taskPage) => void;
+    const initial = new Promise<typeof taskPage>((resolve) => {
+      resolveInitial = resolve;
+    });
+    vi.mocked(api.listTasks)
+      .mockReturnValueOnce(initial)
+      .mockResolvedValueOnce({
+        schema_version: "yieldforge.task-page.v1",
+        items: [taskSummary(25801)],
+        next_cursor: null,
+      });
+    window.history.replaceState({}, "", "/?view=corpus");
+    render(<App client={api} />);
+
+    await screen.findByRole("option", { name: "View only (1)" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Status" }), "view_only");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(await screen.findByRole("button", { name: "25801" })).toBeVisible();
+    await act(async () => resolveInitial(taskPage));
+
+    const table = screen.getByRole("table", { name: /corpus tasks/i });
+    expect(within(table).getByRole("button", { name: "25801" })).toBeVisible();
+    expect(within(table).queryByRole("button", { name: "13958" })).not.toBeInTheDocument();
+  });
+
+  it("loads deep-linked detail independently and ignores stale detail responses", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    let resolveOld!: (value: ReturnType<typeof taskDetail>) => void;
+    const oldDetail = new Promise<ReturnType<typeof taskDetail>>((resolve) => {
+      resolveOld = resolve;
+    });
+    vi.mocked(api.listTasks).mockResolvedValue({
+      ...taskPage,
+      items: [taskSummary(25801)],
+    });
+    vi.mocked(api.getTask).mockImplementation((id) =>
+      id === 13958 ? oldDetail : Promise.resolve(taskDetail(id)),
+    );
+    window.history.replaceState({}, "", "/?view=corpus&task=13958");
+    render(<App client={api} />);
+
+    expect(await screen.findByRole("button", { name: "25801" })).toBeVisible();
+    expect(api.listTasks).toHaveBeenCalledTimes(1);
+    expect(api.getTask).toHaveBeenCalledWith(13958);
+    await user.click(screen.getByRole("button", { name: "25801" }));
+    expect(await screen.findByRole("heading", { name: "Task 25801" })).toBeVisible();
+    await act(async () => resolveOld(taskDetail(13958)));
+
+    expect(screen.getByRole("heading", { name: "Task 25801" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Task 13958" })).not.toBeInTheDocument();
+    expect(api.listTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders distinct support labels from dynamic summary facets", async () => {
+    const api = client();
+    const direct = taskSummary(101);
+    direct.solve_capability = {
+      can_solve: true,
+      requires_assumption_acknowledgement: false,
+      normalization_status: "source_lossless",
+      support_status: "directly_supported",
+      projection_status: "eligible",
+      reason_codes: [],
+      assumption_codes: [],
+    };
+    vi.mocked(api.getCorpusSummary).mockResolvedValue({
+      ...corpusSummary,
+      task_count: 3,
+      support_status_counts: [
+        { name: "directly_supported", count: 1 },
+        { name: "runnable_with_explicit_assumptions", count: 1 },
+        { name: "view_only", count: 1 },
+      ],
+      constraint_type_counts: [
+        { name: "s1", count: 66 },
+        { name: "c8", count: 20 },
+        { name: "g2", count: 4 },
+      ],
+    });
+    vi.mocked(api.listTasks).mockResolvedValue({
+      schema_version: "yieldforge.task-page.v1",
+      items: [direct, taskSummary(13958), taskSummary(25801)],
+      next_cursor: null,
+    });
+    vi.mocked(api.getTask).mockResolvedValue({ ...taskDetail(101), summary: direct });
+    window.history.replaceState({}, "", "/?view=corpus");
+    render(<App client={api} />);
+
+    const table = await screen.findByRole("table", { name: /corpus tasks/i });
+    expect(within(table).getByText("Directly supported")).toBeVisible();
+    expect(within(table).getByText("Assumption-backed")).toBeVisible();
+    expect(within(table).getByText("View only · blocked")).toBeVisible();
+    expect(screen.getByRole("option", { name: "Directly supported (1)" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "g2 (4 rows)" })).toBeVisible();
+  });
+
+  it("does not require acknowledgement for a directly supported task", async () => {
+    const api = client();
+    const direct = taskSummary(101);
+    direct.solve_capability = {
+      can_solve: true,
+      requires_assumption_acknowledgement: false,
+      normalization_status: "source_lossless",
+      support_status: "directly_supported",
+      projection_status: "eligible",
+      reason_codes: [],
+      assumption_codes: [],
+    };
+    vi.mocked(api.getTask).mockResolvedValue({ ...taskDetail(101), summary: direct });
+    window.history.replaceState({}, "", "/?view=nest&task=101");
+    render(<App client={api} />);
+
+    const submit = await screen.findByRole("button", { name: /start solver job/i });
+    expect(submit).toBeEnabled();
+    expect(screen.queryByRole("checkbox", { name: /acknowledge exact assumption/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Directly supported projection")).toBeVisible();
+  });
+
+  it("keeps summary, list, and detail failures in independent UI states", async () => {
+    const api = client();
+    vi.mocked(api.getCorpusSummary).mockRejectedValue(new Error("summary unavailable"));
+    vi.mocked(api.listTasks).mockRejectedValue(new Error("list unavailable"));
+    window.history.replaceState({}, "", "/?view=corpus&task=25801");
+    render(<App client={api} />);
+
+    expect(await screen.findByText(/Corpus summary: Error: summary unavailable/)).toBeVisible();
+    expect(await screen.findByText(/Task list: Error: list unavailable/)).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Task 25801" })).toBeVisible();
+    expect(screen.getByText("Blocked from solver projection")).toBeVisible();
+  });
+
+  it("keeps task rows available when an independent detail request fails", async () => {
+    const api = client();
+    vi.mocked(api.getTask).mockRejectedValue(new Error("detail unavailable"));
+    window.history.replaceState({}, "", "/?view=corpus&task=25801");
+    render(<App client={api} />);
+
+    expect(await screen.findByRole("button", { name: "13958" })).toBeVisible();
+    expect(await screen.findByText(/Task detail: Error: detail unavailable/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "25801" })).toBeVisible();
+  });
+
   it("shows the coordinate warning and both authoritative corpus task states", async () => {
     window.history.replaceState({}, "", "/?view=corpus&task=25801");
     render(<App client={client()} />);

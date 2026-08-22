@@ -33,7 +33,7 @@ export const capability = (canSolve: boolean): SolveCapability => ({
     : [],
 });
 
-export const taskSummary = (tasksIndex: 13958 | 25801): TaskSummary => ({
+export const taskSummary = (tasksIndex: number): TaskSummary => ({
   task: {
     source_row_index: tasksIndex,
     duration: 304,
@@ -54,7 +54,7 @@ export const taskSummary = (tasksIndex: 13958 | 25801): TaskSummary => ({
   solve_capability: capability(tasksIndex === 13958),
 });
 
-export const taskDetail = (tasksIndex: 13958 | 25801): TaskDetail => ({
+export const taskDetail = (tasksIndex: number): TaskDetail => ({
   schema_version: "yieldforge.task-detail.v1",
   source,
   coordinate_unit: { literal_label: "m^-4", interpretation: null },
