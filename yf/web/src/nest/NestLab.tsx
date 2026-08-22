@@ -65,6 +65,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   const lastSequence = useRef(0);
   const candidateRequestGeneration = useRef(0);
   const geometryRequestGeneration = useRef(0);
+  const runSelectionGeneration = useRef(0);
   const refreshedCompletedJob = useRef<string | null>(null);
   const effectiveStatus = job
     ? stream.status === "idle"
@@ -76,6 +77,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   const resetArchiveView = useCallback(() => {
     candidateRequestGeneration.current += 1;
     geometryRequestGeneration.current += 1;
+    runSelectionGeneration.current += 1;
     dispatch({ type: "reset" });
     lastSequence.current = 0;
     setTerminalCandidates([]);
@@ -105,6 +107,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
     setHistoryError(null);
     refreshedCompletedJob.current = null;
     resetArchiveView();
+    const initialSelectionGeneration = runSelectionGeneration.current;
     setError(null);
     void client.getTask(tasksIndex)
       .then((task) => active && setDetail(task))
@@ -115,7 +118,9 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
         setCompletedRuns(page.items);
         setHistoryLoaded(true);
         const newest = page.items[0];
-        if (newest) selectCompletedRun(newest);
+        if (newest && runSelectionGeneration.current === initialSelectionGeneration) {
+          selectCompletedRun(newest);
+        }
       })
       .catch((reason: unknown) => {
         if (!active) return;
@@ -240,9 +245,11 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
       return;
     }
     const completedJobId = job.job_id;
+    let active = true;
     refreshedCompletedJob.current = completedJobId;
     void client.listCompletedRuns(tasksIndex)
       .then((page) => {
+        if (!active) return;
         setCompletedRuns(page.items);
         setHistoryLoaded(true);
         setHistoryError(null);
@@ -253,7 +260,12 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
           setHistoryError(`Run history: completed archive ${completedJobId} was not returned`);
         }
       })
-      .catch((reason: unknown) => setHistoryError(`Run history: ${String(reason)}`));
+      .catch((reason: unknown) => {
+        if (active) setHistoryError(`Run history: ${String(reason)}`);
+      });
+    return () => {
+      active = false;
+    };
   }, [client, effectiveStatus, job, selectCompletedRun, selectedRunId, tasksIndex]);
 
   const candidates = useMemo(

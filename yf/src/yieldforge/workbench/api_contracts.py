@@ -170,16 +170,12 @@ class CompletedRunSettings(ApiContract):
 
 
 class CompletedArchiveIdentity(ApiContract):
-    schema_version: Literal["yieldforge.candidate-archive.v1"] = (
-        "yieldforge.candidate-archive.v1"
-    )
+    schema_version: Literal["yieldforge.candidate-archive.v1"] = "yieldforge.candidate-archive.v1"
     batch_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class CompletedRunView(ApiContract):
-    schema_version: Literal["yieldforge.api-completed-run.v1"] = (
-        "yieldforge.api-completed-run.v1"
-    )
+    schema_version: Literal["yieldforge.api-completed-run.v1"] = "yieldforge.api-completed-run.v1"
     job: JobView
     settings: CompletedRunSettings
     archive: CompletedArchiveIdentity

@@ -519,6 +519,37 @@ describe("research workbench", () => {
     expect(api.listCompletedRuns).toHaveBeenCalledTimes(2);
   });
 
+  it("does not let a late initial history response replace an active job", async () => {
+    const api = client();
+    let resolveHistory: ((value: Awaited<ReturnType<WorkbenchClient["listCompletedRuns"]>>) => void) | undefined;
+    vi.mocked(api.listCompletedRuns).mockImplementation(() =>
+      new Promise((resolve) => { resolveHistory = resolve; }));
+    vi.mocked(api.createJob).mockResolvedValue({
+      ...job,
+      job_id: "job-active",
+    });
+    vi.mocked(api.streamJobEvents).mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("checkbox", { name: /acknowledge exact assumption/i }));
+    await user.click(screen.getByRole("button", { name: /start solver job/i }));
+    expect(await screen.findByText("job-active")).toBeVisible();
+
+    await act(async () => resolveHistory?.({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [completedRun("job-older")],
+    }));
+
+    const older = await screen.findByRole("button", { name: "Open completed run job-older" });
+    expect(older).toBeDisabled();
+    expect(older).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("job-active")).toBeVisible();
+  });
+
   it("does not let a stale archive response cross a run selection", async () => {
     const api = client();
     const newer = completedRun("job-newer");
