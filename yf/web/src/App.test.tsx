@@ -315,6 +315,30 @@ describe("research workbench", () => {
     expect(document.querySelector(".workbench-grid")).toBeTruthy();
   });
 
+  it("explains exact flip eligibility and keeps non-s1 tasks precisely blocked", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    vi.mocked(api.listTasks).mockResolvedValue({
+      schema_version: "yieldforge.task-page.v1",
+      items: [taskSummary(6669), taskSummary(25801)],
+      next_cursor: null,
+    });
+    window.history.replaceState({}, "", "/?view=corpus&task=6669");
+    render(<App client={api} />);
+
+    expect(await screen.findByRole("heading", { name: "Task 6669" })).toBeVisible();
+    expect(screen.getByText("Assumption-backed solver projection")).toBeVisible();
+    expect(screen.getByText("6 parts use recorded flip_x = 1")).toBeVisible();
+    expect(screen.getByText("Recorded transform and no-flip ablation available")).toBeVisible();
+    expect(screen.getByText(/local x coordinate is negated before rotation/i)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "25801" }));
+    expect(await screen.findByRole("heading", { name: "Task 25801" })).toBeVisible();
+    expect(screen.getByText("contains_non_s1_constraints")).toBeVisible();
+    expect(screen.getByText("0 parts use recorded flip_x = 1")).toBeVisible();
+    expect(screen.getByRole("button", { name: /solve task 25801/i })).toBeDisabled();
+  });
+
   it("keeps the corpus inspector inside filtered results and clears it for no matches", async () => {
     const api = client();
     const user = userEvent.setup();

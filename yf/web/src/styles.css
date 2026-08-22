@@ -109,6 +109,10 @@ input[type="checkbox"] { min-height: 18px; width: 18px; }
 .notice--assumed { border-color: #d3aa58; background: var(--amber-wash); }
 .notice--error { border-color: #b66d65; background: var(--red-wash); color: #64241f; }
 .notice--success { border-color: #7fa38b; background: var(--green-wash); color: #174c2a; }
+.projection-evidence { display: grid; gap: 0.55rem; margin-bottom: 0.85rem; }
+.projection-evidence > div { display: grid; gap: 0.3rem; border: 1px solid var(--rule); background: var(--surface-strong); padding: 0.65rem 0.75rem; }
+.projection-evidence strong { font-size: 0.82rem; }
+.projection-evidence p { margin: 0; color: var(--muted); font-size: 0.74rem; }
 .table-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--rule); }
 .table-toolbar p { margin: 0; color: var(--muted); font: 0.72rem ui-monospace, monospace; }
 .fact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--rule); }

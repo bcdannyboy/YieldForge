@@ -313,8 +313,11 @@ export function CorpusExplorer({
 
               {detail.summary.solve_capability.assumption_codes.length > 0 ? (
                 <div className="notice notice--assumed">
+                  <strong>Assumption-backed solver projection</strong>
                   <ProvenanceMark kind="assumed" />
-                  <p>{detail.summary.solve_capability.assumption_codes.join(", ")}</p>
+                  <p className="mono">
+                    {detail.summary.solve_capability.assumption_codes.join(", ")}
+                  </p>
                 </div>
               ) : detail.summary.solve_capability.can_solve ? (
                 <div className="notice notice--success">
@@ -327,6 +330,47 @@ export function CorpusExplorer({
                   <p>{detail.summary.solve_capability.reason_codes.join(", ")}</p>
                 </div>
               )}
+
+              <div className="projection-evidence" aria-label="S1 projection evidence">
+                <div>
+                  <ProvenanceMark kind="source_real" />
+                  <strong>Source-observed S1 orientation state</strong>
+                  <p>
+                    {detail.s1_projection_diagnostics.flip_part_count} parts use recorded flip_x = 1
+                  </p>
+                  <p>
+                    {detail.s1_projection_diagnostics.orientation_state_count} orientation states ·{" "}
+                    {detail.s1_projection_diagnostics.flip_constraint_count} flip-bearing constraints
+                    {detail.s1_projection_diagnostics.mixed_flip_constraint_count > 0
+                      ? ` · ${detail.s1_projection_diagnostics.mixed_flip_constraint_count} mixed flip constraints`
+                      : ""}
+                  </p>
+                </div>
+                {detail.summary.solve_capability.can_solve ? (
+                  <div>
+                    <ProvenanceMark kind="derived" />
+                    <strong>
+                      {detail.summary.solve_capability.projection_options.some(
+                        (option) => option.mode === "force_flip_x_zero",
+                      )
+                        ? "Recorded transform and no-flip ablation available"
+                        : "Recorded transform available"}
+                    </strong>
+                    <p>
+                      Under the explicit flip interpretation, the local x coordinate is negated
+                      before rotation for each recorded flip.
+                    </p>
+                    {detail.summary.solve_capability.projection_options.some(
+                      (option) => option.mode === "force_flip_x_zero",
+                    ) ? (
+                      <p>
+                        The no-flip arm is a derived intervention; it is not the source task as
+                        recorded.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
 
               <dl className="fact-grid">
                 <div><dt>Sheet length</dt><dd>{detail.summary.task.sheet_length}</dd></div>
