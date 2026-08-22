@@ -126,6 +126,23 @@ test.describe("real local research workbench", () => {
     await expect(secondRun).toBeVisible({ timeout: 30_000 });
     await expect(secondRun).toHaveAttribute("aria-pressed", "true");
     await expect(firstRun).toHaveAttribute("aria-pressed", "false");
+    const secondArchiveHash = await secondRun.locator(".run-history-card__hash").textContent();
+    expect(secondArchiveHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const comparison = page.getByRole("region", { name: "Read-only run comparison" });
+    const comparisonSelector = comparison.getByRole("combobox", {
+      name: "Compare open run with",
+    });
+    await comparisonSelector.selectOption(created.job_id);
+    const evidence = comparison.getByRole("table", { name: "Recorded run evidence" });
+    await expect(evidence.getByRole("row", { name: /Seed 424 23 Different/i })).toBeVisible();
+    const archiveIdentity = evidence.getByRole("row", { name: /Archive SHA-256/i });
+    await expect(archiveIdentity).toContainText(secondArchiveHash ?? "");
+    await expect(archiveIdentity).toContainText(firstArchiveHash ?? "");
+    await expect(comparison).not.toContainText(/better|winner|improvement|optimal|savings/i);
+
+    const comparisonAccessibility = await new AxeBuilder({ page }).analyze();
+    expect(comparisonAccessibility.violations).toEqual([]);
 
     const firstArchiveRequest = page.waitForResponse((response) =>
       response.url().includes(`/api/solver-jobs/${created.job_id}/candidates`),
@@ -134,6 +151,11 @@ test.describe("real local research workbench", () => {
     expect((await firstArchiveRequest).status()).toBe(200);
     await expect(firstRun).toHaveAttribute("aria-pressed", "true");
     await expect(firstRun.locator(".run-history-card__hash")).toHaveText(firstArchiveHash ?? "");
+    await expect(comparisonSelector).toHaveValue(secondCreated.job_id);
+    await expect(evidence.getByRole("row", { name: /Seed 23 424 Different/i })).toBeVisible();
+    const swappedArchiveIdentity = evidence.getByRole("row", { name: /Archive SHA-256/i });
+    await expect(swappedArchiveIdentity).toContainText(firstArchiveHash ?? "");
+    await expect(swappedArchiveIdentity).toContainText(secondArchiveHash ?? "");
     await expect(
       page.getByRole("group", { name: "Candidates" }).getByRole("button").first(),
     ).toBeVisible();

@@ -138,7 +138,7 @@ export function RunComparison({
         </label>
       )}
       {runA && runB ? (
-        <div className="run-comparison__table-wrap">
+        <div className="run-comparison__table-wrap" tabIndex={0}>
           <table aria-label="Recorded run evidence">
             <caption>
               Exact recorded fields. Archived candidate count is inventory, not quality.

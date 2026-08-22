@@ -449,6 +449,7 @@ describe("research workbench", () => {
     const evidence = within(comparison).getByRole("table", {
       name: "Recorded run evidence",
     });
+    expect(evidence.parentElement).toHaveAttribute("tabindex", "0");
     expect(within(evidence).getByText(
       "Exact recorded fields. Archived candidate count is inventory, not quality.",
     )).toBeVisible();
