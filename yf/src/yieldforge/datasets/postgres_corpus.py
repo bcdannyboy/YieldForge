@@ -42,8 +42,10 @@ from yieldforge.datasets.postgres_catalog import (
     COMMITTED_CATALOG_LOGICAL_SHA256,
     COMMITTED_CATALOG_MANIFEST_SHA256,
     COMMITTED_CATALOG_SHA256,
+    COMMITTED_READ_MODEL_ROOT_SHA256,
     READ_MODEL_SCHEMA_VERSION,
     CatalogImportError,
+    compute_read_model_root,
     validate_read_model_schema,
 )
 from yieldforge.domain import StripPackingProblem
@@ -158,7 +160,11 @@ class PostgresCorpusQueryService:
     @contextmanager
     def _connection(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         try:
-            with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            with psycopg.connect(
+                self._database_url,
+                row_factory=dict_row,
+                connect_timeout=3,
+            ) as connection:
                 connection.read_only = True
                 connection.execute("SET LOCAL statement_timeout = '5s'")
                 connection.execute("SET LOCAL lock_timeout = '1s'")
@@ -414,6 +420,13 @@ class PostgresCorpusQueryService:
                 ):
                     raise PostgresCorpusError(
                         "catalog capability distribution does not match its committed manifest"
+                    )
+                if not hmac.compare_digest(
+                    compute_read_model_root(rows),
+                    COMMITTED_READ_MODEL_ROOT_SHA256,
+                ):
+                    raise PostgresCorpusError(
+                        "catalog read-model root does not match the committed catalog"
                     )
         except CatalogImportError as error:
             raise PostgresCorpusError(

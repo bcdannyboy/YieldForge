@@ -12,6 +12,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from yieldforge.datasets.corpus import (
     CorpusQueryService,
@@ -202,7 +203,7 @@ def create_app(
 
     @app.get("/api/corpus/summary", response_model=CorpusSummaryDto)
     async def corpus_summary() -> CorpusSummaryDto:
-        return corpus.summary()
+        return await run_in_threadpool(corpus.summary)
 
     @app.get("/api/tasks", response_model=TaskPageDto)
     async def list_tasks(
@@ -215,7 +216,8 @@ def create_app(
         max_parts: Annotated[int | None, Query(ge=0)] = None,
     ) -> TaskPageDto | JSONResponse:
         try:
-            return corpus.list_tasks(
+            return await run_in_threadpool(
+                corpus.list_tasks,
                 limit=limit,
                 cursor=cursor,
                 status=status,
@@ -232,14 +234,14 @@ def create_app(
     @app.get("/api/tasks/{tasks_index}", response_model=TaskDetailDto)
     async def task_detail(tasks_index: int) -> TaskDetailDto | JSONResponse:
         try:
-            return corpus.task_detail(tasks_index)
+            return await run_in_threadpool(corpus.task_detail, tasks_index)
         except TaskNotFoundError:
             return _error(404, "task_not_found", "task was not found")
 
     @app.post("/api/solver-jobs", response_model=JobView, status_code=202)
     async def create_solver_job(body: CreateSolverJobRequest) -> JobView | JSONResponse:
         try:
-            detail = corpus.task_detail(body.tasks_index)
+            detail = await run_in_threadpool(corpus.task_detail, body.tasks_index)
         except TaskNotFoundError:
             return _error(404, "task_not_found", "task was not found")
         capability = detail.summary.solve_capability
@@ -258,7 +260,8 @@ def create_app(
                 details={"required_assumption_codes": list(capability.assumption_codes)},
             )
         try:
-            problem = corpus.project_problem(
+            problem = await run_in_threadpool(
+                corpus.project_problem,
                 body.tasks_index,
                 acknowledged_assumption_codes=body.acknowledged_assumption_codes,
             )
@@ -267,7 +270,7 @@ def create_app(
         except TaskNotFoundError:
             return _error(404, "task_not_found", "task was not found")
 
-        source = corpus.summary().source
+        source = (await run_in_threadpool(corpus.summary)).source
         binding = SourceTaskBinding(
             dataset_id=source.dataset_id,
             source_slice_sha256=source.slice_sha256,
@@ -425,10 +428,10 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
     ) -> TaskJobPage | JSONResponse:
         try:
-            corpus.task_detail(tasks_index)
+            await run_in_threadpool(corpus.task_detail, tasks_index)
         except TaskNotFoundError:
             return _error(404, "task_not_found", "task was not found")
-        source = corpus.summary().source
+        source = (await run_in_threadpool(corpus.summary)).source
         snapshots = jobs.snapshots_for_source_task(
             dataset_id=source.dataset_id,
             source_slice_sha256=source.slice_sha256,

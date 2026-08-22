@@ -14,6 +14,7 @@ import pytest
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from yieldforge.datasets import postgres_corpus as postgres_corpus_module
 from yieldforge.datasets.corpus import (
     InvalidCursorError,
     TaskNotSolvableError,
@@ -40,6 +41,23 @@ ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
 
 def _service(database_url: str = DATABASE_URL) -> PostgresCorpusQueryService:
     return PostgresCorpusQueryService(database_url, cursor_signing_key=CURSOR_KEY)
+
+
+def test_database_connections_apply_a_bounded_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[object] = []
+
+    def reject_connection(*_args: object, **kwargs: object) -> None:
+        observed.append(kwargs.get("connect_timeout"))
+        raise psycopg.OperationalError("offline")
+
+    monkeypatch.setattr(postgres_corpus_module.psycopg, "connect", reject_connection)
+
+    with pytest.raises(PostgresCorpusError, match="unavailable"):
+        _service("postgresql://unavailable.example/yieldforge")
+
+    assert observed == [3]
 
 
 @pytest.fixture(scope="module")
@@ -352,4 +370,29 @@ def test_startup_reconciles_the_directly_supported_count(
         )
 
     with pytest.raises(PostgresCorpusError, match="directly supported count"):
+        _service(isolated_database_url)
+
+
+def test_startup_rejects_rehashed_semantically_valid_problem_tamper_by_root(
+    isolated_database_url: str,
+) -> None:
+    with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
+        row = connection.execute(
+            "SELECT summary_json, detail_json, solver_problem_json "
+            "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
+        ).fetchone()
+        problem = row["solver_problem_json"]
+        problem["sheet_length"] += 1.0
+        StripPackingProblem.model_validate_json(
+            json.dumps(problem, separators=(",", ":"), sort_keys=True),
+            strict=True,
+        )
+        record_hash = _record_hash(row["summary_json"], row["detail_json"], problem)
+        connection.execute(
+            "UPDATE yieldforge_catalog_task "
+            "SET solver_problem_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(problem), record_hash),
+        )
+
+    with pytest.raises(PostgresCorpusError, match="read-model root"):
         _service(isolated_database_url)

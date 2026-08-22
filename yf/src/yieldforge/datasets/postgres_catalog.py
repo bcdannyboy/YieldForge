@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -53,6 +54,10 @@ COMMITTED_CATALOG_SHA256 = "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda
 COMMITTED_CATALOG_LOGICAL_SHA256 = (
     "c01669e5ef3b6bb879f16afea2fcc82594c8dde883d638ca1203e3dbee157778"
 )
+COMMITTED_READ_MODEL_ROOT_SHA256 = (
+    "feff8c47e4ef31629b5d846fd3cec31b7ef6809a56fbd1629ab571442eea85ae"
+)
+READ_MODEL_ROOT_SCHEMA_VERSION = "yieldforge.postgres-read-model-root.v1"
 _EXPECTED_TASK_COUNT = 256
 _ADVISORY_LOCK_KEY = 5_947_313_481_882_363_281
 
@@ -131,6 +136,29 @@ class _TaskRecord:
     record_sha256: str
 
 
+def _task_record_root_mapping(record: _TaskRecord) -> dict[str, object]:
+    return {
+        "catalog_ordinal": record.catalog_ordinal,
+        "constraint_count": record.constraint_count,
+        "constraint_types": record.constraint_types,
+        "detail_json": record.detail,
+        "is_test": record.is_test,
+        "is_train": record.is_train,
+        "is_val": record.is_val,
+        "normalization_status": record.normalization_status,
+        "part_count": record.part_count,
+        "projection_status": record.projection_status,
+        "record_sha256": record.record_sha256,
+        "shape_count": record.shape_count,
+        "sheet_type": record.sheet_type,
+        "solver_problem_json": record.problem,
+        "source_row_index": record.source_row_index,
+        "summary_json": record.summary,
+        "support_status": record.support_status,
+        "tasks_index": record.tasks_index,
+    }
+
+
 @dataclass(frozen=True)
 class _PreparedCatalog:
     normalized: NormalizedSlice
@@ -174,6 +202,61 @@ def _record_hash(
                 "detail": detail,
                 "solver_problem": problem,
                 "summary": summary,
+            }
+        )
+    ).hexdigest()
+
+
+_READ_MODEL_ROOT_FIELDS = (
+    "catalog_ordinal",
+    "tasks_index",
+    "source_row_index",
+    "sheet_type",
+    "is_train",
+    "is_val",
+    "is_test",
+    "normalization_status",
+    "support_status",
+    "projection_status",
+    "part_count",
+    "shape_count",
+    "constraint_count",
+    "constraint_types",
+    "summary_json",
+    "detail_json",
+    "solver_problem_json",
+    "record_sha256",
+)
+
+
+def compute_read_model_root(records: Iterable[Mapping[str, object]]) -> str:
+    """Hash the complete ordered read-model payload without model normalization."""
+
+    canonical_records: list[dict[str, object]] = []
+    for record in records:
+        try:
+            item = {field: record[field] for field in _READ_MODEL_ROOT_FIELDS}
+        except KeyError as error:
+            raise CatalogImportError(
+                "read-model root record is missing a required field"
+            ) from error
+        constraint_types = item["constraint_types"]
+        if not isinstance(constraint_types, (list, tuple)) or any(
+            not isinstance(value, str) for value in constraint_types
+        ):
+            raise CatalogImportError("read-model root constraint types are invalid")
+        item["constraint_types"] = list(constraint_types)
+        canonical_records.append(item)
+    canonical_records.sort(key=lambda item: item["catalog_ordinal"])
+    if [item["catalog_ordinal"] for item in canonical_records] != list(
+        range(len(canonical_records))
+    ):
+        raise CatalogImportError("read-model root requires contiguous catalog ordinals")
+    return hashlib.sha256(
+        _canonical_bytes(
+            {
+                "records": canonical_records,
+                "schema_version": READ_MODEL_ROOT_SCHEMA_VERSION,
             }
         )
     ).hexdigest()
@@ -345,6 +428,11 @@ def _prepare_catalog(
                 record_sha256=_record_hash(summary, detail, problem),
             )
         )
+    read_model_root = compute_read_model_root(
+        _task_record_root_mapping(record) for record in records
+    )
+    if not hmac.compare_digest(read_model_root, COMMITTED_READ_MODEL_ROOT_SHA256):
+        raise CatalogImportError("Invalid catalog: committed read-model root mismatch")
     return _PreparedCatalog(
         normalized=normalized,
         artifact_sha256=artifact_sha256,
@@ -1005,8 +1093,11 @@ __all__ = [
     "COMMITTED_CATALOG_LOGICAL_SHA256",
     "COMMITTED_CATALOG_MANIFEST_SHA256",
     "COMMITTED_CATALOG_SHA256",
+    "COMMITTED_READ_MODEL_ROOT_SHA256",
     "MAX_CATALOG_BYTES",
+    "READ_MODEL_ROOT_SCHEMA_VERSION",
     "READ_MODEL_SCHEMA_VERSION",
+    "compute_read_model_root",
     "import_catalog",
     "validate_read_model_schema",
 ]

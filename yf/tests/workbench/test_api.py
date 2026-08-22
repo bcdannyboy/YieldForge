@@ -6,11 +6,13 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -357,6 +359,42 @@ def test_task_cursor_failure_has_a_distinct_public_error_code() -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "invalid_task_cursor"
+
+
+def test_slow_sync_corpus_does_not_block_an_unrelated_async_request() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowCorpus(_FakeCorpus):
+        def summary(self) -> CorpusSummaryDto:
+            started.set()
+            release.wait()
+            return super().summary()
+
+    async def exercise() -> tuple[float, httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=create_app(corpus=SlowCorpus(), jobs=_FakeJobs()))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            began = time.monotonic()
+            timer = threading.Timer(0.5, release.set)
+            timer.start()
+            try:
+                slow_request = asyncio.create_task(client.get("/api/corpus/summary"))
+                while not started.is_set():
+                    await asyncio.sleep(0.005)
+                fast_response = await client.get("/api/solver-jobs/missing")
+                elapsed = time.monotonic() - began
+                release.set()
+                slow_response = await slow_request
+            finally:
+                release.set()
+                timer.cancel()
+            return elapsed, fast_response, slow_response
+
+    elapsed, fast_response, slow_response = asyncio.run(exercise())
+
+    assert elapsed < 0.3
+    assert fast_response.status_code == 404
+    assert slow_response.status_code == 200
 
 
 def test_unexpected_server_failure_is_sanitized_and_structured() -> None:
@@ -775,5 +813,7 @@ def test_default_factory_fails_closed_for_an_unavailable_configured_database(
     )
     monkeypatch.setenv("YIELDFORGE_WORKBENCH_ROOT", str(tmp_path / "runtime"))
 
+    began = time.monotonic()
     with pytest.raises(PostgresCorpusError, match="unavailable"):
         create_default_app()
+    assert time.monotonic() - began < 4.0

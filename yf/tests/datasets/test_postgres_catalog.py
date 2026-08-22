@@ -12,7 +12,9 @@ from psycopg import sql
 
 from yieldforge.datasets import postgres_catalog
 from yieldforge.datasets.postgres_catalog import (
+    COMMITTED_READ_MODEL_ROOT_SHA256,
     CatalogImportError,
+    compute_read_model_root,
     import_catalog,
 )
 from yieldforge.domain import StripPackingProblem
@@ -89,6 +91,26 @@ def test_imports_exact_catalog_transactionally_and_is_idempotent(database_url: s
             StripPackingProblem.model_validate(problem)
         else:
             assert problem is None
+
+
+def test_imported_rows_match_the_pinned_read_model_root(database_url: str) -> None:
+    _import(database_url)
+    with psycopg.connect(database_url, row_factory=psycopg.rows.dict_row) as connection:
+        rows = connection.execute(
+            "SELECT * FROM yieldforge_catalog_task ORDER BY catalog_ordinal"
+        ).fetchall()
+
+    assert compute_read_model_root(rows) == COMMITTED_READ_MODEL_ROOT_SHA256
+
+
+def test_import_requires_the_pinned_prepared_read_model_root(
+    database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(postgres_catalog, "COMMITTED_READ_MODEL_ROOT_SHA256", "f" * 64)
+
+    with pytest.raises(CatalogImportError, match="read-model root"):
+        _import(database_url)
 
 
 def test_rejects_a_different_existing_catalog_identity(database_url: str) -> None:
