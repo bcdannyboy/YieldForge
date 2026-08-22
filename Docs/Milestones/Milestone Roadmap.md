@@ -26,3 +26,9 @@ The milestones answer a chain of increasingly expensive questions:
 ## Planning rule
 
 Only the active milestone receives a detailed implementation plan. Later milestone notes explain their meaning and acceptance boundary, but we will plan them when we reach them.
+
+M0 now has a frozen executable economic constitution and a calibration-pending pure-geometry
+protocol. Its only permitted handoff into M2 is the prelisted 51-task solver-budget calibration.
+The 203-task evaluation remains blocked until that calibration selects seconds per seed and a new
+validated protocol enables confirmation. This dependency does not authorize residual geometry or
+later economic implementation.

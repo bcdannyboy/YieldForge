@@ -1,7 +1,7 @@
 # M0 experiment-contract design
 
-**Approved:** 2026-08-22  
-**Status:** Approved for implementation  
+**Approved:** 2026-08-22
+**Status:** Approved for implementation
 **Scope:** Executable M0 constitution and pre-registered pure-geometry calibration protocol
 
 ## Decision boundary

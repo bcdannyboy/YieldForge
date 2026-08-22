@@ -47,6 +47,24 @@ uv run yieldforge datasets catalog-import \
 
 The import is transactional and idempotent only for the identical pinned catalog. A clean clone must first reproduce the audit using the sealed acquisition steps in [[Research Workbench]]; the raw pickle-bearing files remain ignored and are never opened by the normal host process. If `YIELDFORGE_DATABASE_URL` is absent, the API deliberately serves only the original two-task fixture.
 
+## Validate the frozen experiment contract
+
+From `yf/`, validate the approved M0 constitution and calibration-pending geometry protocol against
+the committed catalog:
+
+```bash
+uv run yieldforge experiments validate \
+  --m0 experiments/m0-contract-v1.json \
+  --geometry experiments/pure-geometry-calibration-v1.json \
+  --catalog datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json \
+  --catalog-manifest datasets/catalogs/lectra-7030786-v1.1/catalog-manifest.json
+```
+
+The current output must identify M0 `yfm0-29b7efe8ac2a0a9995c4f907`, geometry protocol
+`yfgp-49906e93ed9ff0446705247b`, the catalog SHA-256, 51 calibration tasks, 203 evaluation tasks,
+and `confirmation=disabled`. Validation is a pre-registration check; it is not a calibration or
+geometry result.
+
 ## Run the local workbench
 
 Start the API from `yf/`:
@@ -103,6 +121,8 @@ Archives are write-once: rerunning against an existing output directory fails. G
 - `src/yieldforge/datasets/` — pinned corpus contracts, sealed catalog/import boundary, Postgres read model, projection boundary, and two-task fallback.
 - `src/yieldforge/workbench/` — FastAPI contracts, solver-job supervision, SSE, verified completed-run/candidate archive views, and order-book service.
 - `src/yieldforge/order_books/` — deterministic hybrid order-book contracts, generator, and immutable archive.
+- `src/yieldforge/experiments/` — strict M0/geometry contracts, canonical loading, catalog-bound population validation, and deterministic split derivation.
+- `experiments/` — committed content-addressed M0 and pure-geometry protocol artifacts.
 - `benchmarks/static/` — small authored static fixtures.
 - `web/` — React/Vite Corpus Explorer, Nest Lab, Order Book Lab, unit tests, and Playwright E2E.
 - `tests/` — contract, adapter, native integration, archive, API, and CLI tests.

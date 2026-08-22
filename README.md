@@ -2,7 +2,7 @@
 
 YieldForge is a research project testing whether future demand should change which high-quality 2D nesting layout a manufacturer chooses today.
 
-> **Current status:** M0—the experiment contract—is active. The repository now includes a local research workbench over a committed, deterministically selected 256-task Lectra catalog, but M0 has not passed and no residual-geometry, remnant-reuse, simulator, oracle, savings, or commercial result exists.
+> **Current status:** M0 remains active. Its economic constitution and pure-geometry calibration protocol are now executable and pre-registered, but the geometry seconds-per-seed budget is still calibration-pending and confirmation is disabled. No residual-geometry, remnant-reuse, simulator, oracle, savings, or commercial result exists.
 
 ## The idea
 
@@ -60,6 +60,8 @@ The browser workbench under `yf/web/` is a local research instrument, not a prod
 - **Nest Lab** keeps task `25801` view-only, requires acknowledgement of `interpret_s1_degenerate_entries_as_allowed_rotations` for task `13958`, and does not discard recorded `s1` flips. Flip-bearing tasks such as `6669` require the additional local-x-negation-before-rotation assumption. They can run either the source-recorded projection or an explicitly acknowledged derived no-flip ablation, and can launch both as one matched pair with the same solver configuration. FastAPI supervises each arm across the Spyrrow worker boundary. Newest-first history records projection mode and identity, pair/arm identity, exact solver settings, and verified archive SHA-256 identities; researchers can reopen either immutable candidate archive, render its derived geometry, and inspect the pair. The side-by-side table reports exact recorded values plus neutral Same/Different relations; it does not select a winner, and candidate count is inventory rather than quality.
 - **Order Book Lab** opens three committed deterministic books and can generate additional immutable local books. Geometry and task composition are source-observed; chronology and economics are generated; material is assumed.
 
+The frozen M0 artifact defines net cost, information sets, event timing, candidate parity, remnant eligibility, failure treatment, statistical reporting, and go/no-go gates. Its companion geometry protocol binds the exact 254-task eligible population to a prelisted 51-task calibration set and 203-task evaluation set. The validator rederives those lists from the committed catalog and currently reports `confirmation=disabled`; this is a pre-registration result, not experiment evidence.
+
 The expanded view requires the documented local Postgres service; without `YIELDFORGE_DATABASE_URL`, the API deliberately falls back to the original two-task fixture. The matched flip experiment is a controlled projection-sensitivity test, not a baseline/oracle comparison or a nesting-quality result. The workbench does not calculate residual geometry, reuse remnants, simulate inventory, compare a baseline with an oracle, or report savings. See [Research Workbench](Docs/Development/Research%20Workbench.md) for the exact source-evidence reproduction, database import, direct API, local runtime, and verification commands.
 
 ## Repository documentation
@@ -102,7 +104,7 @@ Candidate output directories are immutable. Choose a new output path for every r
 
 ## Current next step
 
-Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md). The next local-product task is to freeze the pure-geometry test protocol over the existing projections: the primary geometric outcome, paired candidate-sampling rule, strongest legitimate comparator, seed/compute budget, uncertainty summary, and a threshold that would falsify the narrow geometry hypothesis. The matched flip surface and read-only comparison are instruments for that protocol, not performance results. Approve the M0 contract before adding more product surface. Arbitrary sheet input and downstream residual/simulator work remain deferred.
+Work through [M0—Experiment Contract](Docs/Milestones/M0%20-%20Experiment%20contract.md). The next task is the bounded 51-task M2 calibration: run only seeds `0–3` at 1, 3, and 10 seconds under `source_as_recorded`, persist every attempt and verified archive, and apply the frozen budget-selection rule. Do not run the 203-task evaluation until a new validated protocol records the selected duration and explicitly enables confirmation. The flip ablation remains a separate sensitivity, and arbitrary sheet input plus residual/simulator work remain deferred.
 
 ## Name status
 
