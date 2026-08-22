@@ -1075,8 +1075,15 @@ class SolverJobService:
         expected_binding = (
             source_task_binding.model_dump(mode="json") if source_task_binding is not None else None
         )
-        if manifest.get("source_task_binding") != expected_binding or (
-            ("source_task_binding" in manifest) != (source_task_binding is not None)
+        allowed_bindings = [expected_binding]
+        if isinstance(expected_binding, dict) and expected_binding.get("solver_projection") is None:
+            legacy_binding = dict(expected_binding)
+            legacy_binding.pop("solver_projection")
+            allowed_bindings.append(legacy_binding)
+        has_manifest_binding = "source_task_binding" in manifest
+        if (
+            has_manifest_binding != (source_task_binding is not None)
+            or (has_manifest_binding and manifest["source_task_binding"] not in allowed_bindings)
         ):
             raise ValueError(
                 "completed archive source task binding does not match immutable request"
@@ -1090,7 +1097,7 @@ class SolverJobService:
             "config": batch.config.model_dump(mode="json"),
         }
         if source_task_binding is not None:
-            expected_manifest["source_task_binding"] = expected_binding
+            expected_manifest["source_task_binding"] = manifest["source_task_binding"]
         if manifest != expected_manifest or candidates != batch.candidates:
             raise ValueError("completed archive does not match terminal batch")
 

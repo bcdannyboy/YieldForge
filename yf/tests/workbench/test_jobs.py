@@ -877,6 +877,37 @@ def test_recovery_reconstructs_metadata_from_durable_completed_event(tmp_path: P
     assert [event.status for event in recovered.events(job_id)].count(JobStatus.COMPLETED) == 1
 
 
+def test_recovery_accepts_legacy_binding_without_optional_projection_field(
+    tmp_path: Path,
+) -> None:
+    async def create_complete() -> tuple[Path, Path, str]:
+        jobs = tmp_path / "jobs"
+        archives = tmp_path / "archives"
+        service = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+        created = await service.start(
+            make_request(source_task_binding=make_source_task_binding())
+        )
+        await service.wait(created.job_id)
+        return jobs, archives, created.job_id
+
+    jobs, archives, job_id = run(create_complete())
+    for path in (
+        jobs / job_id / "request.json",
+        archives / job_id / "manifest.json",
+    ):
+        payload = json.loads(path.read_text())
+        payload["source_task_binding"].pop("solver_projection")
+        path.chmod(0o600)
+        path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+
+    recovered = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+
+    snapshot = recovered.get(job_id)
+    assert snapshot.status is JobStatus.COMPLETED
+    assert snapshot.source_task_binding is not None
+    assert snapshot.source_task_binding.solver_projection is None
+
+
 def test_recovery_rejects_archive_content_that_disagrees_with_terminal_batch(
     tmp_path: Path,
 ) -> None:
