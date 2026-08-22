@@ -1,6 +1,7 @@
 import {
   type CandidateGeometry,
   type CandidatePage,
+  type CompletedRunPage,
   type CorpusSummary,
   type CreateJobInput,
   type JobEvent,
@@ -11,6 +12,7 @@ import {
   type TaskPage,
   parseCandidateGeometry,
   parseCandidatePage,
+  parseCompletedRunPage,
   parseCorpusSummary,
   parseJobEvent,
   parseJobView,
@@ -52,6 +54,7 @@ export interface WorkbenchClient {
   listCandidates(jobId: string, cursor?: string): Promise<CandidatePage>;
   getCandidateGeometry(jobId: string, candidateId: string): Promise<CandidateGeometry>;
   listTaskJobs(tasksIndex: number): Promise<{ schema_version: string; items: JobView[] }>;
+  listCompletedRuns(tasksIndex: number): Promise<CompletedRunPage>;
   listOrderBooks(): Promise<{ items: OrderBook[]; next_cursor: string | null }>;
   getOrderBook(orderBookId: string): Promise<OrderBook>;
   generateOrderBook(input: GenerateOrderBookInput): Promise<OrderBook>;
@@ -233,6 +236,12 @@ export class HttpWorkbenchClient implements WorkbenchClient {
 
   async listTaskJobs(tasksIndex: number) {
     return parseTaskJobPage(await this.get(`/api/tasks/${tasksIndex}/solver-jobs`));
+  }
+
+  async listCompletedRuns(tasksIndex: number) {
+    return parseCompletedRunPage(
+      await this.get(`/api/tasks/${tasksIndex}/completed-runs?limit=20`),
+    );
   }
 
   async listOrderBooks() {

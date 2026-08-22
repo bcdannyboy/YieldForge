@@ -31,6 +31,10 @@ const client = (): WorkbenchClient => ({
     schema_version: "yieldforge.api-task-jobs.v1",
     items: [],
   }),
+  listCompletedRuns: vi.fn().mockResolvedValue({
+    schema_version: "yieldforge.api-completed-run-page.v1",
+    items: [],
+  }),
   listOrderBooks: vi.fn().mockResolvedValue({
     schema_version: "yieldforge.api-order-book-page.v1",
     items: [orderBook],

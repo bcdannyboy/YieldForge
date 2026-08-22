@@ -169,6 +169,32 @@ export interface JobView {
   error_message: string | null;
 }
 
+export interface CompletedRunSettings {
+  seed: number;
+  total_computation_time: number;
+  num_workers: 1;
+  early_termination: boolean;
+  min_items_separation: number | null;
+  max_runtime_seconds: number;
+}
+
+export interface CompletedArchiveIdentity {
+  schema_version: "yieldforge.candidate-archive.v1";
+  batch_sha256: string;
+}
+
+export interface CompletedRun {
+  schema_version: "yieldforge.api-completed-run.v1";
+  job: JobView;
+  settings: CompletedRunSettings;
+  archive: CompletedArchiveIdentity;
+}
+
+export interface CompletedRunPage {
+  schema_version: "yieldforge.api-completed-run-page.v1";
+  items: CompletedRun[];
+}
+
 export interface JobEvent {
   schema_version: "yieldforge.api-job-event.v1";
   job_id: string;
@@ -291,6 +317,18 @@ function record(value: unknown, label: string): Record<string, unknown> {
     throw new TypeError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function exactFields(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  if (actual.length !== canonical.length || actual.some((field, index) => field !== canonical[index])) {
+    throw new TypeError(`${label} fields are invalid`);
+  }
 }
 
 function list(value: unknown, label: string): unknown[] {
@@ -615,6 +653,139 @@ export function parseJobView(value: unknown): JobView {
   nullableText(item.error_code, "job.error_code");
   nullableText(item.error_message, "job.error_message");
   return item as unknown as JobView;
+}
+
+const sha256Pattern = /^[0-9a-f]{64}$/;
+
+function completedJob(value: unknown): JobView {
+  const item = record(value, "completed run.job");
+  exactFields(
+    item,
+    [
+      "schema_version",
+      "job_id",
+      "status",
+      "created_at",
+      "updated_at",
+      "latest_event_id",
+      "candidate_count",
+      "source_task_binding",
+      "archive_available",
+      "error_code",
+      "error_message",
+    ],
+    "completed run.job",
+  );
+  const parsed = parseJobView(item);
+  if (parsed.status !== "completed" || !parsed.archive_available) {
+    throw new TypeError("completed run.job must identify an available completed archive");
+  }
+  text(parsed.created_at, "completed run.job.created_at");
+  text(parsed.updated_at, "completed run.job.updated_at");
+  if (parsed.source_task_binding === null) {
+    throw new TypeError("completed run.job.source_task_binding is required");
+  }
+  const binding = record(parsed.source_task_binding, "completed run.job.source_task_binding");
+  exactFields(
+    binding,
+    [
+      "dataset_id",
+      "source_slice_sha256",
+      "tasks_index",
+      "acknowledged_assumption_codes",
+    ],
+    "completed run.job.source_task_binding",
+  );
+  text(binding.dataset_id, "completed run.job.source_task_binding.dataset_id");
+  if (
+    typeof binding.source_slice_sha256 !== "string" ||
+    !sha256Pattern.test(binding.source_slice_sha256)
+  ) {
+    throw new TypeError("completed run.job.source_task_binding.source_slice_sha256 is invalid");
+  }
+  nonnegativeSafeInteger(binding.tasks_index, "completed run.job.source_task_binding.tasks_index");
+  strings(
+    binding.acknowledged_assumption_codes,
+    "completed run.job.source_task_binding.acknowledged_assumption_codes",
+  );
+  return parsed;
+}
+
+export function parseCompletedRunPage(value: unknown): CompletedRunPage {
+  const page = record(value, "completed run page");
+  exactFields(page, ["schema_version", "items"], "completed run page");
+  if (page.schema_version !== "yieldforge.api-completed-run-page.v1") {
+    throw new TypeError("completed run page schema is invalid");
+  }
+  const items = list(page.items, "completed run page.items").map((value, index) => {
+    const run = record(value, `completed run page.items[${index}]`);
+    exactFields(
+      run,
+      ["schema_version", "job", "settings", "archive"],
+      `completed run page.items[${index}]`,
+    );
+    if (run.schema_version !== "yieldforge.api-completed-run.v1") {
+      throw new TypeError(`completed run page.items[${index}] schema is invalid`);
+    }
+    const job = completedJob(run.job);
+    const settings = record(run.settings, `completed run page.items[${index}].settings`);
+    exactFields(
+      settings,
+      [
+        "seed",
+        "total_computation_time",
+        "num_workers",
+        "early_termination",
+        "min_items_separation",
+        "max_runtime_seconds",
+      ],
+      `completed run page.items[${index}].settings`,
+    );
+    safeInteger(settings.seed, "completed run.settings.seed");
+    const computation = safeInteger(
+      settings.total_computation_time,
+      "completed run.settings.total_computation_time",
+    );
+    if (computation <= 0) throw new TypeError("completed run.settings.total_computation_time is invalid");
+    if (settings.num_workers !== 1) {
+      throw new TypeError("completed run.settings.num_workers must equal one");
+    }
+    bool(settings.early_termination, "completed run.settings.early_termination");
+    if (settings.min_items_separation !== null) {
+      const separation = finite(
+        settings.min_items_separation,
+        "completed run.settings.min_items_separation",
+      );
+      if (separation < 0) throw new TypeError("completed run.settings.min_items_separation is invalid");
+    }
+    const runtime = finite(settings.max_runtime_seconds, "completed run.settings.max_runtime_seconds");
+    if (runtime <= 0 || runtime > 10 || computation > runtime) {
+      throw new TypeError("completed run.settings.max_runtime_seconds is invalid");
+    }
+    const archive = record(run.archive, `completed run page.items[${index}].archive`);
+    exactFields(
+      archive,
+      ["schema_version", "batch_sha256"],
+      `completed run page.items[${index}].archive`,
+    );
+    if (
+      archive.schema_version !== "yieldforge.candidate-archive.v1" ||
+      typeof archive.batch_sha256 !== "string" ||
+      !sha256Pattern.test(archive.batch_sha256)
+    ) {
+      throw new TypeError("completed run archive sha256 is invalid");
+    }
+    return {
+      schema_version: "yieldforge.api-completed-run.v1" as const,
+      job,
+      settings: settings as unknown as CompletedRunSettings,
+      archive: archive as unknown as CompletedArchiveIdentity,
+    };
+  });
+  return {
+    schema_version: "yieldforge.api-completed-run-page.v1",
+    items,
+  };
 }
 
 export function parseJobEvent(value: unknown): JobEvent {

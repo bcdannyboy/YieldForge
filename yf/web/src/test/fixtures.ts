@@ -1,4 +1,5 @@
 import type {
+  CompletedRun,
   CorpusSource,
   CorpusSummary,
   JobView,
@@ -173,6 +174,30 @@ export const job: JobView = {
   error_code: null,
   error_message: null,
 };
+
+export const completedRun = (jobId = "job-1"): CompletedRun => ({
+  schema_version: "yieldforge.api-completed-run.v1",
+  job: {
+    ...job,
+    job_id: jobId,
+    status: "completed",
+    latest_event_id: 5,
+    candidate_count: 1,
+    archive_available: true,
+  },
+  settings: {
+    seed: 23,
+    total_computation_time: 5,
+    num_workers: 1,
+    early_termination: false,
+    min_items_separation: null,
+    max_runtime_seconds: 6,
+  },
+  archive: {
+    schema_version: "yieldforge.candidate-archive.v1",
+    batch_sha256: "c".repeat(64),
+  },
+});
 
 export const orderBook: OrderBook = {
   schema_version: "yieldforge.api-order-book.v1",

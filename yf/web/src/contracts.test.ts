@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseCorpusSummary,
+  parseCompletedRunPage,
   parseJobEvent,
   parseOrderBook,
   parseTaskDetail,
 } from "./contracts";
-import { corpusSummary, orderBook, taskDetail } from "./test/fixtures";
+import { completedRun, corpusSummary, orderBook, taskDetail } from "./test/fixtures";
 
 describe("browser transport validation", () => {
   it("accepts decimal-string shape hashes and opaque integers", () => {
@@ -94,5 +95,37 @@ describe("browser transport validation", () => {
     const negativeSupportCount = structuredClone(corpusSummary);
     negativeSupportCount.support_status_counts[0]!.count = -1;
     expect(() => parseCorpusSummary(negativeSupportCount)).toThrow(/nonnegative/i);
+  });
+
+  it("strictly validates completed immutable run history", () => {
+    const valid = {
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [completedRun()],
+    };
+    expect(parseCompletedRunPage(valid).items[0]?.archive.batch_sha256).toBe("c".repeat(64));
+
+    const wrongSchema = structuredClone(valid);
+    wrongSchema.schema_version = "yieldforge.api-completed-run-page.v2";
+    expect(() => parseCompletedRunPage(wrongSchema)).toThrow(/schema/i);
+
+    const extraSetting = structuredClone(valid) as unknown as {
+      items: Array<{ settings: Record<string, unknown> }>;
+    };
+    extraSetting.items[0]!.settings.unrecorded_option = true;
+    expect(() => parseCompletedRunPage(extraSetting)).toThrow(/settings.*fields/i);
+
+    const multipleWorkers = structuredClone(valid);
+    multipleWorkers.items[0]!.settings.num_workers = 2 as 1;
+    expect(() => parseCompletedRunPage(multipleWorkers)).toThrow(/num_workers/i);
+
+    const uppercaseHash = structuredClone(valid);
+    uppercaseHash.items[0]!.archive.batch_sha256 = "C".repeat(64);
+    expect(() => parseCompletedRunPage(uppercaseHash)).toThrow(/sha256/i);
+
+    const pathLeak = structuredClone(valid) as unknown as {
+      items: Array<{ archive: Record<string, unknown> }>;
+    };
+    pathLeak.items[0]!.archive.archive_path = "/private/archive";
+    expect(() => parseCompletedRunPage(pathLeak)).toThrow(/archive.*fields/i);
   });
 });
