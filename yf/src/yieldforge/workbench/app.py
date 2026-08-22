@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from yieldforge.archive import batch_content_hash
 from yieldforge.datasets.corpus import (
     CorpusQueryService,
     CorpusService,
@@ -34,6 +35,10 @@ from yieldforge.workbench.api_contracts import (
     CandidateGeometry,
     CandidatePage,
     CandidateSummary,
+    CompletedArchiveIdentity,
+    CompletedRunPage,
+    CompletedRunSettings,
+    CompletedRunView,
     CreateSolverJobRequest,
     GenerateOrderBookInput,
     JobView,
@@ -441,6 +446,58 @@ def create_app(
             snapshot for snapshot in snapshots if snapshot.status is JobStatus.COMPLETED
         )
         return TaskJobPage(items=tuple(_job_view(snapshot) for snapshot in completed[-limit:]))
+
+    @app.get("/api/tasks/{tasks_index}/completed-runs", response_model=CompletedRunPage)
+    async def completed_runs_for_task(
+        tasks_index: int,
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    ) -> CompletedRunPage | JSONResponse:
+        try:
+            await run_in_threadpool(corpus.task_detail, tasks_index)
+        except TaskNotFoundError:
+            return _error(404, "task_not_found", "task was not found")
+        source = (await run_in_threadpool(corpus.summary)).source
+        snapshots = jobs.snapshots_for_source_task(
+            dataset_id=source.dataset_id,
+            source_slice_sha256=source.slice_sha256,
+            tasks_index=tasks_index,
+        )
+        completed = tuple(
+            snapshot for snapshot in snapshots if snapshot.status is JobStatus.COMPLETED
+        )
+        runs: list[CompletedRunView] = []
+        for snapshot in reversed(completed[-limit:]):
+            try:
+                batch = await run_in_threadpool(jobs.completed_batch, snapshot.job_id)
+            except (OSError, ValueError):
+                return _error(
+                    500,
+                    "archive_integrity",
+                    "completed run archive failed validation",
+                )
+            if batch is None:
+                return _error(
+                    500,
+                    "archive_integrity",
+                    "completed run archive failed validation",
+                )
+            runs.append(
+                CompletedRunView(
+                    job=_job_view(snapshot),
+                    settings=CompletedRunSettings(
+                        seed=snapshot.config.seed,
+                        total_computation_time=snapshot.config.total_computation_time,
+                        num_workers=snapshot.config.num_workers,
+                        early_termination=snapshot.config.early_termination,
+                        min_items_separation=snapshot.config.min_items_separation,
+                        max_runtime_seconds=snapshot.max_runtime_seconds,
+                    ),
+                    archive=CompletedArchiveIdentity(
+                        batch_sha256=batch_content_hash(batch),
+                    ),
+                )
+            )
+        return CompletedRunPage(items=tuple(runs))
 
     @app.get("/api/order-books", response_model=OrderBookPage)
     async def list_order_books(

@@ -16,6 +16,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from yieldforge.archive import batch_content_hash
 from yieldforge.datasets.corpus import (
     CoordinateUnitDto,
     CorpusSolveCapabilityDto,
@@ -283,7 +284,10 @@ class _FakeJobs:
         return [event for event in self.event_records if event.sequence > after_sequence]
 
     def completed_batch(self, job_id: str) -> CandidateBatch | None:
-        self.get(job_id)
+        if self.source_snapshots is None:
+            self.get(job_id)
+        elif not any(snapshot.job_id == job_id for snapshot in self.source_snapshots):
+            raise KeyError(job_id)
         return self.batch
 
     def snapshots_for_source_task(
@@ -725,6 +729,94 @@ def test_completed_jobs_for_task_returns_the_latest_bounded_window() -> None:
     assert [item["job_id"] for item in response.json()["items"]] == [
         f"job_{index:02d}" for index in range(5, 25)
     ]
+
+
+def test_completed_runs_are_newest_first_verified_and_hide_internal_state() -> None:
+    jobs = _FakeJobs()
+    jobs.batch = _batch()
+    jobs.source_snapshots = (
+        _snapshot(JobStatus.COMPLETED, sequence=3).model_copy(
+            update={
+                "job_id": "job_older",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "config": SpyrrowRunConfig(
+                    seed=7,
+                    total_computation_time=1,
+                    early_termination=True,
+                    num_workers=1,
+                    min_items_separation=0.25,
+                ),
+                "max_runtime_seconds": 2.0,
+            }
+        ),
+        _snapshot(JobStatus.COMPLETED, sequence=4).model_copy(
+            update={
+                "job_id": "job_newer",
+                "created_at": NOW.replace(hour=1),
+                "updated_at": NOW.replace(hour=1),
+            }
+        ),
+    )
+    client, _, _ = _client(jobs=jobs)
+
+    response = client.get("/api/tasks/13958/completed-runs", params={"limit": 20})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == "yieldforge.api-completed-run-page.v1"
+    assert [item["job"]["job_id"] for item in body["items"]] == ["job_newer", "job_older"]
+    older = body["items"][1]
+    assert older["schema_version"] == "yieldforge.api-completed-run.v1"
+    assert older["settings"] == {
+        "seed": 7,
+        "total_computation_time": 1,
+        "num_workers": 1,
+        "early_termination": True,
+        "min_items_separation": 0.25,
+        "max_runtime_seconds": 2.0,
+    }
+    assert older["archive"] == {
+        "schema_version": "yieldforge.candidate-archive.v1",
+        "batch_sha256": batch_content_hash(jobs.batch),
+    }
+    assert older["job"]["source_task_binding"] == _binding().model_dump(mode="json")
+    assert "archive_path" not in response.text
+    assert "worker_pid" not in response.text
+    assert "/private/server" not in response.text
+
+
+def test_completed_runs_return_the_latest_bounded_window_newest_first() -> None:
+    jobs = _FakeJobs()
+    jobs.batch = _batch()
+    jobs.source_snapshots = tuple(
+        _snapshot(JobStatus.COMPLETED, sequence=3).model_copy(update={"job_id": f"job_{index:02d}"})
+        for index in range(25)
+    )
+    client, _, _ = _client(jobs=jobs)
+
+    response = client.get("/api/tasks/13958/completed-runs", params={"limit": 20})
+
+    assert response.status_code == 200
+    assert [item["job"]["job_id"] for item in response.json()["items"]] == [
+        f"job_{index:02d}" for index in range(24, 4, -1)
+    ]
+
+
+def test_completed_runs_fail_closed_when_an_archive_is_unavailable() -> None:
+    jobs = _FakeJobs()
+    jobs.snapshot = _snapshot(JobStatus.COMPLETED, sequence=3)
+    jobs.batch = None
+    client, _, _ = _client(jobs=jobs)
+
+    response = client.get("/api/tasks/13958/completed-runs")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "schema_version": "yieldforge.api-error.v1",
+        "code": "archive_integrity",
+        "message": "completed run archive failed validation",
+    }
 
 
 def test_api_import_does_not_load_pandas_or_pickle() -> None:

@@ -160,6 +160,38 @@ class TaskJobPage(ApiContract):
     items: tuple[JobView, ...]
 
 
+class CompletedRunSettings(ApiContract):
+    seed: StrictInt
+    total_computation_time: StrictInt = Field(gt=0)
+    num_workers: Literal[1]
+    early_termination: StrictBool
+    min_items_separation: StrictFloat | None = Field(default=None, ge=0)
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
+
+
+class CompletedArchiveIdentity(ApiContract):
+    schema_version: Literal["yieldforge.candidate-archive.v1"] = (
+        "yieldforge.candidate-archive.v1"
+    )
+    batch_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CompletedRunView(ApiContract):
+    schema_version: Literal["yieldforge.api-completed-run.v1"] = (
+        "yieldforge.api-completed-run.v1"
+    )
+    job: JobView
+    settings: CompletedRunSettings
+    archive: CompletedArchiveIdentity
+
+
+class CompletedRunPage(ApiContract):
+    schema_version: Literal["yieldforge.api-completed-run-page.v1"] = (
+        "yieldforge.api-completed-run-page.v1"
+    )
+    items: tuple[CompletedRunView, ...]
+
+
 class GenerateOrderBookInput(ApiContract):
     """The only caller-controlled inputs accepted by the order-book generator."""
 
