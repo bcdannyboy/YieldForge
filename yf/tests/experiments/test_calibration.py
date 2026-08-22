@@ -22,10 +22,13 @@ from yieldforge.experiments.calibration import (
     CalibrationCellEvidence,
     CalibrationRunIdentity,
     CalibrationRunResult,
+    ConfirmationRunIdentity,
     ConfirmationRunResult,
     GeometryCalibrationResult,
     GeometryConfirmationEvaluation,
+    GeometryConfirmationResult,
     build_geometry_calibration_result,
+    build_geometry_confirmation_result,
     evaluate_calibration,
     evaluate_confirmation,
     load_geometry_calibration_result,
@@ -35,6 +38,7 @@ from yieldforge.experiments.calibration import (
     registered_cells,
     registered_confirmation_cells,
     validate_geometry_calibration_result,
+    validate_geometry_confirmation_result,
 )
 from yieldforge.experiments.contracts import (
     PureGeometryCalibrationProtocol,
@@ -747,3 +751,64 @@ def test_confirmation_orchestration_executes_only_registered_cells_sequentially(
     assert not {item.cell.tasks_index for item in result.evidence} & set(
         _confirmation_protocol().split.calibration_task_ids
     )
+
+
+def _synthetic_confirmation_runtime_result() -> ConfirmationRunResult:
+    protocol = _confirmation_protocol()
+    evidence = _complete_confirmation_evidence()
+    attempts = tuple(
+        CalibrationAttemptOutcome(
+            cell=item.cell,
+            attempt_number=1,
+            job_id=f"confirm-job-{index}",
+            status=JobStatus.COMPLETED,
+            error_code=None,
+            archive_valid=True,
+            batch_sha256=hashlib.sha256(f"confirm-archive-{index}".encode()).hexdigest(),
+            candidates=item.candidates,
+        )
+        for index, item in enumerate(evidence)
+    )
+    cells = registered_confirmation_cells(protocol)
+    return ConfirmationRunResult(
+        run=ConfirmationRunIdentity(
+            parent_protocol_id=protocol.protocol_id,
+            parent_protocol_sha256=protocol.content_sha256,
+            m0_contract_sha256=protocol.references.m0_contract_sha256,
+            calibration_result_id=protocol.calibration_result.result_id,
+            calibration_result_sha256=protocol.calibration_result.content_sha256,
+            dataset_id=protocol.references.dataset_id,
+            catalog_sha256=protocol.references.catalog_artifact_sha256,
+            api_origin="http://127.0.0.1:18082",
+            registered_cell_ids=tuple(cell.cell_id for cell in cells),
+        ),
+        attempts=attempts,
+        evidence=evidence,
+        evaluation=evaluate_confirmation(protocol, evidence),
+    )
+
+
+def test_confirmation_result_is_content_addressed_and_recomputes_gate() -> None:
+    result = build_geometry_confirmation_result(
+        _confirmation_protocol(),
+        _synthetic_confirmation_runtime_result(),
+    )
+
+    assert isinstance(result, GeometryConfirmationResult)
+    assert result.result_id == f"yfgfr-{result.content_sha256[7:31]}"
+    assert len(result.attempts) == 812
+    assert len(result.selected_attempts) == 812
+    assert result.evaluation.decision == "proceed_to_m3"
+    validate_geometry_confirmation_result(_confirmation_protocol(), result)
+
+
+def test_confirmation_result_rejects_tampered_attempt_evidence() -> None:
+    result = build_geometry_confirmation_result(
+        _confirmation_protocol(),
+        _synthetic_confirmation_runtime_result(),
+    )
+    payload = result.model_dump(mode="json")
+    payload["attempts"][0]["batch_sha256"] = "f" * 64
+
+    with pytest.raises(ValueError, match="content SHA-256"):
+        GeometryConfirmationResult.model_validate_json(json.dumps(payload), strict=True)

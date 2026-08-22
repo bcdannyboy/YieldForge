@@ -47,6 +47,7 @@ from yieldforge.workbench.contracts import TERMINAL_JOB_STATUSES, JobStatus
 
 _MAX_API_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_CALIBRATION_RESULT_BYTES = 32 * 1024 * 1024
+_MAX_CONFIRMATION_RESULT_BYTES = 64 * 1024 * 1024
 _REGISTERED_OUTER_RUNTIME_SECONDS = 60.0
 _RETRYABLE_FAILURE_CODES = frozenset(
     {"worker_spawn", "worker_protocol", "solver_failure", "supervisor_failure"}
@@ -495,6 +496,46 @@ class GeometryCalibrationResult(FrozenExperimentModel):
         return self
 
 
+class GeometryConfirmationResult(FrozenExperimentModel):
+    """Canonical bounded evidence published after the registered confirmation."""
+
+    schema_version: Literal["yieldforge.geometry-confirmation-result.v1"] = (
+        "yieldforge.geometry-confirmation-result.v1"
+    )
+    result_id: StrictStr = Field(pattern=r"^yfgfr-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    run: ConfirmationRunIdentity
+    attempts: tuple[CalibrationAttemptOutcome, ...]
+    selected_attempts: tuple[CalibrationSelectedAttempt, ...]
+    evaluation: GeometryConfirmationEvaluation
+    claim_ceiling: Literal[
+        "source_recorded_near_tied_geometry_only_not_residual_or_economic_evidence"
+    ] = "source_recorded_near_tied_geometry_only_not_residual_or_economic_evidence"
+
+    @model_validator(mode="after")
+    def require_complete_content_addressed_result(self) -> Self:
+        attempt_by_key = {
+            (attempt.cell.cell_id, attempt.attempt_number): attempt for attempt in self.attempts
+        }
+        if len(attempt_by_key) != len(self.attempts):
+            raise ValueError("confirmation result repeats an attempt")
+        if tuple(item.cell_id for item in self.selected_attempts) != self.run.registered_cell_ids:
+            raise ValueError("selected attempts do not cover the registered cells in order")
+        for selected in self.selected_attempts:
+            attempt = attempt_by_key.get((selected.cell_id, selected.attempt_number))
+            if attempt is None or attempt.job_id != selected.job_id:
+                raise ValueError("selected attempt does not reference exact attempt evidence")
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"result_id", "content_sha256"},
+        )
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("confirmation result content SHA-256 does not match semantic content")
+        if self.result_id != f"yfgfr-{digest[:24]}":
+            raise ValueError("confirmation result ID does not match semantic content")
+        return self
+
+
 def _canonical_model_bytes(value: BaseModel) -> bytes:
     return (
         json.dumps(
@@ -876,6 +917,7 @@ class GeometryConfirmationEvaluation(FrozenExperimentModel):
 CalibrationRunResult.model_rebuild()
 GeometryCalibrationResult.model_rebuild()
 ConfirmationRunResult.model_rebuild()
+GeometryConfirmationResult.model_rebuild()
 
 
 def registered_cells(
@@ -1183,6 +1225,51 @@ def validate_geometry_calibration_result(
         raise ValueError("calibration result selector output does not match attempt evidence")
 
 
+def _selected_confirmation_outcomes(
+    result: GeometryConfirmationResult,
+) -> tuple[CalibrationAttemptOutcome, ...]:
+    attempts = {
+        (attempt.cell.cell_id, attempt.attempt_number): attempt for attempt in result.attempts
+    }
+    return tuple(
+        attempts[(selected.cell_id, selected.attempt_number)]
+        for selected in result.selected_attempts
+    )
+
+
+def validate_geometry_confirmation_result(
+    protocol: PureGeometryConfirmationProtocol,
+    result: GeometryConfirmationResult,
+) -> None:
+    """Recompute the frozen M2 gate from selected immutable attempt evidence."""
+
+    cells = registered_confirmation_cells(protocol)
+    run = result.run
+    if (
+        run.parent_protocol_id != protocol.protocol_id
+        or run.parent_protocol_sha256 != protocol.content_sha256
+        or run.m0_contract_sha256 != protocol.references.m0_contract_sha256
+        or run.calibration_result_id != protocol.calibration_result.result_id
+        or run.calibration_result_sha256 != protocol.calibration_result.content_sha256
+        or run.dataset_id != protocol.references.dataset_id
+        or run.catalog_sha256 != protocol.references.catalog_artifact_sha256
+        or run.registered_cell_ids != tuple(cell.cell_id for cell in cells)
+    ):
+        raise ValueError("confirmation result run identity does not match the frozen protocol")
+    outcomes = _selected_confirmation_outcomes(result)
+    evidence = tuple(
+        CalibrationCellEvidence(
+            cell=outcome.cell,
+            archive_valid=outcome.archive_valid,
+            candidates=outcome.candidates,
+        )
+        for outcome in outcomes
+    )
+    recomputed = evaluate_confirmation(protocol, evidence)
+    if recomputed != result.evaluation:
+        raise ValueError("confirmation result gate output does not match attempt evidence")
+
+
 def load_geometry_calibration_result(path: Path) -> GeometryCalibrationResult:
     """Load one large canonical result through a dedicated bounded artifact boundary."""
 
@@ -1202,6 +1289,28 @@ def load_geometry_calibration_result(path: Path) -> GeometryCalibrationResult:
         raise ValueError("calibration result validation failed") from error
     if _canonical_model_bytes(result) != data:
         raise ValueError("calibration result does not use canonical JSON encoding")
+    return result
+
+
+def load_geometry_confirmation_result(path: Path) -> GeometryConfirmationResult:
+    """Load one large canonical confirmation through a bounded artifact boundary."""
+
+    artifact = Path(path)
+    try:
+        metadata = artifact.lstat()
+    except OSError as error:
+        raise ValueError("confirmation result could not be inspected") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("confirmation result must be a regular file and not a symlink")
+    if metadata.st_size > _MAX_CONFIRMATION_RESULT_BYTES:
+        raise ValueError("confirmation result exceeds the 64 MiB limit")
+    try:
+        data = artifact.read_bytes()
+        result = GeometryConfirmationResult.model_validate_json(data, strict=True)
+    except (OSError, ValidationError) as error:
+        raise ValueError("confirmation result validation failed") from error
+    if _canonical_model_bytes(result) != data:
+        raise ValueError("confirmation result does not use canonical JSON encoding")
     return result
 
 
@@ -1261,4 +1370,63 @@ def build_geometry_calibration_result(
         evaluation=runtime.evaluation,
     )
     validate_geometry_calibration_result(protocol, result)
+    return result
+
+
+def build_geometry_confirmation_result(
+    protocol: PureGeometryConfirmationProtocol,
+    runtime: ConfirmationRunResult,
+) -> GeometryConfirmationResult:
+    """Collapse one complete confirmation ledger into the canonical committed result."""
+
+    cells = registered_confirmation_cells(protocol)
+    if runtime.run.registered_cell_ids != tuple(cell.cell_id for cell in cells):
+        raise ValueError("runtime result does not cover the exact registered cells")
+    if tuple(item.cell for item in runtime.evidence) != cells:
+        raise ValueError("runtime evidence does not preserve registered cell order")
+    if evaluate_confirmation(protocol, runtime.evidence) != runtime.evaluation:
+        raise ValueError("runtime gate output does not match its evidence")
+
+    attempts_by_cell: dict[str, list[CalibrationAttemptOutcome]] = defaultdict(list)
+    for attempt in runtime.attempts:
+        attempts_by_cell[attempt.cell.cell_id].append(attempt)
+    selected_attempts = []
+    for evidence in runtime.evidence:
+        cell_attempts = attempts_by_cell.get(evidence.cell.cell_id, [])
+        if not cell_attempts:
+            raise ValueError("runtime evidence has no corresponding terminal attempt")
+        selected = max(cell_attempts, key=lambda attempt: attempt.attempt_number)
+        if (
+            selected.archive_valid != evidence.archive_valid
+            or selected.candidates != evidence.candidates
+        ):
+            raise ValueError("runtime evidence does not match its selected terminal attempt")
+        selected_attempts.append(
+            CalibrationSelectedAttempt(
+                cell_id=evidence.cell.cell_id,
+                attempt_number=selected.attempt_number,
+                job_id=selected.job_id,
+            )
+        )
+
+    payload = {
+        "schema_version": "yieldforge.geometry-confirmation-result.v1",
+        "run": runtime.run.model_dump(mode="json"),
+        "attempts": [attempt.model_dump(mode="json") for attempt in runtime.attempts],
+        "selected_attempts": [selected.model_dump(mode="json") for selected in selected_attempts],
+        "evaluation": runtime.evaluation.model_dump(mode="json"),
+        "claim_ceiling": (
+            "source_recorded_near_tied_geometry_only_not_residual_or_economic_evidence"
+        ),
+    }
+    digest = semantic_sha256(payload)
+    result = GeometryConfirmationResult(
+        result_id=f"yfgfr-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        run=runtime.run,
+        attempts=runtime.attempts,
+        selected_attempts=tuple(selected_attempts),
+        evaluation=runtime.evaluation,
+    )
+    validate_geometry_confirmation_result(protocol, result)
     return result
