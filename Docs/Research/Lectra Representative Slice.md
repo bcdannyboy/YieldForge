@@ -91,7 +91,7 @@ The real slice export ran in the locked, network-disabled, read-only, non-root q
 
 ## Qualified catalog expansion
 
-The committed catalog at `yf/datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json` extends the same passive-evidence boundary to 256 fully display-safe tasks under `lectra-catalog-rules.v1`. It is 9,554,652 bytes with SHA-256 `4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138`. The adjacent `manifest.json` binds that artifact to the exact source manifest, audit report, ruleset, byte size, and row counts.
+The committed catalog at `yf/datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json` extends the same passive-evidence boundary to 256 fully display-safe tasks under `lectra-catalog-rules.v1`. It is 9,554,652 bytes with SHA-256 `4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138`. The adjacent `catalog-manifest.json` binds that artifact to the exact source manifest, audit report, ruleset, byte size, and row counts.
 
 The catalog contains 8,358 part rows, 745 distinct shape rows with 745 derived geometry records, and 8,398 constraint rows: 8,358 `s1` rows and 40 `c8` rows. All 256 tasks are normalized as `source_lossless`; none is `directly_supported`. Sixty-nine are `runnable_with_explicit_assumptions` and projection-eligible only under `interpret_s1_degenerate_entries_as_allowed_rotations`. The remaining 187 are view-only and projection-blocked: 185 with `s1_projection_requirements_not_met` and two with `contains_non_s1_constraints`.
 
