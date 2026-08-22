@@ -6,15 +6,17 @@ YieldForge's workbench is a local research instrument under `yf/`; it is not a h
 
 - Task `13958` is runnable only after acknowledging `interpret_s1_degenerate_entries_as_allowed_rotations` exactly.
 - Task `25801` is source-lossless and view-only because its non-`s1` `c8` semantics remain unresolved.
-- With the documented Postgres read model enabled, Corpus Explorer exposes exactly 256 fully exported tasks: 69 assumption-backed and 187 view-only. This deterministic selection is not a prevalence sample of the full Lectra release.
+- With the documented Postgres read model enabled, Corpus Explorer exposes exactly 256 fully exported tasks under `lectra-catalog-rules.v2`: 254 assumption-backed and two view-only. The two blocked tasks contain non-`s1` constraints. This deterministic selection is not a prevalence sample of the full Lectra release.
 - Without `YIELDFORGE_DATABASE_URL`, the API deliberately retains the original two-task committed-fixture fallback.
+
+Ruleset v2 preserves uniform binary `s1` flip states instead of treating every flip-bearing task as unsupported. The source-recorded projection interprets `flip_x = 1` as local-x coordinate negation before rotation. A separate `force_flip_x_zero` projection keeps the original polygon and is labeled with `force_s1_flip_x_zero_for_ablation`; it is a derived intervention, not source evidence. Mixed flip values within one constraint row, nonbinary flip values, and non-`s1` constraints remain fail-closed. Task `6669` is the browser E2E witness: six parts carry recorded flips and both projection arms are available after acknowledging the exact two assumptions; the no-flip arm additionally requires the intervention acknowledgement.
 
 Corpus geometry and task composition are source-observed. Candidate placement geometry is derived from a verified immutable archive. Order-book chronology and economics are generated, while material assignment is assumed. Full order-book manifests reveal future events and generator-only regime labels, so the UI marks them analysis-only rather than baseline-facing.
 
 ## Views
 
 - **Corpus Explorer** pages through the committed catalog, filters on server-owned facets, and shows source rows, constraint types, support state, exclusion reasons, and source polygon geometry.
-- **Nest Lab** enforces the server-owned solve gate, streams durable job events, shows progressive candidates, and reconciles complete terminal archives. Its completed-run history is newest-first, exposes exact recorded solver settings and the verified batch SHA-256 without internal paths, and can reopen any listed immutable archive to render derived SVG placements. A read-only comparison uses the open archive as Run A and one chosen completed archive as Run B; it shows exact recorded values with neutral Same/Different relations only. Archived candidate count is inventory, not quality.
+- **Nest Lab** enforces the server-owned solve gate, can submit either projection arm or one matched recorded/no-flip experiment, streams both durable job lifecycles, shows progressive source-arm candidates, and reconciles both complete terminal archives. A matched submission uses the same task, seed, solver settings, and runtime budget for both arms while preserving distinct projection hashes and a shared experiment-pair identity. Completed-run history is newest-first, exposes exact projection metadata, solver settings, and verified batch SHA-256 without internal paths, and can reopen either immutable archive to render derived SVG placements. A read-only comparison uses the open archive as Run A and one chosen completed archive as Run B; it shows exact recorded values with neutral Same/Different relations only. Archived candidate count is inventory, not quality, and the pair UI does not report a winner.
 - **Order Book Lab** lists and opens the three committed deterministic fixtures, displays chronology/diagnostics/provenance, links events to corpus and eligible nest views, and publishes deterministic local books without overwriting an existing identity.
 
 ## Reproduce the source evidence
@@ -108,7 +110,7 @@ Then open `http://127.0.0.1:5173`.
 
 ## Direct API smoke
 
-With FastAPI running, these calls exercise the same server-owned gates as the browser. Task `25801` remains inspectable but cannot be submitted. Task `13958` accepts exactly the one listed assumption:
+With FastAPI running, these calls exercise the same server-owned gates as the browser. Task `25801` remains inspectable but cannot be submitted. Task `13958` accepts exactly the one listed assumption through the source-recorded projection:
 
 ```bash
 API_ORIGIN=http://127.0.0.1:8000
@@ -116,8 +118,18 @@ curl -fsS "$API_ORIGIN/api/corpus/summary"
 curl -fsS "$API_ORIGIN/api/tasks/25801"
 curl -fsS -X POST "$API_ORIGIN/api/solver-jobs" \
   -H 'Content-Type: application/json' \
-  --data '{"schema_version":"yieldforge.api-solver-job-request.v1","tasks_index":13958,"acknowledged_assumption_codes":["interpret_s1_degenerate_entries_as_allowed_rotations"],"seed":23,"total_computation_time":3,"early_termination":false,"min_items_separation":null,"max_runtime_seconds":5.0}'
+  --data '{"schema_version":"yieldforge.api-solver-job-request.v2","tasks_index":13958,"projection_mode":"source_as_recorded","acknowledged_assumption_codes":["interpret_s1_degenerate_entries_as_allowed_rotations"],"acknowledged_intervention_codes":[],"seed":23,"total_computation_time":3,"early_termination":false,"min_items_separation":null,"max_runtime_seconds":5.0}'
 ```
+
+Task `6669` exercises the matched flip sensitivity path. The request must acknowledge both projection assumptions and the derived no-flip intervention exactly:
+
+```bash
+curl -fsS -X POST "$API_ORIGIN/api/matched-solver-jobs" \
+  -H 'Content-Type: application/json' \
+  --data '{"schema_version":"yieldforge.api-matched-solver-jobs-request.v1","tasks_index":6669,"acknowledged_assumption_codes":["interpret_s1_degenerate_entries_as_allowed_rotations","interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation"],"acknowledged_intervention_codes":["force_s1_flip_x_zero_for_ablation"],"seed":23,"total_computation_time":3,"early_termination":false,"min_items_separation":null,"max_runtime_seconds":5.0}'
+```
+
+The response contains `source_as_recorded` and `force_flip_x_zero` job views. They have different immutable job and projection identities, the requested identical solver configuration, and one shared `experiment_pair_id`. Failure to start either arm triggers best-effort cancellation of the other rather than returning an incomplete pair.
 
 Use the returned `job_id` to observe the durable stream and, after completion, browse its immutable archive and derived placement geometry:
 
@@ -129,7 +141,7 @@ curl -fsS "$API_ORIGIN/api/solver-jobs/JOB_ID/candidates/CANDIDATE_ID/geometry"
 curl -fsS "$API_ORIGIN/api/tasks/13958/completed-runs?limit=20"
 ```
 
-The completed-run response contains only task/source-bound completed jobs whose archives can be reopened and verified. It is newest-first and publishes recorded solver settings plus the archive batch SHA-256; it never publishes the server archive path or worker PID. Nest Lab performs pairwise inspection entirely over this already validated response, with no second archive fetch, mutation, score, winner, or economic calculation.
+The completed-run response contains only task/source-bound completed jobs whose archives can be reopened and verified. It is newest-first and publishes recorded projection/pair metadata, solver settings, and the archive batch SHA-256; it never publishes the server archive path or worker PID. Nest Lab performs pairwise inspection entirely over this already validated response, with no comparison mutation, score, winner, or economic calculation.
 
 List the committed and locally generated immutable order books, then publish an idempotent deterministic request:
 
@@ -168,4 +180,4 @@ The real E2E is a completion gate only when it reaches the actual FastAPI servic
 
 ## Claim ceiling
 
-This catalog workbench proves local inspection of a bounded 256-task selection, bounded assumption-backed job execution, transport contracts, task-bound completed-run rediscovery, descriptive pairwise inspection, immutable candidate/archive browsing, and deterministic provenance-labeled order-book generation. Pairwise inspection shows recorded settings, source/archive identities, timestamps, assumptions, and candidate inventory; it does not compare runs scientifically, measure candidate quality, or prove solver optimality. The workbench does not establish corpus representativeness or source-unit meaning, and it does not provide residual geometry, remnant reuse, inventory conservation, a chronological simulator, a strong baseline, an oracle, material savings, production fitness, or buyer value.
+This catalog workbench proves local inspection of a bounded 256-task selection, bounded assumption-backed job execution, explicit uniform-binary flip projection, matched recorded/no-flip process execution, transport contracts, task-bound completed-run rediscovery, descriptive pairwise inspection, immutable candidate/archive browsing, and deterministic provenance-labeled order-book generation. Pairwise inspection shows recorded projection/settings, pair/source/archive identities, timestamps, assumptions, interventions, and candidate inventory; it does not scientifically compare runs, measure candidate quality, choose a preferred flip policy, or prove solver optimality. The workbench does not establish corpus representativeness or source-unit meaning, and it does not provide residual geometry, remnant reuse, inventory conservation, a chronological simulator, a strong baseline, an oracle, material savings, production fitness, or buyer value.

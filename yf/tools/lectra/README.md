@@ -125,9 +125,11 @@ The literal source unit stays `m^-4` with no inferred interpretation.
 Catalog mode uses the same sealed-input container and exact manifest/audit evidence binding as
 slice mode, but calls only the deterministic `export_catalog_slice` path. It exports exactly 256
 fully display-safe tasks, including continuity tasks `13958` and `25801`, under the
-`lectra-catalog-rules.v1` ruleset. This bounded research catalog is not a prevalence sample of the
-full release, and tasks remain view-only unless the strict existing `s1` projection rule supports
-the explicit rotation assumption.
+`lectra-catalog-rules.v2` ruleset. This bounded research catalog is not a prevalence sample of the
+full release. Uniform binary `s1` flip states are retained: a source-recorded projection interprets
+`flip_x = 1` as local-x negation before rotation, and a separately labeled no-flip projection is
+available only as an intervention-backed ablation. Mixed-within-row and nonbinary flip states, plus
+all non-`s1` constraints, remain blocked rather than guessed.
 
 Use a new empty output directory and the exact validated audit report whose bytes should bind the
 catalog:

@@ -73,7 +73,7 @@ That assumption treats the equal start/end entries as the allowed orientations u
 
 This task contains part IDs `110000` through `110031`, again scoped to its own task. It is preserved for inspection but its solver projection is blocked with reason code `contains_non_s1_constraints`. YieldForge has not established the semantics of the 20 `c8` rows, so ignoring or guessing them would not be a lossless projection. No direct-support or runnable claim is made for this task.
 
-The 32 `s1` rows do not remove that exclusion. Their degenerate start/end values split evenly between `0.0` and `180.0`, and 12 of their flip fields contain `1`. The exporter does not apply the runnable task's no-mirror interpretation to this view-only record.
+The 32 `s1` rows do not remove that exclusion. Their degenerate start/end values split evenly between `0.0` and `180.0`, and 12 of their flip fields contain `1`. Ruleset v2 does not discard those flips, but it still refuses to create any solver projection while the task's `c8` semantics remain unresolved.
 
 ## Geometry checks and claim boundary
 
@@ -91,11 +91,13 @@ The real slice export ran in the locked, network-disabled, read-only, non-root q
 
 ## Qualified catalog expansion
 
-The committed catalog at `yf/datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json` extends the same passive-evidence boundary to 256 fully display-safe tasks under `lectra-catalog-rules.v1`. It is 9,554,652 bytes with SHA-256 `4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138`. The adjacent `catalog-manifest.json` binds that artifact to the exact source manifest, audit report, ruleset, byte size, and row counts.
+The committed catalog at `yf/datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json` extends the same passive-evidence boundary to 256 fully display-safe tasks under `lectra-catalog-rules.v2`. It is 9,575,575 bytes with SHA-256 `0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad`. The adjacent `catalog-manifest.json` binds that artifact to the exact source manifest, audit report, ruleset, byte size, and row counts.
 
-The catalog contains 8,358 part rows, 745 distinct shape rows with 745 derived geometry records, and 8,398 constraint rows: 8,358 `s1` rows and 40 `c8` rows. All 256 tasks are normalized as `source_lossless`; none is `directly_supported`. Sixty-nine are `runnable_with_explicit_assumptions` and projection-eligible only under `interpret_s1_degenerate_entries_as_allowed_rotations`. The remaining 187 are view-only and projection-blocked: 185 with `s1_projection_requirements_not_met` and two with `contains_non_s1_constraints`.
+The catalog contains 8,358 part rows, 745 distinct shape rows with 745 derived geometry records, and 8,398 constraint rows: 8,358 `s1` rows and 40 `c8` rows. All 256 tasks are normalized as `source_lossless`; none is `directly_supported`. Two hundred fifty-four are `runnable_with_explicit_assumptions`: zero-flip tasks require `interpret_s1_degenerate_entries_as_allowed_rotations`, while flip-bearing tasks also require `interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation`. The source-recorded projection applies local-x negation before rotation for uniform binary `flip_x = 1`. Those tasks also expose an explicitly derived `force_flip_x_zero` ablation under `force_s1_flip_x_zero_for_ablation`. The remaining two tasks are view-only because they contain non-`s1` constraints.
 
-The continuity classifications remain unchanged: task `13958` is assumption-gated and eligible, while task `25801` is view-only and blocked for its non-`s1` constraints. Two independent locked exports produced byte-identical catalog files. Their reported peak memory values were `9,376,354,304` and `9,377,169,408` bytes, respectively, and the promoted bytes passed the host's strict finite, duplicate-key-free, schema-valid, manifest-bound, and audit-bound passive-evidence validation.
+Task `6669` is the matched-experiment witness in the browser suite. It has 36 parts, five distinct shapes, 36 `s1` rows, and six flip-bearing parts. Its source-recorded and forced-no-flip projections retain separate content identities and can be launched with an identical solver configuration under one experiment-pair identity. That establishes a controlled execution pair, not a quality, optimality, or savings result.
+
+The continuity classifications remain unchanged: task `13958` is assumption-gated and eligible, while task `25801` is view-only and blocked for its non-`s1` constraints. The ruleset-v2 promoted bytes passed the host's strict finite, duplicate-key-free, schema-valid, manifest-bound, and audit-bound passive-evidence validation. The catalog manifest is the authority for their current byte identity; the earlier ruleset-v1 export hashes and peak-memory observations no longer describe the promoted artifact.
 
 This 256-task catalog is a bounded deterministic research selection, not a prevalence sample of the 100,000-task release. It adds browsing breadth without establishing chronology, materials, economics, manufacturing sequence, residual geometry, remnant reuse, simulator truth, oracle quality, or savings.
 

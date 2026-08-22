@@ -13,6 +13,8 @@ The adapter makes Spyrrow a candidate generator behind YieldForge-owned contract
 7. normalize placements and deduplicate identical layouts;
 8. return solver-independent contracts that can be written to an immutable archive.
 
+For qualified Lectra `s1` tasks, projection occurs before this adapter boundary and is recorded in the task binding. `source_as_recorded` negates each polygon's local x coordinates before applying an allowed rotation when that part's uniform binary source flip is `1`. `force_flip_x_zero` passes the original local polygon as an explicitly intervention-backed ablation. The projection mode, assumptions, intervention, source flip count, transform description, and projection SHA-256 are immutable run provenance; neither mode changes the source catalog.
+
 ## Reproducibility identity
 
 The environment pins `spyrrow==0.9.0` in `uv.lock`. Every archive also records the Sparrow source revision declared by that Spyrrow release, the full run configuration, the canonical problem, and a SHA-256 hash of the batch.
@@ -22,6 +24,7 @@ This is necessary provenance, not yet a proof that independent runs produce M2's
 ## Intentional limits
 
 - Input parts are simple polygons; holes are not supported at this boundary.
+- Mixed flip values within one source constraint row, nonbinary flip values, and non-`s1` constraints are blocked upstream rather than guessed here.
 - Spyrrow solves strip packing. The adapter enforces the current finite sheet length afterward.
 - A candidate currently contains placements, width, density, solver provenance, and report type. Exact residual geometry begins in M3.
 - Shapely is pinned for the coming geometry work but is not used to validate residual truth yet.
