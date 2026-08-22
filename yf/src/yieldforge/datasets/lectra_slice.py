@@ -41,6 +41,7 @@ from yieldforge.datasets.normalized_slice import (
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 
 MAX_RANKED_CANDIDATES = 256
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
 MIN_PARTS = 20
 MAX_PARTS = 50
 TARGET_PARTS = 35
@@ -122,6 +123,13 @@ def _source_int(value: Any, *, label: str, nonnegative: bool = False) -> int:
     result = int(value)
     if nonnegative and result < 0:
         raise ValueError(f"{label} must be nonnegative")
+    return result
+
+
+def _browser_safe_int(value: Any, *, label: str, nonnegative: bool = False) -> int:
+    result = _source_int(value, label=label, nonnegative=nonnegative)
+    if not -MAX_SAFE_JSON_INTEGER <= result <= MAX_SAFE_JSON_INTEGER:
+        raise ValueError(f"{label} must be browser-safe as a JSON integer")
     return result
 
 
@@ -292,6 +300,37 @@ def _shape_positions_for_candidates(
         if not bool(mask.iloc[position]):
             continue
         shape_hash = _source_int(_cell(shapes, position, "shape_hash"), label="shape_hash")
+        if shape_hash in positions:
+            duplicates.add(shape_hash)
+        else:
+            positions[shape_hash] = position
+    for shape_hash in duplicates:
+        positions.pop(shape_hash, None)
+    return positions
+
+
+def _catalog_shape_positions_for_candidates(
+    shapes: Any,
+    parts: Any,
+    parts_by_task: Mapping[int, list[int]],
+) -> dict[int, int]:
+    """Index valid shape hashes without letting one bad part abort catalog scanning."""
+    hashes: set[int] = set()
+    for part_positions in parts_by_task.values():
+        for position in part_positions:
+            try:
+                hashes.add(_source_int(_cell(parts, position, "shape_hash"), label="shape_hash"))
+            except ValueError:
+                continue
+    positions: dict[int, int] = {}
+    duplicates: set[int] = set()
+    for position in range(len(shapes)):
+        try:
+            shape_hash = _source_int(_cell(shapes, position, "shape_hash"), label="shape_hash")
+        except ValueError:
+            continue
+        if shape_hash not in hashes:
+            continue
         if shape_hash in positions:
             duplicates.add(shape_hash)
         else:
@@ -495,6 +534,130 @@ def _task_source_row(tasks: Any, position: int) -> TaskSourceRow:
     )
 
 
+def _catalog_source_index_positions(
+    frame: Any, positions: Sequence[int], *, table: str
+) -> dict[int, int]:
+    indexed: dict[int, int] = {}
+    for position in positions:
+        source_index = _browser_safe_int(
+            frame.index[position],
+            label=f"{table} source row index",
+            nonnegative=True,
+        )
+        prior_position = indexed.get(source_index)
+        if prior_position is not None and prior_position != position:
+            raise ValueError(f"{table} source row indexes must be unique")
+        indexed[source_index] = position
+    return indexed
+
+
+def _validate_catalog_candidate(
+    task_id: int,
+    *,
+    frames: Mapping[str, Any],
+    task_position: int,
+    part_positions: list[int],
+    constraint_positions: list[int],
+    shape_positions: Mapping[int, int],
+) -> tuple[tuple[str, ...], dict[str, dict[int, int]]]:
+    task = _task_source_row(frames["tasks"], task_position)
+    _browser_safe_int(task.source_row_index, label="task source_row_index", nonnegative=True)
+    _browser_safe_int(task.duration, label="task duration")
+    _browser_safe_int(task.sheet_type, label="task sheet_type")
+    _browser_safe_int(task.tasks_index, label="tasks_index", nonnegative=True)
+
+    _validate_task_geometry(
+        task_id,
+        parts=frames["parts"],
+        shapes=frames["shapes"],
+        part_positions=part_positions,
+        shape_positions=shape_positions,
+    )
+    referenced_shape_positions: set[int] = set()
+    for position in part_positions:
+        part = PartSourceRow(
+            source_row_index=_source_row_index(frames["parts"], position, table="parts"),
+            tasks_index=_source_int(
+                _cell(frames["parts"], position, "tasks_index"),
+                label="tasks_index",
+                nonnegative=True,
+            ),
+            part_id=_source_int(
+                _cell(frames["parts"], position, "part_id"),
+                label="part_id",
+                nonnegative=True,
+            ),
+            shape_hash=_source_int(
+                _cell(frames["parts"], position, "shape_hash"), label="shape_hash"
+            ),
+        )
+        _browser_safe_int(part.source_row_index, label="part source_row_index", nonnegative=True)
+        _browser_safe_int(part.tasks_index, label="tasks_index", nonnegative=True)
+        _browser_safe_int(part.part_id, label="part_id", nonnegative=True)
+        if part.tasks_index != task_id:
+            raise ValueError("part row names the wrong tasks_index")
+        referenced_shape_positions.add(shape_positions[part.shape_hash])
+
+    for position in referenced_shape_positions:
+        facts = _geometry_facts(frames["shapes"], position)
+        shape = ShapeSourceRow(
+            source_row_index=_source_row_index(frames["shapes"], position, table="shapes"),
+            shape_hash=_source_int(
+                _cell(frames["shapes"], position, "shape_hash"), label="shape_hash"
+            ),
+            raw=facts.raw,
+            sizes=facts.sizes,
+        )
+        _browser_safe_int(shape.source_row_index, label="shape source_row_index", nonnegative=True)
+        for size in shape.sizes:
+            _browser_safe_int(size, label="shape size", nonnegative=True)
+
+    constraint_types: list[str] = []
+    _validate_view_part_references(
+        parts=frames["parts"],
+        constraints=frames["constraints"],
+        part_positions=part_positions,
+        constraint_positions=constraint_positions,
+    )
+    for position in constraint_positions:
+        constraint = ConstraintSourceRow(
+            source_row_index=_source_row_index(
+                frames["constraints"], position, table="constraints"
+            ),
+            tasks_index=_source_int(
+                _cell(frames["constraints"], position, "tasks_index"),
+                label="tasks_index",
+                nonnegative=True,
+            ),
+            type=_constraint_type(_cell(frames["constraints"], position, "type")),
+            values=tuple(
+                _validate_opaque_value(_cell(frames["constraints"], position, column))
+                for column in CONSTRAINT_OPAQUE_FIELD_ORDER
+            ),
+        )
+        _browser_safe_int(
+            constraint.source_row_index,
+            label="constraint source_row_index",
+            nonnegative=True,
+        )
+        _browser_safe_int(constraint.tasks_index, label="tasks_index", nonnegative=True)
+        if constraint.tasks_index != task_id:
+            raise ValueError("constraint row names the wrong tasks_index")
+        constraint_types.append(constraint.type)
+
+    source_positions = {
+        "tasks": _catalog_source_index_positions(frames["tasks"], (task_position,), table="tasks"),
+        "parts": _catalog_source_index_positions(frames["parts"], part_positions, table="parts"),
+        "shapes": _catalog_source_index_positions(
+            frames["shapes"], tuple(referenced_shape_positions), table="shapes"
+        ),
+        "constraints": _catalog_source_index_positions(
+            frames["constraints"], constraint_positions, table="constraints"
+        ),
+    }
+    return tuple(constraint_types), source_positions
+
+
 def select_catalog_task_ids(
     frames: Mapping[str, Any], *, target_count: int = 256
 ) -> CatalogTaskSelection:
@@ -508,39 +671,41 @@ def select_catalog_task_ids(
     ranked_ids = {candidate.tasks_index for candidate in ranked}
     parts_by_task = _subset_positions(frames["parts"], ranked_ids)
     constraints_by_task = _subset_positions(frames["constraints"], ranked_ids)
-    shape_positions = _shape_positions_for_candidates(
+    shape_positions = _catalog_shape_positions_for_candidates(
         frames["shapes"], frames["parts"], parts_by_task
     )
     task_positions = _task_rows_by_id(frames["tasks"])
 
     selected_ids: list[int] = []
     dispositions: list[TaskDisposition] = []
+    selected_source_positions: dict[str, dict[int, int]] = {
+        "tasks": {},
+        "parts": {},
+        "shapes": {},
+        "constraints": {},
+    }
     for candidate in ranked:
         task_id = candidate.tasks_index
         try:
-            _task_source_row(frames["tasks"], task_positions[task_id])
-            _validate_task_geometry(
-                task_id,
-                parts=frames["parts"],
-                shapes=frames["shapes"],
-                part_positions=parts_by_task[task_id],
-                shape_positions=shape_positions,
-            )
             constraint_positions = constraints_by_task[task_id]
-            constraint_types = tuple(
-                _constraint_type(_cell(frames["constraints"], position, "type"))
-                for position in constraint_positions
-            )
-            _validate_view_part_references(
-                parts=frames["parts"],
-                constraints=frames["constraints"],
+            constraint_types, candidate_source_positions = _validate_catalog_candidate(
+                task_id,
+                frames=frames,
+                task_position=task_positions[task_id],
                 part_positions=parts_by_task[task_id],
                 constraint_positions=constraint_positions,
+                shape_positions=shape_positions,
             )
-            for position in constraint_positions:
-                for column in CONSTRAINT_OPAQUE_FIELD_ORDER:
-                    _validate_opaque_value(_cell(frames["constraints"], position, column))
         except (KeyError, ValueError):
+            continue
+        if any(
+            any(
+                source_index in selected_source_positions[table]
+                and selected_source_positions[table][source_index] != position
+                for source_index, position in positions.items()
+            )
+            for table, positions in candidate_source_positions.items()
+        ):
             continue
 
         try:
@@ -576,6 +741,8 @@ def select_catalog_task_ids(
             )
         selected_ids.append(task_id)
         dispositions.append(disposition)
+        for table, positions in candidate_source_positions.items():
+            selected_source_positions[table].update(positions)
         if len(selected_ids) == target_count:
             break
 
@@ -727,6 +894,7 @@ def export_representative_slice(
         audit_report_sha256=audit_report_sha256,
         task_dispositions=dispositions,
         conversion_ruleset_version=CONVERSION_RULESET_VERSION,
+        skip_unparseable_unselected_shapes=False,
     )
 
 
@@ -749,6 +917,7 @@ def export_catalog_slice(
             disposition.tasks_index: disposition for disposition in selection.task_dispositions
         },
         conversion_ruleset_version=CATALOG_CONVERSION_RULESET_VERSION,
+        skip_unparseable_unselected_shapes=True,
     )
 
 
@@ -760,6 +929,7 @@ def _export_selected_slice(
     audit_report_sha256: str,
     task_dispositions: Mapping[int, TaskDisposition],
     conversion_ruleset_version: str,
+    skip_unparseable_unselected_shapes: bool,
 ) -> NormalizedSlice:
     selected_ids = set(task_dispositions)
     task_positions_by_id = _task_rows_by_id(frames["tasks"])
@@ -774,11 +944,16 @@ def _export_selected_slice(
         _source_int(_cell(frames["parts"], position, "shape_hash"), label="shape_hash")
         for position in part_positions
     }
-    shape_positions = [
-        position
-        for position, value in enumerate(frames["shapes"]["shape_hash"])
-        if _source_int(value, label="shape_hash") in selected_hashes
-    ]
+    shape_positions = []
+    for position, value in enumerate(frames["shapes"]["shape_hash"]):
+        try:
+            shape_hash = _source_int(value, label="shape_hash")
+        except ValueError:
+            if skip_unparseable_unselected_shapes:
+                continue
+            raise
+        if shape_hash in selected_hashes:
+            shape_positions.append(position)
 
     task_positions = _ordered_positions(frames["tasks"], task_positions, table="tasks")
     part_positions = _ordered_positions(frames["parts"], part_positions, table="parts")

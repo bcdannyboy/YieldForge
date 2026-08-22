@@ -17,6 +17,7 @@ from yieldforge.datasets.lectra_slice import (
 )
 from yieldforge.datasets.normalized_slice import (
     CONSTRAINT_OPAQUE_FIELD_ORDER,
+    NormalizedSlice,
     OpaqueMissing,
     OpaqueSequence,
     ProjectionStatus,
@@ -30,6 +31,7 @@ CONSTRAINT_COLUMNS = [
     "tasks_index",
     "type",
 ]
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
 
 
 def _shape(shape_hash: int, *, raw: object | None = None, sizes: object | None = None) -> dict:
@@ -234,6 +236,28 @@ def _catalog_disposition(selection, task_id: int):
     )
 
 
+def _candidate_row_position(frames: dict[str, pd.DataFrame], table: str, task_id: int) -> int:
+    if table == "shapes":
+        shape_hash = (
+            frames["parts"].loc[frames["parts"]["tasks_index"] == task_id, "shape_hash"].iloc[0]
+        )
+        return frames["shapes"].index.get_loc(
+            frames["shapes"].index[frames["shapes"]["shape_hash"] == shape_hash][0]
+        )
+    return frames[table].index.get_loc(
+        frames[table].index[frames[table]["tasks_index"] == task_id][0]
+    )
+
+
+def _replace_source_index(
+    frames: dict[str, pd.DataFrame], table: str, task_id: int, value: object
+) -> None:
+    position = _candidate_row_position(frames, table, task_id)
+    index = list(frames[table].index)
+    index[position] = value
+    frames[table].index = index
+
+
 def test_catalog_selects_exactly_256_stably_and_preserves_continuity_tasks() -> None:
     frames = _catalog_frames()
     selection = select_catalog_task_ids(frames)
@@ -259,6 +283,106 @@ def test_catalog_scans_past_invalid_ranked_candidates() -> None:
     assert len(selection.task_ids) == 256
     assert invalid_task not in selection.task_ids
     assert 30_254 in selection.task_ids
+
+
+@pytest.mark.parametrize("table", ["tasks", "parts", "shapes", "constraints"])
+@pytest.mark.parametrize("bad_index", [-1, "not-an-index", MAX_SAFE_JSON_INTEGER + 1])
+def test_catalog_skips_candidate_with_invalid_source_row_index(
+    table: str, bad_index: object
+) -> None:
+    frames = _catalog_frames(filler_count=2)
+    _replace_source_index(frames, table, 30_000, bad_index)
+
+    selection = select_catalog_task_ids(frames, target_count=3)
+
+    assert selection.task_ids == (13_958, 25_801, 30_001)
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "bad_value"),
+    [
+        ("tasks", "duration", 3.0),
+        ("parts", "part_id", 30_000_000.0),
+        ("constraints", "type", 8),
+    ],
+)
+def test_catalog_skips_candidate_with_malformed_source_row_field(
+    table: str, column: str, bad_value: object
+) -> None:
+    frames = _catalog_frames(filler_count=2)
+    row = frames[table].index[frames[table]["tasks_index"] == 30_000][0]
+    frames[table][column] = frames[table][column].astype(object)
+    frames[table].at[row, column] = bad_value
+
+    selection = select_catalog_task_ids(frames, target_count=3)
+
+    assert selection.task_ids == (13_958, 25_801, 30_001)
+
+
+def test_catalog_isolates_malformed_part_shape_hash_to_its_task() -> None:
+    frames = _catalog_frames(filler_count=2)
+    row = frames["parts"].index[frames["parts"]["tasks_index"] == 30_000][0]
+    frames["parts"]["shape_hash"] = frames["parts"]["shape_hash"].astype(object)
+    frames["parts"].at[row, "shape_hash"] = "not-an-integer"
+
+    selection = select_catalog_task_ids(frames, target_count=3)
+
+    assert selection.task_ids == (13_958, 25_801, 30_001)
+
+
+def test_catalog_export_ignores_malformed_unselected_shape_rows() -> None:
+    frames = _catalog_frames(filler_count=0)
+    frames["shapes"] = pd.concat(
+        [
+            frames["shapes"],
+            pd.DataFrame([{"shape_hash": "not-an-integer", "raw": [0.0] * 6, "sizes": [6]}]),
+        ],
+        ignore_index=True,
+    )
+
+    normalized = _export_catalog(frames, target_count=2)
+
+    assert len(normalized.tasks) == 2
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("tasks", "duration"),
+        ("parts", "part_id"),
+    ],
+)
+def test_catalog_skips_browser_unsafe_integer_source_fields(table: str, column: str) -> None:
+    frames = _catalog_frames(filler_count=2)
+    row = frames[table].index[frames[table]["tasks_index"] == 30_000][0]
+    if table == "tasks":
+        frames[table].at[row, column] = MAX_SAFE_JSON_INTEGER + 1
+    else:
+        old_part_id = frames[table].at[row, column]
+        frames[table].at[row, column] = MAX_SAFE_JSON_INTEGER + 1
+        constraint = next(
+            index
+            for index, value in frames["constraints"]["parts_1"].items()
+            if value == [old_part_id]
+        )
+        frames["constraints"].at[constraint, "parts_1"] = [MAX_SAFE_JSON_INTEGER + 1]
+
+    selection = select_catalog_task_ids(frames, target_count=3)
+
+    assert selection.task_ids == (13_958, 25_801, 30_001)
+
+
+def test_catalog_preserves_shape_hashes_beyond_browser_integer_range() -> None:
+    frames = _catalog_frames(filler_count=0)
+    old_hash = frames["parts"].loc[frames["parts"]["tasks_index"] == 13_958, "shape_hash"].iloc[0]
+    new_hash = MAX_SAFE_JSON_INTEGER + 1
+    frames["parts"].loc[frames["parts"]["shape_hash"] == old_hash, "shape_hash"] = new_hash
+    frames["shapes"].loc[frames["shapes"]["shape_hash"] == old_hash, "shape_hash"] = new_hash
+
+    normalized = _export_catalog(frames, target_count=2)
+
+    assert any(part.shape_hash == new_hash for part in normalized.parts)
+    assert any(shape.shape_hash == new_hash for shape in normalized.shapes)
 
 
 def test_catalog_rejects_insufficient_display_safe_tasks() -> None:
@@ -308,6 +432,22 @@ def test_catalog_classifies_strict_s1_and_view_only_tasks_explicitly() -> None:
     assert view_only.assumption_codes == ()
 
 
+def test_catalog_classifies_failed_s1_projection_as_view_only() -> None:
+    frames = _catalog_frames(filler_count=0)
+    task_constraints = frames["constraints"]["tasks_index"] == 25_801
+    frames["constraints"].loc[task_constraints, "type"] = "s1"
+    first_constraint = frames["constraints"].index[task_constraints][0]
+    frames["constraints"].at[first_constraint, "r1_flip_x"] = [1]
+
+    selection = select_catalog_task_ids(frames, target_count=2)
+
+    disposition = _catalog_disposition(selection, 25_801)
+    assert disposition.support_status is SupportStatus.VIEW_ONLY
+    assert disposition.projection_status is ProjectionStatus.BLOCKED
+    assert disposition.reason_codes == ("s1_projection_requirements_not_met",)
+    assert disposition.assumption_codes == ()
+
+
 def test_catalog_export_uses_catalog_ruleset_and_selection_dispositions() -> None:
     frames = _catalog_frames(filler_count=0)
 
@@ -317,6 +457,16 @@ def test_catalog_export_uses_catalog_ruleset_and_selection_dispositions() -> Non
     assert tuple(task.tasks_index for task in normalized.tasks) == (13_958, 25_801)
     assert normalized.task_dispositions[0].assumption_codes == (S1_ASSUMPTION,)
     assert normalized.task_dispositions[1].reason_codes == ("contains_non_s1_constraints",)
+
+
+def test_catalog_exports_all_256_selected_tasks_as_valid_normalized_evidence() -> None:
+    frames = _catalog_frames(filler_count=254)
+
+    normalized = _export_catalog(frames)
+    reparsed = NormalizedSlice.model_validate_json(normalized.model_dump_json())
+
+    assert len(reparsed.tasks) == 256
+    assert len(reparsed.task_dispositions) == 256
 
 
 def test_selector_uses_exact_rank_score_then_task_id() -> None:
