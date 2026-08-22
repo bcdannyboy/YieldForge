@@ -12,7 +12,9 @@ from yieldforge.domain import (
     CandidateReportType,
     Part,
     Placement,
+    ProjectionMode,
     SolverIdentity,
+    SolverProjectionBinding,
     SourceTaskBinding,
     SpyrrowRunConfig,
     SpyrrowRunResult,
@@ -100,6 +102,35 @@ def test_source_task_binding_round_trips_through_solve_request_and_is_frozen() -
     assert restored.source_task_binding == binding
     with pytest.raises(ValidationError, match="Instance is frozen"):
         binding.tasks_index = 1  # type: ignore[misc]
+
+
+def test_matched_solve_request_arm_must_match_bound_projection() -> None:
+    projection = SolverProjectionBinding(
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
+        projection_sha256="a" * 64,
+        assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
+        source_flip_part_count=1,
+    )
+    binding = SourceTaskBinding(
+        dataset_id="lectra-7030786-v1.1",
+        source_slice_sha256="b" * 64,
+        tasks_index=6669,
+        acknowledged_assumption_codes=projection.assumption_codes,
+        solver_projection=projection,
+    )
+    payload = make_request().model_dump(mode="json")
+    payload.update(
+        source_task_binding=binding.model_dump(mode="json"),
+        experiment_pair_id="pair_test",
+        experiment_arm="force_flip_x_zero",
+    )
+
+    with pytest.raises(ValidationError, match="must match"):
+        SolveRequest.model_validate(payload)
+
+    payload.pop("experiment_pair_id")
+    with pytest.raises(ValidationError, match="provided together"):
+        SolveRequest.model_validate(payload)
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,9 @@ from yieldforge.domain import (
     CandidateReportType,
     Part,
     Placement,
+    ProjectionMode,
     SolverIdentity,
+    SolverProjectionBinding,
     SourceTaskBinding,
     SpyrrowRunConfig,
     StripPackingProblem,
@@ -48,11 +50,18 @@ def make_batch() -> CandidateBatch:
 
 
 def make_source_task_binding() -> SourceTaskBinding:
+    projection = SolverProjectionBinding(
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
+        projection_sha256="a" * 64,
+        assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
+        source_flip_part_count=0,
+    )
     return SourceTaskBinding(
         dataset_id="lectra-7030786-v1.1",
         source_slice_sha256="d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8",
         tasks_index=13958,
         acknowledged_assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
+        solver_projection=projection,
     )
 
 

@@ -1,4 +1,4 @@
-"""Durable, single-active-job supervision for disposable solver workers."""
+"""Durable, bounded supervision for disposable solver workers."""
 
 from __future__ import annotations
 
@@ -24,7 +24,13 @@ from yieldforge.datasets.passive_report import (
     decode_strict_json_bytes,
     read_passive_evidence_file,
 )
-from yieldforge.domain import Candidate, CandidateBatch, SourceTaskBinding, SpyrrowRunResult
+from yieldforge.domain import (
+    Candidate,
+    CandidateBatch,
+    ProjectionMode,
+    SourceTaskBinding,
+    SpyrrowRunResult,
+)
 from yieldforge.workbench.contracts import (
     TERMINAL_JOB_STATUSES,
     JobEvent,
@@ -121,7 +127,7 @@ class SolverJobService:
         self.job_root.mkdir(parents=True, exist_ok=True)
         self.archive_root.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, _JobState] = {}
-        self._active_job_id: str | None = None
+        self._active_job_ids: set[str] = set()
         self._service_lock = asyncio.Lock()
         self._recover_existing_jobs()
 
@@ -130,30 +136,105 @@ class SolverJobService:
 
         validated = SolveRequest.model_validate(request.model_dump())
         async with self._service_lock:
-            if self._active_job_id is not None:
-                active = self._jobs[self._active_job_id]
-                if active.status not in TERMINAL_JOB_STATUSES:
-                    raise ActiveJobError(active.job_id)
-                self._active_job_id = None
-
-            job_id = f"job_{uuid.uuid4().hex}"
-            directory = self.job_root / job_id
-            directory.mkdir(mode=0o700)
-            self._write_new(directory / "request.json", canonical_json(validated) + "\n")
-            now = self._now()
-            state = _JobState(
-                job_id=job_id,
-                directory=directory,
-                request=validated,
-                status=JobStatus.QUEUED,
-                created_at=now,
-                updated_at=now,
+            self._discard_terminal_active_ids_locked()
+            if self._active_job_ids:
+                raise ActiveJobError(sorted(self._active_job_ids)[0])
+            state = self._create_validated_state_locked(validated)
+            self._active_job_ids.add(state.job_id)
+            state.runner = asyncio.create_task(
+                self._run_job(state),
+                name=f"solver-{state.job_id}",
             )
-            self._jobs[job_id] = state
-            self._append_event(state, kind=JobEventKind.STATUS, status=JobStatus.QUEUED)
-            self._active_job_id = job_id
-            state.runner = asyncio.create_task(self._run_job(state), name=f"solver-{job_id}")
             return self._snapshot(state)
+
+    async def start_pair(
+        self,
+        requests: tuple[SolveRequest, SolveRequest],
+    ) -> tuple[JobSnapshot, JobSnapshot]:
+        """Atomically reserve both bounded worker slots for one matched experiment."""
+
+        if not isinstance(requests, tuple) or len(requests) != 2:
+            raise ValueError("matched jobs require exactly two solve requests")
+        validated = tuple(SolveRequest.model_validate(item.model_dump()) for item in requests)
+        self._validate_matched_requests(validated)
+        async with self._service_lock:
+            self._discard_terminal_active_ids_locked()
+            if self._active_job_ids:
+                raise ActiveJobError(sorted(self._active_job_ids)[0])
+            states = tuple(self._create_validated_state_locked(item) for item in validated)
+            self._active_job_ids.update(state.job_id for state in states)
+            for state in states:
+                state.runner = asyncio.create_task(
+                    self._run_job(state),
+                    name=f"solver-{state.job_id}",
+                )
+            snapshots = tuple(self._snapshot(state) for state in states)
+            return snapshots[0], snapshots[1]
+
+    def _discard_terminal_active_ids_locked(self) -> None:
+        self._active_job_ids = {
+            job_id
+            for job_id in self._active_job_ids
+            if self._jobs[job_id].status not in TERMINAL_JOB_STATUSES
+        }
+
+    def _create_validated_state_locked(self, request: SolveRequest) -> _JobState:
+        job_id = f"job_{uuid.uuid4().hex}"
+        directory = self.job_root / job_id
+        directory.mkdir(mode=0o700)
+        self._write_new(directory / "request.json", canonical_json(request) + "\n")
+        now = self._now()
+        state = _JobState(
+            job_id=job_id,
+            directory=directory,
+            request=request,
+            status=JobStatus.QUEUED,
+            created_at=now,
+            updated_at=now,
+        )
+        self._jobs[job_id] = state
+        self._append_event(state, kind=JobEventKind.STATUS, status=JobStatus.QUEUED)
+        return state
+
+    @staticmethod
+    def _validate_matched_requests(requests: tuple[SolveRequest, SolveRequest]) -> None:
+        first, second = requests
+        if (
+            first.experiment_pair_id is None
+            or first.experiment_pair_id != second.experiment_pair_id
+            or {first.experiment_arm, second.experiment_arm}
+            != {
+                ProjectionMode.SOURCE_AS_RECORDED,
+                ProjectionMode.FORCE_FLIP_X_ZERO,
+            }
+        ):
+            raise ValueError("matched requests require one shared pair id and both projection arms")
+        first_binding = first.source_task_binding
+        second_binding = second.source_task_binding
+        if first_binding is None or second_binding is None:
+            raise ValueError("matched requests require source task bindings")
+        first_projection = first_binding.solver_projection
+        second_projection = second_binding.solver_projection
+        if first_projection is None or second_projection is None:
+            raise ValueError("matched requests require solver projection bindings")
+        if (
+            (
+                first_binding.dataset_id,
+                first_binding.source_slice_sha256,
+                first_binding.tasks_index,
+                first_binding.acknowledged_assumption_codes,
+            )
+            != (
+                second_binding.dataset_id,
+                second_binding.source_slice_sha256,
+                second_binding.tasks_index,
+                second_binding.acknowledged_assumption_codes,
+            )
+            or first.config != second.config
+            or first.max_runtime_seconds != second.max_runtime_seconds
+            or first_projection.projection_sha256 == second_projection.projection_sha256
+        ):
+            raise ValueError("matched requests must share source identity and run settings")
 
     async def wait(self, job_id: str) -> JobSnapshot:
         """Wait for one job to become terminal."""
@@ -494,8 +575,7 @@ class SolverJobService:
                 return_exceptions=True,
             )
             async with self._service_lock:
-                if self._active_job_id == state.job_id:
-                    self._active_job_id = None
+                self._active_job_ids.discard(state.job_id)
 
     async def _consume_stdout(
         self, state: _JobState, stream: asyncio.StreamReader
@@ -1141,6 +1221,8 @@ class SolverJobService:
             worker_pid=state.worker_pid,
             archive_path=state.archive_path,
             source_task_binding=state.request.source_task_binding,
+            experiment_pair_id=state.request.experiment_pair_id,
+            experiment_arm=state.request.experiment_arm,
             config=state.request.config,
             max_runtime_seconds=state.request.max_runtime_seconds,
             error_code=state.error_code,

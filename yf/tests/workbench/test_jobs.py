@@ -21,7 +21,9 @@ from yieldforge.domain import (
     CandidateReportType,
     Part,
     Placement,
+    ProjectionMode,
     SolverIdentity,
+    SolverProjectionBinding,
     SourceTaskBinding,
     SpyrrowRunConfig,
     SpyrrowRunResult,
@@ -74,6 +76,53 @@ def make_request(
         max_runtime_seconds=budget,
         source_task_binding=source_task_binding,
     )
+
+
+def make_matched_requests() -> tuple[SolveRequest, SolveRequest]:
+    assumptions = tuple(
+        sorted(
+            (
+                "interpret_s1_degenerate_entries_as_allowed_rotations",
+                "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation",
+            )
+        )
+    )
+    pair_id = "pair_test"
+    requests = []
+    for mode, digest, interventions in (
+        (ProjectionMode.SOURCE_AS_RECORDED, "a" * 64, ()),
+        (
+            ProjectionMode.FORCE_FLIP_X_ZERO,
+            "b" * 64,
+            ("force_s1_flip_x_zero_for_ablation",),
+        ),
+    ):
+        projection = SolverProjectionBinding(
+            mode=mode,
+            projection_sha256=digest,
+            assumption_codes=assumptions,
+            intervention_codes=interventions,
+            source_flip_part_count=1,
+        )
+        binding = SourceTaskBinding(
+            dataset_id="lectra-7030786-v1.1",
+            source_slice_sha256="c" * 64,
+            tasks_index=6669,
+            acknowledged_assumption_codes=assumptions,
+            solver_projection=projection,
+        )
+        requests.append(
+            make_request(
+                problem_name=f"task-6669-{mode.value}",
+                source_task_binding=binding,
+            ).model_copy(
+                update={
+                    "experiment_pair_id": pair_id,
+                    "experiment_arm": mode,
+                }
+            )
+        )
+    return requests[0], requests[1]
 
 
 def make_candidate(index: int) -> Candidate:
@@ -352,6 +401,74 @@ def test_only_one_job_can_be_active(tmp_path: Path) -> None:
         assert blocked.value.active_job_id == first.job_id
 
         await service.cancel(first.job_id)
+
+    run(scenario())
+
+
+def test_matched_pair_runs_concurrently_and_persists_identity(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        jobs = tmp_path / "jobs"
+        archives = tmp_path / "archives"
+        service = SolverJobService(
+            jobs,
+            archives,
+            worker_command=fake_command("complete"),
+        )
+        requests = make_matched_requests()
+
+        recorded, no_flip = await service.start_pair(requests)
+
+        assert recorded.experiment_pair_id == no_flip.experiment_pair_id == "pair_test"
+        assert {recorded.experiment_arm, no_flip.experiment_arm} == {
+            ProjectionMode.SOURCE_AS_RECORDED,
+            ProjectionMode.FORCE_FLIP_X_ZERO,
+        }
+        with pytest.raises(ActiveJobError):
+            await service.start(make_request())
+
+        terminals = await asyncio.gather(
+            service.wait(recorded.job_id),
+            service.wait(no_flip.job_id),
+        )
+        assert {item.status for item in terminals} == {JobStatus.COMPLETED}
+        for terminal in terminals:
+            manifest = json.loads(
+                (archives / terminal.job_id / "manifest.json").read_text(encoding="utf-8")
+            )
+            assert manifest["source_task_binding"] == (
+                terminal.source_task_binding.model_dump(mode="json")
+            )
+
+        recovered = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
+        assert recovered.get(recorded.job_id).experiment_pair_id == "pair_test"
+        assert recovered.get(no_flip.job_id).experiment_pair_id == "pair_test"
+
+    run(scenario())
+
+
+def test_invalid_pair_is_rejected_before_job_directories_are_created(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        jobs = tmp_path / "jobs"
+        service = SolverJobService(
+            jobs,
+            tmp_path / "archives",
+            worker_command=fake_command("complete"),
+        )
+        recorded, no_flip = make_matched_requests()
+        mismatched = no_flip.model_copy(
+            update={
+                "config": SpyrrowRunConfig(
+                    seed=24,
+                    total_computation_time=1,
+                    num_workers=1,
+                )
+            }
+        )
+
+        with pytest.raises(ValueError, match="run settings"):
+            await service.start_pair((recorded, mismatched))
+
+        assert list(jobs.iterdir()) == []
 
     run(scenario())
 

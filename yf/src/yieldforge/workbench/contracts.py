@@ -6,11 +6,20 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 from yieldforge.domain import (
     Candidate,
     CandidateBatch,
+    ProjectionMode,
     SourceTaskBinding,
     SpyrrowRunConfig,
     SpyrrowRunResult,
@@ -32,6 +41,8 @@ class SolveRequest(WorkbenchContract):
     config: SpyrrowRunConfig
     max_runtime_seconds: float = Field(gt=0, le=10)
     source_task_binding: SourceTaskBinding | None = None
+    experiment_pair_id: StrictStr | None = Field(default=None, min_length=1, max_length=80)
+    experiment_arm: ProjectionMode | None = None
 
     @model_validator(mode="after")
     def require_bounded_single_worker(self) -> Self:
@@ -39,6 +50,16 @@ class SolveRequest(WorkbenchContract):
             raise ValueError("config.num_workers must equal one")
         if self.config.total_computation_time > self.max_runtime_seconds:
             raise ValueError("config.total_computation_time must fit within max_runtime_seconds")
+        if (self.experiment_pair_id is None) is not (self.experiment_arm is None):
+            raise ValueError("experiment pair id and arm must be provided together")
+        if self.experiment_arm is not None:
+            projection = (
+                self.source_task_binding.solver_projection
+                if self.source_task_binding is not None
+                else None
+            )
+            if projection is None or projection.mode is not self.experiment_arm:
+                raise ValueError("experiment arm must match the source solver projection")
         return self
 
 
@@ -195,7 +216,23 @@ class JobSnapshot(WorkbenchContract):
     worker_pid: StrictInt | None = Field(default=None, gt=0)
     archive_path: str | None = Field(default=None, min_length=1)
     source_task_binding: SourceTaskBinding | None = None
+    experiment_pair_id: StrictStr | None = Field(default=None, min_length=1, max_length=80)
+    experiment_arm: ProjectionMode | None = None
     config: SpyrrowRunConfig
     max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
     error_code: str | None = Field(default=None, min_length=1, max_length=80)
     error_message: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def require_experiment_identity(self) -> Self:
+        if (self.experiment_pair_id is None) is not (self.experiment_arm is None):
+            raise ValueError("experiment pair id and arm must be provided together")
+        if self.experiment_arm is not None:
+            projection = (
+                self.source_task_binding.solver_projection
+                if self.source_task_binding is not None
+                else None
+            )
+            if projection is None or projection.mode is not self.experiment_arm:
+                raise ValueError("experiment arm must match the source solver projection")
+        return self
