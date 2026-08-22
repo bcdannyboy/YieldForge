@@ -603,7 +603,9 @@ def test_confirmation_command_runs_exact_registered_evaluation(
 ) -> None:  # type: ignore[no-untyped-def]
     yf_root = Path(__file__).parents[1]
     output = tmp_path / "confirmation"
+    result_output = tmp_path / "confirmation-result.json"
     calls = []
+    publications = []
 
     class FakeClient:
         def __init__(self, origin: str) -> None:
@@ -622,8 +624,16 @@ def test_confirmation_command_runs_exact_registered_evaluation(
             )
         )
 
+    def fake_build(protocol, runtime):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(result_id="yfgfr-0123456789abcdef01234567")
+
+    def fake_publish(path, result):  # type: ignore[no-untyped-def]
+        publications.append((path, result))
+
     monkeypatch.setattr("yieldforge.cli.CalibrationApiClient", FakeClient)
     monkeypatch.setattr("yieldforge.cli.orchestrate_confirmation", fake_orchestrate)
+    monkeypatch.setattr("yieldforge.cli.build_geometry_confirmation_result", fake_build)
+    monkeypatch.setattr("yieldforge.cli.publish_geometry_confirmation_result", fake_publish)
 
     exit_code = main(
         [
@@ -635,6 +645,8 @@ def test_confirmation_command_runs_exact_registered_evaluation(
             "http://127.0.0.1:18082",
             "--output",
             str(output),
+            "--result-output",
+            str(result_output),
         ]
     )
 
@@ -642,4 +654,7 @@ def test_confirmation_command_runs_exact_registered_evaluation(
     assert len(calls) == 1
     assert calls[0]["output_root"] == output
     assert calls[0]["protocol"].protocol_id == "yfgp-392644d98bb7035fdc218512"
-    assert "registered_cells=812" in capsys.readouterr().out
+    assert publications[0][0] == result_output
+    output_text = capsys.readouterr().out
+    assert "registered_cells=812" in output_text
+    assert "result_id=yfgfr-0123456789abcdef01234567" in output_text

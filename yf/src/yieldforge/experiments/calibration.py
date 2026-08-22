@@ -1314,6 +1314,20 @@ def load_geometry_confirmation_result(path: Path) -> GeometryConfirmationResult:
     return result
 
 
+def publish_geometry_confirmation_result(
+    path: Path,
+    result: GeometryConfirmationResult,
+) -> None:
+    """Publish or verify one canonical confirmation result without replacement."""
+
+    _require_or_create(
+        Path(path),
+        result,
+        GeometryConfirmationResult,
+        label="confirmation result",
+    )
+
+
 def build_geometry_calibration_result(
     protocol: PureGeometryCalibrationProtocol,
     runtime: CalibrationRunResult,

@@ -16,8 +16,10 @@ from yieldforge.datasets.source_manifest import DatasetSourceManifest
 from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
 from yieldforge.experiments.calibration import (
     CalibrationApiClient,
+    build_geometry_confirmation_result,
     orchestrate_calibration,
     orchestrate_confirmation,
+    publish_geometry_confirmation_result,
     registered_cells,
     registered_confirmation_cells,
 )
@@ -180,6 +182,13 @@ def _confirm_geometry_api(args: argparse.Namespace) -> int:
         output_root=args.output,
         progress=report_progress,
     )
+    if args.result_output is not None:
+        canonical = build_geometry_confirmation_result(protocol, result)
+        publish_geometry_confirmation_result(args.result_output, canonical)
+        print(
+            "Published canonical geometry confirmation: "
+            f"result_id={canonical.result_id} output={args.result_output}"
+        )
     evaluation = result.evaluation
     print(
         "Confirmation finished: "
@@ -271,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--geometry", type=Path, required=True)
     confirm.add_argument("--api-origin", required=True)
     confirm.add_argument("--output", type=Path, required=True)
+    confirm.add_argument("--result-output", type=Path)
     confirm.add_argument("--preflight-only", action="store_true")
     confirm.set_defaults(handler=_confirm_geometry_api)
     return parser
