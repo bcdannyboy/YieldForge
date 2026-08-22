@@ -76,7 +76,7 @@ YIELDFORGE_E2E_EXTERNAL=true \
 npm run e2e
 ```
 
-The mutating desktop scenario creates two real task `13958` jobs with different seeds, observes progressive candidates, verifies newest-first immutable run history, reopens the older archive by exact job ID and content hash, renders its derived SVG geometry, then exercises deterministic order-book generation. It never enables task `25801`. The corresponding mobile mutation is deliberately skipped so the same local single-worker state is not mutated twice.
+The mutating desktop scenario creates two real task `13958` jobs with different seeds, observes progressive candidates, verifies newest-first immutable run history, selects the older record as Run B, compares exact settings and both archive hashes with neutral Same/Different labels, then reopens the older archive as Run A while preserving the pair. It renders the older run's derived SVG geometry and exercises deterministic order-book generation. It never enables task `25801`. The corresponding mobile mutation is deliberately skipped so the same local single-worker state is not mutated twice.
 
 ## Generate a smoke archive
 
