@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: yieldforge
+      POSTGRES_PASSWORD: yieldforge-local
+      POSTGRES_USER: yieldforge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yieldforge -d yieldforge"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - yieldforge-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  yieldforge-postgres-data:

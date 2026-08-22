@@ -25,6 +25,24 @@ from yieldforge.datasets.passive_report import parse_normalized_slice
 YF_ROOT = Path(__file__).resolve().parents[2]
 COMMITTED_SLICE = YF_ROOT / "datasets/fixtures/lectra-representative-slice.json"
 COMMITTED_MANIFEST = YF_ROOT / "datasets/sources/lectra-7030786-v1.1.json"
+COMMITTED_CATALOG = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
+
+
+def test_corpus_dtos_accept_the_catalog_ruleset() -> None:
+    normalized = parse_normalized_slice(
+        COMMITTED_CATALOG.read_bytes(),
+        max_bytes=64 * 1024 * 1024,
+    )
+
+    service = CorpusQueryService(
+        normalized,
+        slice_sha256=hashlib.sha256(COMMITTED_CATALOG.read_bytes()).hexdigest(),
+        evidence_status="fully_bound_to_local_audit_evidence",
+        cursor_signing_key=b"c" * 32,
+    )
+
+    assert service.summary().source.conversion_ruleset_version == "lectra-catalog-rules.v1"
+    assert service.summary().task_count == 256
 
 
 def signed_cursor(

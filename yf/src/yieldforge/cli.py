@@ -11,6 +11,7 @@ from yieldforge.datasets.passive_report import (
     PassiveEvidenceError,
     load_lectra_audit_evidence,
 )
+from yieldforge.datasets.postgres_catalog import import_catalog
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
@@ -54,6 +55,20 @@ def _check_dataset_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _import_dataset_catalog(args: argparse.Namespace) -> int:
+    result = import_catalog(
+        database_url=args.database_url,
+        catalog_path=args.catalog,
+        catalog_manifest_path=args.catalog_manifest,
+        source_manifest_path=args.source_manifest,
+        audit_report_path=args.audit_report,
+    )
+    print(
+        f"Imported {result.task_count} catalog tasks with artifact SHA-256 {result.catalog_sha256}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -84,6 +99,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest", type=Path, required=True, help="source manifest JSON path"
     )
     audit_check.set_defaults(handler=_check_dataset_audit)
+
+    catalog_import = dataset_commands.add_parser(
+        "catalog-import",
+        help="validate and import a pinned catalog into PostgreSQL",
+    )
+    catalog_import.add_argument("--catalog", type=Path, required=True)
+    catalog_import.add_argument("--catalog-manifest", type=Path, required=True)
+    catalog_import.add_argument("--source-manifest", type=Path, required=True)
+    catalog_import.add_argument("--audit-report", type=Path, required=True)
+    catalog_import.add_argument("--database-url", required=True)
+    catalog_import.set_defaults(handler=_import_dataset_catalog)
     return parser
 
 

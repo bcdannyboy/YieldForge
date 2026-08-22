@@ -2,6 +2,7 @@ import hashlib
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -198,6 +199,58 @@ def test_datasets_audit_check_validates_passive_report(tmp_path: Path, capsys) -
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         "Validated lectra-test audit: tasks=0, parts=0, shapes=0, constraints=0"
+    )
+
+
+def test_datasets_catalog_import_passes_all_explicit_evidence_paths(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    paths = {
+        name: tmp_path / name
+        for name in ("catalog.json", "catalog-manifest.json", "source-manifest.json", "audit.json")
+    }
+    calls = []
+
+    def fake_import_catalog(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(
+            task_count=256,
+            catalog_sha256="4" * 64,
+        )
+
+    monkeypatch.setattr("yieldforge.cli.import_catalog", fake_import_catalog)
+
+    exit_code = main(
+        [
+            "datasets",
+            "catalog-import",
+            "--catalog",
+            str(paths["catalog.json"]),
+            "--catalog-manifest",
+            str(paths["catalog-manifest.json"]),
+            "--source-manifest",
+            str(paths["source-manifest.json"]),
+            "--audit-report",
+            str(paths["audit.json"]),
+            "--database-url",
+            "postgresql://example.test/yieldforge",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        {
+            "database_url": "postgresql://example.test/yieldforge",
+            "catalog_path": paths["catalog.json"],
+            "catalog_manifest_path": paths["catalog-manifest.json"],
+            "source_manifest_path": paths["source-manifest.json"],
+            "audit_report_path": paths["audit.json"],
+        }
+    ]
+    assert capsys.readouterr().out.strip() == (
+        f"Imported 256 catalog tasks with artifact SHA-256 {'4' * 64}"
     )
 
 

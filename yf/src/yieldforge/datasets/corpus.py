@@ -113,7 +113,10 @@ class CorpusSourceDto(CorpusDto):
     dataset_id: Literal["lectra-7030786-v1.1"]
     doi: Literal["10.5281/zenodo.7030786"]
     license: Literal["CC-BY-4.0"]
-    conversion_ruleset_version: Literal["lectra-slice-rules.v1"]
+    conversion_ruleset_version: Literal[
+        "lectra-slice-rules.v1",
+        "lectra-catalog-rules.v1",
+    ]
     source_checksums: tuple[SourceChecksumDto, ...]
     source_manifest_sha256: Sha256
     audit_report_sha256: Sha256
