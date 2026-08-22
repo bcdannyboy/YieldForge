@@ -12,6 +12,7 @@ import { ProvenanceMark } from "../components/Provenance";
 import { toSvgPoints, transformPlacedPoints } from "../geometry";
 import { initialJobState, jobReducer } from "../jobs/jobReducer";
 import { reconcileCandidates } from "../jobs/reconcile";
+import { RunComparison } from "./RunComparison";
 
 const terminal = new Set(["cancelled", "timed_out", "failed", "completed"]);
 
@@ -50,6 +51,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   const [job, setJob] = useState<JobView | null>(null);
   const [completedRuns, setCompletedRuns] = useState<CompletedRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [comparisonRunId, setComparisonRunId] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [stream, dispatch] = useReducer(jobReducer, initialJobState);
@@ -66,6 +68,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   const candidateRequestGeneration = useRef(0);
   const geometryRequestGeneration = useRef(0);
   const runSelectionGeneration = useRef(0);
+  const selectedRunIdRef = useRef<string | null>(null);
   const refreshedCompletedJob = useRef<string | null>(null);
   const effectiveStatus = job
     ? stream.status === "idle"
@@ -90,8 +93,16 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
   }, []);
 
   const selectCompletedRun = useCallback((run: CompletedRun) => {
+    const nextRunId = run.job.job_id;
+    const previousRunId = selectedRunIdRef.current;
+    setComparisonRunId((currentRunId) =>
+      currentRunId === nextRunId && previousRunId && previousRunId !== nextRunId
+        ? previousRunId
+        : currentRunId,
+    );
+    selectedRunIdRef.current = nextRunId;
     resetArchiveView();
-    setSelectedRunId(run.job.job_id);
+    setSelectedRunId(nextRunId);
     setJob(run.job);
   }, [resetArchiveView]);
 
@@ -102,7 +113,9 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
     setDetail(null);
     setJob(null);
     setCompletedRuns([]);
+    selectedRunIdRef.current = null;
     setSelectedRunId(null);
+    setComparisonRunId(null);
     setHistoryLoaded(false);
     setHistoryError(null);
     refreshedCompletedJob.current = null;
@@ -131,6 +144,16 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
       active = false;
     };
   }, [client, resetArchiveView, selectCompletedRun, tasksIndex]);
+
+  useEffect(() => {
+    if (
+      comparisonRunId !== null &&
+      (comparisonRunId === selectedRunId ||
+        !completedRuns.some((run) => run.job.job_id === comparisonRunId))
+    ) {
+      setComparisonRunId(null);
+    }
+  }, [completedRuns, comparisonRunId, selectedRunId]);
 
   useEffect(() => {
     if (!job || terminal.has(job.status)) return;
@@ -272,6 +295,14 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
     () => reconcileCandidates(stream.liveCandidateIds, terminalCandidates),
     [stream.liveCandidateIds, terminalCandidates],
   );
+  const selectedCompletedRun = useMemo(
+    () => completedRuns.find((run) => run.job.job_id === selectedRunId) ?? null,
+    [completedRuns, selectedRunId],
+  );
+  const comparisonRun = useMemo(
+    () => completedRuns.find((run) => run.job.job_id === comparisonRunId) ?? null,
+    [completedRuns, comparisonRunId],
+  );
   const assumptionCodes = detail?.summary.solve_capability.assumption_codes ?? [];
   const canSubmit = Boolean(
     detail?.summary.solve_capability.can_solve &&
@@ -332,7 +363,9 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                   })
                   .then((created) => {
                     resetArchiveView();
+                    selectedRunIdRef.current = null;
                     setSelectedRunId(null);
+                    setComparisonRunId(null);
                     refreshedCompletedJob.current = null;
                     setJob(created);
                   })
@@ -398,6 +431,14 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
               recorded output; it does not rerun or rank it.
             </p>
             {historyError ? <p className="notice notice--error">{historyError}</p> : null}
+            <RunComparison
+              runs={completedRuns}
+              runA={selectedCompletedRun}
+              runB={comparisonRun}
+              runBId={comparisonRunId}
+              disabled={hasActiveJob}
+              onRunBChange={setComparisonRunId}
+            />
             {!historyLoaded ? (
               <p className="run-history-empty">Loading completed runs…</p>
             ) : completedRuns.length === 0 && !historyError ? (

@@ -420,12 +420,151 @@ describe("research workbench", () => {
     expect(api.listCandidates).toHaveBeenCalledWith("job-older", undefined);
   });
 
+  it("compares two completed runs using exact neutral archive evidence", async () => {
+    const api = client();
+    const newer = completedRun("job-newer");
+    newer.job.updated_at = "2026-08-18T01:00:00Z";
+    newer.settings.seed = 29;
+    newer.archive.batch_sha256 = "d".repeat(64);
+    const older = completedRun("job-older");
+    older.job.candidate_count = 2;
+    older.settings.early_termination = true;
+    older.settings.min_items_separation = 0.25;
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [newer, older],
+    });
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+
+    render(<App client={api} />);
+
+    const comparison = await screen.findByRole("region", {
+      name: "Read-only run comparison",
+    });
+    const selector = within(comparison).getByRole("combobox", {
+      name: "Compare open run with",
+    });
+    await userEvent.setup().selectOptions(selector, "job-older");
+
+    const evidence = within(comparison).getByRole("table", {
+      name: "Recorded run evidence",
+    });
+    expect(within(evidence).getByRole("row", {
+      name: /Job ID job-newer job-older Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Completed at 2026-08-18 01:00:00Z 2026-08-18 00:00:00Z Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", { name: /Seed 29 23 Different/i })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Computation budget 5s 5s Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Hard runtime limit 6s 6s Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", { name: /Workers 1 1 Same/i })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Early termination off on Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Minimum separation none 0.25 Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Archived candidates 1 2 Different/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Acknowledged assumptions interpret_s1_degenerate_entries_as_allowed_rotations interpret_s1_degenerate_entries_as_allowed_rotations Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Dataset lectra-7030786-v1.1 lectra-7030786-v1.1 Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Source slice SHA-256 d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8 d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8 Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: /Archive schema yieldforge.candidate-archive.v1 yieldforge.candidate-archive.v1 Same/i,
+    })).toBeVisible();
+    expect(within(evidence).getByRole("row", {
+      name: new RegExp(`Archive SHA-256 ${"d".repeat(64)} ${"c".repeat(64)} Different`, "i"),
+    })).toBeVisible();
+    expect(
+      within(comparison).queryByText(/better|winner|improvement|optimal|savings/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves the run comparison pair when Run B is opened as Run A", async () => {
+    const api = client();
+    const newer = completedRun("job-newer");
+    newer.settings.seed = 29;
+    const older = completedRun("job-older");
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [newer, older],
+    });
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+    const user = userEvent.setup();
+
+    const comparison = await screen.findByRole("region", {
+      name: "Read-only run comparison",
+    });
+    const selector = within(comparison).getByRole("combobox", {
+      name: "Compare open run with",
+    });
+    await user.selectOptions(selector, "job-older");
+    await user.click(screen.getByRole("button", { name: "Open completed run job-older" }));
+
+    expect(selector).toHaveValue("job-newer");
+    expect(within(comparison).getByRole("row", {
+      name: /Job ID job-older job-newer Different/i,
+    })).toBeVisible();
+    expect(within(comparison).getByRole("row", {
+      name: /Seed 23 29 Different/i,
+    })).toBeVisible();
+  });
+
+  it("clears and locks run comparison while a new solver job is active", async () => {
+    const api = client();
+    const newer = completedRun("job-newer");
+    const older = completedRun("job-older");
+    vi.mocked(api.listCompletedRuns).mockResolvedValue({
+      schema_version: "yieldforge.api-completed-run-page.v1",
+      items: [newer, older],
+    });
+    vi.mocked(api.createJob).mockResolvedValue({ ...job, job_id: "job-active" });
+    vi.mocked(api.streamJobEvents).mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+    const user = userEvent.setup();
+
+    const comparison = await screen.findByRole("region", {
+      name: "Read-only run comparison",
+    });
+    const selector = within(comparison).getByRole("combobox", {
+      name: "Compare open run with",
+    });
+    await user.selectOptions(selector, "job-older");
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge exact assumption/i }));
+    await user.click(screen.getByRole("button", { name: /start solver job/i }));
+
+    await waitFor(() => expect(selector).toBeDisabled());
+    expect(selector).toHaveValue("");
+    expect(within(comparison).queryByRole("table", {
+      name: "Recorded run evidence",
+    })).not.toBeInTheDocument();
+  });
+
   it("shows completed-run empty and independent error states", async () => {
     const emptyApi = client();
     window.history.replaceState({}, "", "/?view=nest&task=13958");
     const { unmount } = render(<App client={emptyApi} />);
 
     expect(await screen.findByText("No completed archive runs for this task yet.")).toBeVisible();
+    expect(screen.getByText(
+      "Complete another archive run for this task to compare two records.",
+    )).toBeVisible();
     expect(screen.getByRole("button", { name: /start solver job/i })).toBeDisabled();
     unmount();
 
