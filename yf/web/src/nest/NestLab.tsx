@@ -359,7 +359,7 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                     total_computation_time: Number(data.get("seconds")),
                     early_termination: data.get("early") === "on",
                     min_items_separation: null,
-                    max_runtime_seconds: Number(data.get("seconds")) + 1,
+                    max_runtime_seconds: Math.min(10, Number(data.get("seconds")) + 3),
                   })
                   .then((created) => {
                     resetArchiveView();

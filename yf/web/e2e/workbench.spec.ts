@@ -57,7 +57,7 @@ test.describe("real local research workbench", () => {
       page.getByText("interpret_s1_degenerate_entries_as_allowed_rotations"),
     ).toBeVisible();
     await page.getByRole("checkbox", { name: /acknowledge exact assumption/i }).check();
-    await page.getByRole("spinbutton", { name: "Computation seconds" }).fill("3");
+    await page.getByRole("spinbutton", { name: "Computation seconds" }).fill("2");
 
     const createResponsePromise = page.waitForResponse(
       (response) =>

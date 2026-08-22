@@ -344,9 +344,31 @@ describe("research workbench", () => {
           "interpret_s1_degenerate_entries_as_allowed_rotations",
         ],
         total_computation_time: 5,
-        max_runtime_seconds: 6,
+        max_runtime_seconds: 8,
       }),
     );
+  });
+
+  it("caps the solver supervision margin at ten seconds", async () => {
+    const api = client();
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?view=nest&task=13958");
+    render(<App client={api} />);
+
+    await user.click(await screen.findByRole("checkbox", {
+      name: /acknowledge exact assumption/i,
+    }));
+    const seconds = screen.getByRole("spinbutton", { name: "Computation seconds" });
+    await user.clear(seconds);
+    await user.type(seconds, "9");
+    await user.click(screen.getByRole("button", { name: /start solver job/i }));
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        total_computation_time: 9,
+        max_runtime_seconds: 10,
+      }),
+    ));
   });
 
   it("defaults to the newest completed archive and browses an older run", async () => {
