@@ -7,8 +7,12 @@ import pandas as pd
 import pytest
 
 from yieldforge.datasets.lectra_slice import (
+    CATALOG_CONVERSION_RULESET_VERSION,
+    S1_ASSUMPTION,
     NoEligibleLectraSliceError,
+    export_catalog_slice,
     export_representative_slice,
+    select_catalog_task_ids,
     select_representative_task_ids,
 )
 from yieldforge.datasets.normalized_slice import (
@@ -197,6 +201,122 @@ def _export(frames: dict[str, pd.DataFrame]):
         source_manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
         audit_report_sha256=hashlib.sha256(b"audit").hexdigest(),
     )
+
+
+def _catalog_frames(*, filler_count: int = 258) -> dict[str, pd.DataFrame]:
+    task_ids = (13_958, 25_801, *range(30_000, 30_000 + filler_count))
+    frames = _frames(
+        runnable_specs=tuple((task_id, 35, 9) for task_id in task_ids),
+        include_view=False,
+    )
+    first_25801_constraint = frames["constraints"].index[
+        frames["constraints"]["tasks_index"] == 25_801
+    ][0]
+    frames["constraints"].at[first_25801_constraint, "type"] = "c8"
+    return frames
+
+
+def _export_catalog(frames: dict[str, pd.DataFrame], *, target_count: int = 256):
+    return export_catalog_slice(
+        frames,
+        manifest=_manifest(),
+        source_manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
+        audit_report_sha256=hashlib.sha256(b"audit").hexdigest(),
+        target_count=target_count,
+    )
+
+
+def _catalog_disposition(selection, task_id: int):
+    return next(
+        disposition
+        for disposition in selection.task_dispositions
+        if disposition.tasks_index == task_id
+    )
+
+
+def test_catalog_selects_exactly_256_stably_and_preserves_continuity_tasks() -> None:
+    frames = _catalog_frames()
+    selection = select_catalog_task_ids(frames)
+    reordered = {
+        name: frame.sample(frac=1, random_state=index + 41)
+        for index, (name, frame) in enumerate(frames.items())
+    }
+
+    assert len(selection.task_ids) == 256
+    assert selection.task_ids == select_catalog_task_ids(reordered).task_ids
+    assert 13_958 in selection.task_ids
+    assert 25_801 in selection.task_ids
+
+
+def test_catalog_scans_past_invalid_ranked_candidates() -> None:
+    frames = _catalog_frames(filler_count=255)
+    invalid_task = 30_000
+    bad_part = frames["parts"].index[frames["parts"]["tasks_index"] == invalid_task][0]
+    frames["parts"].at[bad_part, "shape_hash"] = -999
+
+    selection = select_catalog_task_ids(frames)
+
+    assert len(selection.task_ids) == 256
+    assert invalid_task not in selection.task_ids
+    assert 30_254 in selection.task_ids
+
+
+def test_catalog_rejects_insufficient_display_safe_tasks() -> None:
+    frames = _catalog_frames(filler_count=253)
+
+    with pytest.raises(NoEligibleLectraSliceError, match="255.*256.*display-safe"):
+        select_catalog_task_ids(frames)
+
+
+def test_catalog_rejects_missing_continuity_task() -> None:
+    frames = _catalog_frames()
+    for table in ("tasks", "parts", "constraints"):
+        frames[table] = frames[table][frames[table]["tasks_index"] != 25_801]
+
+    with pytest.raises(NoEligibleLectraSliceError, match="continuity.*25801"):
+        select_catalog_task_ids(frames)
+
+
+def test_catalog_skips_malformed_opaque_constraints() -> None:
+    frames = _catalog_frames(filler_count=255)
+    invalid_task = 30_000
+    bad_constraint = frames["constraints"].index[
+        frames["constraints"]["tasks_index"] == invalid_task
+    ][0]
+    frames["constraints"].at[bad_constraint, "p1_x"] = [[1]]
+
+    selection = select_catalog_task_ids(frames)
+
+    assert len(selection.task_ids) == 256
+    assert invalid_task not in selection.task_ids
+
+
+def test_catalog_classifies_strict_s1_and_view_only_tasks_explicitly() -> None:
+    frames = _catalog_frames(filler_count=0)
+    selection = select_catalog_task_ids(frames, target_count=2)
+
+    runnable = _catalog_disposition(selection, 13_958)
+    assert runnable.support_status is SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS
+    assert runnable.projection_status is ProjectionStatus.ELIGIBLE
+    assert runnable.reason_codes == ()
+    assert runnable.assumption_codes == (S1_ASSUMPTION,)
+
+    view_only = _catalog_disposition(selection, 25_801)
+    assert view_only.support_status is SupportStatus.VIEW_ONLY
+    assert view_only.projection_status is ProjectionStatus.BLOCKED
+    assert view_only.reason_codes == ("contains_non_s1_constraints",)
+    assert view_only.assumption_codes == ()
+
+
+def test_catalog_export_uses_catalog_ruleset_and_selection_dispositions() -> None:
+    frames = _catalog_frames(filler_count=0)
+
+    normalized = _export_catalog(frames, target_count=2)
+
+    assert normalized.source.conversion_ruleset_version == CATALOG_CONVERSION_RULESET_VERSION
+    assert tuple(task.tasks_index for task in normalized.tasks) == (13_958, 25_801)
+    assert normalized.task_dispositions[0].assumption_codes == (S1_ASSUMPTION,)
+    assert normalized.task_dispositions[1].reason_codes == ("contains_non_s1_constraints",)
 
 
 def test_selector_uses_exact_rank_score_then_task_id() -> None:

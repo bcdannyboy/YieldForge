@@ -94,7 +94,7 @@ class NormalizedSliceSource(StrictContractModel):
     doi: Literal["10.5281/zenodo.7030786"]
     license: Literal["CC-BY-4.0"]
     source_unit: SourceUnit
-    conversion_ruleset_version: Literal["lectra-slice-rules.v1"]
+    conversion_ruleset_version: Literal["lectra-slice-rules.v1", "lectra-catalog-rules.v1"]
 
     @model_validator(mode="after")
     def require_exact_source_inventory(self) -> Self:

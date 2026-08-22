@@ -182,6 +182,20 @@ def test_contract_is_frozen_strict_and_has_exact_schema_version() -> None:
         NormalizedSlice.model_validate({**normalized.model_dump(), "surprise": True})
 
 
+def test_source_identity_accepts_only_the_slice_and_catalog_rulesets() -> None:
+    data = source_identity().model_dump()
+    data["conversion_ruleset_version"] = "lectra-catalog-rules.v1"
+
+    assert (
+        NormalizedSliceSource.model_validate(data).conversion_ruleset_version
+        == "lectra-catalog-rules.v1"
+    )
+
+    data["conversion_ruleset_version"] = "lectra-catalog-rules.v2"
+    with pytest.raises(ValidationError, match="conversion_ruleset_version"):
+        NormalizedSliceSource.model_validate(data)
+
+
 @pytest.mark.parametrize(
     ("field", "bad_value"),
     [

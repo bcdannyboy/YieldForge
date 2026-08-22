@@ -47,6 +47,8 @@ TARGET_PARTS = 35
 TARGET_UNIQUE_SHAPES = 9
 TARGET_REPEATED_PART_ROWS = 23
 CONVERSION_RULESET_VERSION = "lectra-slice-rules.v1"
+CATALOG_CONVERSION_RULESET_VERSION = "lectra-catalog-rules.v1"
+CATALOG_CONTINUITY_TASK_IDS = (13_958, 25_801)
 S1_ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
 _S1_FIELDS = frozenset({"parts_1", "r1_start", "r1_end", "r1_flip_x"})
 
@@ -63,6 +65,14 @@ class RepresentativeTaskSelection:
     view_only_tasks_index: int
     runnable_rank_score: int
     view_only_rank_score: int
+
+
+@dataclass(frozen=True)
+class CatalogTaskSelection:
+    """Deterministic catalog membership and capability classifications."""
+
+    task_ids: tuple[int, ...]
+    task_dispositions: tuple[TaskDisposition, ...]
 
 
 @dataclass(frozen=True)
@@ -218,7 +228,7 @@ def _base_task_is_eligible(tasks: Any, position: int) -> bool:
         return False
 
 
-def _ranked_candidates(frames: Mapping[str, Any]) -> list[_RankedCandidate]:
+def _all_ranked_candidates(frames: Mapping[str, Any]) -> list[_RankedCandidate]:
     tasks = frames["tasks"]
     parts = frames["parts"]
     task_positions = _task_rows_by_id(tasks)
@@ -247,7 +257,11 @@ def _ranked_candidates(frames: Mapping[str, Any]) -> list[_RankedCandidate]:
         )
         candidates.append(_RankedCandidate(tasks_index=task_id, rank_score=score))
     candidates.sort(key=lambda item: (item.rank_score, item.tasks_index))
-    return candidates[:MAX_RANKED_CANDIDATES]
+    return candidates
+
+
+def _ranked_candidates(frames: Mapping[str, Any]) -> list[_RankedCandidate]:
+    return _all_ranked_candidates(frames)[:MAX_RANKED_CANDIDATES]
 
 
 def _subset_positions(frame: Any, task_ids: set[int]) -> dict[int, list[int]]:
@@ -462,6 +476,127 @@ def _validate_view_part_references(
                     raise ValueError(f"view constraint {column} reference {part_id} is unresolved")
 
 
+def _task_source_row(tasks: Any, position: int) -> TaskSourceRow:
+    return TaskSourceRow(
+        source_row_index=_source_row_index(tasks, position, table="tasks"),
+        duration=_source_int(_cell(tasks, position, "duration"), label="duration"),
+        efficiency=_source_float(_cell(tasks, position, "efficiency"), label="efficiency"),
+        sheet_width=_source_float(_cell(tasks, position, "sheet_width"), label="sheet_width"),
+        sheet_length=_source_float(_cell(tasks, position, "sheet_length"), label="sheet_length"),
+        sheet_type=_source_int(_cell(tasks, position, "sheet_type"), label="sheet_type"),
+        tasks_index=_source_int(
+            _cell(tasks, position, "tasks_index"),
+            label="tasks_index",
+            nonnegative=True,
+        ),
+        is_train=_source_bool(_cell(tasks, position, "is_train"), label="is_train"),
+        is_val=_source_bool(_cell(tasks, position, "is_val"), label="is_val"),
+        is_test=_source_bool(_cell(tasks, position, "is_test"), label="is_test"),
+    )
+
+
+def select_catalog_task_ids(
+    frames: Mapping[str, Any], *, target_count: int = 256
+) -> CatalogTaskSelection:
+    """Select the first fully display-safe tasks from the deterministic ranking."""
+    if type(target_count) is not int or target_count < len(CATALOG_CONTINUITY_TASK_IDS):
+        raise ValueError(
+            f"target_count must be an integer at least {len(CATALOG_CONTINUITY_TASK_IDS)}"
+        )
+
+    ranked = _all_ranked_candidates(frames)
+    ranked_ids = {candidate.tasks_index for candidate in ranked}
+    parts_by_task = _subset_positions(frames["parts"], ranked_ids)
+    constraints_by_task = _subset_positions(frames["constraints"], ranked_ids)
+    shape_positions = _shape_positions_for_candidates(
+        frames["shapes"], frames["parts"], parts_by_task
+    )
+    task_positions = _task_rows_by_id(frames["tasks"])
+
+    selected_ids: list[int] = []
+    dispositions: list[TaskDisposition] = []
+    for candidate in ranked:
+        task_id = candidate.tasks_index
+        try:
+            _task_source_row(frames["tasks"], task_positions[task_id])
+            _validate_task_geometry(
+                task_id,
+                parts=frames["parts"],
+                shapes=frames["shapes"],
+                part_positions=parts_by_task[task_id],
+                shape_positions=shape_positions,
+            )
+            constraint_positions = constraints_by_task[task_id]
+            constraint_types = tuple(
+                _constraint_type(_cell(frames["constraints"], position, "type"))
+                for position in constraint_positions
+            )
+            _validate_view_part_references(
+                parts=frames["parts"],
+                constraints=frames["constraints"],
+                part_positions=parts_by_task[task_id],
+                constraint_positions=constraint_positions,
+            )
+            for position in constraint_positions:
+                for column in CONSTRAINT_OPAQUE_FIELD_ORDER:
+                    _validate_opaque_value(_cell(frames["constraints"], position, column))
+        except (KeyError, ValueError):
+            continue
+
+        try:
+            _validate_s1_task(
+                task_id,
+                parts=frames["parts"],
+                constraints=frames["constraints"],
+                part_positions=parts_by_task[task_id],
+                constraint_positions=constraint_positions,
+            )
+        except ValueError:
+            reason_code = (
+                "contains_non_s1_constraints"
+                if any(constraint_type != "s1" for constraint_type in constraint_types)
+                else "s1_projection_requirements_not_met"
+            )
+            disposition = TaskDisposition(
+                tasks_index=task_id,
+                normalization_status=NormalizationStatus.SOURCE_LOSSLESS,
+                support_status=SupportStatus.VIEW_ONLY,
+                projection_status=ProjectionStatus.BLOCKED,
+                reason_codes=(reason_code,),
+                assumption_codes=(),
+            )
+        else:
+            disposition = TaskDisposition(
+                tasks_index=task_id,
+                normalization_status=NormalizationStatus.SOURCE_LOSSLESS,
+                support_status=SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS,
+                projection_status=ProjectionStatus.ELIGIBLE,
+                reason_codes=(),
+                assumption_codes=(S1_ASSUMPTION,),
+            )
+        selected_ids.append(task_id)
+        dispositions.append(disposition)
+        if len(selected_ids) == target_count:
+            break
+
+    if len(selected_ids) != target_count:
+        raise NoEligibleLectraSliceError(
+            f"only {len(selected_ids)} of {target_count} required display-safe tasks were found"
+        )
+    missing_continuity = tuple(
+        task_id for task_id in CATALOG_CONTINUITY_TASK_IDS if task_id not in selected_ids
+    )
+    if missing_continuity:
+        missing = ", ".join(str(task_id) for task_id in missing_continuity)
+        raise NoEligibleLectraSliceError(
+            f"required catalog continuity tasks are missing: {missing}"
+        )
+    return CatalogTaskSelection(
+        task_ids=tuple(selected_ids),
+        task_dispositions=tuple(dispositions),
+    )
+
+
 def select_representative_task_ids(
     frames: Mapping[str, Any],
 ) -> RepresentativeTaskSelection:
@@ -567,7 +702,66 @@ def export_representative_slice(
 ) -> NormalizedSlice:
     """Export the two selected task roles into the strict passive slice contract."""
     selection = select_representative_task_ids(frames)
-    selected_ids = {selection.runnable_tasks_index, selection.view_only_tasks_index}
+    dispositions = {
+        selection.runnable_tasks_index: TaskDisposition(
+            tasks_index=selection.runnable_tasks_index,
+            normalization_status=NormalizationStatus.SOURCE_LOSSLESS,
+            support_status=SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS,
+            projection_status=ProjectionStatus.ELIGIBLE,
+            reason_codes=(),
+            assumption_codes=(S1_ASSUMPTION,),
+        ),
+        selection.view_only_tasks_index: TaskDisposition(
+            tasks_index=selection.view_only_tasks_index,
+            normalization_status=NormalizationStatus.SOURCE_LOSSLESS,
+            support_status=SupportStatus.VIEW_ONLY,
+            projection_status=ProjectionStatus.BLOCKED,
+            reason_codes=("contains_non_s1_constraints",),
+            assumption_codes=(),
+        ),
+    }
+    return _export_selected_slice(
+        frames,
+        manifest=manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        audit_report_sha256=audit_report_sha256,
+        task_dispositions=dispositions,
+        conversion_ruleset_version=CONVERSION_RULESET_VERSION,
+    )
+
+
+def export_catalog_slice(
+    frames: Mapping[str, Any],
+    *,
+    manifest: DatasetSourceManifest,
+    source_manifest_sha256: str,
+    audit_report_sha256: str,
+    target_count: int = 256,
+) -> NormalizedSlice:
+    """Export a deterministic, fully display-safe Lectra task catalog."""
+    selection = select_catalog_task_ids(frames, target_count=target_count)
+    return _export_selected_slice(
+        frames,
+        manifest=manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        audit_report_sha256=audit_report_sha256,
+        task_dispositions={
+            disposition.tasks_index: disposition for disposition in selection.task_dispositions
+        },
+        conversion_ruleset_version=CATALOG_CONVERSION_RULESET_VERSION,
+    )
+
+
+def _export_selected_slice(
+    frames: Mapping[str, Any],
+    *,
+    manifest: DatasetSourceManifest,
+    source_manifest_sha256: str,
+    audit_report_sha256: str,
+    task_dispositions: Mapping[int, TaskDisposition],
+    conversion_ruleset_version: str,
+) -> NormalizedSlice:
+    selected_ids = set(task_dispositions)
     task_positions_by_id = _task_rows_by_id(frames["tasks"])
     task_positions = [task_positions_by_id[task_id] for task_id in selected_ids]
     parts_by_task = _subset_positions(frames["parts"], selected_ids)
@@ -593,33 +787,7 @@ def export_representative_slice(
         frames["constraints"], constraint_positions, table="constraints"
     )
 
-    tasks = tuple(
-        TaskSourceRow(
-            source_row_index=_source_row_index(frames["tasks"], position, table="tasks"),
-            duration=_source_int(_cell(frames["tasks"], position, "duration"), label="duration"),
-            efficiency=_source_float(
-                _cell(frames["tasks"], position, "efficiency"), label="efficiency"
-            ),
-            sheet_width=_source_float(
-                _cell(frames["tasks"], position, "sheet_width"), label="sheet_width"
-            ),
-            sheet_length=_source_float(
-                _cell(frames["tasks"], position, "sheet_length"), label="sheet_length"
-            ),
-            sheet_type=_source_int(
-                _cell(frames["tasks"], position, "sheet_type"), label="sheet_type"
-            ),
-            tasks_index=_source_int(
-                _cell(frames["tasks"], position, "tasks_index"),
-                label="tasks_index",
-                nonnegative=True,
-            ),
-            is_train=_source_bool(_cell(frames["tasks"], position, "is_train"), label="is_train"),
-            is_val=_source_bool(_cell(frames["tasks"], position, "is_val"), label="is_val"),
-            is_test=_source_bool(_cell(frames["tasks"], position, "is_test"), label="is_test"),
-        )
-        for position in task_positions
-    )
+    tasks = tuple(_task_source_row(frames["tasks"], position) for position in task_positions)
     parts = tuple(
         PartSourceRow(
             source_row_index=_source_row_index(frames["parts"], position, table="parts"),
@@ -686,31 +854,7 @@ def export_representative_slice(
         )
         for position in constraint_positions
     )
-    task_dispositions = tuple(
-        TaskDisposition(
-            tasks_index=task.tasks_index,
-            normalization_status=NormalizationStatus.SOURCE_LOSSLESS,
-            support_status=(
-                SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS
-                if task.tasks_index == selection.runnable_tasks_index
-                else SupportStatus.VIEW_ONLY
-            ),
-            projection_status=(
-                ProjectionStatus.ELIGIBLE
-                if task.tasks_index == selection.runnable_tasks_index
-                else ProjectionStatus.BLOCKED
-            ),
-            reason_codes=(
-                ()
-                if task.tasks_index == selection.runnable_tasks_index
-                else ("contains_non_s1_constraints",)
-            ),
-            assumption_codes=(
-                (S1_ASSUMPTION,) if task.tasks_index == selection.runnable_tasks_index else ()
-            ),
-        )
-        for task in tasks
-    )
+    ordered_task_dispositions = tuple(task_dispositions[task.tasks_index] for task in tasks)
     provenance = (
         ProvenanceGroup(
             kind=ProvenanceKind.SOURCE_REAL,
@@ -747,7 +891,7 @@ def export_representative_slice(
             doi="10.5281/zenodo.7030786",
             license="CC-BY-4.0",
             source_unit=SourceUnit(literal_label="m^-4", interpretation=None),
-            conversion_ruleset_version=CONVERSION_RULESET_VERSION,
+            conversion_ruleset_version=conversion_ruleset_version,
         ),
         tasks=tasks,
         parts=parts,
@@ -755,6 +899,6 @@ def export_representative_slice(
         constraints=constraints,
         constraint_value_columns=CONSTRAINT_OPAQUE_FIELD_ORDER,
         derived_geometry=tuple(derived_geometry),
-        task_dispositions=task_dispositions,
+        task_dispositions=ordered_task_dispositions,
         provenance=provenance,
     )
