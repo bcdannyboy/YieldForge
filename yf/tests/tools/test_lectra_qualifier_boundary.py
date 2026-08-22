@@ -115,6 +115,43 @@ def _valid_fixture_slice(
     return payload, report_payload, manifest_payload, manifest, report
 
 
+def _valid_fixture_catalog(
+    tmp_path: Path,
+) -> tuple[bytes, bytes, bytes, DatasetSourceManifest, object]:
+    pytest.importorskip("pandas")
+    from yieldforge.datasets.lectra_audit import audit_frames, report_to_json
+    from yieldforge.datasets.lectra_slice import export_catalog_slice
+
+    maker = _load_fixture_maker()
+    input_dir = tmp_path / "catalog-input"
+    manifest_path = tmp_path / "catalog-manifest.json"
+    maker.write_fixture(input_dir, manifest_path)
+    manifest_payload = manifest_path.read_bytes()
+    manifest = DatasetSourceManifest.model_validate_json(manifest_payload)
+    frames = {name: frame.copy(deep=True) for name, frame in maker._trusted_frames().items()}
+    for table in ("tasks", "parts", "constraints"):
+        frames[table]["tasks_index"] = frames[table]["tasks_index"].replace(
+            {100: 13_958, 900: 25_801}
+        )
+    report = audit_frames(
+        frames,
+        dataset_id=manifest.dataset_id,
+        source_checksums={source.name: source.checksum for source in manifest.files},
+    )
+    report_payload = (report_to_json(report) + "\n").encode()
+    normalized = export_catalog_slice(
+        frames,
+        manifest=manifest,
+        source_manifest_sha256=hashlib.sha256(manifest_payload).hexdigest(),
+        audit_report_sha256=hashlib.sha256(report_payload).hexdigest(),
+        target_count=2,
+    )
+    payload = (
+        json.dumps(normalized.model_dump(mode="json"), separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode()
+    return payload, report_payload, manifest_payload, manifest, report
+
+
 def test_only_qualifier_deserializes_pickles() -> None:
     production_files = [
         *PROJECT_ROOT.glob("src/**/*.py"),
@@ -129,13 +166,106 @@ def test_only_qualifier_deserializes_pickles() -> None:
     assert callers == {"tools/lectra/qualify.py"}
 
 
-def test_qualifier_has_explicit_audit_and_slice_modes() -> None:
+def test_qualifier_has_explicit_audit_slice_and_catalog_modes() -> None:
     qualifier = _load_qualifier()
 
-    assert qualifier.QUALIFIER_MODES == frozenset({"audit", "slice"})
+    assert qualifier.QUALIFIER_MODES == frozenset({"audit", "catalog", "slice"})
     assert qualifier.SLICE_NAME == "lectra-slice.json"
+    assert qualifier.CATALOG_NAME == "lectra-catalog.json"
+    assert qualifier.MAX_REPORT_BYTES == 4 * 1024 * 1024
+    assert qualifier.MAX_CATALOG_BYTES == 64 * 1024 * 1024
     assert "source_manifest_sha256" in qualifier._qualify_payload.__annotations__
     assert "audit_report_sha256" in qualifier._qualify_payload.__annotations__
+
+
+@pytest.mark.parametrize("mode", ["slice", "catalog"])
+def test_qualifier_export_modes_require_exact_evidence_hash_arguments(mode: str) -> None:
+    qualifier = _load_qualifier()
+
+    with pytest.raises(SystemExit):
+        qualifier._parse_args(["--mode", mode])
+
+    args = qualifier._parse_args(
+        [
+            "--mode",
+            mode,
+            "--source-manifest-sha256",
+            "a" * 64,
+            "--audit-report-sha256",
+            "b" * 64,
+        ]
+    )
+    assert args.mode == mode
+    assert args.source_manifest_sha256 == "a" * 64
+    assert args.audit_report_sha256 == "b" * 64
+
+
+def test_catalog_mode_rejects_noncanonical_evidence_hashes() -> None:
+    qualifier = _load_qualifier()
+
+    with pytest.raises(qualifier.QualificationBoundaryError, match="lowercase manifest SHA-256"):
+        qualifier._qualify_payload(
+            mode="catalog",
+            source_manifest_sha256="A" * 64,
+            audit_report_sha256="b" * 64,
+        )
+
+
+def test_catalog_mode_calls_only_catalog_exporter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yieldforge.datasets import lectra_audit, lectra_slice
+
+    qualifier = _load_qualifier()
+    payload, report_payload, manifest_payload, manifest, _ = _valid_fixture_catalog(tmp_path)
+    normalized = json.loads(payload)
+    frames = _load_fixture_maker()._trusted_frames()
+    events: list[str] = []
+
+    @contextmanager
+    def fake_memfds(*_: object) -> object:
+        yield frames
+
+    class CatalogArtifact:
+        def model_dump(self, *, mode: str) -> object:
+            assert mode == "json"
+            return normalized
+
+    def fake_catalog_export(*_: object, **kwargs: object) -> CatalogArtifact:
+        events.append("catalog")
+        assert kwargs["source_manifest_sha256"] == hashlib.sha256(manifest_payload).hexdigest()
+        assert kwargs["audit_report_sha256"] == hashlib.sha256(report_payload).hexdigest()
+        return CatalogArtifact()
+
+    monkeypatch.setattr(qualifier, "MANIFEST_PATH", tmp_path / "catalog-manifest.json")
+    monkeypatch.setattr(qualifier, "_load_manifest", lambda: manifest)
+    monkeypatch.setattr(qualifier, "_verified_memfds", fake_memfds)
+    monkeypatch.setattr(qualifier, "_read_verified_pickle", lambda frame: frame)
+    monkeypatch.setattr(qualifier, "_emit_stage_telemetry", lambda stage: events.append(stage))
+    monkeypatch.setattr(qualifier, "MAX_REPORT_BYTES", len(payload) - 1)
+    monkeypatch.setattr(qualifier, "MAX_CATALOG_BYTES", len(payload))
+    monkeypatch.setattr(lectra_audit, "validate_frame_schema", lambda *_: None)
+    monkeypatch.setattr(
+        lectra_audit,
+        "audit_frames",
+        lambda *_args, **_kwargs: pytest.fail("catalog mode must not run audit export"),
+    )
+    monkeypatch.setattr(lectra_slice, "export_catalog_slice", fake_catalog_export)
+    monkeypatch.setattr(
+        lectra_slice,
+        "export_representative_slice",
+        lambda *_args, **_kwargs: pytest.fail("catalog mode must not run slice export"),
+    )
+
+    result = qualifier._qualify_payload(
+        mode="catalog",
+        source_manifest_sha256=hashlib.sha256(manifest_payload).hexdigest(),
+        audit_report_sha256=hashlib.sha256(report_payload).hexdigest(),
+    )
+
+    assert json.loads(result) == normalized
+    assert events.count("catalog") == 1
+    assert events[-1] == "catalog-complete"
 
 
 def test_qualifier_stages_verified_bytes_in_sealed_memfds() -> None:
@@ -382,6 +512,72 @@ def test_slice_validation_is_strict_and_bound_to_exact_evidence_bytes(tmp_path: 
         )
 
 
+def test_catalog_validation_is_strict_bound_canonical_and_separately_bounded(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    payload, report_payload, manifest_payload, manifest, report = _valid_fixture_catalog(tmp_path)
+
+    normalized = runner._validate_slice(
+        payload,
+        manifest,
+        report,
+        manifest_payload=manifest_payload,
+        report_payload=report_payload,
+        expected_ruleset="lectra-catalog-rules.v1",
+        max_bytes=runner.MAX_CATALOG_BYTES,
+    )
+    canonical = runner._canonical_slice_bytes(
+        normalized,
+        max_bytes=runner.MAX_CATALOG_BYTES,
+    )
+
+    assert normalized.source.conversion_ruleset_version == "lectra-catalog-rules.v1"
+    assert canonical.endswith(b"\n")
+    assert b'\n  "' not in canonical
+    assert json.loads(canonical) == normalized.model_dump(mode="json")
+    with pytest.raises(runner.QualifierRunnerError, match="audit report SHA-256 mismatch"):
+        runner._validate_slice(
+            payload,
+            manifest,
+            report,
+            manifest_payload=manifest_payload,
+            report_payload=report_payload + b" ",
+            expected_ruleset="lectra-catalog-rules.v1",
+            max_bytes=runner.MAX_CATALOG_BYTES,
+        )
+    with pytest.raises(runner.QualifierRunnerError, match="size limit"):
+        runner._validate_slice(
+            payload,
+            manifest,
+            report,
+            manifest_payload=manifest_payload,
+            report_payload=report_payload,
+            expected_ruleset="lectra-catalog-rules.v1",
+            max_bytes=len(payload) - 1,
+        )
+    with pytest.raises(runner.QualifierRunnerError, match="ruleset"):
+        runner._validate_slice(
+            payload,
+            manifest,
+            report,
+            manifest_payload=manifest_payload,
+            report_payload=report_payload,
+            expected_ruleset="lectra-slice-rules.v1",
+            max_bytes=runner.MAX_CATALOG_BYTES,
+        )
+    with pytest.raises(runner.QualifierRunnerError, match="size limit"):
+        runner._canonical_slice_bytes(normalized, max_bytes=len(canonical) - 1)
+
+
+def test_mode_limits_keep_audit_and_slice_at_four_mib() -> None:
+    runner = _load_runner()
+
+    assert runner._mode_max_bytes("audit") == 4 * 1024 * 1024
+    assert runner._mode_max_bytes("slice") == 4 * 1024 * 1024
+    assert runner._mode_max_bytes("catalog") == 64 * 1024 * 1024
+
+
 def test_slice_publisher_uses_fixed_name_and_canonical_exact_bytes(tmp_path: Path) -> None:
     runner = _load_runner()
     payload, report_payload, manifest_payload, manifest, report = _valid_fixture_slice(tmp_path)
@@ -402,6 +598,75 @@ def test_slice_publisher_uses_fixed_name_and_canonical_exact_bytes(tmp_path: Pat
     assert destination.name == "lectra-slice.json"
     assert destination.read_bytes() == canonical
     assert {path.name for path in output_dir.iterdir()} == {"lectra-slice.json"}
+
+
+def test_catalog_publisher_uses_allowlisted_name_limit_and_atomic_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    payload, report_payload, manifest_payload, manifest, report = _valid_fixture_catalog(tmp_path)
+    normalized = runner._validate_slice(
+        payload,
+        manifest,
+        report,
+        manifest_payload=manifest_payload,
+        report_payload=report_payload,
+        expected_ruleset="lectra-catalog-rules.v1",
+        max_bytes=runner.MAX_CATALOG_BYTES,
+    )
+    canonical = runner._canonical_slice_bytes(normalized, max_bytes=runner.MAX_CATALOG_BYTES)
+    output_dir = tmp_path / "catalog-output"
+    output_dir.mkdir()
+
+    with runner._open_output_dir(output_dir) as opened:
+        destination = runner._publish_report(
+            opened,
+            canonical,
+            name=runner.CATALOG_NAME,
+            max_bytes=runner.MAX_CATALOG_BYTES,
+        )
+        assert (
+            runner._read_published_report(
+                opened,
+                runner.CATALOG_NAME,
+                max_bytes=runner.MAX_CATALOG_BYTES,
+            )
+            == canonical
+        )
+        with pytest.raises(runner.QualifierRunnerError, match="size limit"):
+            runner._read_published_report(
+                opened,
+                runner.CATALOG_NAME,
+                max_bytes=len(canonical) - 1,
+            )
+
+    assert destination.name == "lectra-catalog.json"
+    assert destination.read_bytes() == canonical
+    assert {path.name for path in output_dir.iterdir()} == {"lectra-catalog.json"}
+
+    overflow_output = tmp_path / "catalog-overflow"
+    overflow_output.mkdir()
+    with runner._open_output_dir(overflow_output) as opened:
+        with pytest.raises(runner.QualifierRunnerError, match="size limit"):
+            runner._publish_report(
+                opened,
+                canonical,
+                name=runner.CATALOG_NAME,
+                max_bytes=len(canonical) - 1,
+            )
+    assert list(overflow_output.iterdir()) == []
+
+    unknown_output = tmp_path / "unknown-output"
+    unknown_output.mkdir()
+    with runner._open_output_dir(unknown_output) as opened:
+        with pytest.raises(runner.QualifierRunnerError, match="unknown passive artifact name"):
+            runner._publish_report(
+                opened,
+                canonical,
+                name="renamed-catalog.json",
+                max_bytes=runner.MAX_CATALOG_BYTES,
+            )
+    assert list(unknown_output.iterdir()) == []
 
 
 def test_publisher_is_atomic_no_clobber_and_exact(tmp_path: Path) -> None:
@@ -582,7 +847,8 @@ def test_runner_refuses_root_and_never_mounts_host_output(monkeypatch: pytest.Mo
     assert command[command.index("--memory-swap") + 1] == "16g"
 
 
-def test_slice_docker_command_passes_only_mode_and_evidence_hashes() -> None:
+@pytest.mark.parametrize("mode", ["slice", "catalog"])
+def test_export_docker_command_passes_only_mode_and_evidence_hashes(mode: str) -> None:
     runner = _load_runner()
     command = runner._docker_command(
         image="yieldforge-lectra-qualifier:test",
@@ -592,7 +858,7 @@ def test_slice_docker_command_passes_only_mode_and_evidence_hashes() -> None:
         gid=20,
         qualifier_args=(
             "--mode",
-            "slice",
+            mode,
             "--source-manifest-sha256",
             "a" * 64,
             "--audit-report-sha256",
@@ -602,7 +868,7 @@ def test_slice_docker_command_passes_only_mode_and_evidence_hashes() -> None:
 
     assert command[-6:] == [
         "--mode",
-        "slice",
+        mode,
         "--source-manifest-sha256",
         "a" * 64,
         "--audit-report-sha256",
@@ -610,6 +876,112 @@ def test_slice_docker_command_passes_only_mode_and_evidence_hashes() -> None:
     ]
     assert all("audit.json" not in argument for argument in command)
     assert all("manifest.json" not in argument for argument in command)
+
+
+def test_catalog_runner_applies_catalog_limit_to_every_artifact_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = _load_runner()
+    payload, report_payload, _, _, _ = _valid_fixture_catalog(tmp_path)
+    report_path = tmp_path / "lectra-audit.json"
+    report_path.write_bytes(report_payload)
+    output_dir = tmp_path / "catalog-output"
+    output_dir.mkdir()
+    observed: dict[str, object] = {}
+    original_validate = runner._validate_slice
+    original_canonical = runner._canonical_slice_bytes
+    original_publish = runner._publish_report
+
+    monkeypatch.setattr(runner, "_validate_input_dir", lambda path, _manifest: path.absolute())
+    monkeypatch.setattr(runner, "_nonroot_identity", lambda: (501, 20))
+
+    def fake_docker_command(**kwargs: object) -> list[str]:
+        observed["qualifier_args"] = kwargs["qualifier_args"]
+        return ["docker", "run", "catalog-test"]
+
+    def fake_capture(*_args: object, **kwargs: object) -> tuple[int, bytes, bytes]:
+        observed["stdout_limit"] = kwargs["stdout_limit"]
+        return 0, payload, b""
+
+    def validate_with_limit(*args: object, **kwargs: object) -> object:
+        observed["validation_limit"] = kwargs["max_bytes"]
+        observed["expected_ruleset"] = kwargs["expected_ruleset"]
+        return original_validate(*args, **kwargs)
+
+    def canonical_with_limit(*args: object, **kwargs: object) -> bytes:
+        observed["canonical_limit"] = kwargs["max_bytes"]
+        return original_canonical(*args, **kwargs)
+
+    def publish_with_limit(*args: object, **kwargs: object) -> Path:
+        observed["publication_limit"] = kwargs["max_bytes"]
+        observed["artifact_name"] = kwargs["name"]
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_docker_command", fake_docker_command)
+    monkeypatch.setattr(runner, "_capture_process", fake_capture)
+    monkeypatch.setattr(runner, "_validate_slice", validate_with_limit)
+    monkeypatch.setattr(runner, "_canonical_slice_bytes", canonical_with_limit)
+    monkeypatch.setattr(runner, "_publish_report", publish_with_limit)
+    monkeypatch.setattr(runner, "_ensure_container_absent", lambda _name: None)
+
+    destination = runner.run_qualifier(
+        mode="catalog",
+        image="yieldforge-lectra-qualifier:test",
+        input_dir=tmp_path / "unused-input",
+        output_dir=output_dir,
+        manifest_path=tmp_path / "catalog-manifest.json",
+        audit_report_path=report_path,
+        timeout_seconds=30,
+    )
+
+    expected_limit = 64 * 1024 * 1024
+    assert destination.name == "lectra-catalog.json"
+    assert observed["stdout_limit"] == expected_limit
+    assert observed["validation_limit"] == expected_limit
+    assert observed["canonical_limit"] == expected_limit
+    assert observed["publication_limit"] == expected_limit
+    assert observed["expected_ruleset"] == "lectra-catalog-rules.v1"
+    assert observed["artifact_name"] == "lectra-catalog.json"
+    assert observed["qualifier_args"] == (
+        "--mode",
+        "catalog",
+        "--source-manifest-sha256",
+        hashlib.sha256((tmp_path / "catalog-manifest.json").read_bytes()).hexdigest(),
+        "--audit-report-sha256",
+        hashlib.sha256(report_payload).hexdigest(),
+    )
+
+
+def test_runner_cli_accepts_catalog_mode_and_audit_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = _load_runner()
+    observed: dict[str, object] = {}
+    destination = tmp_path / runner.CATALOG_NAME
+
+    def fake_run_qualifier(**kwargs: object) -> Path:
+        observed.update(kwargs)
+        return destination
+
+    monkeypatch.setattr(runner, "run_qualifier", fake_run_qualifier)
+
+    assert (
+        runner.main(
+            [
+                "--mode",
+                "catalog",
+                "--input",
+                str(tmp_path / "input"),
+                "--output",
+                str(tmp_path / "output"),
+                "--audit-report",
+                str(tmp_path / "lectra-audit.json"),
+            ]
+        )
+        == 0
+    )
+    assert observed["mode"] == "catalog"
+    assert observed["audit_report_path"] == tmp_path / "lectra-audit.json"
 
 
 def test_dockerfile_is_pinned_minimal_and_nonroot() -> None:

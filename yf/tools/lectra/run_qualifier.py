@@ -38,15 +38,22 @@ DEFAULT_MANIFEST = PROJECT_ROOT / "datasets" / "sources" / "lectra-7030786-v1.1.
 DEFAULT_IMAGE = "yieldforge-lectra-qualifier:7030786-v1.1"
 REPORT_NAME = "lectra-audit.json"
 SLICE_NAME = "lectra-slice.json"
+CATALOG_NAME = "lectra-catalog.json"
 MAX_REPORT_BYTES = 4 * 1024 * 1024
+MAX_CATALOG_BYTES = 64 * 1024 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15 * 60
 _IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")
-type QualifierMode = Literal["audit", "slice"]
+type QualifierMode = Literal["audit", "catalog", "slice"]
+type NormalizedRuleset = Literal["lectra-catalog-rules.v1", "lectra-slice-rules.v1"]
 
 
 class QualifierRunnerError(RuntimeError):
     """Qualification or trusted publication failed closed."""
+
+
+def _mode_max_bytes(mode: QualifierMode) -> int:
+    return MAX_CATALOG_BYTES if mode == "catalog" else MAX_REPORT_BYTES
 
 
 @dataclass(frozen=True)
@@ -261,6 +268,7 @@ def _validate_slice(
     *,
     manifest_payload: bytes,
     report_payload: bytes,
+    expected_ruleset: NormalizedRuleset = "lectra-slice-rules.v1",
     max_bytes: int = MAX_REPORT_BYTES,
 ) -> NormalizedSlice:
     if not payload or len(payload) > max_bytes:
@@ -274,6 +282,10 @@ def _validate_slice(
             report_payload=report_payload,
             manifest_payload=manifest_payload,
         )
+        if normalized.source.conversion_ruleset_version != expected_ruleset:
+            raise QualifierRunnerError(
+                "normalized artifact ruleset does not match the requested qualifier mode"
+            )
     except PassiveEvidenceError as error:
         raise QualifierRunnerError(str(error)) from error
     return normalized
@@ -299,7 +311,11 @@ def _canonical_report_bytes(report: LectraAuditReport) -> bytes:
     return payload
 
 
-def _canonical_slice_bytes(normalized: NormalizedSlice) -> bytes:
+def _canonical_slice_bytes(
+    normalized: NormalizedSlice,
+    *,
+    max_bytes: int = MAX_REPORT_BYTES,
+) -> bytes:
     try:
         payload = (
             json.dumps(
@@ -312,7 +328,7 @@ def _canonical_slice_bytes(normalized: NormalizedSlice) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError) as error:
         raise QualifierRunnerError("validated slice could not be serialized canonically") from error
-    if len(payload) > MAX_REPORT_BYTES:
+    if len(payload) > max_bytes:
         raise QualifierRunnerError("canonical slice violates the size limit")
     return payload
 
@@ -324,20 +340,25 @@ def _unlink_owned(output: _OutputDirectory, name: str) -> None:
         pass
 
 
-def _read_published_report(output: _OutputDirectory, name: str = REPORT_NAME) -> bytes:
+def _read_published_report(
+    output: _OutputDirectory,
+    name: str = REPORT_NAME,
+    *,
+    max_bytes: int = MAX_REPORT_BYTES,
+) -> bytes:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     descriptor = os.open(name, flags, dir_fd=output.file_descriptor)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise QualifierRunnerError("published report is not a regular file")
-        if metadata.st_size > MAX_REPORT_BYTES:
+        if metadata.st_size > max_bytes:
             raise QualifierRunnerError("published report violates the size limit")
         chunks: list[bytes] = []
         byte_count = 0
-        while chunk := os.read(descriptor, min(64 * 1024, MAX_REPORT_BYTES + 1 - byte_count)):
+        while chunk := os.read(descriptor, min(64 * 1024, max_bytes + 1 - byte_count)):
             byte_count += len(chunk)
-            if byte_count > MAX_REPORT_BYTES:
+            if byte_count > max_bytes:
                 raise QualifierRunnerError("published report violates the size limit")
             chunks.append(chunk)
         return b"".join(chunks)
@@ -350,15 +371,16 @@ def _publish_report(
     payload: bytes,
     *,
     name: str = REPORT_NAME,
+    max_bytes: int = MAX_REPORT_BYTES,
 ) -> Path:
     """Atomically link a complete file into an empty directory without overwriting."""
-    if len(payload) > MAX_REPORT_BYTES:
+    if len(payload) > max_bytes:
         raise QualifierRunnerError("qualifier report violates the size limit")
     if not _output_path_has_held_identity(output):
         raise QualifierRunnerError("output directory identity changed during qualification")
     if os.listdir(output.file_descriptor):
         raise QualifierRunnerError("output directory must remain empty until publication")
-    if name not in {REPORT_NAME, SLICE_NAME}:
+    if name not in {CATALOG_NAME, REPORT_NAME, SLICE_NAME}:
         raise QualifierRunnerError("unknown passive artifact name")
     temporary = f".{name}.{uuid.uuid4().hex}.tmp"
     temporary_created = False
@@ -404,7 +426,7 @@ def _publish_report(
         metadata = os.stat(name, dir_fd=output.file_descriptor, follow_symlinks=False)
         if not stat.S_ISREG(metadata.st_mode):
             raise QualifierRunnerError("published report is not a regular file")
-        if _read_published_report(output, name) != payload:
+        if _read_published_report(output, name, max_bytes=max_bytes) != payload:
             raise QualifierRunnerError("published report bytes changed unexpectedly")
         if not _output_path_has_held_identity(output):
             raise QualifierRunnerError("output directory identity changed during qualification")
@@ -552,8 +574,9 @@ def run_qualifier(
     mode: QualifierMode = "audit",
     audit_report_path: Path | None = None,
 ) -> Path:
-    if mode not in {"audit", "slice"}:
+    if mode not in {"audit", "catalog", "slice"}:
         raise QualifierRunnerError(f"unknown qualifier mode: {mode!r}")
+    max_bytes = _mode_max_bytes(mode)
     try:
         manifest_payload = read_passive_evidence_file(
             manifest_path, label="dataset source manifest"
@@ -567,9 +590,9 @@ def run_qualifier(
     report: LectraAuditReport | None = None
     report_payload: bytes | None = None
     qualifier_args: tuple[str, ...] = ()
-    if mode == "slice":
+    if mode in {"catalog", "slice"}:
         if audit_report_path is None:
-            raise QualifierRunnerError("slice mode requires an exact audit report")
+            raise QualifierRunnerError(f"{mode} mode requires an exact audit report")
         try:
             report_payload = read_passive_evidence_file(
                 audit_report_path, label="Lectra audit report"
@@ -580,7 +603,7 @@ def run_qualifier(
             raise QualifierRunnerError(str(error)) from error
         qualifier_args = (
             "--mode",
-            "slice",
+            mode,
             "--source-manifest-sha256",
             hashlib.sha256(manifest_payload).hexdigest(),
             "--audit-report-sha256",
@@ -604,7 +627,7 @@ def run_qualifier(
             return_code, stdout, stderr = _capture_process(
                 command,
                 timeout_seconds=timeout_seconds,
-                stdout_limit=MAX_REPORT_BYTES,
+                stdout_limit=max_bytes,
                 stderr_limit=MAX_STDERR_BYTES,
                 on_abort=lambda: _ensure_container_absent(container_name),
             )
@@ -629,13 +652,22 @@ def run_qualifier(
                 report,
                 manifest_payload=manifest_payload,
                 report_payload=report_payload,
+                expected_ruleset=(
+                    "lectra-catalog-rules.v1" if mode == "catalog" else "lectra-slice-rules.v1"
+                ),
+                max_bytes=max_bytes,
             )
-            canonical_payload = _canonical_slice_bytes(normalized)
-            artifact_name = SLICE_NAME
+            canonical_payload = _canonical_slice_bytes(normalized, max_bytes=max_bytes)
+            artifact_name = CATALOG_NAME if mode == "catalog" else SLICE_NAME
         if stderr:
             sys.stderr.buffer.write(stderr)
             sys.stderr.buffer.flush()
-        return _publish_report(opened_output, canonical_payload, name=artifact_name)
+        return _publish_report(
+            opened_output,
+            canonical_payload,
+            name=artifact_name,
+            max_bytes=max_bytes,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -644,7 +676,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--mode", choices=("audit", "slice"), default="audit")
+    parser.add_argument("--mode", choices=("audit", "catalog", "slice"), default="audit")
     parser.add_argument("--audit-report", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)

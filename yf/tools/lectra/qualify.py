@@ -18,13 +18,15 @@ from typing import Any, BinaryIO
 from yieldforge.datasets.source_manifest import DatasetSourceManifest, SourceFile
 
 EXPECTED_FILENAMES = frozenset({"constraints.gz", "parts.gz", "shapes.gz", "tasks.gz"})
-QUALIFIER_MODES = frozenset({"audit", "slice"})
+QUALIFIER_MODES = frozenset({"audit", "catalog", "slice"})
 SLICE_NAME = "lectra-slice.json"
+CATALOG_NAME = "lectra-catalog.json"
 APP_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = APP_ROOT / "datasets" / "sources" / "lectra-7030786-v1.1.json"
 INPUT_DIR = Path("/input")
 HASH_CHUNK_BYTES = 1024 * 1024
 MAX_REPORT_BYTES = 4 * 1024 * 1024
+MAX_CATALOG_BYTES = 64 * 1024 * 1024
 MAX_CGROUP_VALUE_BYTES = 64
 MAX_TELEMETRY_LINE_BYTES = 256
 CGROUP_MEMORY_FILES = (
@@ -206,18 +208,18 @@ def _qualify_payload(
 
     if mode not in QUALIFIER_MODES:
         raise QualificationBoundaryError(f"unknown qualification mode: {mode!r}")
-    if mode == "slice":
+    if mode in {"catalog", "slice"}:
         if not source_manifest_sha256 or not _SHA256_PATTERN.fullmatch(source_manifest_sha256):
-            raise QualificationBoundaryError("slice mode requires a lowercase manifest SHA-256")
+            raise QualificationBoundaryError(f"{mode} mode requires a lowercase manifest SHA-256")
         if not audit_report_sha256 or not _SHA256_PATTERN.fullmatch(audit_report_sha256):
-            raise QualificationBoundaryError("slice mode requires a lowercase audit SHA-256")
+            raise QualificationBoundaryError(f"{mode} mode requires a lowercase audit SHA-256")
         actual_manifest_sha256 = hashlib.sha256(MANIFEST_PATH.read_bytes()).hexdigest()
         if actual_manifest_sha256 != source_manifest_sha256:
             raise QualificationBoundaryError(
                 "mounted manifest hash differs from the trusted runner"
             )
     elif source_manifest_sha256 is not None or audit_report_sha256 is not None:
-        raise QualificationBoundaryError("audit mode does not accept slice evidence hashes")
+        raise QualificationBoundaryError("audit mode does not accept export evidence hashes")
 
     manifest = _load_manifest()
     with _verified_memfds(INPUT_DIR, manifest) as staged:
@@ -236,7 +238,7 @@ def _qualify_payload(
         )
         _emit_stage_telemetry("audit-complete")
         payload = (report_to_json(report, indent=2) + "\n").encode("utf-8")
-    else:
+    elif mode == "slice":
         from yieldforge.datasets.lectra_slice import export_representative_slice
 
         assert source_manifest_sha256 is not None
@@ -257,8 +259,30 @@ def _qualify_payload(
             )
             + "\n"
         ).encode("utf-8")
-    if len(payload) > MAX_REPORT_BYTES:
-        raise QualificationBoundaryError("audit report exceeds the qualifier size limit")
+    else:
+        from yieldforge.datasets.lectra_slice import export_catalog_slice
+
+        assert source_manifest_sha256 is not None
+        assert audit_report_sha256 is not None
+        normalized = export_catalog_slice(
+            frames,
+            manifest=manifest,
+            source_manifest_sha256=source_manifest_sha256,
+            audit_report_sha256=audit_report_sha256,
+        )
+        _emit_stage_telemetry("catalog-complete")
+        payload = (
+            json.dumps(
+                normalized.model_dump(mode="json"),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    max_bytes = MAX_CATALOG_BYTES if mode == "catalog" else MAX_REPORT_BYTES
+    if len(payload) > max_bytes:
+        raise QualificationBoundaryError("qualification artifact exceeds the mode size limit")
     return payload
 
 
@@ -277,14 +301,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-manifest-sha256")
     parser.add_argument("--audit-report-sha256")
     args = parser.parse_args(argv)
-    if args.mode == "slice" and (
+    if args.mode in {"catalog", "slice"} and (
         args.source_manifest_sha256 is None or args.audit_report_sha256 is None
     ):
-        parser.error("slice mode requires both evidence SHA-256 arguments")
+        parser.error(f"{args.mode} mode requires both evidence SHA-256 arguments")
     if args.mode == "audit" and (
         args.source_manifest_sha256 is not None or args.audit_report_sha256 is not None
     ):
-        parser.error("audit mode does not accept slice evidence hashes")
+        parser.error("audit mode does not accept export evidence hashes")
     return args
 
 

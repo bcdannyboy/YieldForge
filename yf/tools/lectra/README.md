@@ -120,6 +120,37 @@ closure, geometry facts, support status, and the single
 `interpret_s1_degenerate_entries_as_allowed_rotations` assumption remain separately labelled.
 The literal source unit stays `m^-4` with no inferred interpretation.
 
+## Export the qualified catalog
+
+Catalog mode uses the same sealed-input container and exact manifest/audit evidence binding as
+slice mode, but calls only the deterministic `export_catalog_slice` path. It exports exactly 256
+fully display-safe tasks, including continuity tasks `13958` and `25801`, under the
+`lectra-catalog-rules.v1` ruleset. This bounded research catalog is not a prevalence sample of the
+full release, and tasks remain view-only unless the strict existing `s1` projection rule supports
+the explicit rotation assumption.
+
+Use a new empty output directory and the exact validated audit report whose bytes should bind the
+catalog:
+
+```bash
+mkdir -p /ABSOLUTE/PATH/TO/empty-catalog-directory
+
+uv run python tools/lectra/run_qualifier.py \
+  --mode catalog \
+  --image yieldforge-lectra-qualifier:7030786-v1.1 \
+  --input /ABSOLUTE/PATH/TO/raw/lectra-7030786-v1.1 \
+  --output /ABSOLUTE/PATH/TO/empty-catalog-directory \
+  --manifest datasets/sources/lectra-7030786-v1.1.json \
+  --audit-report /ABSOLUTE/PATH/TO/lectra-audit.json \
+  --timeout-seconds 900
+```
+
+The only successful output is canonical `lectra-catalog.json`. Catalog stdout, strict validation,
+canonical serialization, atomic publication, and descriptor-relative readback each use a separate
+64 MiB ceiling. Audit and representative-slice mode remain capped at 4 MiB throughout those same
+stages. The trusted runner still publishes into an initially empty held directory without
+overwriting, and Docker security, timeout, stderr, and cleanup requirements are unchanged.
+
 ## Trusted Docker smoke fixtures
 
 `make_trusted_fixture.py` creates—never reads—four tiny pandas pickle files with the published
