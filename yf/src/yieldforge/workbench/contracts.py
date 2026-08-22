@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
 
 from yieldforge.domain import (
     Candidate,
@@ -195,5 +195,7 @@ class JobSnapshot(WorkbenchContract):
     worker_pid: StrictInt | None = Field(default=None, gt=0)
     archive_path: str | None = Field(default=None, min_length=1)
     source_task_binding: SourceTaskBinding | None = None
+    config: SpyrrowRunConfig
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
     error_code: str | None = Field(default=None, min_length=1, max_length=80)
     error_message: str | None = Field(default=None, min_length=1, max_length=200)

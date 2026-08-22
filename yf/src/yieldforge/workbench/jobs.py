@@ -1141,6 +1141,8 @@ class SolverJobService:
             worker_pid=state.worker_pid,
             archive_path=state.archive_path,
             source_task_binding=state.request.source_task_binding,
+            config=state.request.config,
+            max_runtime_seconds=state.request.max_runtime_seconds,
             error_code=state.error_code,
             error_message=state.error_message,
         )

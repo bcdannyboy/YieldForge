@@ -202,6 +202,8 @@ def _snapshot(status: JobStatus = JobStatus.QUEUED, *, sequence: int = 1) -> Job
         worker_pid=4321,
         archive_path="/private/server/archive/job_abc" if status is JobStatus.COMPLETED else None,
         source_task_binding=_binding(),
+        config=SpyrrowRunConfig(seed=23, total_computation_time=1, num_workers=1),
+        max_runtime_seconds=2.0,
     )
 
 

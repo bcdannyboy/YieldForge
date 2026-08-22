@@ -207,9 +207,11 @@ def test_completed_source_job_persists_binding_and_exposes_archive_bound_batch(
         archives = tmp_path / "archives"
         binding = make_source_task_binding()
         service = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
-
-        created = await service.start(make_request(source_task_binding=binding))
+        request = make_request(source_task_binding=binding)
+        created = await service.start(request)
         assert created.source_task_binding == binding
+        assert created.config == request.config
+        assert created.max_runtime_seconds == request.max_runtime_seconds
         assert service.completed_batch(created.job_id) is None
         terminal = await service.wait(created.job_id)
 
@@ -232,6 +234,8 @@ def test_completed_source_job_persists_binding_and_exposes_archive_bound_batch(
     recovered = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
 
     assert recovered.get(job_id).source_task_binding == binding
+    assert recovered.get(job_id).config == batch.config
+    assert recovered.get(job_id).max_runtime_seconds == 2.0
     assert recovered.completed_batch(job_id) == batch
 
 
