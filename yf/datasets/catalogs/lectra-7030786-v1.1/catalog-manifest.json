@@ -3,13 +3,13 @@
   "dataset_id": "lectra-7030786-v1.1",
   "artifact": {
     "name": "lectra-catalog.json",
-    "sha256": "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138",
-    "size_bytes": 9554652
+    "sha256": "0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad",
+    "size_bytes": 9575575
   },
   "evidence": {
     "source_manifest_sha256": "bfb5cc9e29fdbd81a642cbe6eed1b8c5ca9e153d23a17037489b9f63e6e05e89",
     "audit_report_sha256": "58d1978b59b8a023867f3906f1955b06ffceea52d24f92d31c3db3003091a857",
-    "conversion_ruleset_version": "lectra-catalog-rules.v1"
+    "conversion_ruleset_version": "lectra-catalog-rules.v2"
   },
   "counts": {
     "tasks": 256,
@@ -19,7 +19,7 @@
     "constraints": 8398
   },
   "capability_distribution": {
-    "runnable_with_explicit_assumptions": 69,
-    "view_only": 187
+    "runnable_with_explicit_assumptions": 254,
+    "view_only": 2
   }
 }

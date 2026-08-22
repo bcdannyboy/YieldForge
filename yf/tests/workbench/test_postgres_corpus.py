@@ -37,6 +37,8 @@ DATABASE_URL = os.environ.get(
 )
 CURSOR_KEY = b"p" * 32
 ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
+FLIP_ASSUMPTION = "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation"
+NO_FLIP_INTERVENTION = "force_s1_flip_x_zero_for_ablation"
 
 
 def _service(database_url: str = DATABASE_URL) -> PostgresCorpusQueryService:
@@ -210,7 +212,7 @@ def test_cursors_reject_tamper_stale_cross_filter_and_nonmember(
     )
     wrong_membership = _signed_cursor(
         catalog_hash=service.summary().source.slice_sha256,
-        after=(147, 147),
+        after=(25801, 25801),
         filter_digest=runnable_digest,
     )
     with pytest.raises(InvalidCursorError, match="filtered result"):
@@ -258,6 +260,37 @@ def test_projection_requires_capability_and_exact_assumptions(
     assert projected_13958.problem.name == "lectra-task-13958"
     assert projected_13958.projection.mode is ProjectionMode.SOURCE_AS_RECORDED
     assert projected_1460.problem.name == "lectra-task-1460"
+
+
+def test_flip_task_requires_exact_mode_specific_intervention(
+    service: PostgresCorpusQueryService,
+) -> None:
+    assumptions = tuple(sorted((ASSUMPTION, FLIP_ASSUMPTION)))
+    with pytest.raises(TaskNotSolvableError, match="interventions"):
+        service.project_task(
+            6669,
+            mode=ProjectionMode.FORCE_FLIP_X_ZERO,
+            acknowledged_assumption_codes=assumptions,
+            acknowledged_intervention_codes=(),
+        )
+
+    recorded = service.project_task(
+        6669,
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
+        acknowledged_assumption_codes=assumptions,
+        acknowledged_intervention_codes=(),
+    )
+    no_flip = service.project_task(
+        6669,
+        mode=ProjectionMode.FORCE_FLIP_X_ZERO,
+        acknowledged_assumption_codes=assumptions,
+        acknowledged_intervention_codes=(NO_FLIP_INTERVENTION,),
+    )
+
+    assert recorded.problem.name == "lectra-task-6669"
+    assert no_flip.problem.name == "lectra-task-6669-force-flip-x-zero"
+    assert recorded.projection.source_flip_part_count == 6
+    assert recorded.projection.projection_sha256 != no_flip.projection.projection_sha256
 
 
 def test_startup_rejects_catalog_identity_tamper(isolated_database_url: str) -> None:

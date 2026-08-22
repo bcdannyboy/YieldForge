@@ -21,6 +21,7 @@ from yieldforge.datasets.corpus import (
 )
 from yieldforge.datasets.normalized_slice import SupportStatus
 from yieldforge.datasets.passive_report import parse_normalized_slice
+from yieldforge.domain import ProjectionMode
 
 YF_ROOT = Path(__file__).resolve().parents[2]
 COMMITTED_SLICE = YF_ROOT / "datasets/fixtures/lectra-representative-slice.json"
@@ -41,8 +42,49 @@ def test_corpus_dtos_accept_the_catalog_ruleset() -> None:
         cursor_signing_key=b"c" * 32,
     )
 
-    assert service.summary().source.conversion_ruleset_version == "lectra-catalog-rules.v1"
+    assert service.summary().source.conversion_ruleset_version == "lectra-catalog-rules.v2"
     assert service.summary().task_count == 256
+
+
+def test_catalog_task_6669_exposes_two_exact_projection_arms() -> None:
+    normalized = parse_normalized_slice(
+        COMMITTED_CATALOG.read_bytes(),
+        max_bytes=64 * 1024 * 1024,
+    )
+    service = CorpusQueryService(
+        normalized,
+        slice_sha256=hashlib.sha256(COMMITTED_CATALOG.read_bytes()).hexdigest(),
+        evidence_status="fully_bound_to_local_audit_evidence",
+        cursor_signing_key=b"6" * 32,
+    )
+    assumptions = (
+        "interpret_s1_degenerate_entries_as_allowed_rotations",
+        "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation",
+    )
+
+    detail = service.task_detail(6669)
+    recorded = service.project_task(
+        6669,
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
+        acknowledged_assumption_codes=assumptions,
+        acknowledged_intervention_codes=(),
+    )
+    no_flip = service.project_task(
+        6669,
+        mode=ProjectionMode.FORCE_FLIP_X_ZERO,
+        acknowledged_assumption_codes=assumptions,
+        acknowledged_intervention_codes=("force_s1_flip_x_zero_for_ablation",),
+    )
+
+    assert detail.s1_projection_diagnostics.flip_part_count == 6
+    assert [option.mode for option in detail.summary.solve_capability.projection_options] == [
+        ProjectionMode.SOURCE_AS_RECORDED,
+        ProjectionMode.FORCE_FLIP_X_ZERO,
+    ]
+    assert recorded.projection.source_flip_part_count == 6
+    assert no_flip.projection.source_flip_part_count == 6
+    assert recorded.projection.projection_sha256 != no_flip.projection.projection_sha256
+    assert recorded.problem != no_flip.problem
 
 
 def signed_cursor(

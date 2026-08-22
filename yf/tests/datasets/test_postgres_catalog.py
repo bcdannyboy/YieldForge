@@ -65,10 +65,10 @@ def test_imports_exact_catalog_transactionally_and_is_idempotent(database_url: s
     assert second == first
     assert first.schema_version == "yieldforge.postgres-catalog.v2"
     assert first.catalog_sha256 == (
-        "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138"
+        "0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad"
     )
     assert first.task_count == 256
-    assert first.projected_task_count == 69
+    assert first.projected_task_count == 254
 
     with psycopg.connect(database_url) as connection:
         catalog_count = connection.execute("SELECT count(*) FROM yieldforge_catalog").fetchone()
@@ -84,15 +84,27 @@ def test_imports_exact_catalog_transactionally_and_is_idempotent(database_url: s
         ).fetchall()
 
     assert catalog_count == (1,)
-    assert task_counts == (256, 69, 256, 256)
+    assert task_counts == (256, 254, 256, 256)
     assert all(len(record_sha256) == 64 for *_, record_sha256 in rows)
     for support_status, summary, detail, projections, _ in rows:
         assert detail["summary"] == summary
         if support_status == "runnable_with_explicit_assumptions":
-            assert set(projections) == {"source_as_recorded"}
-            ProjectedTask.model_validate(projections["source_as_recorded"])
+            expected_modes = {
+                option["mode"] for option in summary["solve_capability"]["projection_options"]
+            }
+            assert set(projections) == expected_modes
+            for mode, payload in projections.items():
+                assert ProjectedTask.model_validate(payload).projection.mode.value == mode
         else:
             assert projections == {}
+
+    task_6669 = next(
+        detail for _, _, detail, _, _ in rows if detail["summary"]["tasks_index"] == 6669
+    )
+    assert task_6669["s1_projection_diagnostics"]["flip_part_count"] == 6
+    assert {
+        option["mode"] for option in task_6669["summary"]["solve_capability"]["projection_options"]
+    } == {"source_as_recorded", "force_flip_x_zero"}
 
 
 def test_imported_rows_match_the_pinned_read_model_root(database_url: str) -> None:

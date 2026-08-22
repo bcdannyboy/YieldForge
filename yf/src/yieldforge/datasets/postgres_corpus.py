@@ -53,7 +53,7 @@ from yieldforge.domain import ProjectedTask, ProjectionMode, StripPackingProblem
 _DATASET_ID = "lectra-7030786-v1.1"
 _SOURCE_MANIFEST_SHA256 = "bfb5cc9e29fdbd81a642cbe6eed1b8c5ca9e153d23a17037489b9f63e6e05e89"
 _AUDIT_REPORT_SHA256 = "58d1978b59b8a023867f3906f1955b06ffceea52d24f92d31c3db3003091a857"
-_RULESET_VERSION = "lectra-catalog-rules.v1"
+_RULESET_VERSION = "lectra-catalog-rules.v2"
 _EXPECTED_COUNTS = {
     "constraint_count": 8398,
     "part_count": 8358,
@@ -64,11 +64,11 @@ _EXPECTED_MANIFEST = {
     "artifact": {
         "name": "lectra-catalog.json",
         "sha256": COMMITTED_CATALOG_SHA256,
-        "size_bytes": 9_554_652,
+        "size_bytes": 9_575_575,
     },
     "capability_distribution": {
-        "runnable_with_explicit_assumptions": 69,
-        "view_only": 187,
+        "runnable_with_explicit_assumptions": 254,
+        "view_only": 2,
     },
     "counts": {
         "constraints": 8398,
@@ -449,8 +449,8 @@ class PostgresCorpusQueryService:
                     )
                 if support_counts != Counter(
                     {
-                        SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS.value: 69,
-                        SupportStatus.VIEW_ONLY.value: 187,
+                        SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS.value: 254,
+                        SupportStatus.VIEW_ONLY.value: 2,
                     }
                 ):
                     raise PostgresCorpusError(

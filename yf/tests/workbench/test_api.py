@@ -893,7 +893,7 @@ def test_default_factory_uses_the_configured_postgres_catalog(
     assert response.status_code == 200
     assert response.json()["task_count"] == 256
     assert response.json()["source"]["slice_sha256"] == (
-        "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138"
+        "0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad"
     )
 
 
