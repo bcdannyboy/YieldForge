@@ -449,6 +449,14 @@ describe("research workbench", () => {
     const evidence = within(comparison).getByRole("table", {
       name: "Recorded run evidence",
     });
+    expect(within(evidence).getByText(
+      "Exact recorded fields. Archived candidate count is inventory, not quality.",
+    )).toBeVisible();
+    expect(within(evidence).getByRole("columnheader", { name: "Run A · open" })).toBeVisible();
+    expect(within(evidence).getByRole("columnheader", {
+      name: "Run B · comparison",
+    })).toBeVisible();
+    expect(within(evidence).getByRole("columnheader", { name: "Relation" })).toBeVisible();
     expect(within(evidence).getByRole("row", {
       name: /Job ID job-newer job-older Different/i,
     })).toBeVisible();
