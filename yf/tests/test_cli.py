@@ -507,3 +507,90 @@ def test_experiments_validate_fails_closed_on_tampered_contract(tmp_path: Path) 
                 ),
             ]
         )
+
+
+def _calibration_cli_args(yf_root: Path, output: Path) -> list[str]:
+    return [
+        "experiments",
+        "calibrate-geometry-api",
+        "--m0",
+        str(yf_root / "experiments" / "m0-contract-v1.json"),
+        "--geometry",
+        str(yf_root / "experiments" / "pure-geometry-calibration-v1.json"),
+        "--catalog",
+        str(yf_root / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"),
+        "--catalog-manifest",
+        str(yf_root / "datasets/catalogs/lectra-7030786-v1.1/catalog-manifest.json"),
+        "--api-origin",
+        "http://127.0.0.1:18082",
+        "--output",
+        str(output),
+    ]
+
+
+def test_calibration_preflight_validates_api_identity_without_creating_output(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    yf_root = Path(__file__).parents[1]
+    output = tmp_path / "calibration"
+    corpus_calls = []
+
+    class FakeClient:
+        def __init__(self, origin: str) -> None:
+            assert origin == "http://127.0.0.1:18082"
+            self.origin = origin
+
+        def require_corpus(self, **kwargs):  # type: ignore[no-untyped-def]
+            corpus_calls.append(kwargs)
+
+    monkeypatch.setattr("yieldforge.cli.CalibrationApiClient", FakeClient)
+
+    exit_code = main(_calibration_cli_args(yf_root, output) + ["--preflight-only"])
+
+    assert exit_code == 0
+    assert corpus_calls == [
+        {
+            "dataset_id": "lectra-7030786-v1.1",
+            "catalog_sha256": hashlib.sha256(
+                (yf_root / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json").read_bytes()
+            ).hexdigest(),
+            "task_count": 256,
+            "eligible_task_count": 254,
+        }
+    ]
+    assert not output.exists()
+    assert "registered_cells=612" in capsys.readouterr().out
+
+
+def test_calibration_command_runs_registered_orchestrator(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    yf_root = Path(__file__).parents[1]
+    output = tmp_path / "calibration"
+    calls = []
+
+    class FakeClient:
+        def __init__(self, origin: str) -> None:
+            self.origin = origin
+
+        def require_corpus(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+
+    def fake_orchestrate(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(evaluation=SimpleNamespace(valid=True, selected_seconds_per_seed=3))
+
+    monkeypatch.setattr("yieldforge.cli.CalibrationApiClient", FakeClient)
+    monkeypatch.setattr("yieldforge.cli.orchestrate_calibration", fake_orchestrate)
+
+    exit_code = main(_calibration_cli_args(yf_root, output))
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["output_root"] == output
+    assert calls[0]["protocol"].protocol_id == "yfgp-49906e93ed9ff0446705247b"
+    assert "selected_seconds_per_seed=3" in capsys.readouterr().out

@@ -14,6 +14,11 @@ from yieldforge.datasets.passive_report import (
 from yieldforge.datasets.postgres_catalog import import_catalog
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
 from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
+from yieldforge.experiments.calibration import (
+    CalibrationApiClient,
+    orchestrate_calibration,
+    registered_cells,
+)
 from yieldforge.experiments.contracts import validate_experiment_bundle
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 
@@ -91,6 +96,54 @@ def _validate_experiment_contracts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _calibrate_geometry_api(args: argparse.Namespace) -> int:
+    bundle = validate_experiment_bundle(
+        m0_path=args.m0,
+        geometry_path=args.geometry,
+        catalog_path=args.catalog,
+        catalog_manifest_path=args.catalog_manifest,
+    )
+    protocol = bundle.geometry
+    if protocol.confirmation_enabled or protocol.budget.selected_seconds_per_seed is not None:
+        raise ValueError("calibration requires the frozen confirmation-disabled protocol")
+    cells = registered_cells(protocol)
+    client = CalibrationApiClient(args.api_origin)
+    client.require_corpus(
+        dataset_id=protocol.references.dataset_id,
+        catalog_sha256=bundle.catalog_sha256,
+        task_count=(
+            len(protocol.population.eligible_task_ids) + len(protocol.population.blocked_tasks)
+        ),
+        eligible_task_count=len(protocol.population.eligible_task_ids),
+    )
+    if args.preflight_only:
+        print(
+            "Validated registered geometry calibration: "
+            f"protocol={protocol.protocol_id} registered_cells={len(cells)} "
+            f"api={client.origin}"
+        )
+        return 0
+
+    def report_progress(completed: int, total: int, evidence) -> None:  # type: ignore[no-untyped-def]
+        if completed == 1 or completed % 25 == 0 or completed == total:
+            archive = "valid" if evidence.archive_valid else "invalid"
+            print(f"Calibration progress: {completed}/{total} latest_archive={archive}")
+
+    result = orchestrate_calibration(
+        protocol=protocol,
+        client=client,
+        output_root=args.output,
+        progress=report_progress,
+    )
+    selected = result.evaluation.selected_seconds_per_seed
+    print(
+        "Calibration finished: "
+        f"valid={str(result.evaluation.valid).lower()} "
+        f"selected_seconds_per_seed={selected} output={args.output}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -150,6 +203,19 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--catalog", type=Path, required=True)
     validate.add_argument("--catalog-manifest", type=Path, required=True)
     validate.set_defaults(handler=_validate_experiment_contracts)
+
+    calibrate = experiment_commands.add_parser(
+        "calibrate-geometry-api",
+        help="execute or resume the registered geometry calibration through the API",
+    )
+    calibrate.add_argument("--m0", type=Path, required=True)
+    calibrate.add_argument("--geometry", type=Path, required=True)
+    calibrate.add_argument("--catalog", type=Path, required=True)
+    calibrate.add_argument("--catalog-manifest", type=Path, required=True)
+    calibrate.add_argument("--api-origin", required=True)
+    calibrate.add_argument("--output", type=Path, required=True)
+    calibrate.add_argument("--preflight-only", action="store_true")
+    calibrate.set_defaults(handler=_calibrate_geometry_api)
     return parser
 
 
