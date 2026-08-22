@@ -254,6 +254,49 @@ def test_datasets_catalog_import_passes_all_explicit_evidence_paths(
     )
 
 
+def test_datasets_catalog_import_uses_approved_manifest_spelling_and_adjacent_catalog_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    catalog = tmp_path / "qualified" / "catalog.json"
+    source_manifest = tmp_path / "source-manifest.json"
+    audit_report = tmp_path / "audit.json"
+    calls = []
+
+    def fake_import_catalog(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(task_count=256, catalog_sha256="4" * 64)
+
+    monkeypatch.setattr("yieldforge.cli.import_catalog", fake_import_catalog)
+
+    assert (
+        main(
+            [
+                "datasets",
+                "catalog-import",
+                "--catalog",
+                str(catalog),
+                "--manifest",
+                str(source_manifest),
+                "--audit-report",
+                str(audit_report),
+                "--database-url",
+                "postgresql://example.test/yieldforge",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "database_url": "postgresql://example.test/yieldforge",
+            "catalog_path": catalog,
+            "catalog_manifest_path": catalog.parent / "catalog-manifest.json",
+            "source_manifest_path": source_manifest,
+            "audit_report_path": audit_report,
+        }
+    ]
+
+
 @pytest.mark.parametrize("invalid_report", ["{", '{"schema_version": NaN}'])
 def test_datasets_audit_check_rejects_malformed_or_nonfinite_report(
     tmp_path: Path, invalid_report: str

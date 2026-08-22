@@ -56,10 +56,11 @@ def _check_dataset_audit(args: argparse.Namespace) -> int:
 
 
 def _import_dataset_catalog(args: argparse.Namespace) -> int:
+    catalog_manifest = args.catalog_manifest or args.catalog.parent / "catalog-manifest.json"
     result = import_catalog(
         database_url=args.database_url,
         catalog_path=args.catalog,
-        catalog_manifest_path=args.catalog_manifest,
+        catalog_manifest_path=catalog_manifest,
         source_manifest_path=args.source_manifest,
         audit_report_path=args.audit_report,
     )
@@ -105,8 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate and import a pinned catalog into PostgreSQL",
     )
     catalog_import.add_argument("--catalog", type=Path, required=True)
-    catalog_import.add_argument("--catalog-manifest", type=Path, required=True)
-    catalog_import.add_argument("--source-manifest", type=Path, required=True)
+    catalog_import.add_argument("--catalog-manifest", type=Path)
+    catalog_import.add_argument(
+        "--manifest",
+        "--source-manifest",
+        dest="source_manifest",
+        type=Path,
+        required=True,
+    )
     catalog_import.add_argument("--audit-report", type=Path, required=True)
     catalog_import.add_argument("--database-url", required=True)
     catalog_import.set_defaults(handler=_import_dataset_catalog)
