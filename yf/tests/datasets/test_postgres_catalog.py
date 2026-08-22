@@ -17,7 +17,7 @@ from yieldforge.datasets.postgres_catalog import (
     compute_read_model_root,
     import_catalog,
 )
-from yieldforge.domain import StripPackingProblem
+from yieldforge.domain import ProjectedTask
 
 YF_ROOT = Path(__file__).resolve().parents[2]
 CATALOG = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
@@ -63,7 +63,7 @@ def test_imports_exact_catalog_transactionally_and_is_idempotent(database_url: s
     second = _import(database_url)
 
     assert second == first
-    assert first.schema_version == "yieldforge.postgres-catalog.v1"
+    assert first.schema_version == "yieldforge.postgres-catalog.v2"
     assert first.catalog_sha256 == (
         "4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138"
     )
@@ -73,24 +73,26 @@ def test_imports_exact_catalog_transactionally_and_is_idempotent(database_url: s
     with psycopg.connect(database_url) as connection:
         catalog_count = connection.execute("SELECT count(*) FROM yieldforge_catalog").fetchone()
         task_counts = connection.execute(
-            "SELECT count(*), count(solver_problem_json), "
+            "SELECT count(*), count(*) FILTER "
+            "(WHERE solver_projections_json <> '{}'::jsonb), "
             "count(DISTINCT tasks_index), count(DISTINCT source_row_index) "
             "FROM yieldforge_catalog_task"
         ).fetchone()
         rows = connection.execute(
-            "SELECT support_status, summary_json, detail_json, solver_problem_json, "
+            "SELECT support_status, summary_json, detail_json, solver_projections_json, "
             "record_sha256 FROM yieldforge_catalog_task ORDER BY catalog_ordinal"
         ).fetchall()
 
     assert catalog_count == (1,)
     assert task_counts == (256, 69, 256, 256)
     assert all(len(record_sha256) == 64 for *_, record_sha256 in rows)
-    for support_status, summary, detail, problem, _ in rows:
+    for support_status, summary, detail, projections, _ in rows:
         assert detail["summary"] == summary
         if support_status == "runnable_with_explicit_assumptions":
-            StripPackingProblem.model_validate(problem)
+            assert set(projections) == {"source_as_recorded"}
+            ProjectedTask.model_validate(projections["source_as_recorded"])
         else:
-            assert problem is None
+            assert projections == {}
 
 
 def test_imported_rows_match_the_pinned_read_model_root(database_url: str) -> None:
@@ -151,22 +153,22 @@ def test_rejects_existing_summary_detail_mismatch(database_url: str) -> None:
         _import(database_url)
 
 
-def test_rejects_problem_payload_for_an_ineligible_task(database_url: str) -> None:
+def test_rejects_projection_payload_for_an_ineligible_task(database_url: str) -> None:
     _import(database_url)
     with psycopg.connect(database_url) as connection:
-        problem = connection.execute(
-            "SELECT solver_problem_json FROM yieldforge_catalog_task "
-            "WHERE solver_problem_json IS NOT NULL LIMIT 1"
+        projections = connection.execute(
+            "SELECT solver_projections_json FROM yieldforge_catalog_task "
+            "WHERE solver_projections_json <> '{}'::jsonb LIMIT 1"
         ).fetchone()[0]
         connection.execute(
-            "UPDATE yieldforge_catalog_task SET solver_problem_json = %s "
+            "UPDATE yieldforge_catalog_task SET solver_projections_json = %s "
             "WHERE support_status = 'view_only' AND catalog_ordinal = "
             "(SELECT min(catalog_ordinal) FROM yieldforge_catalog_task "
             "WHERE support_status = 'view_only')",
-            (json.dumps(problem),),
+            (json.dumps(projections),),
         )
 
-    with pytest.raises(CatalogImportError, match="ineligible task.*solver problem"):
+    with pytest.raises(CatalogImportError, match="ineligible task.*projection"):
         _import(database_url)
 
 

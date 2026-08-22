@@ -60,7 +60,7 @@ from yieldforge.datasets.passive_report import (
     read_passive_evidence_file,
 )
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
-from yieldforge.domain import ProjectionMode, StripPackingProblem
+from yieldforge.domain import ProjectedTask, ProjectionMode, StripPackingProblem
 
 YF_ROOT = Path(__file__).resolve().parents[3]
 COMMITTED_SLICE_PATH = YF_ROOT / "datasets/fixtures/lectra-representative-slice.json"
@@ -124,6 +124,15 @@ class CorpusService(Protocol):
         *,
         acknowledged_assumption_codes: tuple[str, ...],
     ) -> StripPackingProblem: ...
+
+    def project_task(
+        self,
+        tasks_index: int,
+        *,
+        mode: ProjectionMode,
+        acknowledged_assumption_codes: tuple[str, ...],
+        acknowledged_intervention_codes: tuple[str, ...],
+    ) -> ProjectedTask: ...
 
 
 class CorpusDto(BaseModel):
@@ -1027,6 +1036,23 @@ class CorpusQueryService:
     ) -> StripPackingProblem:
         """Project only an eligible task with its exact assumptions acknowledged."""
 
+        return self.project_task(
+            tasks_index,
+            mode=ProjectionMode.SOURCE_AS_RECORDED,
+            acknowledged_assumption_codes=acknowledged_assumption_codes,
+            acknowledged_intervention_codes=(),
+        ).problem
+
+    def project_task(
+        self,
+        tasks_index: int,
+        *,
+        mode: ProjectionMode,
+        acknowledged_assumption_codes: tuple[str, ...],
+        acknowledged_intervention_codes: tuple[str, ...],
+    ) -> ProjectedTask:
+        """Return one server-owned projection only after exact option acknowledgement."""
+
         task = self._tasks_by_id.get(tasks_index)
         if task is None:
             raise TaskNotFoundError(f"task {tasks_index} was not found")
@@ -1034,19 +1060,44 @@ class CorpusQueryService:
             not isinstance(code, str) for code in acknowledged_assumption_codes
         ):
             raise TaskNotSolvableError("assumption acknowledgement must be an exact tuple")
-        disposition = self._dispositions[tasks_index]
-        if disposition.projection_status not in {
-            ProjectionStatus.ELIGIBLE,
-            ProjectionStatus.PROJECTED,
-        }:
+        if not isinstance(acknowledged_intervention_codes, tuple) or any(
+            not isinstance(code, str) for code in acknowledged_intervention_codes
+        ):
+            raise TaskNotSolvableError("intervention acknowledgement must be an exact tuple")
+        try:
+            parsed_mode = ProjectionMode(mode)
+        except (TypeError, ValueError) as error:
+            raise TaskNotSolvableError("projection mode is not available for this task") from error
+        summary = self._task_summary(task)
+        if not summary.solve_capability.can_solve:
             raise TaskNotSolvableError(f"task {tasks_index} is blocked from solving")
-        if acknowledged_assumption_codes != disposition.assumption_codes:
+        option = next(
+            (
+                item
+                for item in summary.solve_capability.projection_options
+                if item.mode is parsed_mode
+            ),
+            None,
+        )
+        if option is None:
+            raise TaskNotSolvableError("projection mode is not available for this task")
+        if acknowledged_assumption_codes != option.assumption_codes:
             raise TaskNotSolvableError(
                 f"task {tasks_index} requires exact acknowledgement of its assumptions"
             )
+        if acknowledged_intervention_codes != option.intervention_codes:
+            raise TaskNotSolvableError(
+                f"task {tasks_index} requires exact acknowledgement of its interventions"
+            )
         from yieldforge.datasets.projection import project_task
 
-        return project_task(self._normalized, tasks_index).problem
+        projected = project_task(self._normalized, tasks_index, mode=parsed_mode)
+        if (
+            projected.projection.assumption_codes != option.assumption_codes
+            or projected.projection.intervention_codes != option.intervention_codes
+        ):
+            raise TaskNotSolvableError("projection evidence does not match the selected option")
+        return projected
 
 
 __all__ = [

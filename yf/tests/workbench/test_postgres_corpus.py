@@ -24,7 +24,7 @@ from yieldforge.datasets.postgres_corpus import (
     PostgresCorpusError,
     PostgresCorpusQueryService,
 )
-from yieldforge.domain import StripPackingProblem
+from yieldforge.domain import ProjectedTask, ProjectionMode
 
 YF_ROOT = Path(__file__).resolve().parents[2]
 CATALOG = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
@@ -115,12 +115,12 @@ def _signed_cursor(
 def _record_hash(
     summary: dict[str, object],
     detail: dict[str, object],
-    problem: dict[str, object] | None,
+    projections: dict[str, object],
 ) -> str:
     payload = json.dumps(
         {
             "detail": detail,
-            "solver_problem": problem,
+            "solver_projections": projections,
             "summary": summary,
         },
         allow_nan=False,
@@ -242,17 +242,22 @@ def test_projection_requires_capability_and_exact_assumptions(
     with pytest.raises(TaskNotSolvableError, match="exact acknowledgement"):
         service.project_problem(13958, acknowledged_assumption_codes=())
 
-    problem_13958 = service.project_problem(
+    projected_13958 = service.project_task(
         13958,
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
         acknowledged_assumption_codes=(ASSUMPTION,),
+        acknowledged_intervention_codes=(),
     )
-    problem_1460 = service.project_problem(
+    projected_1460 = service.project_task(
         1460,
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
         acknowledged_assumption_codes=(ASSUMPTION,),
+        acknowledged_intervention_codes=(),
     )
 
-    assert problem_13958.name == "lectra-task-13958"
-    assert problem_1460.name == "lectra-task-1460"
+    assert projected_13958.problem.name == "lectra-task-13958"
+    assert projected_13958.projection.mode is ProjectionMode.SOURCE_AS_RECORDED
+    assert projected_1460.problem.name == "lectra-task-1460"
 
 
 def test_startup_rejects_catalog_identity_tamper(isolated_database_url: str) -> None:
@@ -277,25 +282,27 @@ def test_startup_rejects_task_record_tamper(isolated_database_url: str) -> None:
         _service(isolated_database_url)
 
 
-def test_startup_hashes_raw_problem_before_strict_numeric_validation(
+def test_startup_hashes_raw_projection_before_strict_numeric_validation(
     isolated_database_url: str,
 ) -> None:
     with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
         row = connection.execute(
-            "SELECT summary_json, detail_json, solver_problem_json "
+            "SELECT summary_json, detail_json, solver_projections_json "
             "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
         ).fetchone()
-        problem = row["solver_problem_json"]
+        projections = row["solver_projections_json"]
+        problem = projections["source_as_recorded"]["problem"]
         problem["strip_height"] = str(problem["strip_height"])
-        assert StripPackingProblem.model_validate(problem).strip_height > 0
-        record_hash = _record_hash(row["summary_json"], row["detail_json"], problem)
+        coerced = ProjectedTask.model_validate(projections["source_as_recorded"])
+        assert coerced.problem.strip_height > 0
+        record_hash = _record_hash(row["summary_json"], row["detail_json"], projections)
         connection.execute(
             "UPDATE yieldforge_catalog_task "
-            "SET solver_problem_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
-            (Jsonb(problem), record_hash),
+            "SET solver_projections_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(projections), record_hash),
         )
 
-    with pytest.raises(PostgresCorpusError, match="solver problem.*strict JSON"):
+    with pytest.raises(PostgresCorpusError, match="projection.*strict JSON"):
         _service(isolated_database_url)
 
 
@@ -306,7 +313,7 @@ def test_startup_rejects_rehashed_malformed_capability_semantics(
 ) -> None:
     with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
         row = connection.execute(
-            "SELECT summary_json, detail_json, solver_problem_json "
+            "SELECT summary_json, detail_json, solver_projections_json "
             "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
         ).fetchone()
         summary = row["summary_json"]
@@ -318,9 +325,13 @@ def test_startup_rejects_rehashed_malformed_capability_semantics(
         else:
             assumptions = [ASSUMPTION, ASSUMPTION]
             summary["solve_capability"]["assumption_codes"] = assumptions
+            summary["solve_capability"]["projection_options"][0]["assumption_codes"] = assumptions
             detail["summary"]["solve_capability"]["assumption_codes"] = assumptions
+            detail["summary"]["solve_capability"]["projection_options"][0]["assumption_codes"] = (
+                assumptions
+            )
             support_status = "runnable_with_explicit_assumptions"
-        record_hash = _record_hash(summary, detail, row["solver_problem_json"])
+        record_hash = _record_hash(summary, detail, row["solver_projections_json"])
         connection.execute(
             "UPDATE yieldforge_catalog_task SET summary_json = %s, detail_json = %s, "
             "support_status = %s, record_sha256 = %s WHERE tasks_index = 13958",
@@ -336,7 +347,7 @@ def test_startup_reconciles_the_directly_supported_count(
 ) -> None:
     with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
         row = connection.execute(
-            "SELECT summary_json, detail_json, solver_problem_json "
+            "SELECT summary_json, detail_json, solver_projections_json "
             "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
         ).fetchone()
         summary = row["summary_json"]
@@ -345,13 +356,17 @@ def test_startup_reconciles_the_directly_supported_count(
         capability["support_status"] = "directly_supported"
         capability["assumption_codes"] = []
         capability["requires_assumption_acknowledgement"] = False
+        capability["projection_options"][0]["assumption_codes"] = []
         detail["summary"]["solve_capability"] = capability
-        record_hash = _record_hash(summary, detail, row["solver_problem_json"])
+        projections = row["solver_projections_json"]
+        projections["source_as_recorded"]["projection"]["assumption_codes"] = []
+        record_hash = _record_hash(summary, detail, projections)
         connection.execute(
             "UPDATE yieldforge_catalog_task SET summary_json = %s, detail_json = %s, "
-            "support_status = 'directly_supported', record_sha256 = %s "
+            "support_status = 'directly_supported', solver_projections_json = %s, "
+            "record_sha256 = %s "
             "WHERE tasks_index = 13958",
-            (Jsonb(summary), Jsonb(detail), record_hash),
+            (Jsonb(summary), Jsonb(detail), Jsonb(projections), record_hash),
         )
         catalog_summary = connection.execute(
             "SELECT summary_json FROM yieldforge_catalog WHERE singleton = 1"
@@ -373,25 +388,25 @@ def test_startup_reconciles_the_directly_supported_count(
         _service(isolated_database_url)
 
 
-def test_startup_rejects_rehashed_semantically_valid_problem_tamper_by_root(
+def test_startup_rejects_rehashed_semantically_valid_projection_tamper_by_root(
     isolated_database_url: str,
 ) -> None:
     with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
         row = connection.execute(
-            "SELECT summary_json, detail_json, solver_problem_json "
+            "SELECT summary_json, detail_json, solver_projections_json "
             "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
         ).fetchone()
-        problem = row["solver_problem_json"]
-        problem["sheet_length"] += 1.0
-        StripPackingProblem.model_validate_json(
-            json.dumps(problem, separators=(",", ":"), sort_keys=True),
+        projections = row["solver_projections_json"]
+        projections["source_as_recorded"]["problem"]["sheet_length"] += 1.0
+        ProjectedTask.model_validate_json(
+            json.dumps(projections["source_as_recorded"], separators=(",", ":"), sort_keys=True),
             strict=True,
         )
-        record_hash = _record_hash(row["summary_json"], row["detail_json"], problem)
+        record_hash = _record_hash(row["summary_json"], row["detail_json"], projections)
         connection.execute(
             "UPDATE yieldforge_catalog_task "
-            "SET solver_problem_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
-            (Jsonb(problem), record_hash),
+            "SET solver_projections_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(projections), record_hash),
         )
 
     with pytest.raises(PostgresCorpusError, match="read-model root"):
@@ -406,16 +421,16 @@ def test_live_service_rejects_post_start_rehashed_record_mutation(
     assert cursor is not None
     with psycopg.connect(isolated_database_url, row_factory=psycopg.rows.dict_row) as connection:
         row = connection.execute(
-            "SELECT summary_json, detail_json, solver_problem_json "
+            "SELECT summary_json, detail_json, solver_projections_json "
             "FROM yieldforge_catalog_task WHERE tasks_index = 13958"
         ).fetchone()
-        problem = row["solver_problem_json"]
-        problem["sheet_length"] += 1.0
-        record_hash = _record_hash(row["summary_json"], row["detail_json"], problem)
+        projections = row["solver_projections_json"]
+        projections["source_as_recorded"]["problem"]["sheet_length"] += 1.0
+        record_hash = _record_hash(row["summary_json"], row["detail_json"], projections)
         connection.execute(
             "UPDATE yieldforge_catalog_task "
-            "SET solver_problem_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
-            (Jsonb(problem), record_hash),
+            "SET solver_projections_json = %s, record_sha256 = %s WHERE tasks_index = 13958",
+            (Jsonb(projections), record_hash),
         )
 
     with pytest.raises(PostgresCorpusError, match="runtime record identity"):

@@ -43,10 +43,10 @@ from yieldforge.datasets.passive_report import (
     read_passive_evidence_file,
 )
 from yieldforge.datasets.projection import project_task
-from yieldforge.domain import StripPackingProblem
+from yieldforge.domain import ProjectedTask
 
 MAX_CATALOG_BYTES = 64 * 1024 * 1024
-READ_MODEL_SCHEMA_VERSION = "yieldforge.postgres-catalog.v1"
+READ_MODEL_SCHEMA_VERSION = "yieldforge.postgres-catalog.v2"
 COMMITTED_CATALOG_MANIFEST_SHA256 = (
     "b6e915adcc51b2ee683eeebbbb5ce68a55fa306e2b3ddfd472a6a64f28829cc7"
 )
@@ -55,9 +55,9 @@ COMMITTED_CATALOG_LOGICAL_SHA256 = (
     "c01669e5ef3b6bb879f16afea2fcc82594c8dde883d638ca1203e3dbee157778"
 )
 COMMITTED_READ_MODEL_ROOT_SHA256 = (
-    "feff8c47e4ef31629b5d846fd3cec31b7ef6809a56fbd1629ab571442eea85ae"
+    "5a9eba1ba6a88844af067386b2c92a411231f1254c0352ad82d01c3dd9c03d78"
 )
-READ_MODEL_ROOT_SCHEMA_VERSION = "yieldforge.postgres-read-model-root.v1"
+READ_MODEL_ROOT_SCHEMA_VERSION = "yieldforge.postgres-read-model-root.v2"
 _EXPECTED_TASK_COUNT = 256
 _ADVISORY_LOCK_KEY = 5_947_313_481_882_363_281
 
@@ -78,7 +78,10 @@ class _CatalogArtifact(StrictContractModel):
 class _CatalogEvidence(StrictContractModel):
     source_manifest_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     audit_report_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
-    conversion_ruleset_version: Literal["lectra-catalog-rules.v1"]
+    conversion_ruleset_version: Literal[
+        "lectra-catalog-rules.v1",
+        "lectra-catalog-rules.v2",
+    ]
 
 
 class _CatalogCounts(StrictContractModel):
@@ -106,7 +109,7 @@ class _CatalogManifest(StrictContractModel):
 class CatalogImportResult(StrictContractModel):
     """Stable identity returned for a newly imported or revalidated catalog."""
 
-    schema_version: Literal["yieldforge.postgres-catalog.v1"] = READ_MODEL_SCHEMA_VERSION
+    schema_version: Literal["yieldforge.postgres-catalog.v2"] = READ_MODEL_SCHEMA_VERSION
     catalog_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     catalog_logical_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     catalog_manifest_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
@@ -132,7 +135,7 @@ class _TaskRecord:
     constraint_types: tuple[str, ...]
     summary: dict[str, object]
     detail: dict[str, object]
-    problem: dict[str, object] | None
+    projections: dict[str, dict[str, object]]
     record_sha256: str
 
 
@@ -151,7 +154,7 @@ def _task_record_root_mapping(record: _TaskRecord) -> dict[str, object]:
         "record_sha256": record.record_sha256,
         "shape_count": record.shape_count,
         "sheet_type": record.sheet_type,
-        "solver_problem_json": record.problem,
+        "solver_projections_json": record.projections,
         "source_row_index": record.source_row_index,
         "summary_json": record.summary,
         "support_status": record.support_status,
@@ -178,7 +181,7 @@ class _PreparedCatalog:
             catalog_logical_sha256=self.logical_sha256,
             catalog_manifest_sha256=self.catalog_manifest_sha256,
             task_count=len(self.records),
-            projected_task_count=sum(record.problem is not None for record in self.records),
+            projected_task_count=sum(bool(record.projections) for record in self.records),
         )
 
 
@@ -194,13 +197,13 @@ def _canonical_bytes(value: object) -> bytes:
 def _record_hash(
     summary: dict[str, object],
     detail: dict[str, object],
-    problem: dict[str, object] | None,
+    projections: dict[str, dict[str, object]],
 ) -> str:
     return hashlib.sha256(
         _canonical_bytes(
             {
                 "detail": detail,
-                "solver_problem": problem,
+                "solver_projections": projections,
                 "summary": summary,
             }
         )
@@ -224,7 +227,7 @@ _READ_MODEL_ROOT_FIELDS = (
     "constraint_types",
     "summary_json",
     "detail_json",
-    "solver_problem_json",
+    "solver_projections_json",
     "record_sha256",
 )
 
@@ -398,14 +401,27 @@ def _prepare_catalog(
         disposition = next(
             item for item in normalized.task_dispositions if item.tasks_index == task.tasks_index
         )
-        problem: dict[str, object] | None = None
+        projections: dict[str, dict[str, object]] = {}
         if disposition.projection_status in {
             ProjectionStatus.ELIGIBLE,
             ProjectionStatus.PROJECTED,
         }:
-            problem_model = project_task(normalized, task.tasks_index)
-            problem = problem_model.model_dump(mode="json")
-            StripPackingProblem.model_validate(problem)
+            for option in detail_model.summary.solve_capability.projection_options:
+                projection_model = project_task(
+                    normalized,
+                    task.tasks_index,
+                    mode=option.mode,
+                )
+                if (
+                    projection_model.projection.assumption_codes != option.assumption_codes
+                    or projection_model.projection.intervention_codes != option.intervention_codes
+                ):
+                    raise CatalogImportError(
+                        "Invalid catalog: projection options do not match projected evidence"
+                    )
+                projection = projection_model.model_dump(mode="json")
+                ProjectedTask.model_validate(projection)
+                projections[option.mode.value] = projection
         records.append(
             _TaskRecord(
                 catalog_ordinal=ordinal,
@@ -424,15 +440,17 @@ def _prepare_catalog(
                 constraint_types=detail_model.summary.constraint_types,
                 summary=summary,
                 detail=detail,
-                problem=problem,
-                record_sha256=_record_hash(summary, detail, problem),
+                projections=projections,
+                record_sha256=_record_hash(summary, detail, projections),
             )
         )
     read_model_root = compute_read_model_root(
         _task_record_root_mapping(record) for record in records
     )
     if not hmac.compare_digest(read_model_root, COMMITTED_READ_MODEL_ROOT_SHA256):
-        raise CatalogImportError("Invalid catalog: committed read-model root mismatch")
+        raise CatalogImportError(
+            f"Invalid catalog: committed read-model root mismatch ({read_model_root})"
+        )
     return _PreparedCatalog(
         normalized=normalized,
         artifact_sha256=artifact_sha256,
@@ -490,7 +508,7 @@ _TASK_COLUMN_SIGNATURE = {
     "constraint_types": ("text[]", True, "", "", None),
     "summary_json": ("jsonb", True, "", "", None),
     "detail_json": ("jsonb", True, "", "", None),
-    "solver_problem_json": ("jsonb", False, "", "", None),
+    "solver_projections_json": ("jsonb", True, "", "", None),
     "record_sha256": ("character(64)", True, "", "", None),
 }
 _CATALOG_CONSTRAINT_SIGNATURE = {
@@ -662,7 +680,7 @@ def _create_schema(connection: psycopg.Connection[dict[str, object]]) -> None:
             constraint_types text[] NOT NULL,
             summary_json jsonb NOT NULL,
             detail_json jsonb NOT NULL,
-            solver_problem_json jsonb,
+            solver_projections_json jsonb NOT NULL,
             record_sha256 char(64) NOT NULL
         )
         """
@@ -912,7 +930,7 @@ def _insert_catalog(
                 sheet_type, is_train, is_val, is_test, normalization_status,
                 support_status, projection_status, part_count, shape_count,
                 constraint_count, constraint_types, summary_json, detail_json,
-                solver_problem_json, record_sha256
+                solver_projections_json, record_sha256
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s
@@ -937,7 +955,7 @@ def _insert_catalog(
                     list(record.constraint_types),
                     Jsonb(record.summary),
                     Jsonb(record.detail),
-                    Jsonb(record.problem) if record.problem is not None else None,
+                    Jsonb(record.projections),
                     record.record_sha256,
                 )
                 for record in prepared.records
@@ -956,25 +974,31 @@ def _validate_existing_task(
         raise CatalogImportError("existing catalog task contains invalid strict JSON") from error
     if detail_model.summary != summary_model:
         raise CatalogImportError("existing catalog task has a summary/detail mismatch")
-    problem_json = row["solver_problem_json"]
+    projections_json = row["solver_projections_json"]
     eligible = summary_model.solve_capability.can_solve
-    if not eligible and problem_json is not None:
-        raise CatalogImportError("existing ineligible task contains a solver problem payload")
-    if eligible and problem_json is None:
-        raise CatalogImportError("existing eligible task is missing its solver problem payload")
-    if problem_json is not None:
-        try:
-            StripPackingProblem.model_validate(problem_json)
-        except ValidationError as error:
-            raise CatalogImportError("existing task contains an invalid solver problem") from error
+    if not isinstance(projections_json, dict):
+        raise CatalogImportError("existing task projections must be a JSON object")
+    if not eligible and projections_json:
+        raise CatalogImportError("existing ineligible task contains a projection payload")
+    if eligible and not projections_json:
+        raise CatalogImportError("existing eligible task is missing its projection payload")
+    expected_modes = {
+        option.mode.value for option in summary_model.solve_capability.projection_options
+    }
+    if set(projections_json) != expected_modes:
+        raise CatalogImportError("existing task projection arms do not match its capability")
+    projections: dict[str, dict[str, object]] = {}
+    try:
+        for mode, projection_json in projections_json.items():
+            projection = ProjectedTask.model_validate(projection_json)
+            if projection.projection.mode.value != mode:
+                raise CatalogImportError("existing task projection mode identity is inconsistent")
+            projections[mode] = projection.model_dump(mode="json")
+    except ValidationError as error:
+        raise CatalogImportError("existing task contains an invalid projection") from error
     summary = summary_model.model_dump(mode="json")
     detail = detail_model.model_dump(mode="json")
-    problem = (
-        StripPackingProblem.model_validate(problem_json).model_dump(mode="json")
-        if problem_json is not None
-        else None
-    )
-    if row["record_sha256"] != _record_hash(summary, detail, problem):
+    if row["record_sha256"] != _record_hash(summary, detail, projections):
         raise CatalogImportError("existing catalog task record hash does not revalidate")
     expected_scalars = {
         "catalog_singleton": 1,
@@ -995,7 +1019,9 @@ def _validate_existing_task(
         "record_sha256": expected.record_sha256,
     }
     if any(row[key] != value for key, value in expected_scalars.items()) or (
-        summary != expected.summary or detail != expected.detail or problem != expected.problem
+        summary != expected.summary
+        or detail != expected.detail
+        or projections != expected.projections
     ):
         raise CatalogImportError("existing catalog task is not logically equivalent")
 

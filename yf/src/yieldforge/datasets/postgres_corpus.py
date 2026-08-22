@@ -48,7 +48,7 @@ from yieldforge.datasets.postgres_catalog import (
     compute_read_model_root,
     validate_read_model_schema,
 )
-from yieldforge.domain import StripPackingProblem
+from yieldforge.domain import ProjectedTask, ProjectionMode, StripPackingProblem
 
 _DATASET_ID = "lectra-7030786-v1.1"
 _SOURCE_MANIFEST_SHA256 = "bfb5cc9e29fdbd81a642cbe6eed1b8c5ca9e153d23a17037489b9f63e6e05e89"
@@ -129,13 +129,13 @@ def _canonical_bytes(value: object) -> bytes:
 def _record_hash(
     summary: dict[str, object],
     detail: dict[str, object],
-    problem: dict[str, object] | None,
+    projections: dict[str, object],
 ) -> str:
     return hashlib.sha256(
         _canonical_bytes(
             {
                 "detail": detail,
-                "solver_problem": problem,
+                "solver_projections": projections,
                 "summary": summary,
             }
         )
@@ -235,17 +235,21 @@ class PostgresCorpusQueryService:
     def _validate_task_record(
         self,
         row: dict[str, object],
-    ) -> tuple[TaskSummaryDto, TaskDetailDto, StripPackingProblem | None]:
+    ) -> tuple[TaskSummaryDto, TaskDetailDto, dict[ProjectionMode, ProjectedTask]]:
         raw_summary = row.get("summary_json")
         raw_detail = row.get("detail_json")
-        raw_problem = row.get("solver_problem_json")
+        raw_projections = row.get("solver_projections_json")
         if (
             not isinstance(raw_summary, dict)
             or not isinstance(raw_detail, dict)
-            or (raw_problem is not None and not isinstance(raw_problem, dict))
+            or not isinstance(raw_projections, dict)
         ):
             raise PostgresCorpusError("catalog task record JSON must contain strict objects")
-        if row.get("record_sha256") != _record_hash(raw_summary, raw_detail, raw_problem):
+        if row.get("record_sha256") != _record_hash(
+            raw_summary,
+            raw_detail,
+            raw_projections,
+        ):
             raise PostgresCorpusError("catalog task record hash does not revalidate")
 
         summary = self._validate_summary_row(row)
@@ -294,26 +298,39 @@ class PostgresCorpusQueryService:
         if capability.support_status is SupportStatus.VIEW_ONLY and capability.assumption_codes:
             raise PostgresCorpusError("catalog task capability semantics are invalid")
 
-        problem_json = raw_problem
-        can_solve = summary.solve_capability.can_solve
-        if can_solve is not (problem_json is not None):
-            raise PostgresCorpusError("catalog task capability and solver payload are inconsistent")
-        problem: StripPackingProblem | None = None
-        if problem_json is not None:
+        expected_options = {
+            option.mode: option for option in summary.solve_capability.projection_options
+        }
+        if set(raw_projections) != {mode.value for mode in expected_options}:
+            raise PostgresCorpusError(
+                "catalog task capability and projection arms are inconsistent"
+            )
+        projections: dict[ProjectionMode, ProjectedTask] = {}
+        for mode, option in expected_options.items():
+            projection_json = raw_projections[mode.value]
             try:
-                problem = StripPackingProblem.model_validate_json(
-                    _canonical_bytes(problem_json),
+                projection = ProjectedTask.model_validate_json(
+                    _canonical_bytes(projection_json),
                     strict=True,
                 )
             except ValidationError as error:
                 raise PostgresCorpusError(
-                    "catalog task solver problem contains invalid strict JSON"
+                    "catalog task projection contains invalid strict JSON"
                 ) from error
-            if problem.name != f"lectra-task-{summary.tasks_index}":
-                raise PostgresCorpusError(
-                    "catalog task solver problem source identity is inconsistent"
-                )
-        return summary, detail, problem
+            expected_problem_name = f"lectra-task-{summary.tasks_index}"
+            if mode is ProjectionMode.FORCE_FLIP_X_ZERO:
+                expected_problem_name += "-force-flip-x-zero"
+            if (
+                projection.projection.mode is not mode
+                or projection.projection.assumption_codes != option.assumption_codes
+                or projection.projection.intervention_codes != option.intervention_codes
+                or projection.problem.name != expected_problem_name
+                or projection.projection.source_flip_part_count
+                != detail.s1_projection_diagnostics.flip_part_count
+            ):
+                raise PostgresCorpusError("catalog task projection source identity is inconsistent")
+            projections[mode] = projection
+        return summary, detail, projections
 
     def _validate_startup(self) -> None:
         try:
@@ -761,24 +778,58 @@ class PostgresCorpusQueryService:
         *,
         acknowledged_assumption_codes: tuple[str, ...],
     ) -> StripPackingProblem:
+        return self.project_task(
+            tasks_index,
+            mode=ProjectionMode.SOURCE_AS_RECORDED,
+            acknowledged_assumption_codes=acknowledged_assumption_codes,
+            acknowledged_intervention_codes=(),
+        ).problem
+
+    def project_task(
+        self,
+        tasks_index: int,
+        *,
+        mode: ProjectionMode,
+        acknowledged_assumption_codes: tuple[str, ...],
+        acknowledged_intervention_codes: tuple[str, ...],
+    ) -> ProjectedTask:
         if not isinstance(acknowledged_assumption_codes, tuple) or any(
             not isinstance(code, str) for code in acknowledged_assumption_codes
         ):
             raise TaskNotSolvableError("assumption acknowledgement must be an exact tuple")
-        summary, _, problem = self._validate_task_record(self._task_record(tasks_index))
+        if not isinstance(acknowledged_intervention_codes, tuple) or any(
+            not isinstance(code, str) for code in acknowledged_intervention_codes
+        ):
+            raise TaskNotSolvableError("intervention acknowledgement must be an exact tuple")
+        try:
+            parsed_mode = ProjectionMode(mode)
+        except (TypeError, ValueError) as error:
+            raise TaskNotSolvableError("projection mode is not available for this task") from error
+        summary, _, projections = self._validate_task_record(self._task_record(tasks_index))
         capability = summary.solve_capability
         if capability.projection_status not in {
             ProjectionStatus.ELIGIBLE,
             ProjectionStatus.PROJECTED,
         }:
             raise TaskNotSolvableError(f"task {tasks_index} is blocked from solving")
-        if acknowledged_assumption_codes != capability.assumption_codes:
+        option = next(
+            (item for item in capability.projection_options if item.mode is parsed_mode),
+            None,
+        )
+        if option is None:
+            raise TaskNotSolvableError("projection mode is not available for this task")
+        if acknowledged_assumption_codes != option.assumption_codes:
             raise TaskNotSolvableError(
                 f"task {tasks_index} requires exact acknowledgement of its assumptions"
             )
-        if problem is None:
-            raise PostgresCorpusError("eligible catalog task is missing its solver problem")
-        return problem
+        if acknowledged_intervention_codes != option.intervention_codes:
+            raise TaskNotSolvableError(
+                f"task {tasks_index} requires exact acknowledgement of its interventions"
+            )
+        projection = projections.get(parsed_mode)
+        if projection is None:
+            raise PostgresCorpusError("eligible catalog task is missing its projection")
+        return projection
 
 
 __all__ = ["PostgresCorpusError", "PostgresCorpusQueryService"]
