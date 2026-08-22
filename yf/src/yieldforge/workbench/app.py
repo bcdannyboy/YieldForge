@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,7 +29,7 @@ from yieldforge.datasets.corpus import (
 )
 from yieldforge.datasets.postgres_corpus import PostgresCorpusQueryService
 from yieldforge.datasets.projection import placed_shape_svg_points
-from yieldforge.domain import Candidate, SourceTaskBinding, SpyrrowRunConfig
+from yieldforge.domain import Candidate, ProjectionMode, SourceTaskBinding, SpyrrowRunConfig
 from yieldforge.order_books.domain import GenerationRegime
 from yieldforge.workbench.api_contracts import (
     ApiError,
@@ -39,9 +40,11 @@ from yieldforge.workbench.api_contracts import (
     CompletedRunPage,
     CompletedRunSettings,
     CompletedRunView,
+    CreateMatchedSolverJobsRequest,
     CreateSolverJobRequest,
     GenerateOrderBookInput,
     JobView,
+    MatchedSolverJobsView,
     OrderBookPage,
     OrderBookView,
     PlacementGeometry,
@@ -96,9 +99,112 @@ def _job_view(snapshot: JobSnapshot) -> JobView:
         latest_event_id=snapshot.latest_sequence,
         candidate_count=snapshot.candidate_count,
         source_task_binding=snapshot.source_task_binding,
+        experiment_pair_id=snapshot.experiment_pair_id,
+        experiment_arm=snapshot.experiment_arm,
         archive_available=snapshot.status is JobStatus.COMPLETED,
         error_code=snapshot.error_code,
         error_message=snapshot.error_message,
+    )
+
+
+class _JobRequestRejected(ValueError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 422,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+        self.details = details
+        super().__init__(message)
+
+
+async def _prepare_solve_request(
+    *,
+    corpus: CorpusService,
+    body: CreateSolverJobRequest | CreateMatchedSolverJobsRequest,
+    mode: ProjectionMode,
+    acknowledged_intervention_codes: tuple[str, ...],
+    experiment_pair_id: str | None = None,
+) -> SolveRequest:
+    try:
+        detail = await run_in_threadpool(corpus.task_detail, body.tasks_index)
+    except TaskNotFoundError as error:
+        raise _JobRequestRejected(
+            "task_not_found",
+            "task was not found",
+            status_code=404,
+        ) from error
+    capability = detail.summary.solve_capability
+    if not capability.can_solve:
+        raise _JobRequestRejected(
+            "task_not_solvable",
+            "task is blocked from solver projection",
+            details={"reason_codes": list(capability.reason_codes)},
+        )
+    option = next((item for item in capability.projection_options if item.mode is mode), None)
+    if option is None:
+        raise _JobRequestRejected(
+            "projection_mode_unavailable",
+            "projection mode is not available for this task",
+        )
+    if body.acknowledged_assumption_codes != option.assumption_codes:
+        raise _JobRequestRejected(
+            "assumption_acknowledgement_mismatch",
+            "exact task assumptions must be acknowledged",
+            details={"required_assumption_codes": list(option.assumption_codes)},
+        )
+    if acknowledged_intervention_codes != option.intervention_codes:
+        raise _JobRequestRejected(
+            "intervention_acknowledgement_mismatch",
+            "exact projection interventions must be acknowledged",
+            details={"required_intervention_codes": list(option.intervention_codes)},
+        )
+    try:
+        projected = await run_in_threadpool(
+            corpus.project_task,
+            body.tasks_index,
+            mode=mode,
+            acknowledged_assumption_codes=body.acknowledged_assumption_codes,
+            acknowledged_intervention_codes=acknowledged_intervention_codes,
+        )
+    except TaskNotFoundError as error:
+        raise _JobRequestRejected(
+            "task_not_found",
+            "task was not found",
+            status_code=404,
+        ) from error
+    except TaskNotSolvableError as error:
+        raise _JobRequestRejected(
+            "task_not_solvable",
+            "task is blocked from solver projection",
+        ) from error
+
+    source = (await run_in_threadpool(corpus.summary)).source
+    binding = SourceTaskBinding(
+        dataset_id=source.dataset_id,
+        source_slice_sha256=source.slice_sha256,
+        tasks_index=body.tasks_index,
+        acknowledged_assumption_codes=body.acknowledged_assumption_codes,
+        solver_projection=projected.projection,
+    )
+    return SolveRequest(
+        problem=projected.problem,
+        config=SpyrrowRunConfig(
+            seed=body.seed,
+            total_computation_time=body.total_computation_time,
+            early_termination=body.early_termination,
+            num_workers=1,
+            min_items_separation=body.min_items_separation,
+        ),
+        max_runtime_seconds=body.max_runtime_seconds,
+        source_task_binding=binding,
+        experiment_pair_id=experiment_pair_id,
+        experiment_arm=mode if experiment_pair_id is not None else None,
     )
 
 
@@ -246,56 +352,20 @@ def create_app(
     @app.post("/api/solver-jobs", response_model=JobView, status_code=202)
     async def create_solver_job(body: CreateSolverJobRequest) -> JobView | JSONResponse:
         try:
-            detail = await run_in_threadpool(corpus.task_detail, body.tasks_index)
-        except TaskNotFoundError:
-            return _error(404, "task_not_found", "task was not found")
-        capability = detail.summary.solve_capability
-        if not capability.can_solve:
-            return _error(
-                422,
-                "task_not_solvable",
-                "task is blocked from solver projection",
-                details={"reason_codes": list(capability.reason_codes)},
+            internal = await _prepare_solve_request(
+                corpus=corpus,
+                body=body,
+                mode=body.projection_mode,
+                acknowledged_intervention_codes=body.acknowledged_intervention_codes,
             )
-        if body.acknowledged_assumption_codes != capability.assumption_codes:
-            return _error(
-                422,
-                "assumption_acknowledgement_mismatch",
-                "exact task assumptions must be acknowledged",
-                details={"required_assumption_codes": list(capability.assumption_codes)},
-            )
-        try:
-            problem = await run_in_threadpool(
-                corpus.project_problem,
-                body.tasks_index,
-                acknowledged_assumption_codes=body.acknowledged_assumption_codes,
-            )
-        except TaskNotSolvableError:
-            return _error(422, "task_not_solvable", "task is blocked from solver projection")
-        except TaskNotFoundError:
-            return _error(404, "task_not_found", "task was not found")
-
-        source = (await run_in_threadpool(corpus.summary)).source
-        binding = SourceTaskBinding(
-            dataset_id=source.dataset_id,
-            source_slice_sha256=source.slice_sha256,
-            tasks_index=body.tasks_index,
-            acknowledged_assumption_codes=body.acknowledged_assumption_codes,
-        )
-        internal = SolveRequest(
-            problem=problem,
-            config=SpyrrowRunConfig(
-                seed=body.seed,
-                total_computation_time=body.total_computation_time,
-                early_termination=body.early_termination,
-                num_workers=1,
-                min_items_separation=body.min_items_separation,
-            ),
-            max_runtime_seconds=body.max_runtime_seconds,
-            source_task_binding=binding,
-        )
-        try:
             return _job_view(await jobs.start(internal))
+        except _JobRequestRejected as error:
+            return _error(
+                error.status_code,
+                error.code,
+                error.message,
+                details=error.details,
+            )
         except ActiveJobError as error:
             return _error(
                 409,
@@ -304,6 +374,52 @@ def create_app(
                 details={"active_job_id": error.active_job_id},
                 headers={"Location": f"/api/solver-jobs/{error.active_job_id}"},
             )
+
+    @app.post(
+        "/api/matched-solver-jobs",
+        response_model=MatchedSolverJobsView,
+        status_code=202,
+    )
+    async def create_matched_solver_jobs(
+        body: CreateMatchedSolverJobsRequest,
+    ) -> MatchedSolverJobsView | JSONResponse:
+        pair_id = f"pair_{uuid.uuid4().hex}"
+        try:
+            recorded = await _prepare_solve_request(
+                corpus=corpus,
+                body=body,
+                mode=ProjectionMode.SOURCE_AS_RECORDED,
+                acknowledged_intervention_codes=(),
+                experiment_pair_id=pair_id,
+            )
+            no_flip = await _prepare_solve_request(
+                corpus=corpus,
+                body=body,
+                mode=ProjectionMode.FORCE_FLIP_X_ZERO,
+                acknowledged_intervention_codes=body.acknowledged_intervention_codes,
+                experiment_pair_id=pair_id,
+            )
+            recorded_job, no_flip_job = await jobs.start_pair((recorded, no_flip))
+        except _JobRequestRejected as error:
+            return _error(
+                error.status_code,
+                error.code,
+                error.message,
+                details=error.details,
+            )
+        except ActiveJobError as error:
+            return _error(
+                409,
+                "active_solver_job",
+                "another solver job is already active",
+                details={"active_job_id": error.active_job_id},
+                headers={"Location": f"/api/solver-jobs/{error.active_job_id}"},
+            )
+        return MatchedSolverJobsView(
+            experiment_pair_id=pair_id,
+            source_as_recorded=_job_view(recorded_job),
+            force_flip_x_zero=_job_view(no_flip_job),
+        )
 
     @app.get("/api/solver-jobs/{job_id}", response_model=JobView)
     async def get_solver_job(job_id: str) -> JobView | JSONResponse:

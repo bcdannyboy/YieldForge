@@ -20,6 +20,7 @@ from pydantic import (
 from yieldforge.domain import (
     CandidateReportType,
     Point,
+    ProjectionMode,
     SourceTaskBinding,
 )
 from yieldforge.order_books.domain import (
@@ -55,28 +56,82 @@ class ApiError(ApiContract):
 
 
 class CreateSolverJobRequest(ApiContract):
-    schema_version: Literal["yieldforge.api-solver-job-request.v1"] = (
-        "yieldforge.api-solver-job-request.v1"
+    schema_version: Literal["yieldforge.api-solver-job-request.v2"] = (
+        "yieldforge.api-solver-job-request.v2"
     )
     tasks_index: StrictInt = Field(ge=0)
+    projection_mode: ProjectionMode
     acknowledged_assumption_codes: tuple[StrictStr, ...] = ()
+    acknowledged_intervention_codes: tuple[StrictStr, ...] = ()
     seed: StrictInt
     total_computation_time: StrictInt = Field(gt=0, le=10)
     early_termination: StrictBool = False
     min_items_separation: StrictFloat | None = Field(default=None, ge=0)
     max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
 
-    @field_validator("acknowledged_assumption_codes")
+    @field_validator("projection_mode", mode="before")
+    @classmethod
+    def accept_json_projection_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            try:
+                return ProjectionMode(value)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("acknowledged_assumption_codes", "acknowledged_intervention_codes")
     @classmethod
     def require_sorted_unique_codes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if value != tuple(sorted(set(value))):
             raise ValueError("acknowledged assumption codes must be sorted and unique")
         return value
 
-    @field_validator("acknowledged_assumption_codes", mode="before")
+    @field_validator(
+        "acknowledged_assumption_codes",
+        "acknowledged_intervention_codes",
+        mode="before",
+    )
     @classmethod
     def accept_json_array(cls, value: object) -> object:
         # FastAPI validates an already-decoded JSON body, where arrays are lists.
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @model_validator(mode="after")
+    def require_solver_time_within_hard_runtime(self) -> Self:
+        if self.total_computation_time > self.max_runtime_seconds:
+            raise ValueError("total_computation_time must fit within max_runtime_seconds")
+        return self
+
+
+class CreateMatchedSolverJobsRequest(ApiContract):
+    schema_version: Literal["yieldforge.api-matched-solver-jobs-request.v1"] = (
+        "yieldforge.api-matched-solver-jobs-request.v1"
+    )
+    tasks_index: StrictInt = Field(ge=0)
+    acknowledged_assumption_codes: tuple[StrictStr, ...] = ()
+    acknowledged_intervention_codes: tuple[StrictStr, ...] = ()
+    seed: StrictInt
+    total_computation_time: StrictInt = Field(gt=0, le=10)
+    early_termination: StrictBool = False
+    min_items_separation: StrictFloat | None = Field(default=None, ge=0)
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
+
+    @field_validator("acknowledged_assumption_codes", "acknowledged_intervention_codes")
+    @classmethod
+    def require_sorted_unique_codes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("acknowledged codes must be sorted and unique")
+        return value
+
+    @field_validator(
+        "acknowledged_assumption_codes",
+        "acknowledged_intervention_codes",
+        mode="before",
+    )
+    @classmethod
+    def accept_json_array(cls, value: object) -> object:
         if isinstance(value, list):
             return tuple(value)
         return value
@@ -97,9 +152,31 @@ class JobView(ApiContract):
     latest_event_id: StrictInt = Field(ge=1)
     candidate_count: StrictInt = Field(ge=0)
     source_task_binding: SourceTaskBinding | None = None
+    experiment_pair_id: StrictStr | None = Field(default=None, min_length=1, max_length=80)
+    experiment_arm: ProjectionMode | None = None
     archive_available: StrictBool
     error_code: StrictStr | None = Field(default=None, min_length=1, max_length=80)
     error_message: StrictStr | None = Field(default=None, min_length=1, max_length=200)
+
+
+class MatchedSolverJobsView(ApiContract):
+    schema_version: Literal["yieldforge.api-matched-solver-jobs.v1"] = (
+        "yieldforge.api-matched-solver-jobs.v1"
+    )
+    experiment_pair_id: StrictStr = Field(min_length=1, max_length=80)
+    source_as_recorded: JobView
+    force_flip_x_zero: JobView
+
+    @model_validator(mode="after")
+    def require_exact_pair_identity(self) -> Self:
+        if (
+            self.source_as_recorded.experiment_pair_id != self.experiment_pair_id
+            or self.force_flip_x_zero.experiment_pair_id != self.experiment_pair_id
+            or self.source_as_recorded.experiment_arm is not ProjectionMode.SOURCE_AS_RECORDED
+            or self.force_flip_x_zero.experiment_arm is not ProjectionMode.FORCE_FLIP_X_ZERO
+        ):
+            raise ValueError("matched jobs must expose the exact pair arms")
+        return self
 
 
 class PublicJobEvent(ApiContract):

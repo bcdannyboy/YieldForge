@@ -23,6 +23,8 @@ from yieldforge.datasets.corpus import (
     CorpusSourceDto,
     CorpusSummaryDto,
     InvalidCursorError,
+    ProjectionOptionDto,
+    S1ProjectionDiagnosticsDto,
     SolveCapabilityDto,
     TaskDetailDto,
     TaskPageDto,
@@ -41,7 +43,10 @@ from yieldforge.domain import (
     CandidateReportType,
     Part,
     Placement,
+    ProjectedTask,
+    ProjectionMode,
     SolverIdentity,
+    SolverProjectionBinding,
     SourceTaskBinding,
     SpyrrowRunConfig,
     StripPackingProblem,
@@ -60,12 +65,14 @@ from yieldforge.workbench.jobs import ActiveJobError
 DATASET_ID = "lectra-7030786-v1.1"
 SLICE_SHA256 = "d1e6d6d6aa300f9699cc8d9ffb63cee1747735f640f2b5501298d383ea1402e8"
 ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
+FLIP_ASSUMPTION = "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation"
+NO_FLIP_INTERVENTION = "force_s1_flip_x_zero_for_ablation"
 NOW = datetime(2026, 8, 18, tzinfo=UTC)
 
 
 class _FakeCorpus:
     def __init__(self) -> None:
-        self.project_calls: list[tuple[int, tuple[str, ...]]] = []
+        self.project_calls: list[tuple[int, ProjectionMode, tuple[str, ...], tuple[str, ...]]] = []
         self.list_calls: list[dict[str, object]] = []
 
     def _source(self) -> CorpusSourceDto:
@@ -107,7 +114,28 @@ class _FakeCorpus:
             from yieldforge.datasets.corpus import TaskNotFoundError
 
             raise TaskNotFoundError(tasks_index)
-        can_solve = tasks_index == 13958
+        can_solve = tasks_index in {6669, 13958}
+        flip_task = tasks_index == 6669
+        assumptions = tuple(sorted((ASSUMPTION, FLIP_ASSUMPTION))) if flip_task else (ASSUMPTION,)
+        projection_options = ()
+        if can_solve:
+            projection_options = (
+                ProjectionOptionDto(
+                    mode=ProjectionMode.SOURCE_AS_RECORDED,
+                    source_preserving=True,
+                    assumption_codes=assumptions,
+                    intervention_codes=(),
+                ),
+            )
+            if flip_task:
+                projection_options += (
+                    ProjectionOptionDto(
+                        mode=ProjectionMode.FORCE_FLIP_X_ZERO,
+                        source_preserving=False,
+                        assumption_codes=assumptions,
+                        intervention_codes=(NO_FLIP_INTERVENTION,),
+                    ),
+                )
         capability = SolveCapabilityDto(
             can_solve=can_solve,
             requires_assumption_acknowledgement=can_solve,
@@ -120,8 +148,9 @@ class _FakeCorpus:
             projection_status=(
                 ProjectionStatus.ELIGIBLE if can_solve else ProjectionStatus.BLOCKED
             ),
-            assumption_codes=(ASSUMPTION,) if can_solve else (),
+            assumption_codes=assumptions if can_solve else (),
             reason_codes=() if can_solve else ("contains_non_s1_constraints",),
+            projection_options=projection_options,
         )
         summary = TaskSummaryDto(
             task=TaskSourceDto(
@@ -153,28 +182,73 @@ class _FakeCorpus:
             derived_geometry=(),
             constraint_value_columns=(),
             provenance=(),
+            s1_projection_diagnostics=S1ProjectionDiagnosticsDto(
+                orientation_state_count=1 if can_solve else 0,
+                flip_constraint_count=6 if flip_task else 0,
+                flip_part_count=6 if flip_task else 0,
+                mixed_flip_constraint_count=0,
+            ),
         )
 
-    def project_problem(
+    def project_task(
         self,
         tasks_index: int,
         *,
+        mode: ProjectionMode,
         acknowledged_assumption_codes: tuple[str, ...],
-    ) -> StripPackingProblem:
-        self.project_calls.append((tasks_index, acknowledged_assumption_codes))
-        if tasks_index != 13958 or acknowledged_assumption_codes != (ASSUMPTION,):
+        acknowledged_intervention_codes: tuple[str, ...],
+    ) -> ProjectedTask:
+        parsed_mode = ProjectionMode(mode)
+        self.project_calls.append(
+            (
+                tasks_index,
+                parsed_mode,
+                acknowledged_assumption_codes,
+                acknowledged_intervention_codes,
+            )
+        )
+        flip_task = tasks_index == 6669
+        expected_assumptions = (
+            tuple(sorted((ASSUMPTION, FLIP_ASSUMPTION))) if flip_task else (ASSUMPTION,)
+        )
+        expected_interventions = (
+            (NO_FLIP_INTERVENTION,) if parsed_mode is ProjectionMode.FORCE_FLIP_X_ZERO else ()
+        )
+        if (
+            tasks_index not in {6669, 13958}
+            or acknowledged_assumption_codes != expected_assumptions
+            or acknowledged_intervention_codes != expected_interventions
+            or (not flip_task and parsed_mode is ProjectionMode.FORCE_FLIP_X_ZERO)
+        ):
             raise ValueError("task cannot be projected")
-        return _problem()
+        problem = _problem(tasks_index=tasks_index, mode=parsed_mode)
+        return ProjectedTask(
+            problem=problem,
+            projection=SolverProjectionBinding(
+                mode=parsed_mode,
+                projection_sha256=(
+                    "d" * 64 if parsed_mode is ProjectionMode.SOURCE_AS_RECORDED else "e" * 64
+                ),
+                assumption_codes=expected_assumptions,
+                intervention_codes=expected_interventions,
+                source_flip_part_count=6 if flip_task else 0,
+            ),
+        )
 
 
-def _problem() -> StripPackingProblem:
+def _problem(
+    *,
+    tasks_index: int = 13958,
+    mode: ProjectionMode = ProjectionMode.SOURCE_AS_RECORDED,
+) -> StripPackingProblem:
+    suffix = "-force-flip-x-zero" if mode is ProjectionMode.FORCE_FLIP_X_ZERO else ""
     return StripPackingProblem(
-        name="lectra-task-13958",
+        name=f"lectra-task-{tasks_index}{suffix}",
         strip_height=50,
         sheet_length=100,
         parts=[
             Part(
-                id="lectra:13958:part:1",
+                id=f"lectra:{tasks_index}:part:1",
                 shape=[(0, 0), (1, 0), (1, 1), (0, 1)],
                 demand=1,
                 allowed_orientations=[0, 90],
@@ -184,17 +258,32 @@ def _problem() -> StripPackingProblem:
 
 
 def _binding() -> SourceTaskBinding:
+    projection = SolverProjectionBinding(
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
+        projection_sha256="d" * 64,
+        assumption_codes=(ASSUMPTION,),
+        source_flip_part_count=0,
+    )
     return SourceTaskBinding(
         dataset_id=DATASET_ID,
         source_slice_sha256=SLICE_SHA256,
         tasks_index=13958,
         acknowledged_assumption_codes=(ASSUMPTION,),
+        solver_projection=projection,
     )
 
 
-def _snapshot(status: JobStatus = JobStatus.QUEUED, *, sequence: int = 1) -> JobSnapshot:
+def _snapshot(
+    status: JobStatus = JobStatus.QUEUED,
+    *,
+    sequence: int = 1,
+    job_id: str = "job_abc",
+    source_task_binding: SourceTaskBinding | None = None,
+    experiment_pair_id: str | None = None,
+    experiment_arm: ProjectionMode | None = None,
+) -> JobSnapshot:
     return JobSnapshot(
-        job_id="job_abc",
+        job_id=job_id,
         status=status,
         created_at=NOW,
         updated_at=NOW,
@@ -202,7 +291,9 @@ def _snapshot(status: JobStatus = JobStatus.QUEUED, *, sequence: int = 1) -> Job
         candidate_count=2 if status is JobStatus.COMPLETED else 0,
         worker_pid=4321,
         archive_path="/private/server/archive/job_abc" if status is JobStatus.COMPLETED else None,
-        source_task_binding=_binding(),
+        source_task_binding=source_task_binding or _binding(),
+        experiment_pair_id=experiment_pair_id,
+        experiment_arm=experiment_arm,
         config=SpyrrowRunConfig(seed=23, total_computation_time=1, num_workers=1),
         max_runtime_seconds=2.0,
     )
@@ -266,7 +357,28 @@ class _FakeJobs:
             self._active = True
             self.started.append(request)
         await asyncio.sleep(0.01)
+        self.snapshot = _snapshot(source_task_binding=request.source_task_binding)
         return self.snapshot
+
+    async def start_pair(
+        self,
+        requests: tuple[SolveRequest, SolveRequest],
+    ) -> tuple[JobSnapshot, JobSnapshot]:
+        with self._start_lock:
+            if self.active_conflict or self._active:
+                raise ActiveJobError("job_existing")
+            self._active = True
+            self.started.extend(requests)
+        snapshots = tuple(
+            _snapshot(
+                job_id=f"job_{request.experiment_arm.value}",
+                source_task_binding=request.source_task_binding,
+                experiment_pair_id=request.experiment_pair_id,
+                experiment_arm=request.experiment_arm,
+            )
+            for request in requests
+        )
+        return snapshots[0], snapshots[1]
 
     def get(self, job_id: str) -> JobSnapshot:
         if job_id != self.snapshot.job_id:
@@ -308,9 +420,25 @@ class _FakeJobs:
 
 def _solve_payload(*, tasks_index: int = 13958, assumptions: list[str] | None = None) -> dict:
     return {
-        "schema_version": "yieldforge.api-solver-job-request.v1",
+        "schema_version": "yieldforge.api-solver-job-request.v2",
         "tasks_index": tasks_index,
+        "projection_mode": "source_as_recorded",
         "acknowledged_assumption_codes": assumptions if assumptions is not None else [ASSUMPTION],
+        "acknowledged_intervention_codes": [],
+        "seed": 23,
+        "total_computation_time": 1,
+        "early_termination": False,
+        "min_items_separation": None,
+        "max_runtime_seconds": 2.0,
+    }
+
+
+def _matched_payload() -> dict[str, object]:
+    return {
+        "schema_version": "yieldforge.api-matched-solver-jobs-request.v1",
+        "tasks_index": 6669,
+        "acknowledged_assumption_codes": sorted((ASSUMPTION, FLIP_ASSUMPTION)),
+        "acknowledged_intervention_codes": [NO_FLIP_INTERVENTION],
         "seed": 23,
         "total_computation_time": 1,
         "early_termination": False,
@@ -450,7 +578,7 @@ def test_create_projects_server_side_forces_one_worker_and_persists_binding() ->
     response = client.post("/api/solver-jobs", json=_solve_payload())
 
     assert response.status_code == 202
-    assert corpus.project_calls == [(13958, (ASSUMPTION,))]
+    assert corpus.project_calls == [(13958, ProjectionMode.SOURCE_AS_RECORDED, (ASSUMPTION,), ())]
     assert len(jobs.started) == 1
     persisted = jobs.started[0]
     assert persisted.problem == _problem()
@@ -461,6 +589,50 @@ def test_create_projects_server_side_forces_one_worker_and_persists_binding() ->
     assert "archive_path" not in serialized
     assert "problem" not in serialized
     assert "/private/server" not in serialized
+
+
+def test_create_matched_jobs_binds_both_projection_arms_to_one_pair() -> None:
+    client, corpus, jobs = _client()
+
+    response = client.post("/api/matched-solver-jobs", json=_matched_payload())
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["schema_version"] == "yieldforge.api-matched-solver-jobs.v1"
+    assert body["experiment_pair_id"].startswith("pair_")
+    assert body["source_as_recorded"]["experiment_arm"] == "source_as_recorded"
+    assert body["force_flip_x_zero"]["experiment_arm"] == "force_flip_x_zero"
+    assert len(jobs.started) == 2
+    assert {request.experiment_arm for request in jobs.started} == {
+        ProjectionMode.SOURCE_AS_RECORDED,
+        ProjectionMode.FORCE_FLIP_X_ZERO,
+    }
+    assert len({request.experiment_pair_id for request in jobs.started}) == 1
+    assert [call[1] for call in corpus.project_calls] == [
+        ProjectionMode.SOURCE_AS_RECORDED,
+        ProjectionMode.FORCE_FLIP_X_ZERO,
+    ]
+    assert jobs.started[0].config == jobs.started[1].config
+    assert jobs.started[0].source_task_binding.solver_projection is not None
+    assert jobs.started[1].source_task_binding.solver_projection is not None
+
+
+def test_projection_mode_and_intervention_must_match_authoritative_options() -> None:
+    client, _, jobs = _client()
+    unavailable = _solve_payload()
+    unavailable["projection_mode"] = "force_flip_x_zero"
+    unavailable["acknowledged_intervention_codes"] = [NO_FLIP_INTERVENTION]
+
+    unavailable_response = client.post("/api/solver-jobs", json=unavailable)
+    matched = _matched_payload()
+    matched["acknowledged_intervention_codes"] = []
+    intervention_response = client.post("/api/matched-solver-jobs", json=matched)
+
+    assert unavailable_response.status_code == 422
+    assert unavailable_response.json()["code"] == "projection_mode_unavailable"
+    assert intervention_response.status_code == 422
+    assert intervention_response.json()["code"] == "intervention_acknowledgement_mismatch"
+    assert jobs.started == []
 
 
 def test_public_numeric_runtime_fields_accept_json_integer_numbers() -> None:
