@@ -884,9 +884,7 @@ def test_recovery_accepts_legacy_binding_without_optional_projection_field(
         jobs = tmp_path / "jobs"
         archives = tmp_path / "archives"
         service = SolverJobService(jobs, archives, worker_command=fake_command("complete"))
-        created = await service.start(
-            make_request(source_task_binding=make_source_task_binding())
-        )
+        created = await service.start(make_request(source_task_binding=make_source_task_binding()))
         await service.wait(created.job_id)
         return jobs, archives, created.job_id
 

@@ -1081,9 +1081,8 @@ class SolverJobService:
             legacy_binding.pop("solver_projection")
             allowed_bindings.append(legacy_binding)
         has_manifest_binding = "source_task_binding" in manifest
-        if (
-            has_manifest_binding != (source_task_binding is not None)
-            or (has_manifest_binding and manifest["source_task_binding"] not in allowed_bindings)
+        if has_manifest_binding != (source_task_binding is not None) or (
+            has_manifest_binding and manifest["source_task_binding"] not in allowed_bindings
         ):
             raise ValueError(
                 "completed archive source task binding does not match immutable request"
