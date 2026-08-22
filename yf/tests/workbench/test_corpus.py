@@ -321,11 +321,48 @@ def test_task_items_expose_authoritative_solve_capability(
         "interpret_s1_degenerate_entries_as_allowed_rotations",
     )
     assert runnable.solve_capability.reason_codes == ()
+    assert [option.mode.value for option in runnable.solve_capability.projection_options] == [
+        "source_as_recorded"
+    ]
+    assert runnable.solve_capability.projection_options[0].source_preserving is True
+    assert runnable.solve_capability.projection_options[0].intervention_codes == ()
 
     assert blocked.solve_capability.can_solve is False
     assert blocked.solve_capability.requires_assumption_acknowledgement is False
     assert blocked.solve_capability.assumption_codes == ()
     assert blocked.solve_capability.reason_codes == ("contains_non_s1_constraints",)
+    assert blocked.solve_capability.projection_options == ()
+
+
+def test_flip_task_exposes_recorded_and_no_flip_projection_options() -> None:
+    normalized = parse_normalized_slice(COMMITTED_SLICE.read_bytes())
+    data = normalized.model_dump(mode="json")
+    first_constraint = next(row for row in data["constraints"] if row["tasks_index"] == 13_958)
+    first_constraint["values"][5]["items"][0]["value"] = 1
+    runnable = next(row for row in data["task_dispositions"] if row["tasks_index"] == 13_958)
+    runnable["assumption_codes"] = [
+        "interpret_s1_degenerate_entries_as_allowed_rotations",
+        "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation",
+    ]
+    modified = type(normalized).model_validate(data)
+    service = CorpusQueryService(
+        modified,
+        slice_sha256="f" * 64,
+        evidence_status="fully_bound_to_local_audit_evidence",
+        cursor_signing_key=b"f" * 32,
+    )
+
+    detail = service.task_detail(13_958)
+
+    assert detail.s1_projection_diagnostics.flip_part_count == 1
+    assert [option.mode.value for option in detail.summary.solve_capability.projection_options] == [
+        "source_as_recorded",
+        "force_flip_x_zero",
+    ]
+    assert detail.summary.solve_capability.projection_options[1].source_preserving is False
+    assert detail.summary.solve_capability.projection_options[1].intervention_codes == (
+        "force_s1_flip_x_zero_for_ablation",
+    )
 
 
 def test_task_detail_is_exact_task_scoped_passive_data(service: CorpusQueryService) -> None:
@@ -344,6 +381,14 @@ def test_task_detail_is_exact_task_scoped_passive_data(service: CorpusQueryServi
     assert len(blocked.shapes) == len(blocked.derived_geometry) == 11
     assert blocked.constraint_value_columns[0] == "parts_1"
     assert blocked.provenance
+    assert runnable.s1_projection_diagnostics.orientation_state_count == 34
+    assert runnable.s1_projection_diagnostics.flip_constraint_count == 0
+    assert runnable.s1_projection_diagnostics.flip_part_count == 0
+    assert runnable.s1_projection_diagnostics.mixed_flip_constraint_count == 0
+    assert blocked.s1_projection_diagnostics.orientation_state_count == 32
+    assert blocked.s1_projection_diagnostics.flip_constraint_count == 12
+    assert blocked.s1_projection_diagnostics.flip_part_count == 12
+    assert blocked.s1_projection_diagnostics.mixed_flip_constraint_count == 0
 
     with pytest.raises(TaskNotFoundError):
         service.task_detail(999)

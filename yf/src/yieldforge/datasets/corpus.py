@@ -48,6 +48,8 @@ from yieldforge.datasets.normalized_slice import (
     SupportStatus,
     TaskDisposition,
     TaskSourceRow,
+    constraint_part_references,
+    constraint_value,
 )
 from yieldforge.datasets.passive_report import (
     PassiveEvidenceError,
@@ -58,7 +60,7 @@ from yieldforge.datasets.passive_report import (
     read_passive_evidence_file,
 )
 from yieldforge.datasets.source_manifest import DatasetSourceManifest
-from yieldforge.domain import StripPackingProblem
+from yieldforge.domain import ProjectionMode, StripPackingProblem
 
 YF_ROOT = Path(__file__).resolve().parents[3]
 COMMITTED_SLICE_PATH = YF_ROOT / "datasets/fixtures/lectra-representative-slice.json"
@@ -143,6 +145,7 @@ class CorpusSourceDto(CorpusDto):
     conversion_ruleset_version: Literal[
         "lectra-slice-rules.v1",
         "lectra-catalog-rules.v1",
+        "lectra-catalog-rules.v2",
     ]
     source_checksums: tuple[SourceChecksumDto, ...]
     source_manifest_sha256: Sha256
@@ -196,6 +199,20 @@ class TaskSourceDto(CorpusDto):
     is_test: StrictBool
 
 
+class ProjectionOptionDto(CorpusDto):
+    mode: ProjectionMode
+    source_preserving: StrictBool
+    assumption_codes: tuple[StrictStr, ...]
+    intervention_codes: tuple[StrictStr, ...]
+
+
+class S1ProjectionDiagnosticsDto(CorpusDto):
+    orientation_state_count: SafeJsonInt = Field(ge=0)
+    flip_constraint_count: SafeJsonInt = Field(ge=0)
+    flip_part_count: SafeJsonInt = Field(ge=0)
+    mixed_flip_constraint_count: SafeJsonInt = Field(ge=0)
+
+
 class SolveCapabilityDto(CorpusDto):
     can_solve: StrictBool
     requires_assumption_acknowledgement: StrictBool
@@ -204,6 +221,7 @@ class SolveCapabilityDto(CorpusDto):
     projection_status: ProjectionStatus
     reason_codes: tuple[StrictStr, ...]
     assumption_codes: tuple[StrictStr, ...]
+    projection_options: tuple[ProjectionOptionDto, ...]
 
     @model_validator(mode="after")
     def require_authoritative_status(self) -> Self:
@@ -218,6 +236,21 @@ class SolveCapabilityDto(CorpusDto):
             raise ValueError(
                 "assumption acknowledgement must match eligible assumption-backed projection"
             )
+        if eligible is not bool(self.projection_options):
+            raise ValueError("only eligible tasks may expose projection options")
+        if self.projection_options:
+            recorded = self.projection_options[0]
+            if (
+                recorded.mode is not ProjectionMode.SOURCE_AS_RECORDED
+                or not recorded.source_preserving
+                or recorded.assumption_codes != self.assumption_codes
+                or recorded.intervention_codes
+            ):
+                raise ValueError("the default projection must preserve the recorded source mode")
+            if len({option.mode for option in self.projection_options}) != len(
+                self.projection_options
+            ):
+                raise ValueError("projection option modes must be unique")
         return self
 
 
@@ -339,6 +372,7 @@ class TaskDetailDto(CorpusDto):
     constraint_value_columns: tuple[StrictStr, ...]
     derived_geometry: tuple[DerivedShapeGeometryDto, ...]
     provenance: tuple[ProvenanceDto, ...]
+    s1_projection_diagnostics: S1ProjectionDiagnosticsDto
 
 
 def _safe_int(value: int, *, label: str) -> int:
@@ -370,11 +404,67 @@ def _source_dto(row: TaskSourceRow) -> TaskSourceDto:
     )
 
 
-def _capability(disposition: TaskDisposition) -> SolveCapabilityDto:
+def _s1_projection_diagnostics(
+    constraints: tuple[ConstraintSourceRow, ...],
+) -> S1ProjectionDiagnosticsDto:
+    orientation_state_count = 0
+    flip_constraint_count = 0
+    flipped_parts: set[int] = set()
+    mixed_flip_constraint_count = 0
+    for row in constraints:
+        if row.type != "s1":
+            continue
+        starts = constraint_value(row, "r1_start")
+        if isinstance(starts, OpaqueSequence):
+            orientation_state_count += len(starts.items)
+        flips = constraint_value(row, "r1_flip_x")
+        if not isinstance(flips, OpaqueSequence):
+            continue
+        strict_flip_values = tuple(
+            item.value for item in flips.items if isinstance(item, OpaqueInteger)
+        )
+        if len(set(strict_flip_values)) > 1:
+            mixed_flip_constraint_count += 1
+        if 1 not in strict_flip_values:
+            continue
+        flip_constraint_count += 1
+        flipped_parts.update(constraint_part_references(row, "parts_1"))
+    return S1ProjectionDiagnosticsDto(
+        orientation_state_count=orientation_state_count,
+        flip_constraint_count=flip_constraint_count,
+        flip_part_count=len(flipped_parts),
+        mixed_flip_constraint_count=mixed_flip_constraint_count,
+    )
+
+
+def _capability(
+    disposition: TaskDisposition,
+    diagnostics: S1ProjectionDiagnosticsDto,
+) -> SolveCapabilityDto:
     eligible = disposition.projection_status in {
         ProjectionStatus.ELIGIBLE,
         ProjectionStatus.PROJECTED,
     }
+    options: tuple[ProjectionOptionDto, ...] = ()
+    if eligible:
+        recorded = ProjectionOptionDto(
+            mode=ProjectionMode.SOURCE_AS_RECORDED,
+            source_preserving=True,
+            assumption_codes=disposition.assumption_codes,
+            intervention_codes=(),
+        )
+        options = (recorded,)
+        if diagnostics.flip_part_count:
+            from yieldforge.datasets.projection import NO_FLIP_ABLATION
+
+            options += (
+                ProjectionOptionDto(
+                    mode=ProjectionMode.FORCE_FLIP_X_ZERO,
+                    source_preserving=False,
+                    assumption_codes=disposition.assumption_codes,
+                    intervention_codes=(NO_FLIP_ABLATION,),
+                ),
+            )
     return SolveCapabilityDto(
         can_solve=eligible,
         requires_assumption_acknowledgement=eligible and bool(disposition.assumption_codes),
@@ -383,6 +473,7 @@ def _capability(disposition: TaskDisposition) -> SolveCapabilityDto:
         projection_status=disposition.projection_status,
         reason_codes=disposition.reason_codes,
         assumption_codes=disposition.assumption_codes,
+        projection_options=options,
     )
 
 
@@ -673,6 +764,7 @@ class CorpusQueryService:
     def _task_summary(self, task: TaskSourceRow) -> TaskSummaryDto:
         parts = self._parts_by_task[task.tasks_index]
         constraints = self._constraints_by_task[task.tasks_index]
+        diagnostics = _s1_projection_diagnostics(constraints)
         return TaskSummaryDto(
             task=_source_dto(task),
             tasks_index=_safe_int(task.tasks_index, label="tasks_index"),
@@ -680,7 +772,7 @@ class CorpusQueryService:
             shape_count=len({part.shape_hash for part in parts}),
             constraint_count=len(constraints),
             constraint_types=tuple(sorted({row.type for row in constraints})),
-            solve_capability=_capability(self._dispositions[task.tasks_index]),
+            solve_capability=_capability(self._dispositions[task.tasks_index], diagnostics),
         )
 
     @staticmethod
@@ -924,6 +1016,7 @@ class CorpusQueryService:
             constraint_value_columns=self._normalized.constraint_value_columns,
             derived_geometry=tuple(_geometry_dto(row) for row in geometry),
             provenance=tuple(_provenance_dto(group) for group in self._normalized.provenance),
+            s1_projection_diagnostics=_s1_projection_diagnostics(constraints),
         )
 
     def project_problem(
@@ -953,7 +1046,7 @@ class CorpusQueryService:
             )
         from yieldforge.datasets.projection import project_task
 
-        return project_task(self._normalized, tasks_index)
+        return project_task(self._normalized, tasks_index).problem
 
 
 __all__ = [
@@ -974,7 +1067,9 @@ __all__ = [
     "InvalidTaskQueryError",
     "NamedCountDto",
     "PartDto",
+    "ProjectionOptionDto",
     "ProvenanceDto",
+    "S1ProjectionDiagnosticsDto",
     "ShapeDto",
     "SolveCapabilityDto",
     "TaskDetailDto",

@@ -48,9 +48,10 @@ TARGET_PARTS = 35
 TARGET_UNIQUE_SHAPES = 9
 TARGET_REPEATED_PART_ROWS = 23
 CONVERSION_RULESET_VERSION = "lectra-slice-rules.v1"
-CATALOG_CONVERSION_RULESET_VERSION = "lectra-catalog-rules.v1"
+CATALOG_CONVERSION_RULESET_VERSION = "lectra-catalog-rules.v2"
 CATALOG_CONTINUITY_TASK_IDS = (13_958, 25_801)
 S1_ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
+S1_FLIP_ASSUMPTION = "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation"
 _S1_FIELDS = frozenset({"parts_1", "r1_start", "r1_end", "r1_flip_x"})
 
 
@@ -66,6 +67,7 @@ class RepresentativeTaskSelection:
     view_only_tasks_index: int
     runnable_rank_score: int
     view_only_rank_score: int
+    runnable_flip_part_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,16 @@ class _GeometryFacts:
     is_valid: bool
     area: float
     bounds: tuple[int | float, int | float, int | float, int | float]
+
+
+@dataclass(frozen=True)
+class _S1ValidationFacts:
+    flip_part_count: int
+
+
+def _s1_assumption_codes(flip_part_count: int) -> tuple[str, ...]:
+    codes = (S1_ASSUMPTION, S1_FLIP_ASSUMPTION) if flip_part_count else (S1_ASSUMPTION,)
+    return tuple(sorted(codes))
 
 
 def _python_scalar(value: Any) -> Any:
@@ -488,7 +500,7 @@ def _validate_s1_task(
     constraints: Any,
     part_positions: list[int],
     constraint_positions: list[int],
-) -> None:
+) -> _S1ValidationFacts:
     non_s1 = [
         position
         for position in constraint_positions
@@ -504,6 +516,7 @@ def _validate_s1_task(
         for position in part_positions
     }
     observed_parts: set[int] = set()
+    flipped_parts: set[int] = set()
     for position in constraint_positions:
         parts_1 = _sequence(_cell(constraints, position, "parts_1"), label="s1 parts_1")
         if len(parts_1) != 1:
@@ -528,15 +541,23 @@ def _validate_s1_task(
         flips = _sequence(_cell(constraints, position, "r1_flip_x"), label="s1 r1_flip_x")
         if not (len(starts) == len(ends) == len(flips)):
             raise ValueError("s1 r1_start, r1_end, and r1_flip_x must have equal lengths")
+        flip_values: set[int] = set()
         for start, end, flip in zip(starts, ends, flips, strict=True):
             start_number = _source_number(start, label="s1 rotation start")
             end_number = _source_number(end, label="s1 rotation end")
             if start_number != end_number:
                 raise ValueError("s1 rotations must be degenerate with r1_start equal to r1_end")
-            if _source_int(flip, label="s1 flip flag") != 0:
-                raise ValueError("s1 flip flags must be strict integer zero")
+            flip_value = _source_int(flip, label="s1 flip flag")
+            if flip_value not in {0, 1}:
+                raise ValueError("s1 flip flags must be strict integer zero or one")
+            flip_values.add(flip_value)
+        if len(flip_values) != 1:
+            raise ValueError("s1 flip states must be uniform within one part")
+        if flip_values == {1}:
+            flipped_parts.add(part_id)
     if observed_parts != expected_parts:
         raise ValueError("runnable task requires exactly one s1 row per part")
+    return _S1ValidationFacts(flip_part_count=len(flipped_parts))
 
 
 def _validate_opaque_value(value: Any) -> OpaqueValue:
@@ -789,7 +810,7 @@ def select_catalog_task_ids(
             continue
 
         try:
-            _validate_s1_task(
+            facts = _validate_s1_task(
                 task_id,
                 parts=frames["parts"],
                 constraints=frames["constraints"],
@@ -817,7 +838,7 @@ def select_catalog_task_ids(
                 support_status=SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS,
                 projection_status=ProjectionStatus.ELIGIBLE,
                 reason_codes=(),
-                assumption_codes=(S1_ASSUMPTION,),
+                assumption_codes=_s1_assumption_codes(facts.flip_part_count),
             )
         selected_ids.append(task_id)
         dispositions.append(disposition)
@@ -859,6 +880,7 @@ def select_representative_task_ids(
     )
 
     runnable: _RankedCandidate | None = None
+    runnable_flip_part_count = 0
     view_only: _RankedCandidate | None = None
     first_runnable_failure: str | None = None
     for candidate in ranked:
@@ -903,7 +925,7 @@ def select_representative_task_ids(
             else:
                 view_only = candidate
         try:
-            _validate_s1_task(
+            facts = _validate_s1_task(
                 task_id,
                 parts=frames["parts"],
                 constraints=frames["constraints"],
@@ -916,6 +938,7 @@ def select_representative_task_ids(
         else:
             if runnable is None:
                 runnable = candidate
+                runnable_flip_part_count = facts.flip_part_count
 
     if runnable is None:
         detail = first_runnable_failure or "no task satisfied the strict s1 rule"
@@ -927,6 +950,7 @@ def select_representative_task_ids(
         view_only_tasks_index=view_only.tasks_index,
         runnable_rank_score=runnable.rank_score,
         view_only_rank_score=view_only.rank_score,
+        runnable_flip_part_count=runnable_flip_part_count,
     )
 
 
@@ -956,7 +980,7 @@ def export_representative_slice(
             support_status=SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS,
             projection_status=ProjectionStatus.ELIGIBLE,
             reason_codes=(),
-            assumption_codes=(S1_ASSUMPTION,),
+            assumption_codes=_s1_assumption_codes(selection.runnable_flip_part_count),
         ),
         selection.view_only_tasks_index: TaskDisposition(
             tasks_index=selection.view_only_tasks_index,
@@ -1126,7 +1150,7 @@ def _export_selected_slice(
         ProvenanceGroup(
             kind=ProvenanceKind.ASSUMED,
             field_paths=(ASSUMED_PROVENANCE_PATH,),
-            note="Only the declared degenerate-s1 orientation interpretation.",
+            note=("Only the declared degenerate-s1 orientation and local-x flip interpretations."),
         ),
     )
     return NormalizedSlice(

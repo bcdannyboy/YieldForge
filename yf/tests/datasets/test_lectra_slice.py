@@ -9,6 +9,7 @@ import pytest
 from yieldforge.datasets.lectra_slice import (
     CATALOG_CONVERSION_RULESET_VERSION,
     S1_ASSUMPTION,
+    S1_FLIP_ASSUMPTION,
     NoEligibleLectraSliceError,
     export_catalog_slice,
     export_representative_slice,
@@ -444,16 +445,30 @@ def test_catalog_classifies_strict_s1_and_view_only_tasks_explicitly() -> None:
     assert view_only.assumption_codes == ()
 
 
-def test_catalog_classifies_failed_s1_projection_as_view_only() -> None:
+def test_catalog_classifies_uniform_binary_flip_as_assumption_backed() -> None:
     frames = _catalog_frames(filler_count=0)
-    task_constraints = frames["constraints"]["tasks_index"] == 25_801
-    frames["constraints"].loc[task_constraints, "type"] = "s1"
+    task_constraints = frames["constraints"]["tasks_index"] == 13_958
     first_constraint = frames["constraints"].index[task_constraints][0]
     frames["constraints"].at[first_constraint, "r1_flip_x"] = [1]
 
     selection = select_catalog_task_ids(frames, target_count=2)
 
-    disposition = _catalog_disposition(selection, 25_801)
+    disposition = _catalog_disposition(selection, 13_958)
+    assert disposition.support_status is SupportStatus.RUNNABLE_WITH_EXPLICIT_ASSUMPTIONS
+    assert disposition.projection_status is ProjectionStatus.ELIGIBLE
+    assert disposition.reason_codes == ()
+    assert disposition.assumption_codes == tuple(sorted((S1_ASSUMPTION, S1_FLIP_ASSUMPTION)))
+
+
+def test_catalog_classifies_nonbinary_flip_as_view_only() -> None:
+    frames = _catalog_frames(filler_count=0)
+    task_constraints = frames["constraints"]["tasks_index"] == 13_958
+    first_constraint = frames["constraints"].index[task_constraints][0]
+    frames["constraints"].at[first_constraint, "r1_flip_x"] = [2]
+
+    selection = select_catalog_task_ids(frames, target_count=2)
+
+    disposition = _catalog_disposition(selection, 13_958)
     assert disposition.support_status is SupportStatus.VIEW_ONLY
     assert disposition.projection_status is ProjectionStatus.BLOCKED
     assert disposition.reason_codes == ("s1_projection_requirements_not_met",)
@@ -593,7 +608,15 @@ def test_malformed_or_unresolved_view_references_skip_to_next_ranked_candidate(
         (lambda rows: rows[0].update(parts_1=[-1]), "parts_1"),
         (lambda rows: rows[0].update(r1_start=[]), "nonempty"),
         (lambda rows: rows[0].update(r1_end=[1.0]), "degenerate"),
-        (lambda rows: rows[0].update(r1_flip_x=[1]), "flip"),
+        (lambda rows: rows[0].update(r1_flip_x=[2]), "zero or one"),
+        (
+            lambda rows: rows[0].update(
+                r1_start=[0.0, 180.0],
+                r1_end=[0.0, 180.0],
+                r1_flip_x=[0, 1],
+            ),
+            "uniform",
+        ),
         (lambda rows: rows[0].update(parts_2=[1]), "parts_2"),
         (lambda rows: rows[0].update(p1_x=0.0), "unrelated"),
         (lambda rows: rows[0].update(type="c1"), "non-s1"),
@@ -636,7 +659,7 @@ def test_selector_never_weakens_rules_when_top_256_have_no_eligible_task() -> No
     rows = frames["constraints"].to_dict("records")
     for row in rows:
         if row["tasks_index"] <= 256:
-            row["r1_flip_x"] = [1]
+            row["r1_flip_x"] = [2]
     frames["constraints"] = pd.DataFrame(rows, columns=CONSTRAINT_COLUMNS)
 
     with pytest.raises(NoEligibleLectraSliceError, match="top 256"):
