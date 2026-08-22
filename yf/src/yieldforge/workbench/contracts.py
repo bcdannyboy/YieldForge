@@ -26,6 +26,8 @@ from yieldforge.domain import (
     StripPackingProblem,
 )
 
+MAX_OUTER_RUNTIME_SECONDS = 60
+
 
 class WorkbenchContract(BaseModel):
     """Strict and immutable persisted workbench contract."""
@@ -39,7 +41,7 @@ class SolveRequest(WorkbenchContract):
     schema_version: Literal["yieldforge.solve-request.v1"] = "yieldforge.solve-request.v1"
     problem: StripPackingProblem
     config: SpyrrowRunConfig
-    max_runtime_seconds: float = Field(gt=0, le=10)
+    max_runtime_seconds: float = Field(gt=0, le=MAX_OUTER_RUNTIME_SECONDS)
     source_task_binding: SourceTaskBinding | None = None
     experiment_pair_id: StrictStr | None = Field(default=None, min_length=1, max_length=80)
     experiment_arm: ProjectionMode | None = None
@@ -219,7 +221,7 @@ class JobSnapshot(WorkbenchContract):
     experiment_pair_id: StrictStr | None = Field(default=None, min_length=1, max_length=80)
     experiment_arm: ProjectionMode | None = None
     config: SpyrrowRunConfig
-    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=MAX_OUTER_RUNTIME_SECONDS)
     error_code: str | None = Field(default=None, min_length=1, max_length=80)
     error_message: str | None = Field(default=None, min_length=1, max_length=200)
 

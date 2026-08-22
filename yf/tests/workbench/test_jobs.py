@@ -78,6 +78,13 @@ def make_request(
     )
 
 
+def test_solve_request_accepts_only_the_registered_outer_runtime_ceiling() -> None:
+    assert make_request(budget=60.0).max_runtime_seconds == 60.0
+
+    with pytest.raises(ValueError, match="less than or equal to 60"):
+        make_request(budget=60.000001)
+
+
 def make_matched_requests() -> tuple[SolveRequest, SolveRequest]:
     assumptions = tuple(
         sorted(

@@ -34,7 +34,11 @@ from yieldforge.order_books.domain import (
     OrderBookManifest,
     SourceSliceIdentity,
 )
-from yieldforge.workbench.contracts import JobEventKind, JobStatus
+from yieldforge.workbench.contracts import (
+    MAX_OUTER_RUNTIME_SECONDS,
+    JobEventKind,
+    JobStatus,
+)
 
 
 class ApiContract(BaseModel):
@@ -67,7 +71,7 @@ class CreateSolverJobRequest(ApiContract):
     total_computation_time: StrictInt = Field(gt=0, le=10)
     early_termination: StrictBool = False
     min_items_separation: StrictFloat | None = Field(default=None, ge=0)
-    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=MAX_OUTER_RUNTIME_SECONDS)
 
     @field_validator("projection_mode", mode="before")
     @classmethod
@@ -116,7 +120,7 @@ class CreateMatchedSolverJobsRequest(ApiContract):
     total_computation_time: StrictInt = Field(gt=0, le=10)
     early_termination: StrictBool = False
     min_items_separation: StrictFloat | None = Field(default=None, ge=0)
-    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=MAX_OUTER_RUNTIME_SECONDS)
 
     @field_validator("acknowledged_assumption_codes", "acknowledged_intervention_codes")
     @classmethod
@@ -243,7 +247,7 @@ class CompletedRunSettings(ApiContract):
     num_workers: Literal[1]
     early_termination: StrictBool
     min_items_separation: StrictFloat | None = Field(default=None, ge=0)
-    max_runtime_seconds: StrictFloat = Field(gt=0, le=10)
+    max_runtime_seconds: StrictFloat = Field(gt=0, le=MAX_OUTER_RUNTIME_SECONDS)
 
 
 class CompletedArchiveIdentity(ApiContract):

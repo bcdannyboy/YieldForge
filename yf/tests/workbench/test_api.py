@@ -52,6 +52,11 @@ from yieldforge.domain import (
     StripPackingProblem,
 )
 from yieldforge.workbench import app as app_module
+from yieldforge.workbench.api_contracts import (
+    CompletedRunSettings,
+    CreateMatchedSolverJobsRequest,
+    CreateSolverJobRequest,
+)
 from yieldforge.workbench.app import _stream_job_events, create_app, create_default_app
 from yieldforge.workbench.contracts import (
     JobEvent,
@@ -68,6 +73,45 @@ ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations"
 FLIP_ASSUMPTION = "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation"
 NO_FLIP_INTERVENTION = "force_s1_flip_x_zero_for_ablation"
 NOW = datetime(2026, 8, 18, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [CreateSolverJobRequest, CreateMatchedSolverJobsRequest],
+)
+def test_public_solver_requests_accept_only_registered_outer_runtime_ceiling(
+    model: type[CreateSolverJobRequest] | type[CreateMatchedSolverJobsRequest],
+) -> None:
+    payload: dict[str, object] = {
+        "tasks_index": 13958,
+        "acknowledged_assumption_codes": (),
+        "acknowledged_intervention_codes": (),
+        "seed": 0,
+        "total_computation_time": 10,
+        "early_termination": False,
+        "min_items_separation": None,
+        "max_runtime_seconds": 60.0,
+    }
+    if model is CreateSolverJobRequest:
+        payload["projection_mode"] = ProjectionMode.SOURCE_AS_RECORDED
+
+    assert model.model_validate(payload).max_runtime_seconds == 60.0
+    payload["max_runtime_seconds"] = 60.000001
+    with pytest.raises(ValueError, match="less than or equal to 60"):
+        model.model_validate(payload)
+
+
+def test_completed_run_settings_accept_registered_outer_runtime_ceiling() -> None:
+    settings = CompletedRunSettings(
+        seed=0,
+        total_computation_time=10,
+        num_workers=1,
+        early_termination=False,
+        min_items_separation=None,
+        max_runtime_seconds=60.0,
+    )
+
+    assert settings.max_runtime_seconds == 60.0
 
 
 class _FakeCorpus:
