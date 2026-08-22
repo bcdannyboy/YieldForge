@@ -14,7 +14,7 @@ export const source: CorpusSource = {
   dataset_id: "lectra-7030786-v1.1",
   doi: "10.5281/zenodo.7030786",
   license: "CC-BY-4.0",
-  conversion_ruleset_version: "lectra-slice-rules.v1",
+  conversion_ruleset_version: "lectra-slice-rules.v2",
   source_checksums: [],
   source_manifest_sha256: "a".repeat(64),
   audit_report_sha256: "b".repeat(64),
@@ -22,15 +22,38 @@ export const source: CorpusSource = {
   evidence_status: "content_pinned_with_manifest_identity",
 };
 
-export const capability = (canSolve: boolean): SolveCapability => ({
+const ROTATION_ASSUMPTION = "interpret_s1_degenerate_entries_as_allowed_rotations";
+const FLIP_ASSUMPTION =
+  "interpret_s1_flip_x_as_local_x_coordinate_negation_before_rotation";
+const NO_FLIP_INTERVENTION = "force_s1_flip_x_zero_for_ablation";
+
+export const capability = (canSolve: boolean, hasFlip = false): SolveCapability => ({
   can_solve: canSolve,
   requires_assumption_acknowledgement: canSolve,
   normalization_status: "source_lossless",
   support_status: canSolve ? "runnable_with_explicit_assumptions" : "view_only",
   projection_status: canSolve ? "eligible" : "blocked",
   reason_codes: canSolve ? [] : ["contains_non_s1_constraints"],
-  assumption_codes: canSolve
-    ? ["interpret_s1_degenerate_entries_as_allowed_rotations"]
+  assumption_codes: canSolve ? [ROTATION_ASSUMPTION, ...(hasFlip ? [FLIP_ASSUMPTION] : [])] : [],
+  projection_options: canSolve
+    ? [
+        {
+          mode: "source_as_recorded",
+          source_preserving: true,
+          assumption_codes: [ROTATION_ASSUMPTION, ...(hasFlip ? [FLIP_ASSUMPTION] : [])],
+          intervention_codes: [],
+        },
+        ...(hasFlip
+          ? [
+              {
+                mode: "force_flip_x_zero" as const,
+                source_preserving: false,
+                assumption_codes: [ROTATION_ASSUMPTION, FLIP_ASSUMPTION],
+                intervention_codes: [NO_FLIP_INTERVENTION],
+              },
+            ]
+          : []),
+      ]
     : [],
 });
 
@@ -39,8 +62,8 @@ export const taskSummary = (tasksIndex: number): TaskSummary => ({
     source_row_index: tasksIndex,
     duration: 304,
     efficiency: 80.5,
-    sheet_width: tasksIndex === 13958 ? 16920 : 14800,
-    sheet_length: tasksIndex === 13958 ? 80040 : 140000,
+    sheet_width: tasksIndex === 13958 ? 16920 : tasksIndex === 6669 ? 14004 : 14800,
+    sheet_length: tasksIndex === 13958 ? 80040 : tasksIndex === 6669 ? 80008 : 140000,
     sheet_type: 0,
     tasks_index: tasksIndex,
     is_train: true,
@@ -48,11 +71,11 @@ export const taskSummary = (tasksIndex: number): TaskSummary => ({
     is_test: false,
   },
   tasks_index: tasksIndex,
-  part_count: tasksIndex === 13958 ? 34 : 32,
-  shape_count: tasksIndex === 13958 ? 8 : 11,
-  constraint_count: tasksIndex === 13958 ? 34 : 52,
-  constraint_types: tasksIndex === 13958 ? ["s1"] : ["c8", "s1"],
-  solve_capability: capability(tasksIndex === 13958),
+  part_count: tasksIndex === 13958 ? 34 : tasksIndex === 6669 ? 36 : 32,
+  shape_count: tasksIndex === 13958 ? 8 : tasksIndex === 6669 ? 5 : 11,
+  constraint_count: tasksIndex === 13958 ? 34 : tasksIndex === 6669 ? 36 : 52,
+  constraint_types: tasksIndex === 25801 ? ["c8", "s1"] : ["s1"],
+  solve_capability: capability(tasksIndex !== 25801, tasksIndex === 6669),
 });
 
 export const taskDetail = (tasksIndex: number): TaskDetail => ({
@@ -80,7 +103,7 @@ export const taskDetail = (tasksIndex: number): TaskDetail => ({
     {
       source_row_index: 3,
       tasks_index: tasksIndex,
-      type: tasksIndex === 13958 ? "s1" : "c8",
+      type: tasksIndex === 25801 ? "c8" : "s1",
       values: [
         { kind: "sequence", items: [{ kind: "integer", value: "10" }] },
         { kind: "missing" },
@@ -114,6 +137,12 @@ export const taskDetail = (tasksIndex: number): TaskDetail => ({
       bounds: ["0", "0", "10", "10"],
     },
   ],
+  s1_projection_diagnostics: {
+    orientation_state_count: tasksIndex === 6669 ? 6 : tasksIndex === 25801 ? 32 : 34,
+    flip_constraint_count: tasksIndex === 6669 ? 6 : 0,
+    flip_part_count: tasksIndex === 6669 ? 6 : 0,
+    mixed_flip_constraint_count: 0,
+  },
   provenance: [
     { kind: "source_real", field_paths: ["/parts"], note: "Published rows" },
     { kind: "derived", field_paths: ["/derived_geometry"], note: "Reversible pairing" },
@@ -168,9 +197,20 @@ export const job: JobView = {
     source_slice_sha256: source.slice_sha256,
     tasks_index: 13958,
     acknowledged_assumption_codes: [
-      "interpret_s1_degenerate_entries_as_allowed_rotations",
+      ROTATION_ASSUMPTION,
     ],
+    solver_projection: {
+      schema_version: "yieldforge.solver-projection-binding.v1",
+      mode: "source_as_recorded",
+      transform_convention: "local_x_coordinate_negation_before_rotation",
+      projection_sha256: "f".repeat(64),
+      assumption_codes: [ROTATION_ASSUMPTION],
+      intervention_codes: [],
+      source_flip_part_count: 0,
+    },
   },
+  experiment_pair_id: null,
+  experiment_arm: null,
   archive_available: false,
   error_code: null,
   error_message: null,

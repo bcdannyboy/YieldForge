@@ -4,8 +4,10 @@ import {
   type CompletedRunPage,
   type CorpusSummary,
   type CreateJobInput,
+  type CreateMatchedJobsInput,
   type JobEvent,
   type JobView,
+  type MatchedJobsView,
   type OrderBook,
   type SupportStatus,
   type TaskDetail,
@@ -16,6 +18,7 @@ import {
   parseCorpusSummary,
   parseJobEvent,
   parseJobView,
+  parseMatchedSolverJobsView,
   parseOrderBook,
   parseTaskDetail,
   parseTaskPage,
@@ -43,6 +46,7 @@ export interface WorkbenchClient {
   listTasks(filters?: TaskFilters): Promise<TaskPage>;
   getTask(tasksIndex: number): Promise<TaskDetail>;
   createJob(input: CreateJobInput): Promise<JobView>;
+  createMatchedJobs(input: CreateMatchedJobsInput): Promise<MatchedJobsView>;
   getJob(jobId: string): Promise<JobView>;
   cancelJob(jobId: string): Promise<JobView>;
   streamJobEvents(
@@ -171,6 +175,15 @@ export class HttpWorkbenchClient implements WorkbenchClient {
       body: JSON.stringify(input),
     });
     return parseJobView(await responseJson(response));
+  }
+
+  async createMatchedJobs(input: CreateMatchedJobsInput) {
+    const response = await fetch(`${this.baseUrl}/api/matched-solver-jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(input),
+    });
+    return parseMatchedSolverJobsView(await responseJson(response));
   }
 
   async getJob(jobId: string) {

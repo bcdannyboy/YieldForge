@@ -352,9 +352,11 @@ export function NestLab({ client, tasksIndex }: { client: WorkbenchClient; tasks
                 const assumptions = detail.summary.solve_capability.assumption_codes;
                 void client
                   .createJob({
-                    schema_version: "yieldforge.api-solver-job-request.v1",
+                    schema_version: "yieldforge.api-solver-job-request.v2",
                     tasks_index: tasksIndex,
+                    projection_mode: "source_as_recorded",
                     acknowledged_assumption_codes: [...assumptions],
+                    acknowledged_intervention_codes: [],
                     seed: Number(data.get("seed")),
                     total_computation_time: Number(data.get("seconds")),
                     early_termination: data.get("early") === "on",

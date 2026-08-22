@@ -7,6 +7,7 @@ export type SupportStatus =
   | "runnable_with_explicit_assumptions"
   | "view_only";
 export type ProjectionStatus = "not_attempted" | "eligible" | "blocked" | "projected";
+export type ProjectionMode = "source_as_recorded" | "force_flip_x_zero";
 export type JobStatus =
   | "queued"
   | "running"
@@ -43,6 +44,21 @@ export interface SolveCapability {
   projection_status: ProjectionStatus;
   reason_codes: string[];
   assumption_codes: string[];
+  projection_options: ProjectionOption[];
+}
+
+export interface ProjectionOption {
+  mode: ProjectionMode;
+  source_preserving: boolean;
+  assumption_codes: string[];
+  intervention_codes: string[];
+}
+
+export interface S1ProjectionDiagnostics {
+  orientation_state_count: number;
+  flip_constraint_count: number;
+  flip_part_count: number;
+  mixed_flip_constraint_count: number;
 }
 
 export interface TaskSource {
@@ -136,18 +152,52 @@ export interface TaskDetail {
     area: BrowserNumber;
     bounds: [BrowserNumber, BrowserNumber, BrowserNumber, BrowserNumber];
   }>;
+  s1_projection_diagnostics: S1ProjectionDiagnostics;
   provenance: Array<{ kind: ProvenanceKind; field_paths: string[]; note: string }>;
 }
 
 export interface CreateJobInput {
-  schema_version: "yieldforge.api-solver-job-request.v1";
+  schema_version: "yieldforge.api-solver-job-request.v2";
   tasks_index: number;
+  projection_mode: ProjectionMode;
   acknowledged_assumption_codes: string[];
+  acknowledged_intervention_codes: string[];
   seed: number;
   total_computation_time: number;
   early_termination: boolean;
   min_items_separation: number | null;
   max_runtime_seconds: number;
+}
+
+export interface CreateMatchedJobsInput {
+  schema_version: "yieldforge.api-matched-solver-jobs-request.v1";
+  tasks_index: number;
+  acknowledged_assumption_codes: string[];
+  acknowledged_intervention_codes: string[];
+  seed: number;
+  total_computation_time: number;
+  early_termination: boolean;
+  min_items_separation: number | null;
+  max_runtime_seconds: number;
+}
+
+export interface SolverProjectionBinding {
+  schema_version: "yieldforge.solver-projection-binding.v1";
+  mode: ProjectionMode;
+  transform_convention: "local_x_coordinate_negation_before_rotation";
+  projection_sha256: string;
+  assumption_codes: string[];
+  intervention_codes: string[];
+  source_flip_part_count: number;
+}
+
+export interface SourceTaskBinding {
+  schema_version: "yieldforge.source-task-binding.v1";
+  dataset_id: string;
+  source_slice_sha256: string;
+  tasks_index: number;
+  acknowledged_assumption_codes: string[];
+  solver_projection: SolverProjectionBinding | null;
 }
 
 export interface JobView {
@@ -158,16 +208,19 @@ export interface JobView {
   updated_at: string;
   latest_event_id: number;
   candidate_count: number;
-  source_task_binding: {
-    schema_version: "yieldforge.source-task-binding.v1";
-    dataset_id: string;
-    source_slice_sha256: string;
-    tasks_index: number;
-    acknowledged_assumption_codes: string[];
-  } | null;
+  source_task_binding: SourceTaskBinding | null;
+  experiment_pair_id: string | null;
+  experiment_arm: ProjectionMode | null;
   archive_available: boolean;
   error_code: string | null;
   error_message: string | null;
+}
+
+export interface MatchedJobsView {
+  schema_version: "yieldforge.api-matched-solver-jobs.v1";
+  experiment_pair_id: string;
+  source_as_recorded: JobView;
+  force_flip_x_zero: JobView;
 }
 
 export interface CompletedRunSettings {
@@ -394,6 +447,14 @@ function strings(value: unknown, label: string): string[] {
   return list(value, label).map((item, index) => text(item, `${label}[${index}]`));
 }
 
+function sortedUniqueStrings(value: unknown, label: string): string[] {
+  const parsed = strings(value, label);
+  if (parsed.some((code, index) => code !== [...new Set(parsed)].sort()[index])) {
+    throw new TypeError(`${label} must be sorted and unique`);
+  }
+  return parsed;
+}
+
 function browserNumber(value: unknown, label: string): BrowserNumber {
   if (typeof value === "string") return decimal(value, label);
   return finite(value, label);
@@ -422,8 +483,64 @@ function source(value: unknown): CorpusSource {
   return item as unknown as CorpusSource;
 }
 
+const projectionModes = new Set<ProjectionMode>(["source_as_recorded", "force_flip_x_zero"]);
+
+function projectionMode(value: unknown, label: string): ProjectionMode {
+  if (typeof value !== "string" || !projectionModes.has(value as ProjectionMode)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value as ProjectionMode;
+}
+
+function projectionOption(value: unknown, label: string): ProjectionOption {
+  const item = record(value, label);
+  exactFields(
+    item,
+    ["mode", "source_preserving", "assumption_codes", "intervention_codes"],
+    label,
+  );
+  const mode = projectionMode(item.mode, `${label}.mode`);
+  const sourcePreserving = bool(item.source_preserving, `${label}.source_preserving`);
+  const assumptionCodes = sortedUniqueStrings(item.assumption_codes, `${label}.assumption_codes`);
+  const interventionCodes = sortedUniqueStrings(
+    item.intervention_codes,
+    `${label}.intervention_codes`,
+  );
+  if (mode === "source_as_recorded" && (!sourcePreserving || interventionCodes.length > 0)) {
+    throw new TypeError(`${label} recorded projection intervention is invalid`);
+  }
+  if (
+    mode === "force_flip_x_zero" &&
+    (sourcePreserving ||
+      interventionCodes.length !== 1 ||
+      interventionCodes[0] !== "force_s1_flip_x_zero_for_ablation")
+  ) {
+    throw new TypeError(`${label} no-flip intervention is invalid`);
+  }
+  return {
+    mode,
+    source_preserving: sourcePreserving,
+    assumption_codes: assumptionCodes,
+    intervention_codes: interventionCodes,
+  };
+}
+
 function capability(value: unknown): SolveCapability {
   const item = record(value, "solve_capability");
+  exactFields(
+    item,
+    [
+      "can_solve",
+      "requires_assumption_acknowledgement",
+      "normalization_status",
+      "support_status",
+      "projection_status",
+      "reason_codes",
+      "assumption_codes",
+      "projection_options",
+    ],
+    "solve_capability",
+  );
   const canSolve = bool(item.can_solve, "solve_capability.can_solve");
   const requiresAcknowledgement = bool(
     item.requires_assumption_acknowledgement,
@@ -447,8 +564,17 @@ function capability(value: unknown): SolveCapability {
   ) {
     throw new TypeError("solve_capability.projection_status is invalid");
   }
-  const reasonCodes = strings(item.reason_codes, "solve_capability.reason_codes");
-  const assumptionCodes = strings(item.assumption_codes, "solve_capability.assumption_codes");
+  const reasonCodes = sortedUniqueStrings(item.reason_codes, "solve_capability.reason_codes");
+  const assumptionCodes = sortedUniqueStrings(
+    item.assumption_codes,
+    "solve_capability.assumption_codes",
+  );
+  const projectionOptions = list(
+    item.projection_options,
+    "solve_capability.projection_options",
+  ).map((option, index) =>
+    projectionOption(option, `solve_capability.projection_options[${index}]`),
+  );
   const projectionEligible =
     item.projection_status === "eligible" || item.projection_status === "projected";
   if (canSolve !== projectionEligible) {
@@ -469,7 +595,32 @@ function capability(value: unknown): SolveCapability {
   ) {
     throw new TypeError("blocked capability requires reason codes");
   }
-  return item as unknown as SolveCapability;
+  if (projectionEligible) {
+    if (projectionOptions.length < 1 || projectionOptions[0]?.mode !== "source_as_recorded") {
+      throw new TypeError("eligible capability requires a recorded projection option");
+    }
+    if (
+      projectionOptions.some(
+        (option) => JSON.stringify(option.assumption_codes) !== JSON.stringify(assumptionCodes),
+      )
+    ) {
+      throw new TypeError("projection option assumption codes must match solve capability");
+    }
+    if (
+      projectionOptions.length > 2 ||
+      (projectionOptions.length === 2 && projectionOptions[1]?.mode !== "force_flip_x_zero")
+    ) {
+      throw new TypeError("solve_capability projection option order is invalid");
+    }
+  } else if (projectionOptions.length > 0) {
+    throw new TypeError("blocked capability cannot expose projection options");
+  }
+  return {
+    ...(item as unknown as SolveCapability),
+    reason_codes: reasonCodes,
+    assumption_codes: assumptionCodes,
+    projection_options: projectionOptions,
+  };
 }
 
 const supportStatuses = new Set<SupportStatus>([
@@ -634,6 +785,25 @@ export function parseTaskDetail(value: unknown): TaskDetail {
       });
     }
   });
+  const diagnostics = record(item.s1_projection_diagnostics, "s1_projection_diagnostics");
+  exactFields(
+    diagnostics,
+    [
+      "orientation_state_count",
+      "flip_constraint_count",
+      "flip_part_count",
+      "mixed_flip_constraint_count",
+    ],
+    "s1_projection_diagnostics",
+  );
+  for (const field of [
+    "orientation_state_count",
+    "flip_constraint_count",
+    "flip_part_count",
+    "mixed_flip_constraint_count",
+  ] as const) {
+    nonnegativeSafeInteger(diagnostics[field], `s1_projection_diagnostics.${field}`);
+  }
   return item as unknown as TaskDetail;
 }
 
@@ -654,20 +824,183 @@ function status(value: unknown, label: string): JobStatus {
   return value as JobStatus;
 }
 
+const sha256Pattern = /^[0-9a-f]{64}$/;
+
+function solverProjectionBinding(value: unknown, label: string): SolverProjectionBinding {
+  const item = record(value, label);
+  exactFields(
+    item,
+    [
+      "schema_version",
+      "mode",
+      "transform_convention",
+      "projection_sha256",
+      "assumption_codes",
+      "intervention_codes",
+      "source_flip_part_count",
+    ],
+    label,
+  );
+  if (item.schema_version !== "yieldforge.solver-projection-binding.v1") {
+    throw new TypeError(`${label} schema is invalid`);
+  }
+  const mode = projectionMode(item.mode, `${label}.mode`);
+  if (item.transform_convention !== "local_x_coordinate_negation_before_rotation") {
+    throw new TypeError(`${label}.transform_convention is invalid`);
+  }
+  if (typeof item.projection_sha256 !== "string" || !sha256Pattern.test(item.projection_sha256)) {
+    throw new TypeError(`${label}.projection_sha256 is invalid`);
+  }
+  const assumptionCodes = sortedUniqueStrings(item.assumption_codes, `${label}.assumption_codes`);
+  const interventionCodes = sortedUniqueStrings(
+    item.intervention_codes,
+    `${label}.intervention_codes`,
+  );
+  if (mode === "source_as_recorded" && interventionCodes.length > 0) {
+    throw new TypeError(`${label} recorded projection cannot carry interventions`);
+  }
+  if (
+    mode === "force_flip_x_zero" &&
+    (interventionCodes.length !== 1 ||
+      interventionCodes[0] !== "force_s1_flip_x_zero_for_ablation")
+  ) {
+    throw new TypeError(`${label} no-flip projection requires its intervention`);
+  }
+  nonnegativeSafeInteger(item.source_flip_part_count, `${label}.source_flip_part_count`);
+  return {
+    ...(item as unknown as SolverProjectionBinding),
+    mode,
+    assumption_codes: assumptionCodes,
+    intervention_codes: interventionCodes,
+  };
+}
+
+function sourceTaskBinding(value: unknown, label: string): SourceTaskBinding {
+  const item = record(value, label);
+  const hasProjection = Object.hasOwn(item, "solver_projection");
+  exactFields(
+    item,
+    [
+      "schema_version",
+      "dataset_id",
+      "source_slice_sha256",
+      "tasks_index",
+      "acknowledged_assumption_codes",
+      ...(hasProjection ? ["solver_projection"] : []),
+    ],
+    label,
+  );
+  if (item.schema_version !== "yieldforge.source-task-binding.v1") {
+    throw new TypeError(`${label} schema is invalid`);
+  }
+  text(item.dataset_id, `${label}.dataset_id`);
+  if (typeof item.source_slice_sha256 !== "string" || !sha256Pattern.test(item.source_slice_sha256)) {
+    throw new TypeError(`${label}.source_slice_sha256 is invalid`);
+  }
+  nonnegativeSafeInteger(item.tasks_index, `${label}.tasks_index`);
+  const acknowledged = sortedUniqueStrings(
+    item.acknowledged_assumption_codes,
+    `${label}.acknowledged_assumption_codes`,
+  );
+  const projection =
+    !hasProjection || item.solver_projection === null
+      ? null
+      : solverProjectionBinding(item.solver_projection, `${label}.solver_projection`);
+  if (
+    projection !== null &&
+    JSON.stringify(projection.assumption_codes) !== JSON.stringify(acknowledged)
+  ) {
+    throw new TypeError(`${label} acknowledged assumptions must match solver projection`);
+  }
+  return {
+    ...(item as unknown as SourceTaskBinding),
+    acknowledged_assumption_codes: acknowledged,
+    solver_projection: projection,
+  };
+}
+
 export function parseJobView(value: unknown): JobView {
   const item = record(value, "job");
+  exactFields(
+    item,
+    [
+      "schema_version",
+      "job_id",
+      "status",
+      "created_at",
+      "updated_at",
+      "latest_event_id",
+      "candidate_count",
+      "source_task_binding",
+      "experiment_pair_id",
+      "experiment_arm",
+      "archive_available",
+      "error_code",
+      "error_message",
+    ],
+    "job",
+  );
   if (item.schema_version !== "yieldforge.api-job.v1") throw new TypeError("job schema invalid");
   text(item.job_id, "job.job_id");
   status(item.status, "job.status");
-  safeInteger(item.latest_event_id, "job.latest_event_id");
-  safeInteger(item.candidate_count, "job.candidate_count");
+  timestamp(item.created_at, "job.created_at");
+  timestamp(item.updated_at, "job.updated_at");
+  nonnegativeSafeInteger(item.latest_event_id, "job.latest_event_id");
+  nonnegativeSafeInteger(item.candidate_count, "job.candidate_count");
+  const binding =
+    item.source_task_binding === null
+      ? null
+      : sourceTaskBinding(item.source_task_binding, "job.source_task_binding");
+  const pairId = item.experiment_pair_id === null ? null : text(item.experiment_pair_id, "job.experiment_pair_id");
+  const arm = item.experiment_arm === null ? null : projectionMode(item.experiment_arm, "job.experiment_arm");
+  if ((pairId === null) !== (arm === null)) {
+    throw new TypeError("job experiment_pair_id and experiment_arm must be set together");
+  }
+  if (
+    arm !== null &&
+    (binding?.solver_projection === null || binding?.solver_projection.mode !== arm)
+  ) {
+    throw new TypeError("job experiment_arm must match its solver projection binding");
+  }
   bool(item.archive_available, "job.archive_available");
   nullableText(item.error_code, "job.error_code");
   nullableText(item.error_message, "job.error_message");
-  return item as unknown as JobView;
+  return {
+    ...(item as unknown as JobView),
+    source_task_binding: binding,
+    experiment_pair_id: pairId,
+    experiment_arm: arm,
+  };
 }
 
-const sha256Pattern = /^[0-9a-f]{64}$/;
+export function parseMatchedSolverJobsView(value: unknown): MatchedJobsView {
+  const item = record(value, "matched jobs");
+  exactFields(
+    item,
+    ["schema_version", "experiment_pair_id", "source_as_recorded", "force_flip_x_zero"],
+    "matched jobs",
+  );
+  if (item.schema_version !== "yieldforge.api-matched-solver-jobs.v1") {
+    throw new TypeError("matched jobs schema is invalid");
+  }
+  const pairId = text(item.experiment_pair_id, "matched jobs.experiment_pair_id");
+  const sourceArm = parseJobView(item.source_as_recorded);
+  const ablationArm = parseJobView(item.force_flip_x_zero);
+  if (
+    sourceArm.experiment_pair_id !== pairId ||
+    ablationArm.experiment_pair_id !== pairId ||
+    sourceArm.experiment_arm !== "source_as_recorded" ||
+    ablationArm.experiment_arm !== "force_flip_x_zero"
+  ) {
+    throw new TypeError("matched jobs pair arms are invalid");
+  }
+  return {
+    schema_version: "yieldforge.api-matched-solver-jobs.v1",
+    experiment_pair_id: pairId,
+    source_as_recorded: sourceArm,
+    force_flip_x_zero: ablationArm,
+  };
+}
 
 function completedJob(value: unknown): JobView {
   const item = record(value, "completed run.job");
@@ -682,6 +1015,8 @@ function completedJob(value: unknown): JobView {
       "latest_event_id",
       "candidate_count",
       "source_task_binding",
+      "experiment_pair_id",
+      "experiment_arm",
       "archive_available",
       "error_code",
       "error_message",
@@ -697,33 +1032,6 @@ function completedJob(value: unknown): JobView {
   if (parsed.source_task_binding === null) {
     throw new TypeError("completed run.job.source_task_binding is required");
   }
-  const binding = record(parsed.source_task_binding, "completed run.job.source_task_binding");
-  exactFields(
-    binding,
-    [
-      "schema_version",
-      "dataset_id",
-      "source_slice_sha256",
-      "tasks_index",
-      "acknowledged_assumption_codes",
-    ],
-    "completed run.job.source_task_binding",
-  );
-  if (binding.schema_version !== "yieldforge.source-task-binding.v1") {
-    throw new TypeError("completed run.job.source_task_binding schema is invalid");
-  }
-  text(binding.dataset_id, "completed run.job.source_task_binding.dataset_id");
-  if (
-    typeof binding.source_slice_sha256 !== "string" ||
-    !sha256Pattern.test(binding.source_slice_sha256)
-  ) {
-    throw new TypeError("completed run.job.source_task_binding.source_slice_sha256 is invalid");
-  }
-  nonnegativeSafeInteger(binding.tasks_index, "completed run.job.source_task_binding.tasks_index");
-  strings(
-    binding.acknowledged_assumption_codes,
-    "completed run.job.source_task_binding.acknowledged_assumption_codes",
-  );
   return parsed;
 }
 

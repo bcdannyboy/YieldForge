@@ -19,6 +19,12 @@ const client = (): WorkbenchClient => ({
   listTasks: vi.fn().mockResolvedValue(taskPage),
   getTask: vi.fn((id: number) => Promise.resolve(taskDetail(id))),
   createJob: vi.fn().mockResolvedValue(job),
+  createMatchedJobs: vi.fn().mockResolvedValue({
+    schema_version: "yieldforge.api-matched-solver-jobs.v1",
+    experiment_pair_id: "pair-1",
+    source_as_recorded: job,
+    force_flip_x_zero: job,
+  }),
   getJob: vi.fn().mockResolvedValue(job),
   cancelJob: vi.fn().mockResolvedValue({ ...job, status: "cancelled" }),
   streamJobEvents: vi.fn().mockResolvedValue(undefined),
@@ -202,6 +208,14 @@ describe("research workbench", () => {
       projection_status: "eligible",
       reason_codes: [],
       assumption_codes: [],
+      projection_options: [
+        {
+          mode: "source_as_recorded",
+          source_preserving: true,
+          assumption_codes: [],
+          intervention_codes: [],
+        },
+      ],
     };
     vi.mocked(api.getCorpusSummary).mockResolvedValue({
       ...corpusSummary,
@@ -245,6 +259,14 @@ describe("research workbench", () => {
       projection_status: "eligible",
       reason_codes: [],
       assumption_codes: [],
+      projection_options: [
+        {
+          mode: "source_as_recorded",
+          source_preserving: true,
+          assumption_codes: [],
+          intervention_codes: [],
+        },
+      ],
     };
     vi.mocked(api.getTask).mockResolvedValue({ ...taskDetail(101), summary: direct });
     window.history.replaceState({}, "", "/?view=nest&task=101");

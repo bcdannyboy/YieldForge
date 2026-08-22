@@ -4,6 +4,8 @@ import {
   parseCorpusSummary,
   parseCompletedRunPage,
   parseJobEvent,
+  parseJobView,
+  parseMatchedSolverJobsView,
   parseOrderBook,
   parseTaskDetail,
 } from "./contracts";
@@ -17,6 +19,79 @@ describe("browser transport validation", () => {
       kind: "sequence",
       items: [{ kind: "integer", value: "10" }],
     });
+  });
+
+  it("validates the authoritative S1 projection menu and diagnostics", () => {
+    const detail = taskDetail(6669);
+    const parsed = parseTaskDetail(detail);
+
+    expect(parsed.summary.solve_capability.projection_options.map((option) => option.mode)).toEqual([
+      "source_as_recorded",
+      "force_flip_x_zero",
+    ]);
+    expect(parsed.s1_projection_diagnostics).toEqual({
+      orientation_state_count: 6,
+      flip_constraint_count: 6,
+      flip_part_count: 6,
+      mixed_flip_constraint_count: 0,
+    });
+
+    const wrongIntervention = structuredClone(detail);
+    wrongIntervention.summary.solve_capability.projection_options[1]!.intervention_codes = [];
+    expect(() => parseTaskDetail(wrongIntervention)).toThrow(/intervention/i);
+
+    const mismatchedAssumptions = structuredClone(detail);
+    mismatchedAssumptions.summary.solve_capability.projection_options[0]!.assumption_codes = [];
+    expect(() => parseTaskDetail(mismatchedAssumptions)).toThrow(/assumption/i);
+  });
+
+  it("validates matched jobs and preserves legacy completed bindings", () => {
+    const sourceArm = structuredClone(completedRun("job-source").job);
+    const ablationArm = structuredClone(completedRun("job-ablation").job);
+    sourceArm.experiment_pair_id = "pair-1";
+    sourceArm.experiment_arm = "source_as_recorded";
+    ablationArm.experiment_pair_id = "pair-1";
+    ablationArm.experiment_arm = "force_flip_x_zero";
+    ablationArm.source_task_binding!.solver_projection!.mode = "force_flip_x_zero";
+    ablationArm.source_task_binding!.solver_projection!.projection_sha256 = "e".repeat(64);
+    ablationArm.source_task_binding!.solver_projection!.intervention_codes = [
+      "force_s1_flip_x_zero_for_ablation",
+    ];
+
+    const parsed = parseMatchedSolverJobsView({
+      schema_version: "yieldforge.api-matched-solver-jobs.v1",
+      experiment_pair_id: "pair-1",
+      source_as_recorded: sourceArm,
+      force_flip_x_zero: ablationArm,
+    });
+    expect(parsed.force_flip_x_zero.experiment_arm).toBe("force_flip_x_zero");
+
+    const wrongArm = structuredClone(ablationArm);
+    wrongArm.experiment_arm = "source_as_recorded";
+    expect(() =>
+      parseMatchedSolverJobsView({
+        schema_version: "yieldforge.api-matched-solver-jobs.v1",
+        experiment_pair_id: "pair-1",
+        source_as_recorded: sourceArm,
+        force_flip_x_zero: wrongArm,
+      }),
+    ).toThrow(/pair arms|experiment_arm/i);
+
+    const legacy = completedRun("legacy-job");
+    delete (legacy.job.source_task_binding as { solver_projection?: unknown }).solver_projection;
+    expect(
+      parseCompletedRunPage({
+        schema_version: "yieldforge.api-completed-run-page.v1",
+        items: [legacy],
+      }).items[0]!.job.source_task_binding!.solver_projection,
+    ).toBeNull();
+  });
+
+  it("rejects a job whose pair arm disagrees with its projection binding", () => {
+    const inconsistent = structuredClone(completedRun().job);
+    inconsistent.experiment_pair_id = "pair-1";
+    inconsistent.experiment_arm = "force_flip_x_zero";
+    expect(() => parseJobView(inconsistent)).toThrow(/experiment_arm/i);
   });
 
   it("rejects unsafe JSON numbers and numeric shape hashes", () => {
@@ -68,6 +143,7 @@ describe("browser transport validation", () => {
       if (supportStatus === "directly_supported") {
         detail.summary.solve_capability.requires_assumption_acknowledgement = false;
         detail.summary.solve_capability.assumption_codes = [];
+        detail.summary.solve_capability.projection_options[0]!.assumption_codes = [];
       }
       expect(parseTaskDetail(detail).summary.solve_capability.support_status).toBe(supportStatus);
     }
