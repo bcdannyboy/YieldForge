@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
+from yieldforge.datasets.corpus import CorpusQueryService
+from yieldforge.datasets.passive_report import parse_normalized_slice
+from yieldforge.domain import ProjectionMode, SourceTaskBinding
 from yieldforge.experiments.calibration import (
+    CalibrationApiClient,
     CalibrationCandidateObservation,
     CalibrationCellEvidence,
     evaluate_calibration,
@@ -18,6 +29,8 @@ from yieldforge.experiments.contracts import (
 
 YF_ROOT = Path(__file__).parents[2]
 GEOMETRY_PROTOCOL_PATH = YF_ROOT / "experiments" / "pure-geometry-calibration-v1.json"
+CATALOG_PATH = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
+NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
 
 def _protocol() -> PureGeometryCalibrationProtocol:
@@ -162,3 +175,261 @@ def test_archive_validity_uses_all_204_registered_cells_per_duration() -> None:
     assert one_second.registered_cell_count == 204
     assert one_second.valid_archive_rate_percent == 193 / 204 * 100
     assert one_second.passes is False
+
+
+class _HttpStub:
+    def __init__(self) -> None:
+        self.routes: dict[tuple[str, str], list[tuple[int, object]]] = {}
+        self.requests: list[tuple[str, str, object | None]] = []
+
+    def respond(self, method: str, path: str, payload: object, *, status: int = 200) -> None:
+        self.routes.setdefault((method, path), []).append((status, payload))
+
+
+@contextmanager
+def _serve(stub: _HttpStub) -> Iterator[str]:
+    class Handler(BaseHTTPRequestHandler):
+        def _handle(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            body = json.loads(raw) if raw else None
+            stub.requests.append((self.command, self.path, body))
+            queue = stub.routes.get((self.command, self.path), [])
+            if not queue:
+                status, payload = 404, {"error": "missing stub route"}
+            else:
+                status, payload = queue.pop(0)
+            encoded = json.dumps(payload, allow_nan=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        do_GET = _handle
+        do_POST = _handle
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def _catalog_service() -> CorpusQueryService:
+    payload = CATALOG_PATH.read_bytes()
+    return CorpusQueryService(
+        parse_normalized_slice(payload, max_bytes=16 * 1024 * 1024),
+        slice_sha256=hashlib.sha256(payload).hexdigest(),
+        evidence_status="fully_bound_to_local_audit_evidence",
+        cursor_signing_key=b"m2-calibration-test-key-material!",
+    )
+
+
+def _job_payload(tasks_index: int, *, status: str = "queued", candidate_count: int = 0) -> dict:
+    service = _catalog_service()
+    detail = service.task_detail(tasks_index)
+    assumptions = detail.summary.solve_capability.assumption_codes
+    projected = service.project_task(
+        tasks_index,
+        mode=ProjectionMode.SOURCE_AS_RECORDED,
+        acknowledged_assumption_codes=assumptions,
+        acknowledged_intervention_codes=(),
+    )
+    binding = SourceTaskBinding(
+        dataset_id=service.summary().source.dataset_id,
+        source_slice_sha256=service.summary().source.slice_sha256,
+        tasks_index=tasks_index,
+        acknowledged_assumption_codes=assumptions,
+        solver_projection=projected.projection,
+    )
+    return {
+        "schema_version": "yieldforge.api-job.v1",
+        "job_id": "job-calibration-test",
+        "status": status,
+        "created_at": NOW.isoformat(),
+        "updated_at": NOW.isoformat(),
+        "latest_event_id": 2 if status == "completed" else 1,
+        "candidate_count": candidate_count,
+        "source_task_binding": binding.model_dump(mode="json"),
+        "experiment_pair_id": None,
+        "experiment_arm": None,
+        "archive_available": status == "completed",
+        "error_code": None,
+        "error_message": None,
+    }
+
+
+def test_api_client_validates_corpus_and_submits_exact_registered_request() -> None:
+    protocol = _protocol()
+    cell = registered_cells(protocol)[0]
+    service = _catalog_service()
+    detail = service.task_detail(cell.tasks_index)
+    stub = _HttpStub()
+    stub.respond("GET", "/api/corpus/summary", service.summary().model_dump(mode="json"))
+    stub.respond(
+        "GET",
+        f"/api/tasks/{cell.tasks_index}",
+        detail.model_dump(mode="json"),
+    )
+    stub.respond("POST", "/api/solver-jobs", _job_payload(cell.tasks_index))
+
+    with _serve(stub) as origin:
+        client = CalibrationApiClient(origin)
+        client.require_corpus(
+            dataset_id=protocol.references.dataset_id,
+            catalog_sha256=protocol.references.catalog_artifact_sha256,
+            task_count=256,
+            eligible_task_count=254,
+        )
+        observed_detail = client.task_detail(cell.tasks_index)
+        job = client.submit(cell, observed_detail.summary.solve_capability.assumption_codes)
+
+    assert job.job_id == "job-calibration-test"
+    assert stub.requests[-1] == (
+        "POST",
+        "/api/solver-jobs",
+        {
+            "schema_version": "yieldforge.api-solver-job-request.v2",
+            "tasks_index": cell.tasks_index,
+            "projection_mode": "source_as_recorded",
+            "acknowledged_assumption_codes": list(detail.summary.solve_capability.assumption_codes),
+            "acknowledged_intervention_codes": [],
+            "seed": cell.seed,
+            "total_computation_time": cell.seconds_per_seed,
+            "early_termination": False,
+            "min_items_separation": None,
+            "max_runtime_seconds": 60.0,
+        },
+    )
+
+
+def test_api_client_paginates_candidates_and_rejects_cursor_cycles() -> None:
+    first = {
+        "schema_version": "yieldforge.api-candidate-page.v1",
+        "items": [
+            {
+                "candidate_id": "cand_a",
+                "report_type": "exploration_feasible",
+                "seed": 0,
+                "width": 100.0,
+                "density": 0.5,
+                "placement_count": 2,
+            }
+        ],
+        "next_cursor": "cand_a",
+    }
+    second = {
+        "schema_version": "yieldforge.api-candidate-page.v1",
+        "items": [
+            {
+                "candidate_id": "cand_b",
+                "report_type": "final",
+                "seed": 0,
+                "width": 99.9,
+                "density": 0.51,
+                "placement_count": 2,
+            }
+        ],
+        "next_cursor": None,
+    }
+    stub = _HttpStub()
+    stub.respond("GET", "/api/solver-jobs/job-1/candidates?limit=100", first)
+    stub.respond("GET", "/api/solver-jobs/job-1/candidates?limit=100&cursor=cand_a", second)
+
+    with _serve(stub) as origin:
+        candidates = CalibrationApiClient(origin).candidates("job-1")
+
+    assert [candidate.candidate_id for candidate in candidates] == ["cand_a", "cand_b"]
+
+    cycling = _HttpStub()
+    cycling.respond("GET", "/api/solver-jobs/job-1/candidates?limit=100", first)
+    cycling.respond("GET", "/api/solver-jobs/job-1/candidates?limit=100&cursor=cand_a", first)
+    with _serve(cycling) as origin:
+        with pytest.raises(ValueError, match="candidate cursor repeated"):
+            CalibrationApiClient(origin).candidates("job-1")
+
+
+def test_api_client_requires_matching_completed_archive_evidence() -> None:
+    protocol = _protocol()
+    cell = registered_cells(protocol)[0]
+    job = _job_payload(cell.tasks_index, status="completed", candidate_count=1)
+    completed = {
+        "schema_version": "yieldforge.api-completed-run-page.v1",
+        "items": [
+            {
+                "schema_version": "yieldforge.api-completed-run.v1",
+                "job": job,
+                "settings": {
+                    "seed": cell.seed,
+                    "total_computation_time": cell.seconds_per_seed,
+                    "num_workers": 1,
+                    "early_termination": False,
+                    "min_items_separation": None,
+                    "max_runtime_seconds": 60.0,
+                },
+                "archive": {
+                    "schema_version": "yieldforge.candidate-archive.v1",
+                    "batch_sha256": "a" * 64,
+                },
+            }
+        ],
+    }
+    candidates = {
+        "schema_version": "yieldforge.api-candidate-page.v1",
+        "items": [
+            {
+                "candidate_id": "cand_a",
+                "report_type": "final",
+                "seed": cell.seed,
+                "width": 100.0,
+                "density": 0.5,
+                "placement_count": 2,
+            }
+        ],
+        "next_cursor": None,
+    }
+    stub = _HttpStub()
+    stub.respond(
+        "GET",
+        f"/api/tasks/{cell.tasks_index}/completed-runs?limit=100",
+        completed,
+    )
+    stub.respond(
+        "GET",
+        "/api/solver-jobs/job-calibration-test/candidates?limit=100",
+        candidates,
+    )
+
+    with _serve(stub) as origin:
+        evidence = CalibrationApiClient(origin).completed_evidence(
+            cell,
+            "job-calibration-test",
+        )
+
+    assert evidence.batch_sha256 == "a" * 64
+    assert [candidate.candidate_id for candidate in evidence.candidates] == ["cand_a"]
+
+
+def test_api_client_rejects_unknown_response_fields() -> None:
+    summary = _catalog_service().summary().model_dump(mode="json")
+    summary["unexpected"] = True
+    stub = _HttpStub()
+    stub.respond("GET", "/api/corpus/summary", summary)
+
+    with _serve(stub) as origin:
+        with pytest.raises(ValueError, match="API response failed validation"):
+            CalibrationApiClient(origin).require_corpus(
+                dataset_id="lectra-7030786-v1.1",
+                catalog_sha256=hashlib.sha256(CATALOG_PATH.read_bytes()).hexdigest(),
+                task_count=256,
+                eligible_task_count=254,
+            )
