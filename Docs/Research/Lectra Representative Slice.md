@@ -89,6 +89,16 @@ Task `25801` was selected separately as a bounded, source-lossless example of th
 
 The real slice export ran in the locked, network-disabled, read-only, non-root qualifier boundary described by [[2026-08-17-lectra-qualification]]. The trusted runner reported peak memory of `9,378,103,296` bytes. The committed artifact was then independently parsed and bound to the exact audit report and source manifest above.
 
+## Qualified catalog expansion
+
+The committed catalog at `yf/datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json` extends the same passive-evidence boundary to 256 fully display-safe tasks under `lectra-catalog-rules.v1`. It is 9,554,652 bytes with SHA-256 `4903e28be9b874460ab565b3fc17b06608a9ccce37b699d6bcda49c7eac03138`. The adjacent `manifest.json` binds that artifact to the exact source manifest, audit report, ruleset, byte size, and row counts.
+
+The catalog contains 8,358 part rows, 745 distinct shape rows with 745 derived geometry records, and 8,398 constraint rows: 8,358 `s1` rows and 40 `c8` rows. All 256 tasks are normalized as `source_lossless`; none is `directly_supported`. Sixty-nine are `runnable_with_explicit_assumptions` and projection-eligible only under `interpret_s1_degenerate_entries_as_allowed_rotations`. The remaining 187 are view-only and projection-blocked: 185 with `s1_projection_requirements_not_met` and two with `contains_non_s1_constraints`.
+
+The continuity classifications remain unchanged: task `13958` is assumption-gated and eligible, while task `25801` is view-only and blocked for its non-`s1` constraints. Two independent locked exports produced byte-identical catalog files. Their reported peak memory values were `9,376,354,304` and `9,377,169,408` bytes, respectively, and the promoted bytes passed the host's strict finite, duplicate-key-free, schema-valid, manifest-bound, and audit-bound passive-evidence validation.
+
+This 256-task catalog is a bounded deterministic research selection, not a prevalence sample of the 100,000-task release. It adds browsing breadth without establishing chronology, materials, economics, manufacturing sequence, residual geometry, remnant reuse, simulator truth, oracle quality, or savings.
+
 ## Next use
 
 The workbench may display both tasks, but it must preserve their different support states:
