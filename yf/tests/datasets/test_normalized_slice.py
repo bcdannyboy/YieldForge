@@ -192,6 +192,12 @@ def test_source_identity_accepts_only_the_slice_and_catalog_rulesets() -> None:
     )
 
     data["conversion_ruleset_version"] = "lectra-catalog-rules.v2"
+    assert (
+        NormalizedSliceSource.model_validate(data).conversion_ruleset_version
+        == "lectra-catalog-rules.v2"
+    )
+
+    data["conversion_ruleset_version"] = "lectra-catalog-rules.v3"
     with pytest.raises(ValidationError, match="conversion_ruleset_version"):
         NormalizedSliceSource.model_validate(data)
 

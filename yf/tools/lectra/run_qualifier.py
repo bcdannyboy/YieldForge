@@ -45,7 +45,11 @@ MAX_STDERR_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15 * 60
 _IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")
 type QualifierMode = Literal["audit", "catalog", "slice"]
-type NormalizedRuleset = Literal["lectra-catalog-rules.v1", "lectra-slice-rules.v1"]
+type NormalizedRuleset = Literal[
+    "lectra-catalog-rules.v1",
+    "lectra-catalog-rules.v2",
+    "lectra-slice-rules.v1",
+]
 
 
 class QualifierRunnerError(RuntimeError):
@@ -653,7 +657,7 @@ def run_qualifier(
                 manifest_payload=manifest_payload,
                 report_payload=report_payload,
                 expected_ruleset=(
-                    "lectra-catalog-rules.v1" if mode == "catalog" else "lectra-slice-rules.v1"
+                    "lectra-catalog-rules.v2" if mode == "catalog" else "lectra-slice-rules.v1"
                 ),
                 max_bytes=max_bytes,
             )

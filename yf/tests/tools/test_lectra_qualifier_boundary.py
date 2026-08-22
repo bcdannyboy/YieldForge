@@ -524,7 +524,7 @@ def test_catalog_validation_is_strict_bound_canonical_and_separately_bounded(
         report,
         manifest_payload=manifest_payload,
         report_payload=report_payload,
-        expected_ruleset="lectra-catalog-rules.v1",
+        expected_ruleset="lectra-catalog-rules.v2",
         max_bytes=runner.MAX_CATALOG_BYTES,
     )
     canonical = runner._canonical_slice_bytes(
@@ -532,7 +532,7 @@ def test_catalog_validation_is_strict_bound_canonical_and_separately_bounded(
         max_bytes=runner.MAX_CATALOG_BYTES,
     )
 
-    assert normalized.source.conversion_ruleset_version == "lectra-catalog-rules.v1"
+    assert normalized.source.conversion_ruleset_version == "lectra-catalog-rules.v2"
     assert canonical.endswith(b"\n")
     assert b'\n  "' not in canonical
     assert json.loads(canonical) == normalized.model_dump(mode="json")
@@ -543,7 +543,7 @@ def test_catalog_validation_is_strict_bound_canonical_and_separately_bounded(
             report,
             manifest_payload=manifest_payload,
             report_payload=report_payload + b" ",
-            expected_ruleset="lectra-catalog-rules.v1",
+            expected_ruleset="lectra-catalog-rules.v2",
             max_bytes=runner.MAX_CATALOG_BYTES,
         )
     with pytest.raises(runner.QualifierRunnerError, match="size limit"):
@@ -553,7 +553,7 @@ def test_catalog_validation_is_strict_bound_canonical_and_separately_bounded(
             report,
             manifest_payload=manifest_payload,
             report_payload=report_payload,
-            expected_ruleset="lectra-catalog-rules.v1",
+            expected_ruleset="lectra-catalog-rules.v2",
             max_bytes=len(payload) - 1,
         )
     with pytest.raises(runner.QualifierRunnerError, match="ruleset"):
@@ -611,7 +611,7 @@ def test_catalog_publisher_uses_allowlisted_name_limit_and_atomic_exact_bytes(
         report,
         manifest_payload=manifest_payload,
         report_payload=report_payload,
-        expected_ruleset="lectra-catalog-rules.v1",
+        expected_ruleset="lectra-catalog-rules.v2",
         max_bytes=runner.MAX_CATALOG_BYTES,
     )
     canonical = runner._canonical_slice_bytes(normalized, max_bytes=runner.MAX_CATALOG_BYTES)
@@ -940,7 +940,7 @@ def test_catalog_runner_applies_catalog_limit_to_every_artifact_stage(
     assert observed["validation_limit"] == expected_limit
     assert observed["canonical_limit"] == expected_limit
     assert observed["publication_limit"] == expected_limit
-    assert observed["expected_ruleset"] == "lectra-catalog-rules.v1"
+    assert observed["expected_ruleset"] == "lectra-catalog-rules.v2"
     assert observed["artifact_name"] == "lectra-catalog.json"
     assert observed["qualifier_args"] == (
         "--mode",
