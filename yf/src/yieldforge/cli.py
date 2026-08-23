@@ -57,6 +57,7 @@ from yieldforge.experiments.residual_geometry import (
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 from yieldforge.temporal_benchmark.catalog import load_registered_catalog
 from yieldforge.temporal_benchmark.contracts import build_registered_contract
+from yieldforge.temporal_benchmark.pilot import publish_pilot_result, run_lowering_pilot
 from yieldforge.temporal_benchmark.population import (
     build_population,
     publish_population_artifacts,
@@ -363,6 +364,27 @@ def _validate_m6_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pilot_m6_benchmark(args: argparse.Namespace) -> int:
+    validate_population_artifacts(
+        contract_path=args.contract,
+        population_path=args.population,
+        stream_root=args.stream_root,
+    )
+    contract = build_registered_contract()
+    catalog = load_registered_catalog()
+    population, streams = build_population(contract, catalog)
+    result = run_lowering_pilot(contract, population, streams, catalog)
+    path = publish_pilot_result(args.output, result)
+    print(
+        "Published M6 lowering pilot: "
+        f"result={result.result_id} streams={len(result.streams)} "
+        f"events={result.event_count} batches={result.batch_count} parts={result.part_count} "
+        f"fit_search_calls={result.exact_fit_search_call_count} "
+        f"collision_backend={result.collision_backend_decision} output={path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -523,6 +545,16 @@ def build_parser() -> argparse.ArgumentParser:
     validate_m6.add_argument("--population", type=Path, required=True)
     validate_m6.add_argument("--stream-root", type=Path, required=True)
     validate_m6.set_defaults(handler=_validate_m6_benchmark)
+
+    pilot_m6 = benchmark_commands.add_parser(
+        "m6-pilot",
+        help="profile a stratified M6 lowering and exact-geometry sample",
+    )
+    pilot_m6.add_argument("--contract", type=Path, required=True)
+    pilot_m6.add_argument("--population", type=Path, required=True)
+    pilot_m6.add_argument("--stream-root", type=Path, required=True)
+    pilot_m6.add_argument("--output", type=Path, required=True)
+    pilot_m6.set_defaults(handler=_pilot_m6_benchmark)
     return parser
 
 

@@ -1145,3 +1145,75 @@ def test_m6_validate_command_reports_regeneration_and_lowering(
     assert "streams=48" in text
     assert "events=1152" in text
     assert "parts=38000" in text
+
+
+def test_m6_pilot_command_validates_population_and_publishes_measurement(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    contract_path = tmp_path / "m6-contract.json"
+    population_path = tmp_path / "m6-population.json"
+    stream_root = tmp_path / "streams"
+    output = tmp_path / "results"
+    contract = object()
+    catalog = object()
+    population = object()
+    streams = {"stream": object()}
+    result = SimpleNamespace(
+        result_id="yfm6p-" + "c" * 24,
+        streams=tuple(range(6)),
+        event_count=144,
+        batch_count=128,
+        part_count=4600,
+        exact_fit_search_call_count=0,
+        collision_backend_decision="defer_until_repeated_fit_search_pilot",
+    )
+    validation_calls = []
+
+    monkeypatch.setattr(
+        "yieldforge.cli.validate_population_artifacts",
+        lambda **kwargs: validation_calls.append(kwargs),
+    )
+    monkeypatch.setattr("yieldforge.cli.build_registered_contract", lambda: contract)
+    monkeypatch.setattr("yieldforge.cli.load_registered_catalog", lambda: catalog)
+    monkeypatch.setattr(
+        "yieldforge.cli.build_population",
+        lambda contract_arg, catalog_arg: (population, streams),
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.run_lowering_pilot",
+        lambda *args: result,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_pilot_result",
+        lambda output_arg, result_arg: output / f"pilot-{result_arg.result_id}.json",
+    )
+
+    exit_code = main(
+        [
+            "benchmark",
+            "m6-pilot",
+            "--contract",
+            str(contract_path),
+            "--population",
+            str(population_path),
+            "--stream-root",
+            str(stream_root),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert validation_calls == [
+        {
+            "contract_path": contract_path,
+            "population_path": population_path,
+            "stream_root": stream_root,
+        }
+    ]
+    text = capsys.readouterr().out
+    assert "streams=6" in text
+    assert "fit_search_calls=0" in text
+    assert "defer_until_repeated_fit_search_pilot" in text
