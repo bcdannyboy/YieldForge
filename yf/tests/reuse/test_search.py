@@ -273,7 +273,10 @@ def test_search_finds_rotated_fit_and_prefilters_impossible_dimensions(monkeypat
     def fail_if_evaluated(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("safe dimensional prefilter should prevent exact evaluation")
 
-    monkeypatch.setattr("yieldforge.reuse.search.validate_fit_placement", fail_if_evaluated)
+    monkeypatch.setattr(
+        "yieldforge.reuse.search._validate_pretransformed_fit_placement",
+        fail_if_evaluated,
+    )
     impossible = search_fit_witness(
         remnant,
         impossible_part,
@@ -308,3 +311,103 @@ def test_material_compatibility_fails_closed_before_safe_geometry_prefilters() -
         )
 
     assert captured.value.code == "material_mismatch"
+
+
+def test_search_decodes_and_canonicalizes_large_remnant_only_once(monkeypatch) -> None:
+    remnant = _remnant(Polygon([(0, 0), (6, 0), (6, 2), (2, 2), (2, 6), (0, 6)]))
+    part = _part([(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)])
+    calls = 0
+
+    from yieldforge.reuse import geometry as geometry_module
+    from yieldforge.reuse import search as search_module
+
+    original_search_decode = search_module.polygon_from_record
+    original_geometry_decode = geometry_module.polygon_from_record
+
+    def count_search_decode(record):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original_search_decode(record)
+
+    def count_geometry_decode(record):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original_geometry_decode(record)
+
+    monkeypatch.setattr(search_module, "polygon_from_record", count_search_decode)
+    monkeypatch.setattr(geometry_module, "polygon_from_record", count_geometry_decode)
+
+    result = search_fit_witness(
+        remnant,
+        part,
+        part_material=remnant.material,
+        fit_config=RemnantFitConfig(),
+        search_config=FitSearchConfig(
+            grid_columns=7,
+            grid_rows=7,
+            maximum_candidates=1000,
+        ),
+    )
+
+    assert result.status is FitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH
+    assert result.summary.evaluated_candidate_count > 1
+    assert calls == 1
+
+
+def test_search_constructs_source_polygon_once_per_allowed_rotation(monkeypatch) -> None:
+    remnant = _remnant(Polygon([(0, 0), (6, 0), (6, 2), (2, 2), (2, 6), (0, 6)]))
+    part = _part([(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)])
+
+    from yieldforge.reuse import geometry as geometry_module
+
+    original_source_polygon = geometry_module._source_polygon
+    calls = 0
+
+    def count_source_polygon(source_part):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original_source_polygon(source_part)
+
+    monkeypatch.setattr(geometry_module, "_source_polygon", count_source_polygon)
+
+    result = search_fit_witness(
+        remnant,
+        part,
+        part_material=remnant.material,
+        fit_config=RemnantFitConfig(),
+        search_config=FitSearchConfig(
+            grid_columns=7,
+            grid_rows=7,
+            maximum_candidates=1000,
+        ),
+    )
+
+    assert result.status is FitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH
+    assert result.summary.evaluated_candidate_count > 1
+    assert calls == 1
+
+
+def test_candidate_generation_instantiates_only_budgeted_placements(monkeypatch) -> None:
+    remnant = _remnant(Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]))
+    part = _part([(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)])
+
+    from yieldforge.reuse import search as search_module
+
+    original_placement = search_module.FitPlacement
+    calls = 0
+
+    def count_placement(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original_placement(*args, **kwargs)
+
+    monkeypatch.setattr(search_module, "FitPlacement", count_placement)
+
+    placements = generate_fit_placements(
+        remnant,
+        part,
+        config=FitSearchConfig(grid_columns=7, grid_rows=7, maximum_candidates=1),
+    )
+
+    assert len(placements) == 1
+    assert calls == 1

@@ -6,7 +6,8 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 
-from shapely import BufferJoinStyle, Polygon
+from shapely import BufferJoinStyle, Polygon, prepare
+from shapely.affinity import translate
 
 from yieldforge.domain import Part
 from yieldforge.reuse.contracts import (
@@ -22,12 +23,18 @@ from yieldforge.reuse.contracts import (
     ReuseGeometryError,
     polygon_from_record,
 )
-from yieldforge.reuse.geometry import material_key, transform_part, validate_fit_placement
+from yieldforge.reuse.geometry import (
+    _validate_pretransformed_fit_placement,
+    material_key,
+    rotate_part,
+)
 
 
 @dataclass(frozen=True)
 class _CandidateGeneration:
     placements: tuple[FitPlacement, ...]
+    remnant_polygon: Polygon
+    rotated_parts: tuple[tuple[float, Polygon], ...]
     generated_candidate_count: int
     duplicate_candidate_count: int
     unique_candidate_count: int
@@ -72,6 +79,18 @@ def _placement(
     )
 
 
+def _candidate_key(
+    rotation: float,
+    translation_x: float,
+    translation_y: float,
+) -> tuple[float, float, float]:
+    return (
+        _canonical_zero(rotation),
+        _canonical_zero(translation_x),
+        _canonical_zero(translation_y),
+    )
+
+
 def _translation_within_bounds(
     translation_x: float,
     translation_y: float,
@@ -111,17 +130,17 @@ def _generate_fit_placements(
         raise ReuseGeometryError("nonfinite_geometry", "allowed rotations must be finite")
 
     remnant_polygon = polygon_from_record(remnant.geometry)
+    prepare(remnant_polygon)
     remnant_min_x, remnant_min_y, remnant_max_x, remnant_max_y = remnant_polygon.bounds
     remnant_width = remnant_max_x - remnant_min_x
     remnant_height = remnant_max_y - remnant_min_y
     remnant_vertices = _vertices(remnant_polygon)
-    raw: list[FitPlacement] = []
+    unique_keys: set[tuple[float, float, float]] = set()
+    generated_candidate_count = 0
+    rotated_parts: list[tuple[float, Polygon]] = []
 
     for rotation in sorted(float(value) for value in part.allowed_orientations):
-        rotated = transform_part(
-            part,
-            _placement(part.id, rotation, 0.0, 0.0),
-        )
+        rotated = rotate_part(part, rotation)
         footprint = (
             rotated.buffer(
                 fit_config.clearance_distance,
@@ -148,6 +167,7 @@ def _generate_fit_placements(
             or footprint_height > remnant_height + fit_config.coordinate_tolerance
         ):
             continue
+        rotated_parts.append((_canonical_zero(rotation), rotated))
 
         translation_min_x = remnant_min_x - footprint_min_x
         translation_max_x = remnant_max_x - footprint_max_x
@@ -156,7 +176,8 @@ def _generate_fit_placements(
 
         for translation_x in (translation_min_x, translation_max_x):
             for translation_y in (translation_min_y, translation_max_y):
-                raw.append(_placement(part.id, rotation, translation_x, translation_y))
+                generated_candidate_count += 1
+                unique_keys.add(_candidate_key(rotation, translation_x, translation_y))
 
         for remnant_x, remnant_y in remnant_vertices:
             for part_x, part_y in _vertices(footprint):
@@ -171,7 +192,8 @@ def _generate_fit_placements(
                     maximum_y=translation_max_y,
                     tolerance=fit_config.coordinate_tolerance,
                 ):
-                    raw.append(_placement(part.id, rotation, translation_x, translation_y))
+                    generated_candidate_count += 1
+                    unique_keys.add(_candidate_key(rotation, translation_x, translation_y))
 
         for translation_x in _grid_values(
             translation_min_x,
@@ -183,20 +205,23 @@ def _generate_fit_placements(
                 translation_max_y,
                 config.grid_rows,
             ):
-                raw.append(_placement(part.id, rotation, translation_x, translation_y))
+                generated_candidate_count += 1
+                unique_keys.add(_candidate_key(rotation, translation_x, translation_y))
 
-    by_key = {
-        (placement.rotation, placement.translation[0], placement.translation[1]): placement
-        for placement in raw
-    }
-    ordered = tuple(by_key[key] for key in sorted(by_key))
-    budgeted = ordered[: config.maximum_candidates]
+    ordered_keys = tuple(sorted(unique_keys))
+    budgeted_keys = ordered_keys[: config.maximum_candidates]
+    budgeted = tuple(
+        _placement(part.id, rotation, translation_x, translation_y)
+        for rotation, translation_x, translation_y in budgeted_keys
+    )
     return _CandidateGeneration(
         placements=budgeted,
-        generated_candidate_count=len(raw),
-        duplicate_candidate_count=len(raw) - len(ordered),
-        unique_candidate_count=len(ordered),
-        budget_truncated_candidate_count=len(ordered) - len(budgeted),
+        remnant_polygon=remnant_polygon,
+        rotated_parts=tuple(rotated_parts),
+        generated_candidate_count=generated_candidate_count,
+        duplicate_candidate_count=generated_candidate_count - len(ordered_keys),
+        unique_candidate_count=len(ordered_keys),
+        budget_truncated_candidate_count=len(ordered_keys) - len(budgeted),
     )
 
 
@@ -257,12 +282,21 @@ def search_fit_witness(
         fit_config=fit_config,
     )
     rejection_counts: Counter[str] = Counter()
+    rotated_by_angle = dict(generation.rotated_parts)
     for index, placement in enumerate(generation.placements, start=1):
         try:
-            validate_fit_placement(
+            translation_x, translation_y = placement.translation
+            placed_polygon = translate(
+                rotated_by_angle[placement.rotation],
+                xoff=translation_x,
+                yoff=translation_y,
+            )
+            _validate_pretransformed_fit_placement(
                 remnant,
+                generation.remnant_polygon,
                 part,
                 placement,
+                placed_polygon,
                 part_material=part_material,
                 config=fit_config,
             )

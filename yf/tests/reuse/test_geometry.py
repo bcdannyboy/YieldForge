@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 from shapely import Polygon
+from shapely.geometry.base import BaseGeometry
 
 from yieldforge.domain import Part
 from yieldforge.experiments.contracts import M0ExperimentContract
@@ -156,6 +157,26 @@ def test_boundary_touch_passes_at_zero_clearance_and_fails_with_clearance() -> N
             config=RemnantFitConfig(clearance_distance=0.1),
         )
     assert captured.value.code == "placement_outside_remnant"
+
+
+def test_exactly_covered_placement_skips_expensive_overlay_difference(monkeypatch) -> None:
+    remnant = _remnant(Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]))
+    part = _part([(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)])
+
+    def forbidden_difference(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("covered placement should not require an overlay difference")
+
+    monkeypatch.setattr(BaseGeometry, "difference", forbidden_difference)
+
+    validated = validate_fit_placement(
+        remnant,
+        part,
+        FitPlacement(part_id=part.id, rotation=0.0, translation=(1.0, 1.0)),
+        part_material=remnant.material,
+        config=RemnantFitConfig(),
+    )
+
+    assert validated.buffered_footprint.area == pytest.approx(4.0)
 
 
 def test_rejects_unlisted_rotation_part_mismatch_and_material_mismatch() -> None:

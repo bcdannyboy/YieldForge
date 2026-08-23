@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import json
 import math
 import os
 import secrets
 import stat
+from collections import Counter
 from pathlib import Path
 from typing import Literal, Self
 
 import shapely
-from pydantic import Field, StrictInt, StrictStr, ValidationError, model_validator
-from shapely import Polygon
+from pydantic import Field, StrictFloat, StrictInt, StrictStr, ValidationError, model_validator
+from shapely import Polygon, box
 
 from yieldforge.domain import Part, ProjectionMode
 from yieldforge.experiments.contracts import (
@@ -29,20 +32,31 @@ from yieldforge.experiments.residual_geometry import (
 from yieldforge.residuals.contracts import ResidualGeometryError, ResidualRuleName, rule_set_from_m0
 from yieldforge.residuals.geometry import extract_candidate_residual, geometry_sha256
 from yieldforge.reuse.contracts import (
+    CanonicalPolygon,
     FitPlacement,
     FitSearchConfig,
+    FitSearchRejectionCount,
+    FitSearchResult,
+    FitSearchStatus,
     MaterialIdentity,
     MaterialProvenance,
     RemnantFitConfig,
+    RemnantFitResult,
     RemnantLineage,
     RemnantStock,
     ReuseGeometryError,
     canonical_polygon_record,
     derive_remnant_id,
 )
-from yieldforge.reuse.geometry import transform_part
+from yieldforge.reuse.geometry import consume_remnant, transform_part, validate_fit_placement
+from yieldforge.reuse.search import search_fit_witness
 
 _MAX_M4_INPUT_BYTES = 256 * 1024 * 1024
+REGISTERED_M4_SEARCH_CONFIG = FitSearchConfig(
+    grid_columns=17,
+    grid_rows=17,
+    maximum_candidates=4096,
+)
 
 
 class M4EvidenceError(ValueError):
@@ -100,7 +114,10 @@ class M4FuturePartRole(FrozenExperimentModel):
     source_projection_mode: Literal["source_as_recorded"] = "source_as_recorded"
     acknowledged_assumption_codes: tuple[StrictStr, ...]
     source_flip_part_count: StrictInt = Field(ge=0)
+    source_sheet_length: StrictFloat = Field(gt=0)
+    source_strip_height: StrictFloat = Field(gt=0)
     part: Part
+    reference_placement: FitPlacement
 
     @model_validator(mode="after")
     def require_valid_explicit_source_part(self) -> Self:
@@ -111,6 +128,13 @@ class M4FuturePartRole(FrozenExperimentModel):
             raise ValueError("future source part requires explicit allowed rotations")
         if not all(math.isfinite(value) for value in orientations):
             raise ValueError("future source part rotations must be finite")
+        if self.reference_placement.part_id != self.part.id:
+            raise ValueError("future source reference placement changes part identity")
+        if not any(
+            abs(math.remainder(self.reference_placement.rotation - value, 360.0)) <= 1e-7
+            for value in orientations
+        ):
+            raise ValueError("future source reference placement uses an unlisted rotation")
         polygon = Polygon(self.part.shape)
         if polygon.is_empty or polygon.area <= 0 or not polygon.is_valid:
             raise ValueError("future source part must be a valid positive-area polygon")
@@ -366,8 +390,13 @@ def _future_part_roles(m3_input: M3ResidualInputPack) -> tuple[M4FuturePartRole,
             or projection.intervention_codes
         ):
             raise M4EvidenceError("M4 future part requires a source-as-recorded projection")
+        reference_placements = {
+            placement.part_id: placement
+            for placement in pair.selected_candidates[0].candidate.placements
+        }
         for part in sorted(pair.problem.parts, key=lambda item: item.id):
             try:
+                source_placement = reference_placements[part.id]
                 role = M4FuturePartRole(
                     tasks_index=pair.tasks_index,
                     dataset_id=binding.dataset_id,
@@ -375,18 +404,23 @@ def _future_part_roles(m3_input: M3ResidualInputPack) -> tuple[M4FuturePartRole,
                     source_projection_sha256=projection.projection_sha256,
                     acknowledged_assumption_codes=binding.acknowledged_assumption_codes,
                     source_flip_part_count=projection.source_flip_part_count,
+                    source_sheet_length=float(pair.problem.sheet_length),
+                    source_strip_height=float(pair.problem.strip_height),
                     part=part,
-                )
-                first_rotation = role.part.allowed_orientations[0]  # type: ignore[index]
-                transform_part(
-                    role.part,
-                    FitPlacement(
-                        part_id=role.part.id,
-                        rotation=float(first_rotation),
-                        translation=(0.0, 0.0),
+                    reference_placement=FitPlacement(
+                        part_id=source_placement.part_id,
+                        rotation=float(source_placement.rotation),
+                        translation=(
+                            float(source_placement.translation[0]),
+                            float(source_placement.translation[1]),
+                        ),
                     ),
                 )
-            except (ReuseGeometryError, ValidationError) as error:
+                transform_part(
+                    role.part,
+                    role.reference_placement,
+                )
+            except (KeyError, ReuseGeometryError, ValidationError) as error:
                 raise M4EvidenceError("M4 future source part is invalid") from error
             roles.append(role)
     roles.sort(key=lambda item: (item.tasks_index, item.part.id))
@@ -459,6 +493,497 @@ def prepare_m4_input_pack(
     )
 
 
+class M4PairAttempt(FrozenExperimentModel):
+    """One registered origin/future pair passed to bounded search."""
+
+    origin_remnant_id: StrictStr = Field(pattern=r"^yfrm-[0-9a-f]{24}$")
+    origin_tasks_index: StrictInt = Field(ge=0)
+    origin_candidate_position: StrictInt = Field(ge=0, le=1)
+    origin_candidate_id: StrictStr = Field(min_length=1)
+    source_component_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    future_tasks_index: StrictInt = Field(ge=0)
+    future_part_id: StrictStr = Field(min_length=1)
+    search_result: FitSearchResult
+
+    @model_validator(mode="after")
+    def require_bound_search_result(self) -> Self:
+        if self.future_tasks_index <= self.origin_tasks_index:
+            raise ValueError("M4 pair must use a strictly greater generated future task index")
+        if self.search_result.parent_remnant_id != self.origin_remnant_id:
+            raise ValueError("M4 pair search changes origin remnant identity")
+        if self.search_result.part_id != self.future_part_id:
+            raise ValueError("M4 pair search changes future part identity")
+        return self
+
+
+class M4FullSheetReference(FrozenExperimentModel):
+    """Exact feasibility evidence for opening the future task's full sheet."""
+
+    reference_stock: RemnantStock
+    part_id: StrictStr = Field(min_length=1)
+    placement: FitPlacement
+    placed_polygon: CanonicalPolygon
+
+    @model_validator(mode="after")
+    def require_consistent_reference(self) -> Self:
+        if self.placement.part_id != self.part_id:
+            raise ValueError("full-sheet reference placement changes part identity")
+        return self
+
+
+class M4ReuseWitness(FrozenExperimentModel):
+    """First exactly validated source-observed remnant reuse witness."""
+
+    origin_remnant_id: StrictStr = Field(pattern=r"^yfrm-[0-9a-f]{24}$")
+    origin_tasks_index: StrictInt = Field(ge=0)
+    origin_candidate_position: StrictInt = Field(ge=0, le=1)
+    origin_candidate_id: StrictStr = Field(min_length=1)
+    source_component_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    future_tasks_index: StrictInt = Field(ge=0)
+    future_part_id: StrictStr = Field(min_length=1)
+    parent_remnant: RemnantStock
+    search_result: FitSearchResult
+    placed_polygon: CanonicalPolygon
+    consumption_result: RemnantFitResult
+    child_remnants: tuple[RemnantStock, ...]
+    full_sheet_reference: M4FullSheetReference
+    remnant_available_before_order: Literal[True] = True
+    open_full_sheet_count_before_order: Literal[0] = 0
+    declared_order_part_count: Literal[1] = 1
+    avoided_full_sheet_openings: Literal[1] = 1
+
+    @model_validator(mode="after")
+    def require_consistent_witness(self) -> Self:
+        if self.future_tasks_index <= self.origin_tasks_index:
+            raise ValueError("M4 witness future task must be strictly greater than its origin")
+        if self.parent_remnant.remnant_id != self.origin_remnant_id:
+            raise ValueError("M4 witness parent changes origin identity")
+        if self.source_component_sha256 != self.parent_remnant.geometry.polygon_sha256:
+            raise ValueError("M4 witness origin component changes parent geometry")
+        if self.search_result.status is not FitSearchStatus.FIT:
+            raise ValueError("M4 witness requires a successful bounded search")
+        if (
+            self.search_result.parent_remnant_id != self.origin_remnant_id
+            or self.search_result.part_id != self.future_part_id
+            or self.search_result.placement is None
+        ):
+            raise ValueError("M4 witness search result changes pair identity")
+        if self.consumption_result.status != "fit":
+            raise ValueError("M4 witness requires successful remnant consumption")
+        if self.consumption_result.placed_polygon_sha256 != self.placed_polygon.polygon_sha256:
+            raise ValueError("M4 witness placed polygon does not match consumption evidence")
+        child_summaries = tuple(
+            (item.remnant_id, item.polygon_sha256, item.area)
+            for item in self.consumption_result.children
+        )
+        child_records = tuple(
+            (item.remnant_id, item.geometry.polygon_sha256, item.geometry.area)
+            for item in self.child_remnants
+        )
+        if child_records != child_summaries:
+            raise ValueError("M4 witness child remnants do not match consumption evidence")
+        if self.full_sheet_reference.part_id != self.future_part_id:
+            raise ValueError("M4 witness full-sheet reference changes future part identity")
+        return self
+
+
+class M4ReuseSummary(FrozenExperimentModel):
+    """Recomputed bounded-search and toy-state M4 totals."""
+
+    registered_origin_remnant_count: StrictInt = Field(ge=1)
+    registered_future_part_count: StrictInt = Field(ge=1)
+    eligible_pair_count: StrictInt = Field(ge=0)
+    attempted_pair_count: StrictInt = Field(ge=0)
+    no_witness_pair_count: StrictInt = Field(ge=0)
+    fit_pair_count: StrictInt = Field(ge=0, le=1)
+    generated_candidate_count: StrictInt = Field(ge=0)
+    evaluated_candidate_count: StrictInt = Field(ge=0)
+    budget_truncated_candidate_count: StrictInt = Field(ge=0)
+    rejection_counts: tuple[FitSearchRejectionCount, ...]
+    avoided_full_sheet_openings: StrictInt = Field(ge=0, le=1)
+    technical_decision: Literal["pass", "open"]
+
+    @model_validator(mode="after")
+    def require_reconciled_summary(self) -> Self:
+        if self.attempted_pair_count != self.no_witness_pair_count + self.fit_pair_count:
+            raise ValueError("M4 attempted pairs do not reconcile with search outcomes")
+        if self.attempted_pair_count > self.eligible_pair_count:
+            raise ValueError("M4 attempted pairs exceed registered eligible pairs")
+        expected_decision = "pass" if self.fit_pair_count == 1 else "open"
+        if self.technical_decision != expected_decision:
+            raise ValueError("M4 technical decision does not match fit evidence")
+        if self.avoided_full_sheet_openings != self.fit_pair_count:
+            raise ValueError("M4 avoided sheet count does not match the toy-state witness")
+        codes = tuple(item.error_code for item in self.rejection_counts)
+        if codes != tuple(sorted(set(codes))):
+            raise ValueError("M4 rejection summaries must be sorted and unique")
+        return self
+
+
+class M4ReuseResult(FrozenExperimentModel):
+    """Canonical bounded result of source-observed exact remnant reuse search."""
+
+    schema_version: Literal["yieldforge.m4-remnant-reuse-result.v1"] = (
+        "yieldforge.m4-remnant-reuse-result.v1"
+    )
+    result_id: StrictStr = Field(pattern=r"^yfrr-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    input_id: StrictStr = Field(pattern=r"^yfri-[0-9a-f]{24}$")
+    input_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    m0_contract_id: StrictStr = Field(pattern=r"^yfm0-[0-9a-f]{24}$")
+    m0_contract_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    shapely_version: StrictStr = Field(min_length=1)
+    attempts: tuple[M4PairAttempt, ...]
+    witness: M4ReuseWitness | None = None
+    summary: M4ReuseSummary
+    claim_ceiling: Literal[
+        "exact_remnant_reuse_possibility_only_not_frequency_savings_physical_recovery_or_"
+        "commercial_value"
+    ] = (
+        "exact_remnant_reuse_possibility_only_not_frequency_savings_physical_recovery_or_"
+        "commercial_value"
+    )
+
+    @model_validator(mode="after")
+    def require_content_identity(self) -> Self:
+        if self.summary.attempted_pair_count != len(self.attempts):
+            raise ValueError("M4 result summary does not match persisted attempts")
+        if self.witness is None:
+            if self.summary.fit_pair_count != 0:
+                raise ValueError("M4 result cannot report a fit without a witness")
+        elif (
+            not self.attempts
+            or self.attempts[-1].search_result.status is not FitSearchStatus.FIT
+            or self.attempts[-1].search_result != self.witness.search_result
+        ):
+            raise ValueError("M4 witness must match the final first-fit attempt")
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"result_id", "content_sha256"},
+        )
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("M4 result content SHA-256 does not match semantic content")
+        if self.result_id != f"yfrr-{digest[:24]}":
+            raise ValueError("M4 result ID does not match semantic content")
+        return self
+
+
+def recompute_m4_summary(
+    pack: M4ReuseInputPack,
+    attempts: tuple[M4PairAttempt, ...],
+    witness: M4ReuseWitness | None,
+) -> M4ReuseSummary:
+    """Recompute every aggregate from the registered input and persisted pair attempts."""
+
+    rejection_counts: Counter[str] = Counter()
+    for attempt in attempts:
+        for rejection in attempt.search_result.summary.rejection_counts:
+            rejection_counts[rejection.error_code] += rejection.count
+    fit_count = sum(attempt.search_result.status is FitSearchStatus.FIT for attempt in attempts)
+    no_witness_count = sum(
+        attempt.search_result.status is FitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH
+        for attempt in attempts
+    )
+    return M4ReuseSummary(
+        registered_origin_remnant_count=len(pack.origin_remnants),
+        registered_future_part_count=len(pack.future_part_roles),
+        eligible_pair_count=sum(
+            origin.origin_tasks_index < role.tasks_index
+            for origin in pack.origin_remnants
+            for role in pack.future_part_roles
+        ),
+        attempted_pair_count=len(attempts),
+        no_witness_pair_count=no_witness_count,
+        fit_pair_count=fit_count,
+        generated_candidate_count=sum(
+            item.search_result.summary.generated_candidate_count for item in attempts
+        ),
+        evaluated_candidate_count=sum(
+            item.search_result.summary.evaluated_candidate_count for item in attempts
+        ),
+        budget_truncated_candidate_count=sum(
+            item.search_result.summary.budget_truncated_candidate_count for item in attempts
+        ),
+        rejection_counts=tuple(
+            FitSearchRejectionCount(error_code=code, count=count)
+            for code, count in sorted(rejection_counts.items())
+        ),
+        avoided_full_sheet_openings=1 if witness is not None else 0,
+        technical_decision="pass" if witness is not None else "open",
+    )
+
+
+def _reference_stock(pack: M4ReuseInputPack, role: M4FuturePartRole) -> RemnantStock:
+    sheet = canonical_polygon_record(
+        box(0.0, 0.0, role.source_sheet_length, role.source_strip_height)
+    )
+    identity_payload = {
+        "input_id": pack.input_id,
+        "part_id": role.part.id,
+        "tasks_index": role.tasks_index,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity_payload, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    lineage = RemnantLineage.root(
+        root_stock_id=f"yfref-{digest[:24]}",
+        source_candidate_id=f"full-sheet-reference-{role.tasks_index}-{role.part.id}",
+        source_component_sha256=sheet.polygon_sha256,
+    )
+    return RemnantStock(
+        remnant_id=derive_remnant_id(lineage, sheet, pack.assumed_material),
+        geometry=sheet,
+        material=pack.assumed_material,
+        root_sheet_area=float(role.source_sheet_length * role.source_strip_height),
+        root_sheet_short_side=float(min(role.source_sheet_length, role.source_strip_height)),
+        lineage=lineage,
+    )
+
+
+def _full_sheet_reference(
+    pack: M4ReuseInputPack,
+    role: M4FuturePartRole,
+) -> M4FullSheetReference:
+    stock = _reference_stock(pack, role)
+    validated = validate_fit_placement(
+        stock,
+        role.part,
+        role.reference_placement,
+        part_material=pack.assumed_material,
+        config=pack.primary_fit_config,
+    )
+    return M4FullSheetReference(
+        reference_stock=stock,
+        part_id=role.part.id,
+        placement=role.reference_placement,
+        placed_polygon=canonical_polygon_record(validated.placed_polygon),
+    )
+
+
+def _result_payload(
+    pack: M4ReuseInputPack,
+    attempts: tuple[M4PairAttempt, ...],
+    witness: M4ReuseWitness | None,
+    summary: M4ReuseSummary,
+) -> dict[str, object]:
+    return {
+        "schema_version": "yieldforge.m4-remnant-reuse-result.v1",
+        "input_id": pack.input_id,
+        "input_sha256": pack.content_sha256,
+        "m0_contract_id": pack.m0_contract_id,
+        "m0_contract_sha256": pack.m0_contract_sha256,
+        "shapely_version": pack.shapely_version,
+        "attempts": [item.model_dump(mode="json") for item in attempts],
+        "witness": witness.model_dump(mode="json") if witness is not None else None,
+        "summary": summary.model_dump(mode="json"),
+        "claim_ceiling": (
+            "exact_remnant_reuse_possibility_only_not_frequency_savings_physical_recovery_or_"
+            "commercial_value"
+        ),
+    }
+
+
+def _build_m4_result(
+    pack: M4ReuseInputPack,
+    attempts: tuple[M4PairAttempt, ...],
+    witness: M4ReuseWitness | None,
+) -> M4ReuseResult:
+    summary = recompute_m4_summary(pack, attempts, witness)
+    payload = _result_payload(pack, attempts, witness, summary)
+    digest = semantic_sha256(payload)
+    return M4ReuseResult(
+        result_id=f"yfrr-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        input_id=pack.input_id,
+        input_sha256=pack.content_sha256,
+        m0_contract_id=pack.m0_contract_id,
+        m0_contract_sha256=pack.m0_contract_sha256,
+        shapely_version=pack.shapely_version,
+        attempts=attempts,
+        witness=witness,
+        summary=summary,
+    )
+
+
+def _validate_pack_and_m0(
+    pack: M4ReuseInputPack,
+    m0: M0ExperimentContract,
+) -> tuple[M4ReuseInputPack, M0ExperimentContract]:
+    try:
+        validated_pack = M4ReuseInputPack.model_validate_json(
+            json.dumps(pack.model_dump(mode="json"), allow_nan=False), strict=True
+        )
+        validated_m0 = M0ExperimentContract.model_validate_json(
+            json.dumps(m0.model_dump(mode="json"), allow_nan=False), strict=True
+        )
+    except (ValidationError, ValueError) as error:
+        raise M4EvidenceError("M4 input or M0 contract is invalid") from error
+    if (
+        validated_pack.m0_contract_id != validated_m0.contract_id
+        or validated_pack.m0_contract_sha256 != validated_m0.content_sha256
+    ):
+        raise M4EvidenceError("M4 input does not bind the supplied M0 contract")
+    if validated_pack.shapely_version != shapely.__version__:
+        raise M4EvidenceError("M4 input Shapely version does not match the runtime")
+    return validated_pack, validated_m0
+
+
+def evaluate_m4_remnant_reuse(
+    pack: M4ReuseInputPack,
+    m0: M0ExperimentContract,
+) -> M4ReuseResult:
+    """Evaluate registered pairs in order and stop at the first exact reuse witness."""
+
+    pack, m0 = _validate_pack_and_m0(pack, m0)
+    attempts: list[M4PairAttempt] = []
+    rules = rule_set_from_m0(m0.remnant_eligibility)
+    for origin in pack.origin_remnants:
+        for role in pack.future_part_roles:
+            if role.tasks_index <= origin.origin_tasks_index:
+                continue
+            search_result = search_fit_witness(
+                origin.remnant,
+                role.part,
+                part_material=pack.assumed_material,
+                fit_config=pack.primary_fit_config,
+                search_config=pack.search_config,
+            )
+            attempt = M4PairAttempt(
+                origin_remnant_id=origin.remnant.remnant_id,
+                origin_tasks_index=origin.origin_tasks_index,
+                origin_candidate_position=origin.origin_candidate_position,
+                origin_candidate_id=origin.origin_candidate_id,
+                source_component_sha256=origin.source_component_sha256,
+                future_tasks_index=role.tasks_index,
+                future_part_id=role.part.id,
+                search_result=search_result,
+            )
+            attempts.append(attempt)
+            if search_result.status is not FitSearchStatus.FIT:
+                continue
+            assert search_result.placement is not None
+            consumption = consume_remnant(
+                origin.remnant,
+                role.part,
+                search_result.placement,
+                part_material=pack.assumed_material,
+                rules=rules,
+                config=pack.primary_fit_config,
+            )
+            validated = validate_fit_placement(
+                origin.remnant,
+                role.part,
+                search_result.placement,
+                part_material=pack.assumed_material,
+                config=pack.primary_fit_config,
+            )
+            witness = M4ReuseWitness(
+                origin_remnant_id=origin.remnant.remnant_id,
+                origin_tasks_index=origin.origin_tasks_index,
+                origin_candidate_position=origin.origin_candidate_position,
+                origin_candidate_id=origin.origin_candidate_id,
+                source_component_sha256=origin.source_component_sha256,
+                future_tasks_index=role.tasks_index,
+                future_part_id=role.part.id,
+                parent_remnant=origin.remnant,
+                search_result=search_result,
+                placed_polygon=canonical_polygon_record(validated.placed_polygon),
+                consumption_result=consumption.result,
+                child_remnants=consumption.children,
+                full_sheet_reference=_full_sheet_reference(pack, role),
+            )
+            return _build_m4_result(pack, tuple(attempts), witness)
+    return _build_m4_result(pack, tuple(attempts), None)
+
+
+def _eligible_pair_keys(pack: M4ReuseInputPack) -> tuple[tuple[str, int, str], ...]:
+    return tuple(
+        (origin.remnant.remnant_id, role.tasks_index, role.part.id)
+        for origin in pack.origin_remnants
+        for role in pack.future_part_roles
+        if role.tasks_index > origin.origin_tasks_index
+    )
+
+
+def _validate_m4_result_evidence(
+    result: M4ReuseResult,
+    pack: M4ReuseInputPack,
+    m0: M0ExperimentContract,
+) -> None:
+    pack, m0 = _validate_pack_and_m0(pack, m0)
+    if (
+        result.input_id != pack.input_id
+        or result.input_sha256 != pack.content_sha256
+        or result.m0_contract_id != m0.contract_id
+        or result.m0_contract_sha256 != m0.content_sha256
+        or result.shapely_version != shapely.__version__
+    ):
+        raise M4EvidenceError("M4 result does not bind its input, M0 contract, and runtime")
+    attempt_keys = tuple(
+        (item.origin_remnant_id, item.future_tasks_index, item.future_part_id)
+        for item in result.attempts
+    )
+    eligible_keys = _eligible_pair_keys(pack)
+    if attempt_keys != eligible_keys[: len(attempt_keys)]:
+        raise M4EvidenceError("M4 result attempts do not use registered pair order")
+    if result.witness is None:
+        if len(result.attempts) != len(eligible_keys):
+            raise M4EvidenceError("M4 no-witness result did not exhaust registered pairs")
+    elif len(result.attempts) == 0:
+        raise M4EvidenceError("M4 witness result has no pair attempt")
+    expected_summary = recompute_m4_summary(pack, result.attempts, result.witness)
+    if result.summary != expected_summary:
+        raise M4EvidenceError("M4 result summary does not match persisted attempts")
+    if result.witness is None:
+        return
+
+    witness = result.witness
+    origin = next(
+        (
+            item
+            for item in pack.origin_remnants
+            if item.remnant.remnant_id == witness.origin_remnant_id
+        ),
+        None,
+    )
+    role = next(
+        (
+            item
+            for item in pack.future_part_roles
+            if item.tasks_index == witness.future_tasks_index
+            and item.part.id == witness.future_part_id
+        ),
+        None,
+    )
+    if origin is None or role is None:
+        raise M4EvidenceError("M4 witness does not reference registered input entities")
+    assert witness.search_result.placement is not None
+    validated = validate_fit_placement(
+        origin.remnant,
+        role.part,
+        witness.search_result.placement,
+        part_material=pack.assumed_material,
+        config=pack.primary_fit_config,
+    )
+    if canonical_polygon_record(validated.placed_polygon) != witness.placed_polygon:
+        raise M4EvidenceError("M4 witness placed polygon does not revalidate")
+    consumption = consume_remnant(
+        origin.remnant,
+        role.part,
+        witness.search_result.placement,
+        part_material=pack.assumed_material,
+        rules=rule_set_from_m0(m0.remnant_eligibility),
+        config=pack.primary_fit_config,
+    )
+    if (
+        consumption.result != witness.consumption_result
+        or consumption.children != witness.child_remnants
+    ):
+        raise M4EvidenceError("M4 witness recursive residual evidence does not revalidate")
+    if _full_sheet_reference(pack, role) != witness.full_sheet_reference:
+        raise M4EvidenceError("M4 witness full-sheet reference does not revalidate")
+
+
 def _canonical_model_bytes(value: FrozenExperimentModel) -> bytes:
     return (
         json.dumps(
@@ -497,8 +1022,8 @@ def publish_m4_input_pack(output_directory: Path, pack: M4ReuseInputPack) -> Pat
 
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
-    path = output / f"remnant-reuse-input-{pack.input_id}.json"
-    data = _canonical_model_bytes(pack)
+    path = output / f"remnant-reuse-input-{pack.input_id}.json.gz"
+    data = gzip.compress(_canonical_model_bytes(pack), compresslevel=9, mtime=0)
     if path.exists():
         if _read_regular_file(path) != data:
             raise M4EvidenceError("M4 input artifact is immutable and differs from existing bytes")
@@ -519,7 +1044,14 @@ def publish_m4_input_pack(output_directory: Path, pack: M4ReuseInputPack) -> Pat
 def load_m4_input_pack(path: Path) -> M4ReuseInputPack:
     """Load one bounded canonical M4 input and recompute its identity."""
 
-    data = _read_regular_file(Path(path))
+    compressed = _read_regular_file(Path(path))
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
+            data = stream.read(_MAX_M4_INPUT_BYTES + 1)
+    except (EOFError, OSError) as error:
+        raise M4EvidenceError("M4 input artifact is not valid gzip") from error
+    if len(data) > _MAX_M4_INPUT_BYTES:
+        raise M4EvidenceError("M4 input artifact exceeds its decompressed byte limit")
     try:
         pack = M4ReuseInputPack.model_validate_json(data, strict=True)
     except ValidationError as error:
@@ -527,3 +1059,51 @@ def load_m4_input_pack(path: Path) -> M4ReuseInputPack:
     if _canonical_model_bytes(pack) != data:
         raise M4EvidenceError("M4 input artifact does not use canonical JSON encoding")
     return pack
+
+
+def publish_m4_result(output_directory: Path, result: M4ReuseResult) -> Path:
+    """Publish or verify one immutable canonical M4 result artifact."""
+
+    output = Path(output_directory)
+    output.mkdir(parents=True, exist_ok=True)
+    path = output / f"remnant-reuse-result-{result.result_id}.json"
+    data = _canonical_model_bytes(result)
+    if path.exists():
+        if _read_regular_file(path) != data:
+            raise M4EvidenceError("M4 result artifact is immutable and differs from existing bytes")
+        return path
+
+    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        temporary.rename(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return path
+
+
+def load_m4_result(
+    path: Path,
+    *,
+    pack: M4ReuseInputPack,
+    m0: M0ExperimentContract,
+) -> M4ReuseResult:
+    """Load and independently revalidate one canonical M4 result artifact."""
+
+    data = _read_regular_file(Path(path))
+    try:
+        result = M4ReuseResult.model_validate_json(data, strict=True)
+    except ValidationError as error:
+        raise M4EvidenceError("M4 result artifact validation failed") from error
+    if _canonical_model_bytes(result) != data:
+        raise M4EvidenceError("M4 result artifact does not use canonical JSON encoding")
+    try:
+        _validate_m4_result_evidence(result, pack, m0)
+    except ReuseGeometryError as error:
+        raise M4EvidenceError(
+            "M4 result placement or residual evidence failed revalidation"
+        ) from error
+    return result

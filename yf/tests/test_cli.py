@@ -779,3 +779,142 @@ def test_evaluate_residual_geometry_command_publishes_canonical_result(
     assert "valid_tasks=203/203" in text
     assert "exact_residual_differences=200" in text
     assert "decision=pass" in text
+
+
+def test_prepare_remnant_reuse_command_freezes_registered_search_and_sources(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    m0_path = tmp_path / "m0.json"
+    m3_input_path = tmp_path / "m3-input.json"
+    m3_result_path = tmp_path / "m3-result.json"
+    output = tmp_path / "results"
+    m0 = SimpleNamespace(contract_id="yfm0-" + "a" * 24)
+    m3_input = SimpleNamespace(input_id="yfgi-" + "b" * 24)
+    m3_result = SimpleNamespace(result_id="yfgr-" + "c" * 24)
+    search_config = SimpleNamespace(grid_columns=17, grid_rows=17, maximum_candidates=4096)
+    pack = SimpleNamespace(
+        input_id="yfri-" + "d" * 24,
+        origin_remnants=tuple(range(406)),
+        future_part_roles=tuple(range(6607)),
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        "yieldforge.cli.load_frozen_json",
+        lambda path, model: m0 if path == m0_path else None,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.load_m3_input_pack",
+        lambda path: m3_input if path == m3_input_path else None,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.load_m3_result",
+        lambda path: m3_result if path == m3_result_path else None,
+    )
+    monkeypatch.setattr("yieldforge.cli.REGISTERED_M4_SEARCH_CONFIG", search_config)
+
+    def fake_prepare(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((args, kwargs))
+        return pack
+
+    monkeypatch.setattr("yieldforge.cli.prepare_m4_input_pack", fake_prepare)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_m4_input_pack",
+        lambda output_arg, pack_arg: (
+            output_arg / f"remnant-reuse-input-{pack_arg.input_id}.json.gz"
+        ),
+    )
+
+    exit_code = main(
+        [
+            "experiments",
+            "prepare-remnant-reuse",
+            "--m0",
+            str(m0_path),
+            "--m3-input",
+            str(m3_input_path),
+            "--m3-result",
+            str(m3_result_path),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        (
+            (m3_input, m3_result, m0),
+            {"search_config": search_config},
+        )
+    ]
+    text = capsys.readouterr().out
+    assert "input_id=yfri-" in text
+    assert "origin_remnants=406" in text
+    assert "future_parts=6607" in text
+
+
+def test_evaluate_remnant_reuse_command_publishes_bounded_result(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    input_path = tmp_path / "m4-input.json"
+    m0_path = tmp_path / "m0.json"
+    output = tmp_path / "results"
+    pack = SimpleNamespace(input_id="yfri-" + "a" * 24)
+    m0 = SimpleNamespace(contract_id="yfm0-" + "b" * 24)
+    result = SimpleNamespace(
+        result_id="yfrr-" + "c" * 24,
+        witness=SimpleNamespace(origin_remnant_id="yfrm-" + "d" * 24),
+        summary=SimpleNamespace(
+            attempted_pair_count=17,
+            eligible_pair_count=100,
+            technical_decision="pass",
+            avoided_full_sheet_openings=1,
+        ),
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        "yieldforge.cli.load_m4_input_pack",
+        lambda path: pack if path == input_path else None,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.load_frozen_json",
+        lambda path, model: m0 if path == m0_path else None,
+    )
+
+    def fake_evaluate(pack_arg, m0_arg):  # type: ignore[no-untyped-def]
+        calls.append((pack_arg, m0_arg))
+        return result
+
+    monkeypatch.setattr("yieldforge.cli.evaluate_m4_remnant_reuse", fake_evaluate)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_m4_result",
+        lambda output_arg, result_arg: (
+            output_arg / f"remnant-reuse-result-{result_arg.result_id}.json"
+        ),
+    )
+
+    exit_code = main(
+        [
+            "experiments",
+            "evaluate-remnant-reuse",
+            "--m0",
+            str(m0_path),
+            "--input",
+            str(input_path),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(pack, m0)]
+    text = capsys.readouterr().out
+    assert "result_id=yfrr-" in text
+    assert "attempted_pairs=17/100" in text
+    assert "decision=pass" in text
+    assert "avoided_full_sheet_openings=1" in text

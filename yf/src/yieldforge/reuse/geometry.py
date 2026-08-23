@@ -84,23 +84,35 @@ def _rotation_allowed(rotation: float, allowed: list[float], tolerance: float) -
     return any(abs(math.remainder(rotation - value, 360.0)) <= tolerance for value in allowed)
 
 
-def transform_part(part: Part, placement: FitPlacement) -> Polygon:
-    """Apply the canonical rotation-before-translation convention to one part."""
+def rotate_part(part: Part, rotation: float) -> Polygon:
+    """Apply the canonical local-origin rotation to one source part."""
 
     source = _source_polygon(part)
-    radians = math.radians(placement.rotation)
+    radians = math.radians(rotation)
     cosine = math.cos(radians)
     sine = math.sin(radians)
-    translate_x, translate_y = placement.translation
-    transformed = Polygon(
+    rotated = Polygon(
         [
             (
-                x * cosine - y * sine + translate_x,
-                x * sine + y * cosine + translate_y,
+                x * cosine - y * sine,
+                x * sine + y * cosine,
             )
             for x, y in source.exterior.coords
         ]
     )
+    if rotated.is_empty or rotated.area <= 0 or not rotated.is_valid:
+        raise ReuseGeometryError(
+            "invalid_transformed_polygon", "part rotation produced invalid geometry"
+        )
+    return rotated
+
+
+def transform_part(part: Part, placement: FitPlacement) -> Polygon:
+    """Apply the canonical rotation-before-translation convention to one part."""
+
+    rotated = rotate_part(part, placement.rotation)
+    translate_x, translate_y = placement.translation
+    transformed = Polygon([(x + translate_x, y + translate_y) for x, y in rotated.exterior.coords])
     if transformed.is_empty or transformed.area <= 0 or not transformed.is_valid:
         raise ReuseGeometryError(
             "invalid_transformed_polygon", "part placement produced invalid geometry"
@@ -117,6 +129,50 @@ def validate_fit_placement(
     config: RemnantFitConfig,
 ) -> ValidatedFitPlacement:
     """Validate one explicit part transform against an exact irregular remnant."""
+
+    return _validate_fit_placement_against_polygon(
+        remnant,
+        polygon_from_record(remnant.geometry),
+        part,
+        placement,
+        part_material=part_material,
+        config=config,
+    )
+
+
+def _validate_fit_placement_against_polygon(
+    remnant: RemnantStock,
+    remnant_polygon: Polygon,
+    part: Part,
+    placement: FitPlacement,
+    *,
+    part_material: MaterialIdentity,
+    config: RemnantFitConfig,
+) -> ValidatedFitPlacement:
+    """Validate against one already canonicalized polygon from the same remnant record."""
+
+    return _validate_pretransformed_fit_placement(
+        remnant,
+        remnant_polygon,
+        part,
+        placement,
+        transform_part(part, placement),
+        part_material=part_material,
+        config=config,
+    )
+
+
+def _validate_pretransformed_fit_placement(
+    remnant: RemnantStock,
+    remnant_polygon: Polygon,
+    part: Part,
+    placement: FitPlacement,
+    placed_polygon: Polygon,
+    *,
+    part_material: MaterialIdentity,
+    config: RemnantFitConfig,
+) -> ValidatedFitPlacement:
+    """Validate one exact cached transform against an already canonicalized remnant."""
 
     if placement.part_id != part.id:
         raise ReuseGeometryError("part_id_mismatch", "placement part ID does not match the part")
@@ -141,8 +197,10 @@ def validate_fit_placement(
             "rotation_not_allowed", "placement rotation is not allowed by the source part"
         )
 
-    remnant_polygon = polygon_from_record(remnant.geometry)
-    placed_polygon = transform_part(part, placement)
+    if placed_polygon.is_empty or placed_polygon.area <= 0 or not placed_polygon.is_valid:
+        raise ReuseGeometryError(
+            "invalid_transformed_polygon", "part placement produced invalid geometry"
+        )
     try:
         buffered = (
             placed_polygon.buffer(
@@ -160,7 +218,11 @@ def validate_fit_placement(
             config.coordinate_tolerance,
             remnant_polygon.area * config.relative_area_tolerance,
         )
-        outside_area = float(buffered.difference(remnant_polygon).area)
+        outside_area = (
+            0.0
+            if remnant_polygon.covers(buffered)
+            else float(buffered.difference(remnant_polygon).area)
+        )
     except GEOSException as error:
         raise ReuseGeometryError(
             "geometry_operation_failed", "remnant containment validation failed"

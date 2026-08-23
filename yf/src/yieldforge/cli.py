@@ -30,9 +30,18 @@ from yieldforge.experiments.contracts import (
     load_frozen_json,
     validate_experiment_bundle,
 )
+from yieldforge.experiments.remnant_reuse import (
+    REGISTERED_M4_SEARCH_CONFIG,
+    evaluate_m4_remnant_reuse,
+    load_m4_input_pack,
+    prepare_m4_input_pack,
+    publish_m4_input_pack,
+    publish_m4_result,
+)
 from yieldforge.experiments.residual_geometry import (
     evaluate_m3_residual_geometry,
     load_m3_input_pack,
+    load_m3_result,
     prepare_m3_input_pack,
     publish_m3_input_pack,
     publish_m3_result,
@@ -237,6 +246,42 @@ def _evaluate_residual_geometry(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prepare_remnant_reuse(args: argparse.Namespace) -> int:
+    m3_input = load_m3_input_pack(args.m3_input)
+    m3_result = load_m3_result(args.m3_result)
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    pack = prepare_m4_input_pack(
+        m3_input,
+        m3_result,
+        m0,
+        search_config=REGISTERED_M4_SEARCH_CONFIG,
+    )
+    path = publish_m4_input_pack(args.output, pack)
+    print(
+        "Published M4 remnant reuse input: "
+        f"input_id={pack.input_id} "
+        f"origin_remnants={len(pack.origin_remnants)} "
+        f"future_parts={len(pack.future_part_roles)} output={path}"
+    )
+    return 0
+
+
+def _evaluate_remnant_reuse(args: argparse.Namespace) -> int:
+    pack = load_m4_input_pack(args.input)
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    result = evaluate_m4_remnant_reuse(pack, m0)
+    path = publish_m4_result(args.output, result)
+    summary = result.summary
+    print(
+        "Published M4 remnant reuse result: "
+        f"result_id={result.result_id} "
+        f"attempted_pairs={summary.attempted_pair_count}/{summary.eligible_pair_count} "
+        f"decision={summary.technical_decision} "
+        f"avoided_full_sheet_openings={summary.avoided_full_sheet_openings} output={path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -339,6 +384,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_residual.add_argument("--input", type=Path, required=True)
     evaluate_residual.add_argument("--output", type=Path, required=True)
     evaluate_residual.set_defaults(handler=_evaluate_residual_geometry)
+
+    prepare_reuse = experiment_commands.add_parser(
+        "prepare-remnant-reuse",
+        help="reconstruct M3 remnants and freeze the bounded M4 search input",
+    )
+    prepare_reuse.add_argument("--m0", type=Path, required=True)
+    prepare_reuse.add_argument("--m3-input", type=Path, required=True)
+    prepare_reuse.add_argument("--m3-result", type=Path, required=True)
+    prepare_reuse.add_argument("--output", type=Path, required=True)
+    prepare_reuse.set_defaults(handler=_prepare_remnant_reuse)
+
+    evaluate_reuse = experiment_commands.add_parser(
+        "evaluate-remnant-reuse",
+        help="evaluate and publish the frozen bounded M4 remnant search",
+    )
+    evaluate_reuse.add_argument("--m0", type=Path, required=True)
+    evaluate_reuse.add_argument("--input", type=Path, required=True)
+    evaluate_reuse.add_argument("--output", type=Path, required=True)
+    evaluate_reuse.set_defaults(handler=_evaluate_remnant_reuse)
     return parser
 
 
