@@ -39,6 +39,7 @@ def test_geometry_config_is_explicit_and_rejects_invalid_polygons() -> None:
     config = ResidualGeometryConfig()
 
     assert config.process_model == "explicit_symmetric_part_buffer"
+    assert config.buffer_join_style == "mitre"
     assert config.part_buffer_distance == 0.0
     assert config.forbidden_polygons == ()
 

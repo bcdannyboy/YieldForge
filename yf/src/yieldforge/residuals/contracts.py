@@ -52,6 +52,7 @@ class ResidualGeometryConfig(ResidualContractModel):
     process_model: Literal["explicit_symmetric_part_buffer"] = (
         "explicit_symmetric_part_buffer"
     )
+    buffer_join_style: Literal["mitre"] = "mitre"
     part_buffer_distance: StrictFloat = Field(default=0.0, ge=0)
     forbidden_polygons: tuple[ForbiddenRing, ...] = ()
     coordinate_tolerance: StrictFloat = Field(default=1e-7, gt=0)
