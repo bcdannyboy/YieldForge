@@ -165,7 +165,7 @@ def _require_valid_geometry(geometry: BaseGeometry, *, label: str) -> None:
         raise ResidualGeometryError("invalid_overlay_geometry", f"{label} geometry is invalid")
 
 
-def _polygon_components(geometry: BaseGeometry) -> tuple[Polygon, ...]:
+def polygon_components(geometry: BaseGeometry) -> tuple[Polygon, ...]:
     if geometry.is_empty:
         return ()
     if isinstance(geometry, Polygon):
@@ -237,16 +237,60 @@ def _passes_effective_width(
     return not inward.is_empty
 
 
-def _classify_components(
+def measure_residual_components(
+    components: tuple[Polygon, ...],
+    *,
+    access_boundary: BaseGeometry,
+    rules: ResidualRuleSet,
+    reference_short_side: float,
+    coordinate_tolerance: float,
+) -> tuple[ResidualComponentMetrics, ...]:
+    """Measure components against an explicit recoverable-container boundary."""
+
+    metrics = []
+    for component in components:
+        try:
+            access = component.boundary.intersection(access_boundary)
+        except GEOSException as error:
+            raise ResidualGeometryError(
+                "geometry_operation_failed", "component access measurement failed"
+            ) from error
+        effective_width_rules = tuple(
+            rule.rule_name
+            for rule in rules.ordered()
+            if _passes_effective_width(
+                component,
+                rule,
+                short_side=reference_short_side,
+            )
+        )
+        metrics.append(
+            ResidualComponentMetrics(
+                component_sha256=geometry_sha256(component),
+                area=float(component.area),
+                bounds=tuple(float(value) for value in component.bounds),
+                hole_count=len(component.interiors),
+                exterior_connected=access.length > coordinate_tolerance,
+                exterior_access_length=float(access.length),
+                effective_width_rule_names=effective_width_rules,
+            )
+        )
+    metrics.sort(key=lambda item: item.component_sha256)
+    return tuple(metrics)
+
+
+def classify_residual_components(
     components: tuple[Polygon, ...],
     metrics: tuple[ResidualComponentMetrics, ...],
     rules: ResidualRuleSet,
     *,
-    stock_area: float,
-    short_side: float,
+    reference_area: float,
+    reference_short_side: float,
     area_tolerance: float,
     coordinate_tolerance: float,
 ) -> tuple[RuleClassificationSummary, ...]:
+    """Classify exact residual components under the frozen M0 rule grid."""
+
     component_by_hash = {geometry_sha256(component): component for component in components}
     metric_by_hash = {metric.component_sha256: metric for metric in metrics}
     summaries = []
@@ -255,8 +299,8 @@ def _classify_components(
         scrap = []
         for component_hash, component in component_by_hash.items():
             metric = metric_by_hash[component_hash]
-            minimum_area = stock_area * rule.minimum_area_sheet_fraction
-            minimum_access = short_side * rule.minimum_exterior_access_short_side_fraction
+            minimum_area = reference_area * rule.minimum_area_sheet_fraction
+            minimum_access = reference_short_side * rule.minimum_exterior_access_short_side_fraction
             eligible = (
                 (not rule.requires_exterior_connection or metric.exterior_connected)
                 and component.area + area_tolerance >= minimum_area
@@ -330,29 +374,15 @@ def extract_candidate_residual(
     ):
         _require_valid_geometry(geometry, label=label)
 
-    components = _polygon_components(residual)
+    components = polygon_components(residual)
     short_side = min(problem.sheet_length, problem.strip_height)
-    metrics = []
-    for component in components:
-        access = component.boundary.intersection(stock.boundary)
-        effective_width_rules = tuple(
-            rule.rule_name
-            for rule in rules.ordered()
-            if _passes_effective_width(component, rule, short_side=short_side)
-        )
-        metrics.append(
-            ResidualComponentMetrics(
-                component_sha256=geometry_sha256(component),
-                area=float(component.area),
-                bounds=tuple(float(value) for value in component.bounds),
-                hole_count=len(component.interiors),
-                exterior_connected=access.length > config.coordinate_tolerance,
-                exterior_access_length=float(access.length),
-                effective_width_rule_names=effective_width_rules,
-            )
-        )
-    metrics.sort(key=lambda item: item.component_sha256)
-    metric_tuple = tuple(metrics)
+    metric_tuple = measure_residual_components(
+        components,
+        access_boundary=stock.boundary,
+        rules=rules,
+        reference_short_side=short_side,
+        coordinate_tolerance=config.coordinate_tolerance,
+    )
 
     residual_area = float(residual.area)
     reconciliation_delta = _require_reconciliation(
@@ -380,12 +410,12 @@ def extract_candidate_residual(
         residual_sha256=geometry_sha256(residual),
         accounting=accounting,
         components=metric_tuple,
-        classifications=_classify_components(
+        classifications=classify_residual_components(
             components,
             metric_tuple,
             rules,
-            stock_area=float(stock.area),
-            short_side=short_side,
+            reference_area=float(stock.area),
+            reference_short_side=short_side,
             area_tolerance=area_tolerance,
             coordinate_tolerance=config.coordinate_tolerance,
         ),

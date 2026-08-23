@@ -7,14 +7,32 @@ from dataclasses import dataclass
 
 from shapely import BufferJoinStyle, Polygon
 from shapely.errors import GEOSException
+from shapely.geometry.base import BaseGeometry
 
 from yieldforge.domain import Part
+from yieldforge.residuals.contracts import (
+    ResidualGeometryError,
+    ResidualRuleName,
+    ResidualRuleSet,
+)
+from yieldforge.residuals.geometry import (
+    classify_residual_components,
+    geometry_sha256,
+    measure_residual_components,
+    polygon_components,
+)
 from yieldforge.reuse.contracts import (
+    ChildRemnantSummary,
     FitPlacement,
     MaterialIdentity,
     RemnantFitConfig,
+    RemnantFitResult,
     RemnantStock,
+    ReuseAccounting,
     ReuseGeometryError,
+    canonical_polygon_record,
+    child_lineage,
+    derive_remnant_id,
     polygon_from_record,
 )
 
@@ -27,6 +45,16 @@ class ValidatedFitPlacement:
     placed_polygon: Polygon
     buffered_footprint: Polygon
     area_tolerance: float
+
+
+@dataclass(frozen=True)
+class RemnantConsumption:
+    """Runtime polygons paired with one persisted reuse result."""
+
+    result: RemnantFitResult
+    children: tuple[RemnantStock, ...]
+    unused_geometry: BaseGeometry
+    scrap_components: tuple[Polygon, ...]
 
 
 def _material_key(material: MaterialIdentity) -> tuple[str, str, str, str, str]:
@@ -142,4 +170,133 @@ def validate_fit_placement(
         placed_polygon=placed_polygon,
         buffered_footprint=buffered,
         area_tolerance=area_tolerance,
+    )
+
+
+def _reconciliation_delta(parent_area: float, *category_areas: float) -> float:
+    return abs(parent_area - sum(category_areas))
+
+
+def consume_remnant(
+    remnant: RemnantStock,
+    part: Part,
+    placement: FitPlacement,
+    *,
+    part_material: MaterialIdentity,
+    rules: ResidualRuleSet,
+    config: RemnantFitConfig,
+) -> RemnantConsumption:
+    """Consume one exactly placed part and create classified child remnants."""
+
+    validated = validate_fit_placement(
+        remnant,
+        part,
+        placement,
+        part_material=part_material,
+        config=config,
+    )
+    parent = polygon_from_record(remnant.geometry)
+    try:
+        placed_material = validated.placed_polygon.intersection(parent)
+        buffered_material = validated.buffered_footprint.intersection(parent)
+        process_loss = buffered_material.difference(placed_material)
+        unused = parent.difference(buffered_material)
+    except GEOSException as error:
+        raise ReuseGeometryError(
+            "geometry_operation_failed", "remnant consumption overlay failed"
+        ) from error
+    for label, geometry in (
+        ("placed", placed_material),
+        ("process loss", process_loss),
+        ("unused", unused),
+    ):
+        if not geometry.is_valid:
+            raise ReuseGeometryError("invalid_overlay_geometry", f"{label} geometry is invalid")
+
+    try:
+        components = polygon_components(unused)
+        metrics = measure_residual_components(
+            components,
+            access_boundary=parent.boundary,
+            rules=rules,
+            reference_short_side=remnant.root_sheet_short_side,
+            coordinate_tolerance=config.coordinate_tolerance,
+        )
+        classifications = classify_residual_components(
+            components,
+            metrics,
+            rules,
+            reference_area=remnant.root_sheet_area,
+            reference_short_side=remnant.root_sheet_short_side,
+            area_tolerance=validated.area_tolerance,
+            coordinate_tolerance=config.coordinate_tolerance,
+        )
+    except ResidualGeometryError as error:
+        raise ReuseGeometryError(error.code, "child residual classification failed") from error
+
+    primary = next(item for item in classifications if item.rule_name is ResidualRuleName.PRIMARY)
+    component_by_hash = {geometry_sha256(component): component for component in components}
+    children = []
+    for component_hash in primary.retained_component_sha256:
+        geometry = canonical_polygon_record(component_by_hash[component_hash])
+        lineage = child_lineage(remnant, source_component_sha256=geometry.polygon_sha256)
+        children.append(
+            RemnantStock(
+                remnant_id=derive_remnant_id(lineage, geometry, remnant.material),
+                geometry=geometry,
+                material=remnant.material,
+                root_sheet_area=remnant.root_sheet_area,
+                root_sheet_short_side=remnant.root_sheet_short_side,
+                lineage=lineage,
+            )
+        )
+    children.sort(key=lambda child: child.remnant_id)
+    child_tuple = tuple(children)
+    scrap_components = tuple(
+        component_by_hash[component_hash] for component_hash in primary.scrap_component_sha256
+    )
+
+    category_areas = (
+        float(placed_material.area),
+        float(process_loss.area),
+        primary.retained_area,
+        primary.scrap_area,
+    )
+    delta = _reconciliation_delta(float(parent.area), *category_areas)
+    if delta > validated.area_tolerance:
+        raise ReuseGeometryError(
+            "material_reconciliation_failed",
+            f"material accounting delta {delta} exceeds tolerance {validated.area_tolerance}",
+        )
+    accounting = ReuseAccounting(
+        parent_remnant_area=float(parent.area),
+        placed_area=category_areas[0],
+        process_loss_area=category_areas[1],
+        retained_child_area=category_areas[2],
+        scrap_area=category_areas[3],
+        reconciliation_delta=delta,
+        area_tolerance=validated.area_tolerance,
+    )
+    placed_record = canonical_polygon_record(validated.placed_polygon)
+    result = RemnantFitResult(
+        status="fit",
+        parent_remnant_id=remnant.remnant_id,
+        part_id=part.id,
+        placement=placement,
+        placed_polygon_sha256=placed_record.polygon_sha256,
+        accounting=accounting,
+        children=tuple(
+            ChildRemnantSummary(
+                remnant_id=child.remnant_id,
+                polygon_sha256=child.geometry.polygon_sha256,
+                area=child.geometry.area,
+            )
+            for child in child_tuple
+        ),
+    )
+    return RemnantConsumption(
+        result=result,
+        children=child_tuple,
+        unused_geometry=unused,
+        scrap_components=scrap_components,
     )

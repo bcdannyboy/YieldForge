@@ -14,9 +14,11 @@ from yieldforge.residuals.contracts import (
 )
 from yieldforge.residuals.geometry import (
     _require_reconciliation,
+    classify_residual_components,
     compare_candidate_residuals,
     extract_candidate_residual,
     geometry_sha256,
+    measure_residual_components,
     placed_part_polygons,
 )
 
@@ -334,3 +336,36 @@ def test_pair_comparison_reports_exact_geometry_not_unchanged_classification() -
     assert comparison.symmetric_difference_area == pytest.approx(4.0)
     assert comparison.symmetric_difference_sheet_fraction == pytest.approx(0.04)
     assert comparison.classification_difference_rule_names == ()
+
+
+def test_classifies_components_against_arbitrary_parent_boundary() -> None:
+    parent = Polygon([(10, 10), (20, 10), (20, 12), (12, 12), (12, 20), (10, 20)])
+    exterior_component = Polygon([(10, 10), (12, 10), (12, 12), (10, 12)])
+    interior_component = Polygon([(15, 10.5), (16, 10.5), (16, 11.5), (15, 11.5)])
+    components = (exterior_component, interior_component)
+
+    metrics = measure_residual_components(
+        components,
+        access_boundary=parent.boundary,
+        rules=_rules(),
+        reference_short_side=10.0,
+        coordinate_tolerance=1e-7,
+    )
+    classifications = classify_residual_components(
+        components,
+        metrics,
+        _rules(),
+        reference_area=100.0,
+        reference_short_side=10.0,
+        area_tolerance=1e-7,
+        coordinate_tolerance=1e-7,
+    )
+
+    metrics_by_hash = {item.component_sha256: item for item in metrics}
+    exterior_hash = geometry_sha256(exterior_component)
+    interior_hash = geometry_sha256(interior_component)
+    primary = next(item for item in classifications if item.rule_name is ResidualRuleName.PRIMARY)
+    assert metrics_by_hash[exterior_hash].exterior_connected is True
+    assert metrics_by_hash[interior_hash].exterior_connected is False
+    assert primary.retained_component_sha256 == (exterior_hash,)
+    assert primary.scrap_component_sha256 == (interior_hash,)
