@@ -1,0 +1,176 @@
+{
+  "claim_ceiling": "deterministic_replay_mechanics_only_not_benchmark_policy_savings_physical_or_commercial_evidence",
+  "content_sha256": "sha256:a4c97d5d026be4d28a53346401be9e1cf241198350da971722b881a542644863",
+  "engine": {
+    "name": "yieldforge.deterministic-replay",
+    "shapely_version": "2.1.2",
+    "version": "1.0.0"
+  },
+  "event_stage_order": [
+    "accrue_storage_to_t",
+    "reveal_orders_released_at_t",
+    "form_compatible_released_batch",
+    "select_action",
+    "execute_and_fulfill_atomically",
+    "record_purchase_handling_and_scrap",
+    "return_eligible_remnants_at_t"
+  ],
+  "fit_config": {
+    "buffer_join_style": "mitre",
+    "clearance_distance": 0.0,
+    "coordinate_tolerance": 1e-07,
+    "relative_area_tolerance": 1e-10,
+    "schema_version": "yieldforge.remnant-fit-config.v1"
+  },
+  "horizon_end": "2026-01-01T02:00:00Z",
+  "input_id": "yfrpi-a4c97d5d026be4d28a533464",
+  "m0_contract_id": "yfm0-29b7efe8ac2a0a9995c4f907",
+  "m0_contract_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+  "m4_input_id": "yfri-26460ffca19eebfc9e479d01",
+  "m4_input_sha256": "sha256:26460ffca19eebfc9e479d0182b55bce39c4c5ffec79c5c5feb82c10b7b68f7f",
+  "m4_result_id": "yfrr-b8b1578fc5e0225f00c4386e",
+  "m4_result_sha256": "sha256:b8b1578fc5e0225f00c4386eae71a33fff4bdef642347941958dbff56b9b7901",
+  "orders": [
+    {
+      "chronology_provenance": "generated",
+      "geometry_provenance": "generated",
+      "material": {
+        "grade": "m4-assumed-uniform",
+        "grain": "m4-assumed-uniform",
+        "material_code": "m4-assumed-uniform",
+        "provenance": "assumed",
+        "schema_version": "yieldforge.material-identity.v1",
+        "surface": "m4-assumed-uniform",
+        "thickness": "m4-assumed-uniform"
+      },
+      "material_provenance": "assumed",
+      "order_id": "m5-generated-order-a",
+      "part": {
+        "allowed_orientations": [
+          0.0
+        ],
+        "demand": 1,
+        "id": "m5-generated-part-a",
+        "shape": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            4.0,
+            0.0
+          ],
+          [
+            4.0,
+            10.0
+          ],
+          [
+            0.0,
+            10.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "released_at": "2026-01-01T00:00:00Z",
+      "sequence": 0
+    },
+    {
+      "chronology_provenance": "generated",
+      "geometry_provenance": "generated",
+      "material": {
+        "grade": "m4-assumed-uniform",
+        "grain": "m4-assumed-uniform",
+        "material_code": "m4-assumed-uniform",
+        "provenance": "assumed",
+        "schema_version": "yieldforge.material-identity.v1",
+        "surface": "m4-assumed-uniform",
+        "thickness": "m4-assumed-uniform"
+      },
+      "material_provenance": "assumed",
+      "order_id": "m5-generated-order-b",
+      "part": {
+        "allowed_orientations": [
+          0.0
+        ],
+        "demand": 1,
+        "id": "m5-generated-part-b",
+        "shape": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            3.0,
+            0.0
+          ],
+          [
+            3.0,
+            10.0
+          ],
+          [
+            0.0,
+            10.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "released_at": "2026-01-01T01:00:00Z",
+      "sequence": 1
+    }
+  ],
+  "policy": {
+    "information_set": "released_order_and_current_inventory_only",
+    "name": "first_fit_remnant_then_standard_sheet",
+    "seed": 0,
+    "version": "1.0.0"
+  },
+  "rates": {
+    "area_unit": "generated_square_unit",
+    "cost_unit": "generated_cost_unit",
+    "provenance": "generated",
+    "purchase_cost_per_area": 1.0,
+    "retrieval_handling_cost_per_remnant": 3.0,
+    "return_handling_cost_per_remnant": 2.0,
+    "rounding_decimal_places": 6,
+    "rounding_mode": "half_up",
+    "schema_version": "yieldforge.replay-rates.v1",
+    "scrap_credit_per_area": 0.1,
+    "storage_cost_per_area_hour": 0.01,
+    "time_unit": "hour"
+  },
+  "schema_version": "yieldforge.deterministic-replay-input.v1",
+  "search_config": {
+    "candidate_source_order": [
+      "bbox_alignments",
+      "vertex_alignments",
+      "uniform_grid"
+    ],
+    "grid_columns": 5,
+    "grid_rows": 5,
+    "maximum_candidates": 512,
+    "rotation_order": "ascending_numeric",
+    "schema_version": "yieldforge.fit-search-config.v1",
+    "transform_order": "rotation_translation_lexicographic"
+  },
+  "standard_sheet": {
+    "height": 10.0,
+    "length": 10.0,
+    "material": {
+      "grade": "m4-assumed-uniform",
+      "grain": "m4-assumed-uniform",
+      "material_code": "m4-assumed-uniform",
+      "provenance": "assumed",
+      "schema_version": "yieldforge.material-identity.v1",
+      "surface": "m4-assumed-uniform",
+      "thickness": "m4-assumed-uniform"
+    },
+    "provenance": "generated",
+    "stock_code": "m5-generated-standard-sheet"
+  }
+}

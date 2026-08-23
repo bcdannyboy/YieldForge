@@ -1,0 +1,471 @@
+{
+  "claim_ceiling": "deterministic_replay_mechanics_only_not_benchmark_policy_savings_physical_or_commercial_evidence",
+  "content_sha256": "sha256:3e53070d65447bef0e7bcc24d9278eada1e71fc8572e6cf82984732571bbbd56",
+  "engine": {
+    "name": "yieldforge.deterministic-replay",
+    "shapely_version": "2.1.2",
+    "version": "1.0.0"
+  },
+  "events": [
+    {
+      "action": {
+        "accounting": {
+          "area_tolerance": 1e-07,
+          "parent_remnant_area": 100.0,
+          "placed_area": 40.0,
+          "process_loss_area": 0.0,
+          "reconciliation_delta": 0.0,
+          "retained_child_area": 60.0,
+          "scrap_area": 0.0
+        },
+        "kind": "open_standard_sheet",
+        "order_id": "m5-generated-order-a",
+        "placed_polygon": {
+          "area": 40.0,
+          "polygon_sha256": "79b347db5b8716c5fa7ab6c099004e99a644ece80123086f0b5a7a95f79794f7",
+          "schema_version": "yieldforge.canonical-polygon.v1",
+          "wkb_hex": "010300000001000000050000000000000000000000000000000000000000000000000000000000000000002440000000000000104000000000000024400000000000001040000000000000000000000000000000000000000000000000"
+        },
+        "placement": {
+          "part_id": "m5-generated-part-a",
+          "rotation": 0.0,
+          "translation": [
+            0.0,
+            0.0
+          ]
+        },
+        "returned_remnants": [
+          {
+            "geometry": {
+              "area": 60.0,
+              "polygon_sha256": "17a41273984a1683024975cf1d8b6bf5df4f6ffe7834023e1be56bfdf2a7fd2c",
+              "schema_version": "yieldforge.canonical-polygon.v1",
+              "wkb_hex": "010300000001000000050000000000000000001040000000000000000000000000000010400000000000002440000000000000244000000000000024400000000000002440000000000000000000000000000010400000000000000000"
+            },
+            "lineage": {
+              "ancestor_remnant_ids": [],
+              "generation": 1,
+              "parent_remnant_id": null,
+              "root_stock_id": "yfrm-039da3bb479ddd8aea406b25",
+              "schema_version": "yieldforge.remnant-lineage.v1",
+              "source_candidate_id": "yfrm-039da3bb479ddd8aea406b25",
+              "source_component_sha256": "17a41273984a1683024975cf1d8b6bf5df4f6ffe7834023e1be56bfdf2a7fd2c"
+            },
+            "material": {
+              "grade": "m4-assumed-uniform",
+              "grain": "m4-assumed-uniform",
+              "material_code": "m4-assumed-uniform",
+              "provenance": "assumed",
+              "schema_version": "yieldforge.material-identity.v1",
+              "surface": "m4-assumed-uniform",
+              "thickness": "m4-assumed-uniform"
+            },
+            "remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+            "root_sheet_area": 100.0,
+            "root_sheet_short_side": 10.0,
+            "schema_version": "yieldforge.remnant-stock.v1"
+          }
+        ],
+        "search_result": {
+          "config": {
+            "candidate_source_order": [
+              "bbox_alignments",
+              "vertex_alignments",
+              "uniform_grid"
+            ],
+            "grid_columns": 5,
+            "grid_rows": 5,
+            "maximum_candidates": 512,
+            "rotation_order": "ascending_numeric",
+            "schema_version": "yieldforge.fit-search-config.v1",
+            "transform_order": "rotation_translation_lexicographic"
+          },
+          "parent_remnant_id": "yfrm-039da3bb479ddd8aea406b25",
+          "part_id": "m5-generated-part-a",
+          "placement": {
+            "part_id": "m5-generated-part-a",
+            "rotation": 0.0,
+            "translation": [
+              0.0,
+              0.0
+            ]
+          },
+          "schema_version": "yieldforge.fit-search-result.v1",
+          "status": "fit",
+          "summary": {
+            "budget_truncated_candidate_count": 0,
+            "budgeted_candidate_count": 5,
+            "duplicate_candidate_count": 28,
+            "evaluated_candidate_count": 1,
+            "generated_candidate_count": 33,
+            "rejection_counts": [],
+            "unique_candidate_count": 5
+          }
+        },
+        "selected_remnant_id": null,
+        "selected_stock_id": "yfrm-039da3bb479ddd8aea406b25"
+      },
+      "cumulative_costs": {
+        "net_cost": 102.0,
+        "purchase_cost": 100.0,
+        "retrieval_handling_cost": 0.0,
+        "return_handling_cost": 2.0,
+        "scrap_proceeds": 0.0,
+        "storage_cost": 0.0,
+        "terminal_scrap_credit": 0.0
+      },
+      "delta_costs": {
+        "net_cost": 102.0,
+        "purchase_cost": 100.0,
+        "retrieval_handling_cost": 0.0,
+        "return_handling_cost": 2.0,
+        "scrap_proceeds": 0.0,
+        "storage_cost": 0.0,
+        "terminal_scrap_credit": 0.0
+      },
+      "event_id": "yfre-4360a73adec63135c501017c",
+      "event_stage_order": [
+        "accrue_storage_to_t",
+        "reveal_orders_released_at_t",
+        "form_compatible_released_batch",
+        "select_action",
+        "execute_and_fulfill_atomically",
+        "record_purchase_handling_and_scrap",
+        "return_eligible_remnants_at_t"
+      ],
+      "inventory_after": [
+        {
+          "entered_at": "2026-01-01T00:00:00Z",
+          "remnant": {
+            "geometry": {
+              "area": 60.0,
+              "polygon_sha256": "17a41273984a1683024975cf1d8b6bf5df4f6ffe7834023e1be56bfdf2a7fd2c",
+              "schema_version": "yieldforge.canonical-polygon.v1",
+              "wkb_hex": "010300000001000000050000000000000000001040000000000000000000000000000010400000000000002440000000000000244000000000000024400000000000002440000000000000000000000000000010400000000000000000"
+            },
+            "lineage": {
+              "ancestor_remnant_ids": [],
+              "generation": 1,
+              "parent_remnant_id": null,
+              "root_stock_id": "yfrm-039da3bb479ddd8aea406b25",
+              "schema_version": "yieldforge.remnant-lineage.v1",
+              "source_candidate_id": "yfrm-039da3bb479ddd8aea406b25",
+              "source_component_sha256": "17a41273984a1683024975cf1d8b6bf5df4f6ffe7834023e1be56bfdf2a7fd2c"
+            },
+            "material": {
+              "grade": "m4-assumed-uniform",
+              "grain": "m4-assumed-uniform",
+              "material_code": "m4-assumed-uniform",
+              "provenance": "assumed",
+              "schema_version": "yieldforge.material-identity.v1",
+              "surface": "m4-assumed-uniform",
+              "thickness": "m4-assumed-uniform"
+            },
+            "remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+            "root_sheet_area": 100.0,
+            "root_sheet_short_side": 10.0,
+            "schema_version": "yieldforge.remnant-stock.v1"
+          }
+        }
+      ],
+      "inventory_before": [],
+      "occurred_at": "2026-01-01T00:00:00Z",
+      "order_id": "m5-generated-order-a",
+      "sequence": 0,
+      "storage_interval_end": "2026-01-01T00:00:00Z",
+      "storage_interval_start": "2026-01-01T00:00:00Z"
+    },
+    {
+      "action": {
+        "accounting": {
+          "area_tolerance": 1e-07,
+          "parent_remnant_area": 60.0,
+          "placed_area": 30.0,
+          "process_loss_area": 0.0,
+          "reconciliation_delta": 0.0,
+          "retained_child_area": 30.0,
+          "scrap_area": 0.0
+        },
+        "kind": "consume_remnant",
+        "order_id": "m5-generated-order-b",
+        "placed_polygon": {
+          "area": 30.0,
+          "polygon_sha256": "1477fddaaf76b4d240f037f35fce3f59966136cee18e058944c397e0b519b6de",
+          "schema_version": "yieldforge.canonical-polygon.v1",
+          "wkb_hex": "0103000000010000000500000000000000000010400000000000000000000000000000104000000000000024400000000000001c4000000000000024400000000000001c40000000000000000000000000000010400000000000000000"
+        },
+        "placement": {
+          "part_id": "m5-generated-part-b",
+          "rotation": 0.0,
+          "translation": [
+            4.0,
+            0.0
+          ]
+        },
+        "returned_remnants": [
+          {
+            "geometry": {
+              "area": 30.0,
+              "polygon_sha256": "642137ce54ae750fc84a87f60290ce1b4eb5ff9ad612a489bca00aa980aa8fe5",
+              "schema_version": "yieldforge.canonical-polygon.v1",
+              "wkb_hex": "010300000001000000050000000000000000001c4000000000000000000000000000001c40000000000000244000000000000024400000000000002440000000000000244000000000000000000000000000001c400000000000000000"
+            },
+            "lineage": {
+              "ancestor_remnant_ids": [
+                "yfrm-27e89424457e06cd6a5b6961"
+              ],
+              "generation": 2,
+              "parent_remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+              "root_stock_id": "yfrm-039da3bb479ddd8aea406b25",
+              "schema_version": "yieldforge.remnant-lineage.v1",
+              "source_candidate_id": "yfrm-039da3bb479ddd8aea406b25",
+              "source_component_sha256": "642137ce54ae750fc84a87f60290ce1b4eb5ff9ad612a489bca00aa980aa8fe5"
+            },
+            "material": {
+              "grade": "m4-assumed-uniform",
+              "grain": "m4-assumed-uniform",
+              "material_code": "m4-assumed-uniform",
+              "provenance": "assumed",
+              "schema_version": "yieldforge.material-identity.v1",
+              "surface": "m4-assumed-uniform",
+              "thickness": "m4-assumed-uniform"
+            },
+            "remnant_id": "yfrm-2e2f9a7cc46a75c3c81f5fd3",
+            "root_sheet_area": 100.0,
+            "root_sheet_short_side": 10.0,
+            "schema_version": "yieldforge.remnant-stock.v1"
+          }
+        ],
+        "search_result": {
+          "config": {
+            "candidate_source_order": [
+              "bbox_alignments",
+              "vertex_alignments",
+              "uniform_grid"
+            ],
+            "grid_columns": 5,
+            "grid_rows": 5,
+            "maximum_candidates": 512,
+            "rotation_order": "ascending_numeric",
+            "schema_version": "yieldforge.fit-search-config.v1",
+            "transform_order": "rotation_translation_lexicographic"
+          },
+          "parent_remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+          "part_id": "m5-generated-part-b",
+          "placement": {
+            "part_id": "m5-generated-part-b",
+            "rotation": 0.0,
+            "translation": [
+              4.0,
+              0.0
+            ]
+          },
+          "schema_version": "yieldforge.fit-search-result.v1",
+          "status": "fit",
+          "summary": {
+            "budget_truncated_candidate_count": 0,
+            "budgeted_candidate_count": 5,
+            "duplicate_candidate_count": 28,
+            "evaluated_candidate_count": 1,
+            "generated_candidate_count": 33,
+            "rejection_counts": [],
+            "unique_candidate_count": 5
+          }
+        },
+        "selected_remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+        "selected_stock_id": "yfrm-27e89424457e06cd6a5b6961"
+      },
+      "cumulative_costs": {
+        "net_cost": 107.6,
+        "purchase_cost": 100.0,
+        "retrieval_handling_cost": 3.0,
+        "return_handling_cost": 4.0,
+        "scrap_proceeds": 0.0,
+        "storage_cost": 0.6,
+        "terminal_scrap_credit": 0.0
+      },
+      "delta_costs": {
+        "net_cost": 5.6,
+        "purchase_cost": 0.0,
+        "retrieval_handling_cost": 3.0,
+        "return_handling_cost": 2.0,
+        "scrap_proceeds": 0.0,
+        "storage_cost": 0.6,
+        "terminal_scrap_credit": 0.0
+      },
+      "event_id": "yfre-fc48c823f6bae2fc0fae4d68",
+      "event_stage_order": [
+        "accrue_storage_to_t",
+        "reveal_orders_released_at_t",
+        "form_compatible_released_batch",
+        "select_action",
+        "execute_and_fulfill_atomically",
+        "record_purchase_handling_and_scrap",
+        "return_eligible_remnants_at_t"
+      ],
+      "inventory_after": [
+        {
+          "entered_at": "2026-01-01T01:00:00Z",
+          "remnant": {
+            "geometry": {
+              "area": 30.0,
+              "polygon_sha256": "642137ce54ae750fc84a87f60290ce1b4eb5ff9ad612a489bca00aa980aa8fe5",
+              "schema_version": "yieldforge.canonical-polygon.v1",
+              "wkb_hex": "010300000001000000050000000000000000001c4000000000000000000000000000001c40000000000000244000000000000024400000000000002440000000000000244000000000000000000000000000001c400000000000000000"
+            },
+            "lineage": {
+              "ancestor_remnant_ids": [
+                "yfrm-27e89424457e06cd6a5b6961"
+              ],
+              "generation": 2,
+              "parent_remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+              "root_stock_id": "yfrm-039da3bb479ddd8aea406b25",
+              "schema_version": "yieldforge.remnant-lineage.v1",
+              "source_candidate_id": "yfrm-039da3bb479ddd8aea406b25",
+              "source_component_sha256": "642137ce54ae750fc84a87f60290ce1b4eb5ff9ad612a489bca00aa980aa8fe5"
+            },
+            "material": {
+              "grade": "m4-assumed-uniform",
+              "grain": "m4-assumed-uniform",
+              "material_code": "m4-assumed-uniform",
+              "provenance": "assumed",
+              "schema_version": "yieldforge.material-identity.v1",
+              "surface": "m4-assumed-uniform",
+              "thickness": "m4-assumed-uniform"
+            },
+            "remnant_id": "yfrm-2e2f9a7cc46a75c3c81f5fd3",
+            "root_sheet_area": 100.0,
+            "root_sheet_short_side": 10.0,
+            "schema_version": "yieldforge.remnant-stock.v1"
+          }
+        }
+      ],
+      "inventory_before": [
+        {
+          "entered_at": "2026-01-01T00:00:00Z",
+          "remnant": {
+            "geometry": {
+              "area": 60.0,
+              "polygon_sha256": "17a41273984a1683024975cf1d8b6bf5df4f6ffe7834023e1be56bfdf2a7fd2c",
+              "schema_version": "yieldforge.canonical-polygon.v1",
+              "wkb_hex": "010300000001000000050000000000000000001040000000000000000000000000000010400000000000002440000000000000244000000000000024400000000000002440000000000000000000000000000010400000000000000000"
+            },
+            "lineage": {
+              "ancestor_remnant_ids": [],
+              "generation": 1,
+              "parent_remnant_id": null,
+              "root_stock_id": "yfrm-039da3bb479ddd8aea406b25",
+              "schema_version": "yieldforge.remnant-lineage.v1",
+              "source_candidate_id": "yfrm-039da3bb479ddd8aea406b25",
+              "source_component_sha256": "17a41273984a1683024975cf1d8b6bf5df4f6ffe7834023e1be56bfdf2a7fd2c"
+            },
+            "material": {
+              "grade": "m4-assumed-uniform",
+              "grain": "m4-assumed-uniform",
+              "material_code": "m4-assumed-uniform",
+              "provenance": "assumed",
+              "schema_version": "yieldforge.material-identity.v1",
+              "surface": "m4-assumed-uniform",
+              "thickness": "m4-assumed-uniform"
+            },
+            "remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+            "root_sheet_area": 100.0,
+            "root_sheet_short_side": 10.0,
+            "schema_version": "yieldforge.remnant-stock.v1"
+          }
+        }
+      ],
+      "occurred_at": "2026-01-01T01:00:00Z",
+      "order_id": "m5-generated-order-b",
+      "sequence": 1,
+      "storage_interval_end": "2026-01-01T01:00:00Z",
+      "storage_interval_start": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "input_id": "yfrpi-a4c97d5d026be4d28a533464",
+  "input_sha256": "sha256:a4c97d5d026be4d28a53346401be9e1cf241198350da971722b881a542644863",
+  "m0_contract_id": "yfm0-29b7efe8ac2a0a9995c4f907",
+  "m0_contract_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+  "m4_result_id": "yfrr-b8b1578fc5e0225f00c4386e",
+  "m4_result_sha256": "sha256:b8b1578fc5e0225f00c4386eae71a33fff4bdef642347941958dbff56b9b7901",
+  "policy": {
+    "information_set": "released_order_and_current_inventory_only",
+    "name": "first_fit_remnant_then_standard_sheet",
+    "seed": 0,
+    "version": "1.0.0"
+  },
+  "result_id": "yfrpr-3e53070d65447bef0e7bcc24",
+  "schema_version": "yieldforge.deterministic-replay-result.v1",
+  "summary": {
+    "final_net_cost": 104.9,
+    "fulfilled_order_count": 2,
+    "full_sheet_opening_count": 1,
+    "order_count": 2,
+    "remnant_retrieval_count": 1,
+    "returned_remnant_count": 2,
+    "technical_decision": "pass",
+    "terminal_remnant_count": 1
+  },
+  "terminal": {
+    "cumulative_costs": {
+      "net_cost": 104.9,
+      "purchase_cost": 100.0,
+      "retrieval_handling_cost": 3.0,
+      "return_handling_cost": 4.0,
+      "scrap_proceeds": 0.0,
+      "storage_cost": 0.9,
+      "terminal_scrap_credit": 3.0
+    },
+    "delta_costs": {
+      "net_cost": -2.7,
+      "purchase_cost": 0.0,
+      "retrieval_handling_cost": 0.0,
+      "return_handling_cost": 0.0,
+      "scrap_proceeds": 0.0,
+      "storage_cost": 0.3,
+      "terminal_scrap_credit": 3.0
+    },
+    "horizon_end": "2026-01-01T02:00:00Z",
+    "inventory_before_liquidation": [
+      {
+        "entered_at": "2026-01-01T01:00:00Z",
+        "remnant": {
+          "geometry": {
+            "area": 30.0,
+            "polygon_sha256": "642137ce54ae750fc84a87f60290ce1b4eb5ff9ad612a489bca00aa980aa8fe5",
+            "schema_version": "yieldforge.canonical-polygon.v1",
+            "wkb_hex": "010300000001000000050000000000000000001c4000000000000000000000000000001c40000000000000244000000000000024400000000000002440000000000000244000000000000000000000000000001c400000000000000000"
+          },
+          "lineage": {
+            "ancestor_remnant_ids": [
+              "yfrm-27e89424457e06cd6a5b6961"
+            ],
+            "generation": 2,
+            "parent_remnant_id": "yfrm-27e89424457e06cd6a5b6961",
+            "root_stock_id": "yfrm-039da3bb479ddd8aea406b25",
+            "schema_version": "yieldforge.remnant-lineage.v1",
+            "source_candidate_id": "yfrm-039da3bb479ddd8aea406b25",
+            "source_component_sha256": "642137ce54ae750fc84a87f60290ce1b4eb5ff9ad612a489bca00aa980aa8fe5"
+          },
+          "material": {
+            "grade": "m4-assumed-uniform",
+            "grain": "m4-assumed-uniform",
+            "material_code": "m4-assumed-uniform",
+            "provenance": "assumed",
+            "schema_version": "yieldforge.material-identity.v1",
+            "surface": "m4-assumed-uniform",
+            "thickness": "m4-assumed-uniform"
+          },
+          "remnant_id": "yfrm-2e2f9a7cc46a75c3c81f5fd3",
+          "root_sheet_area": 100.0,
+          "root_sheet_short_side": 10.0,
+          "schema_version": "yieldforge.remnant-stock.v1"
+        }
+      }
+    ],
+    "liquidated_remnant_ids": [
+      "yfrm-2e2f9a7cc46a75c3c81f5fd3"
+    ],
+    "storage_interval_start": "2026-01-01T01:00:00Z"
+  }
+}
