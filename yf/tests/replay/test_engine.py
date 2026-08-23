@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,13 +10,14 @@ import shapely
 from pydantic import ValidationError
 
 from yieldforge.domain import Part
-from yieldforge.experiments.contracts import M0ExperimentContract
+from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
 from yieldforge.replay.contracts import (
     InventoryItem,
     ReplayActionKind,
     ReplayEngineIdentity,
     ReplayPolicyIdentity,
     ReplayRateManifest,
+    ReplayResult,
     StandardSheetSpec,
     build_replay_input,
 )
@@ -394,4 +396,44 @@ def test_event_identity_and_timeline_tampering_fail_closed() -> None:
             second.model_copy(
                 update={"storage_interval_start": second.occurred_at + timedelta(hours=1)}
             ).model_dump(mode="python")
+        )
+
+
+def _reidentify_result_payload(payload: dict[str, object]) -> dict[str, object]:
+    payload.pop("result_id", None)
+    payload.pop("content_sha256", None)
+    digest = semantic_sha256(payload)
+    payload["result_id"] = f"yfrpr-{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
+    return payload
+
+
+def test_result_rejects_reidentified_order_count_and_cumulative_cost_drift() -> None:
+    result = run_replay(_input(), _rules())
+
+    count_payload = result.model_dump(mode="json")
+    count_payload["summary"]["order_count"] = 3  # type: ignore[index]
+    count_payload["summary"]["technical_decision"] = "open"  # type: ignore[index]
+    with pytest.raises(ValidationError, match="order count"):
+        ReplayResult.model_validate_json(
+            json.dumps(_reidentify_result_payload(count_payload)), strict=True
+        )
+
+    cost_payload = result.model_dump(mode="json")
+    first_event = cost_payload["events"][0]  # type: ignore[index]
+    first_event["cumulative_costs"] = {  # type: ignore[index]
+        "purchase_cost": 999.0,
+        "storage_cost": 0.0,
+        "return_handling_cost": 0.0,
+        "retrieval_handling_cost": 0.0,
+        "scrap_proceeds": 0.0,
+        "terminal_scrap_credit": 0.0,
+        "net_cost": 999.0,
+    }
+    first_event.pop("event_id")  # type: ignore[union-attr]
+    event_digest = semantic_sha256(first_event)  # type: ignore[arg-type]
+    first_event["event_id"] = f"yfre-{event_digest[:24]}"  # type: ignore[index]
+    with pytest.raises(ValidationError, match="cumulative costs"):
+        ReplayResult.model_validate_json(
+            json.dumps(_reidentify_result_payload(cost_payload)), strict=True
         )

@@ -327,6 +327,37 @@ class ReplayCostLedger(ReplayContractModel):
         )
 
 
+def _sum_cost_ledgers(
+    left: ReplayCostLedger,
+    right: ReplayCostLedger,
+) -> ReplayCostLedger:
+    terms = {
+        "purchase_cost": rounded_cost(left.purchase_cost + right.purchase_cost),
+        "storage_cost": rounded_cost(left.storage_cost + right.storage_cost),
+        "return_handling_cost": rounded_cost(
+            left.return_handling_cost + right.return_handling_cost
+        ),
+        "retrieval_handling_cost": rounded_cost(
+            left.retrieval_handling_cost + right.retrieval_handling_cost
+        ),
+        "scrap_proceeds": rounded_cost(left.scrap_proceeds + right.scrap_proceeds),
+        "terminal_scrap_credit": rounded_cost(
+            left.terminal_scrap_credit + right.terminal_scrap_credit
+        ),
+    }
+    return ReplayCostLedger(
+        **terms,
+        net_cost=rounded_cost(
+            terms["purchase_cost"]
+            + terms["storage_cost"]
+            + terms["return_handling_cost"]
+            + terms["retrieval_handling_cost"]
+            - terms["scrap_proceeds"]
+            - terms["terminal_scrap_credit"]
+        ),
+    )
+
+
 class InventoryItem(ReplayContractModel):
     """One exact retained remnant and the time it most recently entered inventory."""
 
@@ -496,9 +527,13 @@ class ReplayResult(ReplayContractModel):
     def require_content_identity(self) -> Self:
         if len(self.events) != self.summary.fulfilled_order_count:
             raise ValueError("replay events do not match fulfilled order count")
+        if len(self.events) != self.summary.order_count:
+            raise ValueError("replay result order count must match complete event evidence")
         if tuple(event.sequence for event in self.events) != tuple(range(len(self.events))):
             raise ValueError("replay event sequences must be contiguous from zero")
         if self.events:
+            if self.events[0].inventory_before:
+                raise ValueError("replay must begin with empty inventory")
             for previous, current in zip(self.events, self.events[1:], strict=False):
                 if previous.occurred_at >= current.occurred_at:
                     raise ValueError("replay event times must be strictly increasing")
@@ -510,6 +545,16 @@ class ReplayResult(ReplayContractModel):
                 raise ValueError("terminal storage interval must follow the final event")
             if self.terminal.inventory_before_liquidation != self.events[-1].inventory_after:
                 raise ValueError("terminal inventory must match the final event")
+        cumulative = ReplayCostLedger.zero()
+        for event in self.events:
+            if event.action.order_id != event.order_id:
+                raise ValueError("replay event action must match its order")
+            cumulative = _sum_cost_ledgers(cumulative, event.delta_costs)
+            if event.cumulative_costs != cumulative:
+                raise ValueError("replay event cumulative costs do not reconcile")
+        cumulative = _sum_cost_ledgers(cumulative, self.terminal.delta_costs)
+        if self.terminal.cumulative_costs != cumulative:
+            raise ValueError("replay terminal cumulative costs do not reconcile")
         full_sheet_count = sum(
             event.action.kind is ReplayActionKind.OPEN_STANDARD_SHEET for event in self.events
         )
