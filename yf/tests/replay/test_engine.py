@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import shapely
+from pydantic import ValidationError
 
 from yieldforge.domain import Part
 from yieldforge.experiments.contracts import M0ExperimentContract
@@ -18,7 +19,7 @@ from yieldforge.replay.contracts import (
     StandardSheetSpec,
     build_replay_input,
 )
-from yieldforge.replay.engine import execute_action, select_action
+from yieldforge.replay.engine import execute_action, run_replay, select_action
 from yieldforge.residuals.contracts import rule_set_from_m0
 from yieldforge.reuse.contracts import (
     FitSearchConfig,
@@ -51,7 +52,11 @@ def _part(part_id: str, width: float) -> Part:
     )
 
 
-def _input():  # type: ignore[no-untyped-def]
+def _input(  # type: ignore[no-untyped-def]
+    *,
+    storage_rate: float = 0.01,
+    second_release_hours: float = 1.0,
+):
     material = _material()
     starts_at = datetime(2026, 1, 1, tzinfo=UTC)
     return build_replay_input(
@@ -71,7 +76,7 @@ def _input():  # type: ignore[no-untyped-def]
         ),
         rates=ReplayRateManifest(
             purchase_cost_per_area=1.0,
-            storage_cost_per_area_hour=0.01,
+            storage_cost_per_area_hour=storage_rate,
             return_handling_cost_per_remnant=2.0,
             retrieval_handling_cost_per_remnant=3.0,
             scrap_credit_per_area=0.1,
@@ -86,7 +91,7 @@ def _input():  # type: ignore[no-untyped-def]
             ("m5-order-a", starts_at, _part("m5-part-a", 4.0), material),
             (
                 "m5-order-b",
-                starts_at + timedelta(hours=1),
+                starts_at + timedelta(hours=second_release_hours),
                 _part("m5-part-b", 3.0),
                 material,
             ),
@@ -307,4 +312,86 @@ def test_full_sheet_infeasibility_fails_closed() -> None:
             replay_input.standard_sheet,
             replay_input.fit_config,
             replay_input.search_config,
+        )
+
+
+def test_replay_costs_chronology_and_recursive_inventory() -> None:
+    replay_input = _input()
+    result = run_replay(replay_input, _rules())
+
+    assert len(result.events) == 2
+    first, second = result.events
+    assert first.event_stage_order == replay_input.event_stage_order
+    assert first.storage_interval_start == first.storage_interval_end
+    assert first.action.kind is ReplayActionKind.OPEN_STANDARD_SHEET
+    assert first.delta_costs.purchase_cost == 100.0
+    assert first.delta_costs.return_handling_cost == 2.0
+    assert first.delta_costs.net_cost == 102.0
+    assert first.cumulative_costs.net_cost == 102.0
+
+    assert second.storage_interval_start == first.occurred_at
+    assert second.storage_interval_end == second.occurred_at
+    assert second.action.kind is ReplayActionKind.CONSUME_REMNANT
+    assert second.delta_costs.storage_cost == 0.6
+    assert second.delta_costs.retrieval_handling_cost == 3.0
+    assert second.delta_costs.return_handling_cost == 2.0
+    assert second.delta_costs.net_cost == 5.6
+    assert second.cumulative_costs.net_cost == 107.6
+
+    assert result.terminal.storage_interval_start == second.occurred_at
+    assert result.terminal.delta_costs.storage_cost == 0.3
+    assert result.terminal.delta_costs.terminal_scrap_credit == 3.0
+    assert result.terminal.delta_costs.net_cost == -2.7
+    assert result.terminal.cumulative_costs.net_cost == 104.9
+    assert len(result.terminal.inventory_before_liquidation) == 1
+    final_remnant = result.terminal.inventory_before_liquidation[0].remnant
+    assert final_remnant.geometry.area == 30.0
+    assert final_remnant.lineage.generation == 2
+
+    assert result.summary.order_count == 2
+    assert result.summary.fulfilled_order_count == 2
+    assert result.summary.full_sheet_opening_count == 1
+    assert result.summary.remnant_retrieval_count == 1
+    assert result.summary.returned_remnant_count == 2
+    assert result.summary.terminal_remnant_count == 1
+    assert result.summary.final_net_cost == 104.9
+    assert result.summary.technical_decision == "pass"
+
+
+def test_replay_is_deterministic_and_identity_changes_with_semantics() -> None:
+    replay_input = _input()
+    first = run_replay(replay_input, _rules())
+    second = run_replay(replay_input, _rules())
+
+    assert first == second
+    assert first.model_dump_json() == second.model_dump_json()
+    assert first.result_id == f"yfrpr-{first.content_sha256[7:31]}"
+
+    changed_rate_input = _input(storage_rate=0.02)
+    changed_rate_result = run_replay(changed_rate_input, _rules())
+    assert changed_rate_input.input_id != replay_input.input_id
+    assert changed_rate_result.result_id != first.result_id
+    assert changed_rate_result.summary.final_net_cost == 105.8
+
+    changed_time_input = _input(second_release_hours=0.5)
+    changed_time_result = run_replay(changed_time_input, _rules())
+    assert changed_time_input.input_id != replay_input.input_id
+    assert changed_time_result.result_id != first.result_id
+    assert changed_time_result.summary.final_net_cost == 104.75
+
+
+def test_event_identity_and_timeline_tampering_fail_closed() -> None:
+    result = run_replay(_input(), _rules())
+    first, second = result.events
+
+    with pytest.raises(ValidationError, match="event ID"):
+        first.__class__.model_validate(
+            first.model_copy(update={"event_id": "yfre-" + "f" * 24}).model_dump(mode="python")
+        )
+
+    with pytest.raises(ValidationError, match="storage interval"):
+        second.__class__.model_validate(
+            second.model_copy(
+                update={"storage_interval_start": second.occurred_at + timedelta(hours=1)}
+            ).model_dump(mode="python")
         )

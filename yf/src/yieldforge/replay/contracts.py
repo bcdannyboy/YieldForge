@@ -367,6 +367,10 @@ class ReplayActionEvidence(ReplayContractModel):
                 raise ValueError("remnant action requires one matching selected remnant")
         elif self.selected_remnant_id is not None:
             raise ValueError("standard-sheet action cannot select a remnant")
+        if self.search_result.parent_remnant_id != self.selected_stock_id:
+            raise ValueError("action search parent must match selected stock")
+        if self.search_result.placement != self.placement:
+            raise ValueError("action placement must match its search witness")
         returned_ids = tuple(item.remnant_id for item in self.returned_remnants)
         if returned_ids != tuple(sorted(set(returned_ids))):
             raise ValueError("returned remnants must use sorted unique IDs")
@@ -394,6 +398,25 @@ class ReplayEventRecord(ReplayContractModel):
     def canonicalize_event_time(cls, value: datetime) -> datetime:
         return _utc(value, "event timestamp")
 
+    @model_validator(mode="after")
+    def require_identity_and_atomic_transition(self) -> Self:
+        if self.event_stage_order != M0_EVENT_STAGE_ORDER:
+            raise ValueError("event stages do not match frozen M0 order")
+        if self.storage_interval_end != self.occurred_at:
+            raise ValueError("event must end its storage interval at occurrence")
+        if self.storage_interval_start > self.storage_interval_end:
+            raise ValueError("event storage interval cannot run backward")
+        before_ids = tuple(item.remnant.remnant_id for item in self.inventory_before)
+        after_ids = tuple(item.remnant.remnant_id for item in self.inventory_after)
+        if before_ids != tuple(sorted(set(before_ids))):
+            raise ValueError("event inventory before must use sorted unique IDs")
+        if after_ids != tuple(sorted(set(after_ids))):
+            raise ValueError("event inventory after must use sorted unique IDs")
+        digest = semantic_sha256(self, excluded_fields={"event_id"})
+        if self.event_id != f"yfre-{digest[:24]}":
+            raise ValueError("replay event ID does not match semantic content")
+        return self
+
 
 class ReplayTerminalRecord(ReplayContractModel):
     """Storage accrual and scrap-only liquidation at the explicit horizon."""
@@ -409,6 +432,17 @@ class ReplayTerminalRecord(ReplayContractModel):
     @classmethod
     def canonicalize_terminal_time(cls, value: datetime) -> datetime:
         return _utc(value, "terminal timestamp")
+
+    @model_validator(mode="after")
+    def require_complete_liquidation(self) -> Self:
+        if self.storage_interval_start > self.horizon_end:
+            raise ValueError("terminal storage interval cannot run backward")
+        inventory_ids = tuple(item.remnant.remnant_id for item in self.inventory_before_liquidation)
+        if inventory_ids != tuple(sorted(set(inventory_ids))):
+            raise ValueError("terminal inventory must use sorted unique IDs")
+        if self.liquidated_remnant_ids != inventory_ids:
+            raise ValueError("terminal liquidation must include the complete inventory")
+        return self
 
 
 class ReplaySummary(ReplayContractModel):
@@ -462,6 +496,43 @@ class ReplayResult(ReplayContractModel):
     def require_content_identity(self) -> Self:
         if len(self.events) != self.summary.fulfilled_order_count:
             raise ValueError("replay events do not match fulfilled order count")
+        if tuple(event.sequence for event in self.events) != tuple(range(len(self.events))):
+            raise ValueError("replay event sequences must be contiguous from zero")
+        if self.events:
+            for previous, current in zip(self.events, self.events[1:], strict=False):
+                if previous.occurred_at >= current.occurred_at:
+                    raise ValueError("replay event times must be strictly increasing")
+                if current.storage_interval_start != previous.occurred_at:
+                    raise ValueError("replay event storage intervals must be continuous")
+                if current.inventory_before != previous.inventory_after:
+                    raise ValueError("replay event inventory transitions must be continuous")
+            if self.terminal.storage_interval_start != self.events[-1].occurred_at:
+                raise ValueError("terminal storage interval must follow the final event")
+            if self.terminal.inventory_before_liquidation != self.events[-1].inventory_after:
+                raise ValueError("terminal inventory must match the final event")
+        full_sheet_count = sum(
+            event.action.kind is ReplayActionKind.OPEN_STANDARD_SHEET for event in self.events
+        )
+        retrieval_count = sum(
+            event.action.kind is ReplayActionKind.CONSUME_REMNANT for event in self.events
+        )
+        returned_count = sum(len(event.action.returned_remnants) for event in self.events)
+        expected_summary = (
+            full_sheet_count,
+            retrieval_count,
+            returned_count,
+            len(self.terminal.inventory_before_liquidation),
+            self.terminal.cumulative_costs.net_cost,
+        )
+        observed_summary = (
+            self.summary.full_sheet_opening_count,
+            self.summary.remnant_retrieval_count,
+            self.summary.returned_remnant_count,
+            self.summary.terminal_remnant_count,
+            self.summary.final_net_cost,
+        )
+        if observed_summary != expected_summary:
+            raise ValueError("replay summary does not reconcile with event evidence")
         digest = semantic_sha256(self, excluded_fields={"result_id", "content_sha256"})
         if self.content_sha256 != f"sha256:{digest}":
             raise ValueError("replay result content SHA-256 does not match semantic content")
