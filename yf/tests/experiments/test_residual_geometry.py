@@ -29,13 +29,17 @@ from yieldforge.experiments.calibration import (
 from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
 from yieldforge.experiments.residual_geometry import (
     M3EvidenceError,
+    M3ResidualGeometryResult,
     VerifiedCandidateArchive,
     build_m3_input_pack,
     build_m3_task_pair,
+    evaluate_m3_residual_geometry,
     load_m3_input_pack,
+    load_m3_result,
     load_verified_candidate_archive,
     prepare_m3_input_pack,
     publish_m3_input_pack,
+    publish_m3_result,
 )
 from yieldforge.workbench.contracts import JobStatus
 
@@ -464,3 +468,113 @@ def test_prepare_input_pack_recomputes_pair_from_canonical_m2_archives(
     ) == ("candidate-a", "candidate-b")
     assert pack.m2_result_id == confirmation.result_id
     assert pack.m0_contract_id == m0.contract_id
+
+
+def _m0() -> M0ExperimentContract:
+    return M0ExperimentContract.model_validate_json(M0_CONTRACT_PATH.read_bytes(), strict=True)
+
+
+def _pack_from_archives(
+    archives: tuple[VerifiedCandidateArchive, ...],
+):  # type: ignore[no-untyped-def]
+    m0 = _m0()
+    pair = build_m3_task_pair(tasks_index=7, archives=archives)
+    return build_m3_input_pack(
+        m2_result_id="yfgfr-" + "a" * 24,
+        m2_result_sha256="sha256:" + "b" * 64,
+        m0_contract_id=m0.contract_id,
+        m0_contract_sha256=m0.content_sha256,
+        task_pairs=(pair,),
+        expected_task_ids=(7,),
+    )
+
+
+def test_evaluator_records_exact_difference_and_passes_complete_population() -> None:
+    pack = _pack_from_archives(_selection_archives())
+
+    result = evaluate_m3_residual_geometry(pack, _m0())
+
+    assert isinstance(result, M3ResidualGeometryResult)
+    assert len(result.task_results) == 1
+    assert result.task_results[0].valid is True
+    assert result.task_results[0].comparison is not None
+    assert result.task_results[0].comparison.exact_residual_equal is False
+    assert result.summary.registered_task_count == 1
+    assert result.summary.valid_task_count == 1
+    assert result.summary.exact_residual_difference_count == 1
+    assert result.summary.technical_decision == "pass"
+    assert result.result_id == f"yfgr-{result.content_sha256[7:31]}"
+
+
+def test_evaluator_fails_when_distinct_candidates_have_equal_residuals() -> None:
+    archives = (
+        _verified_archive(
+            0,
+            [
+                _candidate("candidate-a", 10.0, seed=0, translation_x=1.0),
+                _candidate("candidate-b", 10.01, seed=0, translation_x=1.0),
+            ],
+        ),
+    )
+    pack = _pack_from_archives(archives)
+
+    result = evaluate_m3_residual_geometry(pack, _m0())
+
+    assert result.summary.exact_residual_difference_count == 0
+    assert result.summary.technical_decision == "fail"
+
+
+def test_evaluator_records_invalid_geometry_without_dropping_task() -> None:
+    archives = (
+        _verified_archive(
+            0,
+            [
+                _candidate("candidate-a", 10.0, seed=0, translation_x=19.0),
+                _candidate("candidate-b", 10.01, seed=0, translation_x=1.0),
+            ],
+        ),
+    )
+    pack = _pack_from_archives(archives)
+
+    result = evaluate_m3_residual_geometry(pack, _m0())
+
+    assert len(result.task_results) == 1
+    assert result.task_results[0].valid is False
+    assert result.task_results[0].error_code == "first_placed_material_out_of_sheet"
+    assert result.summary.failure_count == 1
+    assert result.summary.technical_decision == "fail"
+
+
+def test_result_rejects_reidentified_summary_tampering() -> None:
+    result = evaluate_m3_residual_geometry(
+        _pack_from_archives(_selection_archives()),
+        _m0(),
+    )
+    payload = result.model_dump(mode="json")
+    payload["summary"]["valid_task_count"] = 0
+    digest = semantic_sha256(payload, excluded_fields={"result_id", "content_sha256"})
+    payload["result_id"] = f"yfgr-{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
+
+    with pytest.raises(ValueError, match="summary"):
+        M3ResidualGeometryResult.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_result_is_canonical_immutable_and_rejects_tampering(tmp_path: Path) -> None:
+    result = evaluate_m3_residual_geometry(
+        _pack_from_archives(_selection_archives()),
+        _m0(),
+    )
+    path = publish_m3_result(tmp_path, result)
+
+    assert path.name == f"residual-geometry-result-{result.result_id}.json"
+    assert publish_m3_result(tmp_path, result) == path
+    assert load_m3_result(path) == result
+
+    payload = result.model_dump(mode="json")
+    payload["task_results"][0]["first_observation"]["components"][0][
+        "component_sha256"
+    ] = "f" * 64
+    path.write_text(json.dumps(payload) + "\n")
+    with pytest.raises(M3EvidenceError, match="immutable"):
+        publish_m3_result(tmp_path, result)
