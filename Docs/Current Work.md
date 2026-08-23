@@ -2,21 +2,22 @@
 
 ## Active milestone
 
-[[M4 - Remnant reuse proof]]
+[[M5 - Deterministic replay]]
 
 ## Current objective
 
-Freeze the bounded M4 exact-fit experiment, then prove on adversarial fixtures that a retained
-irregular residual can accept a later compatible source-observed shape while preserving strict
-geometry and provenance. The reusable implementation remains in the single `yf/` project.
+Build the smallest deterministic chronological replay that carries exact stock and recursive
+remnants through time, applies a policy using only its permitted information, and produces a
+canonical event history and reconciled cost totals. The reusable implementation remains in the
+single `yf/` project.
 
 ## Next step
 
-Write the M4 design and implementation plan around exact polygon containment, allowed
-source-backed orientation states, material compatibility, clearance, retained-component identity,
-and immutable lineage. Begin with hand-verifiable favorable and unfavorable fixtures before any
-corpus evaluation. Do not begin chronological simulation, baseline/oracle implementation, oracle
-UI, savings, or commercial claims during this milestone.
+Freeze the M5 event order, inventory state transitions, information boundary, terminal rule, and
+canonical history identity. Start with a hand-computable manifest and replay fixture. Profile the
+existing exact fit path under repeated queries; add a narrow `jagua-rs` collision-acceleration spike
+only if measured replay throughput warrants the second runtime. Do not begin the M6 benchmark,
+baseline/oracle comparison, oracle UI, savings claim, or commercial claim during this milestone.
 
 ## Evidence bridge completed
 
@@ -49,9 +50,16 @@ differed for 202 pairs (99.5074%); the median symmetric difference was 0.1343% o
 was 3.5361%, and the maximum was 22.1654%. None of the 203 pairs changed classification under the
 permissive, primary, or conservative M0 rule.
 
-This proves exact residual accounting and widespread exact residual differences for the selected
-pairs. It does not prove a later shape can use the difference. No remnant-reuse result,
-chronological simulator, future-aware policy, economic benchmark, solver-optimality result, or
-validated savings claim exists.
+M4 is Passed. The input `yfri-26460ffca19eebfc9e479d01` froze 406 exact M3 remnants, 6,607
+future source-shape roles, and 1,331,906 eligible generated-order pairs. The canonical result
+`yfrr-b8b1578fc5e0225f00c4386e` found the first exact witness after 123 pair attempts. The part
+from task `2531` fits a task `147` remnant, creates one reconciled child remnant, and avoids one
+full-sheet opening in the declared one-order toy state.
+
+This proves exact remnant reuse is possible in the modeled geometry. Exact collision detection is
+implemented with Shapely; what remains optional is a faster collision-search backend for repeated
+queries. No observed chronology, reuse-frequency estimate, deterministic simulator, future-aware
+policy, economic benchmark, solver-optimality result, physical-recovery result, or validated
+savings claim exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

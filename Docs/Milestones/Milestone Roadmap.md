@@ -34,6 +34,13 @@ per task: all 203 pairs were valid and reconciled, 202 differed in exact residua
 pair changed classification under any frozen remnant rule. The canonical M3 result is
 `yfgr-0ac2c37f0938d9d399e7a076`.
 
-M4 is next. Its first work is a bounded design and implementation plan for exact future-shape fit
-inside retained residual components. The M3 differences authorize that reuse test; they do not
-establish reuse, avoided purchases, savings, physical recovery, or commercial value.
+M4 also passed. Its frozen bounded search found a later source-shape role that fits an exact M3
+remnant after 123 ordered pair attempts, creates one reconciled child remnant, and avoids one
+full-sheet opening in the declared one-order toy state. The canonical result is
+`yfrr-b8b1578fc5e0225f00c4386e`. This proves the modeled reuse mechanism is possible; it does not
+establish opportunity frequency, chronology, savings, physical recovery, or commercial value.
+
+M5 is next. It will freeze a deterministic event, inventory, policy, and cost-replay boundary, then
+prove that identical inputs reproduce identical histories and totals. The existing Shapely backend
+already provides exact collision truth. A measured `jagua-rs` adapter spike is appropriate only if
+repeated fit discovery becomes the replay bottleneck.
