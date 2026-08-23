@@ -17,6 +17,7 @@ from yieldforge.domain import SpyrrowRunConfig, StripPackingProblem
 from yieldforge.experiments.calibration import (
     CalibrationApiClient,
     build_geometry_confirmation_result,
+    load_geometry_confirmation_result,
     orchestrate_calibration,
     orchestrate_confirmation,
     publish_geometry_confirmation_result,
@@ -24,9 +25,17 @@ from yieldforge.experiments.calibration import (
     registered_confirmation_cells,
 )
 from yieldforge.experiments.contracts import (
+    M0ExperimentContract,
     PureGeometryConfirmationProtocol,
     load_frozen_json,
     validate_experiment_bundle,
+)
+from yieldforge.experiments.residual_geometry import (
+    evaluate_m3_residual_geometry,
+    load_m3_input_pack,
+    prepare_m3_input_pack,
+    publish_m3_input_pack,
+    publish_m3_result,
 )
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 
@@ -200,6 +209,34 @@ def _confirm_geometry_api(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prepare_residual_geometry(args: argparse.Namespace) -> int:
+    confirmation = load_geometry_confirmation_result(args.confirmation_result)
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    pack = prepare_m3_input_pack(confirmation, m0, args.archive_root)
+    path = publish_m3_input_pack(args.output, pack)
+    print(
+        "Published M3 residual input: "
+        f"input_id={pack.input_id} task_pairs={len(pack.expected_task_ids)} output={path}"
+    )
+    return 0
+
+
+def _evaluate_residual_geometry(args: argparse.Namespace) -> int:
+    pack = load_m3_input_pack(args.input)
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    result = evaluate_m3_residual_geometry(pack, m0)
+    path = publish_m3_result(args.output, result)
+    summary = result.summary
+    print(
+        "Published M3 residual result: "
+        f"result_id={result.result_id} "
+        f"valid_tasks={summary.valid_task_count}/{summary.registered_task_count} "
+        f"exact_residual_differences={summary.exact_residual_difference_count} "
+        f"decision={summary.technical_decision} output={path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -283,6 +320,25 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--result-output", type=Path)
     confirm.add_argument("--preflight-only", action="store_true")
     confirm.set_defaults(handler=_confirm_geometry_api)
+
+    prepare_residual = experiment_commands.add_parser(
+        "prepare-residual-geometry",
+        help="verify M2 archives and freeze the exact M3 candidate pairs",
+    )
+    prepare_residual.add_argument("--m0", type=Path, required=True)
+    prepare_residual.add_argument("--confirmation-result", type=Path, required=True)
+    prepare_residual.add_argument("--archive-root", type=Path, required=True)
+    prepare_residual.add_argument("--output", type=Path, required=True)
+    prepare_residual.set_defaults(handler=_prepare_residual_geometry)
+
+    evaluate_residual = experiment_commands.add_parser(
+        "evaluate-residual-geometry",
+        help="evaluate and publish the frozen exact M3 residual pairs",
+    )
+    evaluate_residual.add_argument("--m0", type=Path, required=True)
+    evaluate_residual.add_argument("--input", type=Path, required=True)
+    evaluate_residual.add_argument("--output", type=Path, required=True)
+    evaluate_residual.set_defaults(handler=_evaluate_residual_geometry)
     return parser
 
 

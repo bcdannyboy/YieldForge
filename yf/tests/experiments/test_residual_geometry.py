@@ -45,6 +45,18 @@ from yieldforge.workbench.contracts import JobStatus
 
 YF_ROOT = Path(__file__).parents[2]
 M0_CONTRACT_PATH = YF_ROOT / "experiments" / "m0-contract-v1.json"
+COMMITTED_M3_INPUT_PATH = (
+    YF_ROOT
+    / "experiments"
+    / "results"
+    / "residual-geometry-input-yfgi-2fe5b848ea643d282c284f90.json"
+)
+COMMITTED_M3_RESULT_PATH = (
+    YF_ROOT
+    / "experiments"
+    / "results"
+    / "residual-geometry-result-yfgr-0ac2c37f0938d9d399e7a076.json"
+)
 
 
 def _problem(*, name: str = "lectra-task-7") -> StripPackingProblem:
@@ -578,3 +590,29 @@ def test_result_is_canonical_immutable_and_rejects_tampering(tmp_path: Path) -> 
     path.write_text(json.dumps(payload) + "\n")
     with pytest.raises(M3EvidenceError, match="immutable"):
         publish_m3_result(tmp_path, result)
+
+
+def test_committed_m3_input_is_canonical() -> None:
+    pack = load_m3_input_pack(COMMITTED_M3_INPUT_PATH)
+
+    assert pack.input_id == "yfgi-2fe5b848ea643d282c284f90"
+    assert pack.content_sha256 == (
+        "sha256:2fe5b848ea643d282c284f90fc645ecc8d00a8467e6a7f53fed506cb9fa0eaa0"
+    )
+    assert len(pack.expected_task_ids) == 203
+    assert len(pack.task_pairs) == 203
+    assert sum(len(pair.selected_candidates) for pair in pack.task_pairs) == 406
+
+
+def test_committed_m3_result_is_canonical_and_recomputes_gate() -> None:
+    result = load_m3_result(COMMITTED_M3_RESULT_PATH)
+
+    assert result.result_id == "yfgr-0ac2c37f0938d9d399e7a076"
+    assert result.content_sha256 == (
+        "sha256:0ac2c37f0938d9d399e7a076238bd574ed6d24ec7db3d8ea4e3af7b37165412d"
+    )
+    assert result.input_id == "yfgi-2fe5b848ea643d282c284f90"
+    assert len(result.task_results) == 203
+    assert result.summary.valid_task_count == 203
+    assert result.summary.exact_residual_difference_count == 202
+    assert result.summary.technical_decision == "pass"

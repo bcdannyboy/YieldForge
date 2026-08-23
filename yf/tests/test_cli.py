@@ -658,3 +658,122 @@ def test_confirmation_command_runs_exact_registered_evaluation(
     output_text = capsys.readouterr().out
     assert "registered_cells=812" in output_text
     assert "result_id=yfgfr-0123456789abcdef01234567" in output_text
+
+
+def test_prepare_residual_geometry_command_binds_m2_archives_and_m0(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    confirmation_path = tmp_path / "confirmation.json"
+    m0_path = tmp_path / "m0.json"
+    archive_root = tmp_path / "archives"
+    output = tmp_path / "results"
+    confirmation = SimpleNamespace(result_id="yfgfr-" + "a" * 24)
+    m0 = SimpleNamespace(contract_id="yfm0-" + "b" * 24)
+    pack = SimpleNamespace(input_id="yfgi-" + "c" * 24, expected_task_ids=tuple(range(203)))
+    calls = []
+
+    monkeypatch.setattr(
+        "yieldforge.cli.load_geometry_confirmation_result",
+        lambda path: confirmation if path == confirmation_path else None,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.load_frozen_json",
+        lambda path, model: m0 if path == m0_path else None,
+    )
+
+    def fake_prepare(confirmation_arg, m0_arg, archive_root_arg):  # type: ignore[no-untyped-def]
+        calls.append((confirmation_arg, m0_arg, archive_root_arg))
+        return pack
+
+    monkeypatch.setattr("yieldforge.cli.prepare_m3_input_pack", fake_prepare)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_m3_input_pack",
+        lambda output_arg, pack_arg: output_arg
+        / f"residual-geometry-input-{pack_arg.input_id}.json",
+    )
+
+    exit_code = main(
+        [
+            "experiments",
+            "prepare-residual-geometry",
+            "--m0",
+            str(m0_path),
+            "--confirmation-result",
+            str(confirmation_path),
+            "--archive-root",
+            str(archive_root),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(confirmation, m0, archive_root)]
+    text = capsys.readouterr().out
+    assert "input_id=yfgi-" in text
+    assert "task_pairs=203" in text
+
+
+def test_evaluate_residual_geometry_command_publishes_canonical_result(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    input_path = tmp_path / "input.json"
+    m0_path = tmp_path / "m0.json"
+    output = tmp_path / "results"
+    pack = SimpleNamespace(input_id="yfgi-" + "a" * 24)
+    m0 = SimpleNamespace(contract_id="yfm0-" + "b" * 24)
+    result = SimpleNamespace(
+        result_id="yfgr-" + "c" * 24,
+        summary=SimpleNamespace(
+            registered_task_count=203,
+            valid_task_count=203,
+            exact_residual_difference_count=200,
+            technical_decision="pass",
+        ),
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        "yieldforge.cli.load_m3_input_pack",
+        lambda path: pack if path == input_path else None,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.load_frozen_json",
+        lambda path, model: m0 if path == m0_path else None,
+    )
+
+    def fake_evaluate(pack_arg, m0_arg):  # type: ignore[no-untyped-def]
+        calls.append((pack_arg, m0_arg))
+        return result
+
+    monkeypatch.setattr("yieldforge.cli.evaluate_m3_residual_geometry", fake_evaluate)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_m3_result",
+        lambda output_arg, result_arg: output_arg
+        / f"residual-geometry-result-{result_arg.result_id}.json",
+    )
+
+    exit_code = main(
+        [
+            "experiments",
+            "evaluate-residual-geometry",
+            "--m0",
+            str(m0_path),
+            "--input",
+            str(input_path),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(pack, m0)]
+    text = capsys.readouterr().out
+    assert "result_id=yfgr-" in text
+    assert "valid_tasks=203/203" in text
+    assert "exact_residual_differences=200" in text
+    assert "decision=pass" in text
