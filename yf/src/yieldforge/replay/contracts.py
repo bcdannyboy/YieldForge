@@ -81,9 +81,7 @@ class ReplayEngineIdentity(ReplayContractModel):
 class ReplayPolicyIdentity(ReplayContractModel):
     """Bounded as-of-time policy identity for the M5 mechanism proof."""
 
-    name: Literal["first_fit_remnant_then_standard_sheet"] = (
-        "first_fit_remnant_then_standard_sheet"
-    )
+    name: Literal["first_fit_remnant_then_standard_sheet"] = "first_fit_remnant_then_standard_sheet"
     version: Literal["1.0.0"] = "1.0.0"
     seed: Literal[0] = 0
     information_set: Literal["released_order_and_current_inventory_only"] = (
@@ -352,9 +350,7 @@ class ReplayActionEvidence(ReplayContractModel):
     kind: ReplayActionKind
     order_id: StrictStr = Field(min_length=1)
     selected_stock_id: StrictStr = Field(min_length=1)
-    selected_remnant_id: StrictStr | None = Field(
-        default=None, pattern=r"^yfrm-[0-9a-f]{24}$"
-    )
+    selected_remnant_id: StrictStr | None = Field(default=None, pattern=r"^yfrm-[0-9a-f]{24}$")
     placement: FitPlacement
     search_result: FitSearchResult
     placed_polygon: CanonicalPolygon
