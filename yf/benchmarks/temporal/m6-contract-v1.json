@@ -1,0 +1,427 @@
+{
+  "blocked_tasks": [
+    {
+      "reason_code": "contains_non_s1_constraints",
+      "tasks_index": 4365,
+      "treatment": "excluded_and_reported"
+    },
+    {
+      "reason_code": "contains_non_s1_constraints",
+      "tasks_index": 25801,
+      "treatment": "excluded_and_reported"
+    }
+  ],
+  "candidate_requirement": {
+    "archive_requirement": "verified_immutable_shared_across_paired_policies",
+    "early_termination": false,
+    "min_items_separation": null,
+    "num_workers": 1,
+    "seconds_per_seed": 10,
+    "seeds": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "solver_name": "spyrrow",
+    "solver_version": "0.9.0"
+  },
+  "claim_ceiling": "controlled_synthetic_chronology_over_real_catalog_geometry_only_not_factory_demand_policy_value_savings_physical_or_commercial_evidence",
+  "common_seeds": [
+    2026082300,
+    2026082301,
+    2026082302,
+    2026082303,
+    2026082304,
+    2026082305,
+    2026082306,
+    2026082307
+  ],
+  "content_sha256": "sha256:3eeda3f4feb80813807c501ae71299a2add07ed76b75009e2f744daddae5a8aa",
+  "contract_id": "yfm6-3eeda3f4feb80813807c501a",
+  "field_provenance": [
+    {
+      "explanation": "Exact polygon coordinates reference the pinned Lectra catalog.",
+      "field": "geometry",
+      "kind": "source_observed"
+    },
+    {
+      "explanation": "Each event preserves one source task's complete part composition.",
+      "field": "composition",
+      "kind": "source_observed"
+    },
+    {
+      "explanation": "Sheet type and dimensions are copied from the selected source task.",
+      "field": "stock",
+      "kind": "source_observed"
+    },
+    {
+      "explanation": "Release timestamps are deterministic generated scenario fields.",
+      "field": "chronology",
+      "kind": "generated"
+    },
+    {
+      "explanation": "Material compatibility is assumed because the source has no material field.",
+      "field": "material",
+      "kind": "assumed"
+    },
+    {
+      "explanation": "Rates and economic indexes are generated feasibility fields.",
+      "field": "economics",
+      "kind": "generated"
+    },
+    {
+      "explanation": "Regime labels describe generator construction, not source observations.",
+      "field": "regime_label",
+      "kind": "generated"
+    },
+    {
+      "explanation": "Calibration and evaluation membership is preregistered generated metadata.",
+      "field": "partition",
+      "kind": "generated"
+    }
+  ],
+  "generator": {
+    "algorithm": "python-mt19937-canonical-v1",
+    "name": "yieldforge.temporal-benchmark",
+    "version": "1.0.0"
+  },
+  "m0_contract_id": "yfm0-29b7efe8ac2a0a9995c4f907",
+  "m0_contract_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+  "population_cells": [
+    {
+      "cell_id": "yfm6c-57e52fe3068550b4acfe",
+      "partition": "calibration",
+      "regime": "no_signal",
+      "seed": 2026082300
+    },
+    {
+      "cell_id": "yfm6c-34714f591d7e7e9c5a8c",
+      "partition": "calibration",
+      "regime": "no_signal",
+      "seed": 2026082301
+    },
+    {
+      "cell_id": "yfm6c-d2353eebb3fbfb03b5f8",
+      "partition": "evaluation",
+      "regime": "no_signal",
+      "seed": 2026082302
+    },
+    {
+      "cell_id": "yfm6c-d54548a36b992e839951",
+      "partition": "evaluation",
+      "regime": "no_signal",
+      "seed": 2026082303
+    },
+    {
+      "cell_id": "yfm6c-0b41cb6d1c16a6aace1d",
+      "partition": "evaluation",
+      "regime": "no_signal",
+      "seed": 2026082304
+    },
+    {
+      "cell_id": "yfm6c-5b19103b3b75dceceea9",
+      "partition": "evaluation",
+      "regime": "no_signal",
+      "seed": 2026082305
+    },
+    {
+      "cell_id": "yfm6c-999c2eef123feb868c69",
+      "partition": "evaluation",
+      "regime": "no_signal",
+      "seed": 2026082306
+    },
+    {
+      "cell_id": "yfm6c-e248ed91864e6bd2e68b",
+      "partition": "evaluation",
+      "regime": "no_signal",
+      "seed": 2026082307
+    },
+    {
+      "cell_id": "yfm6c-54c5ccb4709e595da1ec",
+      "partition": "calibration",
+      "regime": "exact_recurrence",
+      "seed": 2026082300
+    },
+    {
+      "cell_id": "yfm6c-c69acf2467a50a0df6b9",
+      "partition": "calibration",
+      "regime": "exact_recurrence",
+      "seed": 2026082301
+    },
+    {
+      "cell_id": "yfm6c-4d34a75dc43e6cbde818",
+      "partition": "evaluation",
+      "regime": "exact_recurrence",
+      "seed": 2026082302
+    },
+    {
+      "cell_id": "yfm6c-b663eaebb5ae78137a40",
+      "partition": "evaluation",
+      "regime": "exact_recurrence",
+      "seed": 2026082303
+    },
+    {
+      "cell_id": "yfm6c-18dcdd91d8faa67b6095",
+      "partition": "evaluation",
+      "regime": "exact_recurrence",
+      "seed": 2026082304
+    },
+    {
+      "cell_id": "yfm6c-a7fa94a6aab45488627f",
+      "partition": "evaluation",
+      "regime": "exact_recurrence",
+      "seed": 2026082305
+    },
+    {
+      "cell_id": "yfm6c-7c2b9d35998842183bfb",
+      "partition": "evaluation",
+      "regime": "exact_recurrence",
+      "seed": 2026082306
+    },
+    {
+      "cell_id": "yfm6c-3f4f25248f1f7bbcb3a4",
+      "partition": "evaluation",
+      "regime": "exact_recurrence",
+      "seed": 2026082307
+    },
+    {
+      "cell_id": "yfm6c-a58a557f1cf23ebc4cc3",
+      "partition": "calibration",
+      "regime": "family_similarity",
+      "seed": 2026082300
+    },
+    {
+      "cell_id": "yfm6c-6c80a0de14b209d243e1",
+      "partition": "calibration",
+      "regime": "family_similarity",
+      "seed": 2026082301
+    },
+    {
+      "cell_id": "yfm6c-286bf62b6ff8f766c9dd",
+      "partition": "evaluation",
+      "regime": "family_similarity",
+      "seed": 2026082302
+    },
+    {
+      "cell_id": "yfm6c-908d7047734921b4ba42",
+      "partition": "evaluation",
+      "regime": "family_similarity",
+      "seed": 2026082303
+    },
+    {
+      "cell_id": "yfm6c-8c4ecf23255e758aea2d",
+      "partition": "evaluation",
+      "regime": "family_similarity",
+      "seed": 2026082304
+    },
+    {
+      "cell_id": "yfm6c-1a708a4b5c48b74ed0c8",
+      "partition": "evaluation",
+      "regime": "family_similarity",
+      "seed": 2026082305
+    },
+    {
+      "cell_id": "yfm6c-6381b27831d91f1ec35f",
+      "partition": "evaluation",
+      "regime": "family_similarity",
+      "seed": 2026082306
+    },
+    {
+      "cell_id": "yfm6c-8e37e556c8d3887e18dc",
+      "partition": "evaluation",
+      "regime": "family_similarity",
+      "seed": 2026082307
+    },
+    {
+      "cell_id": "yfm6c-772a6330a7a08d17342d",
+      "partition": "calibration",
+      "regime": "compatible_bundle",
+      "seed": 2026082300
+    },
+    {
+      "cell_id": "yfm6c-04baea47122da4cb1275",
+      "partition": "calibration",
+      "regime": "compatible_bundle",
+      "seed": 2026082301
+    },
+    {
+      "cell_id": "yfm6c-855f4d5dcb684b7337c0",
+      "partition": "evaluation",
+      "regime": "compatible_bundle",
+      "seed": 2026082302
+    },
+    {
+      "cell_id": "yfm6c-972281c9943154f66c02",
+      "partition": "evaluation",
+      "regime": "compatible_bundle",
+      "seed": 2026082303
+    },
+    {
+      "cell_id": "yfm6c-42b49045ba74c9362ef1",
+      "partition": "evaluation",
+      "regime": "compatible_bundle",
+      "seed": 2026082304
+    },
+    {
+      "cell_id": "yfm6c-f47e270763b99f1ce51a",
+      "partition": "evaluation",
+      "regime": "compatible_bundle",
+      "seed": 2026082305
+    },
+    {
+      "cell_id": "yfm6c-854cd4d4d3d92f6341d9",
+      "partition": "evaluation",
+      "regime": "compatible_bundle",
+      "seed": 2026082306
+    },
+    {
+      "cell_id": "yfm6c-ba80f07ae109ea504dfe",
+      "partition": "evaluation",
+      "regime": "compatible_bundle",
+      "seed": 2026082307
+    },
+    {
+      "cell_id": "yfm6c-6cc3d69b24624eaa460d",
+      "partition": "calibration",
+      "regime": "high_mix",
+      "seed": 2026082300
+    },
+    {
+      "cell_id": "yfm6c-473256212c050a2eb951",
+      "partition": "calibration",
+      "regime": "high_mix",
+      "seed": 2026082301
+    },
+    {
+      "cell_id": "yfm6c-ade5208a8f3bee232677",
+      "partition": "evaluation",
+      "regime": "high_mix",
+      "seed": 2026082302
+    },
+    {
+      "cell_id": "yfm6c-463afe753e2fe93cf072",
+      "partition": "evaluation",
+      "regime": "high_mix",
+      "seed": 2026082303
+    },
+    {
+      "cell_id": "yfm6c-15fdb7f23615c63c69ac",
+      "partition": "evaluation",
+      "regime": "high_mix",
+      "seed": 2026082304
+    },
+    {
+      "cell_id": "yfm6c-b1762be31b1fd99f4e4d",
+      "partition": "evaluation",
+      "regime": "high_mix",
+      "seed": 2026082305
+    },
+    {
+      "cell_id": "yfm6c-7519c156105a3f1fa478",
+      "partition": "evaluation",
+      "regime": "high_mix",
+      "seed": 2026082306
+    },
+    {
+      "cell_id": "yfm6c-4c3a77a361ac35818a1f",
+      "partition": "evaluation",
+      "regime": "high_mix",
+      "seed": 2026082307
+    },
+    {
+      "cell_id": "yfm6c-a06a825193077e1205b3",
+      "partition": "calibration",
+      "regime": "regime_shift",
+      "seed": 2026082300
+    },
+    {
+      "cell_id": "yfm6c-54524a198348e51a78da",
+      "partition": "calibration",
+      "regime": "regime_shift",
+      "seed": 2026082301
+    },
+    {
+      "cell_id": "yfm6c-3231e6ab3938cd012fc3",
+      "partition": "evaluation",
+      "regime": "regime_shift",
+      "seed": 2026082302
+    },
+    {
+      "cell_id": "yfm6c-5c0887e597c46a61cf4f",
+      "partition": "evaluation",
+      "regime": "regime_shift",
+      "seed": 2026082303
+    },
+    {
+      "cell_id": "yfm6c-f0841624c0c272ff3c80",
+      "partition": "evaluation",
+      "regime": "regime_shift",
+      "seed": 2026082304
+    },
+    {
+      "cell_id": "yfm6c-0da3f8be095a46d8c823",
+      "partition": "evaluation",
+      "regime": "regime_shift",
+      "seed": 2026082305
+    },
+    {
+      "cell_id": "yfm6c-16b226b6cc6bd7860b08",
+      "partition": "evaluation",
+      "regime": "regime_shift",
+      "seed": 2026082306
+    },
+    {
+      "cell_id": "yfm6c-720d9c1a9686ccaf11a8",
+      "partition": "evaluation",
+      "regime": "regime_shift",
+      "seed": 2026082307
+    }
+  ],
+  "projection_mode": "source_as_recorded",
+  "rates": {
+    "area_unit": "source_coordinate_unit_squared",
+    "cost_unit": "generated_cost_unit",
+    "provenance": "generated_feasibility_only",
+    "purchase_cost_per_area": 1e-06,
+    "retrieval_handling_cost_per_remnant": 0.25,
+    "return_handling_cost_per_remnant": 0.25,
+    "schema_version": "yieldforge.m6-feasibility-rates.v1",
+    "scrap_credit_per_area": 1e-07,
+    "storage_cost_per_area_hour": 1e-09,
+    "time_unit": "hour"
+  },
+  "regimes": [
+    "no_signal",
+    "exact_recurrence",
+    "family_similarity",
+    "compatible_bundle",
+    "high_mix",
+    "regime_shift"
+  ],
+  "schema_version": "yieldforge.temporal-benchmark-contract.v1",
+  "source_catalog": {
+    "artifact_sha256": "0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad",
+    "blocked_task_count": 2,
+    "conversion_ruleset_version": "lectra-catalog-rules.v2",
+    "coordinate_unit": "source_literal_m^-4_uninterpreted",
+    "dataset_id": "lectra-7030786-v1.1",
+    "doi": "10.5281/zenodo.7030786",
+    "logical_sha256": "900dcb5e33308c54db794cccb72f75b8fcf6d11d385fc54d28ccd680dc15ba06",
+    "manifest_path": "datasets/catalogs/lectra-7030786-v1.1/catalog-manifest.json",
+    "manifest_sha256": "95a404847a112b47ae27bd6269bc5e3e797c83848cabea2ce3b155004e82976e",
+    "part_count": 8358,
+    "repository_path": "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json",
+    "runnable_task_count": 254,
+    "shape_count": 745,
+    "task_count": 256
+  },
+  "timing": {
+    "batching_rule": "all_and_only_same_timestamp_material_and_source_sheet",
+    "compatible_bundle_size": 3,
+    "event_count": 24,
+    "interval_minutes": 60,
+    "regime_shift_sequence": 12,
+    "starts_at": "2026-01-01T00:00:00Z"
+  }
+}

@@ -1036,3 +1036,112 @@ def test_evaluate_deterministic_replay_command_publishes_result(
     assert "fulfilled=2/2" in text
     assert "final_net_cost=104.9" in text
     assert "decision=pass" in text
+
+
+def test_m6_generate_command_publishes_registered_population(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    contract_path = tmp_path / "m6-contract.json"
+    population_path = tmp_path / "m6-population.json"
+    stream_root = tmp_path / "streams"
+    contract = SimpleNamespace(contract_id="yfm6-" + "a" * 24)
+    catalog = object()
+    population = SimpleNamespace(
+        population_id="yftp-" + "b" * 24,
+        stream_count=48,
+        registered_cell_count=48,
+        failed_cells=(),
+    )
+    streams = {"stream": object()}
+    calls = []
+
+    monkeypatch.setattr("yieldforge.cli.build_registered_contract", lambda: contract)
+    monkeypatch.setattr("yieldforge.cli.load_registered_catalog", lambda: catalog)
+    monkeypatch.setattr(
+        "yieldforge.cli.build_population",
+        lambda contract_arg, catalog_arg: (population, streams),
+    )
+
+    def fake_publish(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(population_path=population_path)
+
+    monkeypatch.setattr("yieldforge.cli.publish_population_artifacts", fake_publish)
+
+    exit_code = main(
+        [
+            "benchmark",
+            "m6-generate",
+            "--contract",
+            str(contract_path),
+            "--population",
+            str(population_path),
+            "--stream-root",
+            str(stream_root),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        {
+            "contract_path": contract_path,
+            "population_path": population_path,
+            "stream_root": stream_root,
+            "contract": contract,
+            "population": population,
+            "streams": streams,
+        }
+    ]
+    assert "streams=48/48" in capsys.readouterr().out
+
+
+def test_m6_validate_command_reports_regeneration_and_lowering(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    contract_path = tmp_path / "m6-contract.json"
+    population_path = tmp_path / "m6-population.json"
+    stream_root = tmp_path / "streams"
+    calls = []
+
+    def fake_validate(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(
+            contract_id="yfm6-" + "a" * 24,
+            population_id="yftp-" + "b" * 24,
+            stream_count=48,
+            event_count=1152,
+            batch_count=1064,
+            part_count=38000,
+        )
+
+    monkeypatch.setattr("yieldforge.cli.validate_population_artifacts", fake_validate)
+
+    exit_code = main(
+        [
+            "benchmark",
+            "m6-validate",
+            "--contract",
+            str(contract_path),
+            "--population",
+            str(population_path),
+            "--stream-root",
+            str(stream_root),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        {
+            "contract_path": contract_path,
+            "population_path": population_path,
+            "stream_root": stream_root,
+        }
+    ]
+    text = capsys.readouterr().out
+    assert "streams=48" in text
+    assert "events=1152" in text
+    assert "parts=38000" in text

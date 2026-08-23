@@ -470,6 +470,19 @@ class TemporalStreamManifest(TemporalContractModel):
             raise ValueError("stream ID does not match content hash")
         return self
 
+    def canonical_bytes(self) -> bytes:
+        """Return the stable persisted JSON representation for immutable archives."""
+
+        return (
+            json.dumps(
+                self.model_dump(mode="json"),
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode()
+
 
 class BaselineTemporalView(TemporalContractModel):
     schema_version: Literal["yieldforge.temporal-baseline-view.v1"] = (

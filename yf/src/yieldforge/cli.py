@@ -55,6 +55,13 @@ from yieldforge.experiments.residual_geometry import (
     publish_m3_result,
 )
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
+from yieldforge.temporal_benchmark.catalog import load_registered_catalog
+from yieldforge.temporal_benchmark.contracts import build_registered_contract
+from yieldforge.temporal_benchmark.population import (
+    build_population,
+    publish_population_artifacts,
+    validate_population_artifacts,
+)
 
 DatasetAuditCheckError = PassiveEvidenceError
 
@@ -320,6 +327,42 @@ def _evaluate_deterministic_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _generate_m6_benchmark(args: argparse.Namespace) -> int:
+    contract = build_registered_contract()
+    catalog = load_registered_catalog()
+    population, streams = build_population(contract, catalog)
+    paths = publish_population_artifacts(
+        contract_path=args.contract,
+        population_path=args.population,
+        stream_root=args.stream_root,
+        contract=contract,
+        population=population,
+        streams=streams,
+    )
+    print(
+        "Published M6 temporal benchmark: "
+        f"contract={contract.contract_id} population={population.population_id} "
+        f"streams={population.stream_count}/{population.registered_cell_count} "
+        f"failures={len(population.failed_cells)} output={paths.population_path}"
+    )
+    return 0 if not population.failed_cells else 1
+
+
+def _validate_m6_benchmark(args: argparse.Namespace) -> int:
+    summary = validate_population_artifacts(
+        contract_path=args.contract,
+        population_path=args.population,
+        stream_root=args.stream_root,
+    )
+    print(
+        "Validated M6 temporal benchmark: "
+        f"contract={summary.contract_id} population={summary.population_id} "
+        f"streams={summary.stream_count} events={summary.event_count} "
+        f"batches={summary.batch_count} parts={summary.part_count}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -460,6 +503,26 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_replay.add_argument("--input", type=Path, required=True)
     evaluate_replay.add_argument("--output", type=Path, required=True)
     evaluate_replay.set_defaults(handler=_evaluate_deterministic_replay)
+
+    benchmark = commands.add_parser("benchmark", help="manage registered benchmark artifacts")
+    benchmark_commands = benchmark.add_subparsers(dest="benchmark_command", required=True)
+    generate_m6 = benchmark_commands.add_parser(
+        "m6-generate",
+        help="generate and publish the registered M6 temporal population",
+    )
+    generate_m6.add_argument("--contract", type=Path, required=True)
+    generate_m6.add_argument("--population", type=Path, required=True)
+    generate_m6.add_argument("--stream-root", type=Path, required=True)
+    generate_m6.set_defaults(handler=_generate_m6_benchmark)
+
+    validate_m6 = benchmark_commands.add_parser(
+        "m6-validate",
+        help="regenerate, lower, and validate the registered M6 temporal population",
+    )
+    validate_m6.add_argument("--contract", type=Path, required=True)
+    validate_m6.add_argument("--population", type=Path, required=True)
+    validate_m6.add_argument("--stream-root", type=Path, required=True)
+    validate_m6.set_defaults(handler=_validate_m6_benchmark)
     return parser
 
 

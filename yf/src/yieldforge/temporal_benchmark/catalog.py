@@ -7,7 +7,7 @@ import hmac
 import json
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -78,6 +78,11 @@ class CatalogSnapshot:
     _tasks: Mapping[int, TaskSourceRow]
     _parts: Mapping[int, tuple[PartSourceRow, ...]]
     _geometry: Mapping[int, DerivedShapeGeometry]
+    _projection_cache: dict[int, ProjectedTask] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
 
     def task(self, tasks_index: int) -> TaskSourceRow:
         try:
@@ -115,8 +120,10 @@ class CatalogSnapshot:
             if tasks_index in set(self.blocked_task_ids):
                 raise CatalogEvidenceError(f"source task {tasks_index} is not runnable")
             raise CatalogEvidenceError(f"unknown source task {tasks_index}")
+        if tasks_index in self._projection_cache:
+            return self._projection_cache[tasks_index]
         try:
-            return project_task(
+            projected = project_task(
                 self._normalized,
                 tasks_index,
                 mode=ProjectionMode.SOURCE_AS_RECORDED,
@@ -125,6 +132,8 @@ class CatalogSnapshot:
             raise CatalogEvidenceError(
                 f"source-recorded projection failed for task {tasks_index}"
             ) from error
+        self._projection_cache[tasks_index] = projected
+        return projected
 
 
 def _semantic_sha256(normalized: NormalizedSlice) -> str:
