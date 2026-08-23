@@ -275,6 +275,115 @@ class FitPlacement(ReuseContractModel):
     translation: tuple[StrictFloat, StrictFloat]
 
 
+class FitSearchConfig(ReuseContractModel):
+    """Frozen deterministic candidate-search settings."""
+
+    schema_version: Literal["yieldforge.fit-search-config.v1"] = "yieldforge.fit-search-config.v1"
+    grid_columns: StrictInt = Field(ge=2)
+    grid_rows: StrictInt = Field(ge=2)
+    maximum_candidates: StrictInt = Field(ge=1)
+    candidate_source_order: tuple[StrictStr, ...] = (
+        "bbox_alignments",
+        "vertex_alignments",
+        "uniform_grid",
+    )
+    rotation_order: Literal["ascending_numeric"] = "ascending_numeric"
+    transform_order: Literal["rotation_translation_lexicographic"] = (
+        "rotation_translation_lexicographic"
+    )
+
+    @field_validator("candidate_source_order")
+    @classmethod
+    def require_registered_candidate_source_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        expected = ("bbox_alignments", "vertex_alignments", "uniform_grid")
+        if value != expected:
+            raise ValueError("candidate sources must use the registered order")
+        return value
+
+
+class FitSearchStatus(StrEnum):
+    """Exhaustive vocabulary for one bounded witness search."""
+
+    FIT = "fit"
+    NO_WITNESS_WITHIN_REGISTERED_SEARCH = "no_witness_within_registered_search"
+
+
+class FitSearchRejectionCount(ReuseContractModel):
+    """Stable count for one exact placement rejection code."""
+
+    error_code: StrictStr = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    count: StrictInt = Field(ge=1)
+
+
+class FitSearchAttemptSummary(ReuseContractModel):
+    """Auditable candidate generation, budget, and evaluation counts."""
+
+    generated_candidate_count: StrictInt = Field(ge=0)
+    duplicate_candidate_count: StrictInt = Field(ge=0)
+    unique_candidate_count: StrictInt = Field(ge=0)
+    budgeted_candidate_count: StrictInt = Field(ge=0)
+    evaluated_candidate_count: StrictInt = Field(ge=0)
+    budget_truncated_candidate_count: StrictInt = Field(ge=0)
+    rejection_counts: tuple[FitSearchRejectionCount, ...] = ()
+
+    @model_validator(mode="after")
+    def require_reconciled_counts(self) -> Self:
+        if self.generated_candidate_count != (
+            self.duplicate_candidate_count + self.unique_candidate_count
+        ):
+            raise ValueError("generated candidates must reconcile with duplicates and unique count")
+        if self.unique_candidate_count != (
+            self.budgeted_candidate_count + self.budget_truncated_candidate_count
+        ):
+            raise ValueError("unique candidates must reconcile with the registered budget")
+        if self.evaluated_candidate_count > self.budgeted_candidate_count:
+            raise ValueError("evaluated candidates cannot exceed the registered budget")
+        error_codes = tuple(item.error_code for item in self.rejection_counts)
+        if error_codes != tuple(sorted(set(error_codes))):
+            raise ValueError("search rejection counts must be sorted and unique")
+        if sum(item.count for item in self.rejection_counts) > self.evaluated_candidate_count:
+            raise ValueError("search rejections cannot exceed evaluated candidates")
+        return self
+
+
+class FitSearchResult(ReuseContractModel):
+    """One exact witness or an explicitly inconclusive bounded exhaustion."""
+
+    schema_version: Literal["yieldforge.fit-search-result.v1"] = "yieldforge.fit-search-result.v1"
+    status: FitSearchStatus
+    parent_remnant_id: StrictStr = Field(pattern=r"^yfrm-[0-9a-f]{24}$")
+    part_id: StrictStr = Field(min_length=1)
+    config: FitSearchConfig
+    summary: FitSearchAttemptSummary
+    placement: FitPlacement | None = None
+
+    @model_validator(mode="after")
+    def require_consistent_outcome(self) -> Self:
+        expected_budgeted = min(
+            self.summary.unique_candidate_count,
+            self.config.maximum_candidates,
+        )
+        if self.summary.budgeted_candidate_count != expected_budgeted:
+            raise ValueError("search summary does not match the registered candidate budget")
+
+        rejected = sum(item.count for item in self.summary.rejection_counts)
+        if self.status is FitSearchStatus.FIT:
+            if (
+                self.placement is None
+                or self.placement.part_id != self.part_id
+                or self.summary.evaluated_candidate_count < 1
+                or rejected != self.summary.evaluated_candidate_count - 1
+            ):
+                raise ValueError("fit result requires one accepted placement after its rejections")
+        elif (
+            self.placement is not None
+            or self.summary.evaluated_candidate_count != self.summary.budgeted_candidate_count
+            or rejected != self.summary.evaluated_candidate_count
+        ):
+            raise ValueError("no-witness result requires complete inconclusive search exhaustion")
+        return self
+
+
 class ReuseAccounting(ReuseContractModel):
     """Disjoint material categories after consuming one remnant."""
 

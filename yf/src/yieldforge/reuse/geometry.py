@@ -57,7 +57,9 @@ class RemnantConsumption:
     scrap_components: tuple[Polygon, ...]
 
 
-def _material_key(material: MaterialIdentity) -> tuple[str, str, str, str, str]:
+def material_key(material: MaterialIdentity) -> tuple[str, str, str, str, str]:
+    """Return the exact five-field M0 compatibility identity."""
+
     return (
         material.material_code,
         material.grade,
@@ -82,7 +84,9 @@ def _rotation_allowed(rotation: float, allowed: list[float], tolerance: float) -
     return any(abs(math.remainder(rotation - value, 360.0)) <= tolerance for value in allowed)
 
 
-def _transform_part(part: Part, placement: FitPlacement) -> Polygon:
+def transform_part(part: Part, placement: FitPlacement) -> Polygon:
+    """Apply the canonical rotation-before-translation convention to one part."""
+
     source = _source_polygon(part)
     radians = math.radians(placement.rotation)
     cosine = math.cos(radians)
@@ -120,7 +124,7 @@ def validate_fit_placement(
         raise ReuseGeometryError(
             "unsupported_part_demand", "remnant fit requires one explicit part instance"
         )
-    if _material_key(part_material) != _material_key(remnant.material):
+    if material_key(part_material) != material_key(remnant.material):
         raise ReuseGeometryError("material_mismatch", "part and remnant material are incompatible")
     if part.allowed_orientations is None:
         raise ReuseGeometryError(
@@ -138,7 +142,7 @@ def validate_fit_placement(
         )
 
     remnant_polygon = polygon_from_record(remnant.geometry)
-    placed_polygon = _transform_part(part, placement)
+    placed_polygon = transform_part(part, placement)
     try:
         buffered = (
             placed_polygon.buffer(
