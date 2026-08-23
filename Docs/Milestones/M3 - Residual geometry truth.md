@@ -1,6 +1,6 @@
 # M3 — Residual geometry truth
 
-**Status:** Later
+**Status:** Next — M2 passed; implementation planning pending
 
 M3 determines what material actually remains after placed parts, clearance, kerf, and forbidden regions are removed. It extracts connected residual polygons, separates retained remnants from scrap, and accounts for every unit of modeled material.
 

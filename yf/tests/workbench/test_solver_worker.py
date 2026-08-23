@@ -86,11 +86,13 @@ def run_result(request: SolveRequest) -> SpyrrowRunResult:
     )
 
 
-def test_solve_request_requires_one_worker_and_at_most_ten_seconds() -> None:
+def test_solve_request_requires_one_worker_and_bounded_outer_runtime() -> None:
     with pytest.raises(ValidationError, match="num_workers"):
         make_request(workers=2)
-    with pytest.raises(ValidationError, match="less than or equal to 10"):
-        make_request(budget=10.01)
+    with pytest.raises(ValidationError, match="less than or equal to 60"):
+        make_request(budget=60.01)
+    with pytest.raises(ValidationError, match="must fit within max_runtime_seconds"):
+        make_request(budget=0.5)
 
 
 def test_source_task_binding_round_trips_through_solve_request_and_is_frozen() -> None:

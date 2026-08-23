@@ -32,6 +32,7 @@ from yieldforge.experiments.calibration import (
     evaluate_calibration,
     evaluate_confirmation,
     load_geometry_calibration_result,
+    load_geometry_confirmation_result,
     nearest_rank_percentile,
     orchestrate_calibration,
     orchestrate_confirmation,
@@ -54,6 +55,9 @@ GEOMETRY_CONFIRMATION_PATH = YF_ROOT / "experiments" / "pure-geometry-confirmati
 CATALOG_PATH = YF_ROOT / "datasets/catalogs/lectra-7030786-v1.1/lectra-catalog.json"
 CALIBRATION_RESULT_PATH = (
     YF_ROOT / "experiments/results/pure-geometry-calibration-yfgcr-c333f934c363abc0d78082ec.json"
+)
+CONFIRMATION_RESULT_PATH = (
+    YF_ROOT / "experiments/results/pure-geometry-confirmation-yfgfr-47d42952e0003154baceee02.json"
 )
 NOW = datetime(2026, 8, 22, tzinfo=UTC)
 
@@ -812,3 +816,15 @@ def test_confirmation_result_rejects_tampered_attempt_evidence() -> None:
 
     with pytest.raises(ValueError, match="content SHA-256"):
         GeometryConfirmationResult.model_validate_json(json.dumps(payload), strict=True)
+
+
+def test_committed_confirmation_result_is_canonical_and_recomputes_gate() -> None:
+    result = load_geometry_confirmation_result(CONFIRMATION_RESULT_PATH)
+
+    assert result.result_id == "yfgfr-47d42952e0003154baceee02"
+    assert result.evaluation.decision == "proceed_to_m3"
+    assert result.evaluation.qualifying_task_count == 203
+    assert result.evaluation.valid_archive_count == 812
+    assert len(result.attempts) == 812
+    assert len(result.selected_attempts) == 812
+    validate_geometry_confirmation_result(_confirmation_protocol(), result)

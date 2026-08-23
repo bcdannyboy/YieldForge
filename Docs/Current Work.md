@@ -2,20 +2,21 @@
 
 ## Active milestone
 
-[[M2 - Static data and Sparrow]]
+[[M3 - Residual geometry truth]]
 
 ## Current objective
 
-Execute the exact 203-task pure-geometry confirmation under the newly frozen 10-second ordinary
-budget. The reusable implementation remains in the single `yf/` project.
+Plan the bounded M3 residual-geometry slice, then establish exact material reconciliation on
+adversarial fixtures before evaluating residual differences between M2 candidate layouts. The
+reusable implementation remains in the single `yf/` project.
 
 ## Next step
 
-Run only the 203 evaluation task IDs prelisted in
-`yf/experiments/pure-geometry-confirmation-v2.json`, using `source_as_recorded`, seeds
-`[0, 1, 2, 3]`, and 10 seconds per seed. Persist and verify every attempt and archive, then apply
-the frozen 0.5% near-tie and 60% proceed gates. Do not begin residual geometry, remnant reuse,
-simulation, baseline/oracle implementation, or oracle UI before the M2 result is frozen.
+Write the M3 design and implementation plan around exact sheet-minus-placed-material geometry,
+kerf/clearance treatment, connected residual polygons, scrap/remnant classification, and a strict
+material-reconciliation invariant. Begin with adversarial fixtures and fail-closed invalid geometry.
+Do not begin remnant reuse, simulation, baseline/oracle implementation, oracle UI, savings, or
+commercial claims during this milestone.
 
 ## Evidence bridge completed
 
@@ -37,11 +38,14 @@ simulation, baseline/oracle implementation, or oracle UI before the M2 result is
 The M0 economic constitution is frozen and executable: net cost, information sets, event order, candidate parity, remnant eligibility, failures, reporting, and economic thresholds are explicit. The pure-geometry population, split, arms, calibration ladder, candidate identity, 0.5% primary outcome, supporting strata, and pass/redesign/stop rules are also pre-registered.
 
 M0 is Passed. The registered calibration completed all 612 cells with 100% archive validity and no
-retry. Every calibration task qualified at every duration, but the shorter budgets exceeded the
-frozen best-length degradation limits, so 10 seconds per seed was selected. Protocol v2 enables
-confirmation without changing the population, split, seeds, 0.5% envelope, metrics, retry rules,
-or gates. No confirmatory geometry result, residual-geometry proof, remnant reuse, chronological
-simulator, future-aware policy, economic benchmark, solver-optimality result, or validated savings
-claim exists.
+retry, selecting 10 seconds per seed. M2 is also Passed. The registered confirmation completed all
+812 cells with 100% archive validity and no retry, archived 124,641 candidates, and found 203/203
+tasks qualifying inside the primary 0.5% envelope. The frozen decision is `proceed_to_m3`; the
+canonical result is `yfgfr-47d42952e0003154baceee02`, with a 98.1428% Wilson 95% lower bound.
+
+This proves only a sufficiently rich source-recorded near-tied geometric action space. No exact
+residual-geometry proof, remnant reuse, chronological simulator, future-aware policy, economic
+benchmark, solver-optimality result, or validated savings claim exists. The registered no-flip
+ablation and 20-task repeatability subset remain supporting diagnostics.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

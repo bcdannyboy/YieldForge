@@ -21,6 +21,9 @@ machine-readable artifacts are:
 - `yf/experiments/pure-geometry-confirmation-v2.json` — ID
   `yfgp-392644d98bb7035fdc218512`, semantic SHA-256
   `392644d98bb7035fdc218512c9c28cd5f3120a38f8add211fd9b953456166b31`;
+- `yf/experiments/results/pure-geometry-confirmation-yfgfr-47d42952e0003154baceee02.json` —
+  ID `yfgfr-47d42952e0003154baceee02`, semantic SHA-256
+  `47d42952e0003154baceee02ac503b24969bc5f453b9652386f758e2f07aa341`;
 - the committed Lectra catalog — artifact SHA-256
   `0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10efdcf759fc55ad`.
 
@@ -32,10 +35,10 @@ contracts and their tests control over this prose if they disagree.
 
 M0 passed after all 612 registered calibration cells completed with verified archives and the
 frozen selector selected 10 seconds per seed. Protocol v2 has `status = confirmation_ready`,
-`selected_seconds_per_seed = 10`, and `confirmation_enabled = true`. The 203-task geometry
-evaluation is now authorized under that exact protocol.
+`selected_seconds_per_seed = 10`, and `confirmation_enabled = true`. The authorized 203-task
+geometry evaluation subsequently completed under that exact protocol and proceeded to M3.
 
-Passing M0 will prove only that the experiment was defined before confirmation. It will not prove
+Passing M0 proved only that the experiment was defined before confirmation. It did not prove
 candidate richness, residual geometry, remnant utility, material savings, solver optimality,
 physical recoverability, or commercial value.
 
@@ -248,6 +251,6 @@ The immutable v1 artifact still reports `confirmation=disabled` because it is th
 input. The committed calibration result and protocol v2 record the observed handoff without
 rewriting v1.
 
-The next experiment is the 203-task confirmatory geometry evaluation under `source_as_recorded`,
-seeds `[0, 1, 2, 3]`, and 10 seconds per seed. It may not change the population, split, seeds,
-0.5% envelope, metrics, or gates.
+The 203-task confirmatory geometry evaluation completed under `source_as_recorded`, seeds
+`[0, 1, 2, 3]`, and 10 seconds per seed without changing the population, split, seeds, 0.5%
+envelope, metrics, or gates. Its result is M2 evidence and does not expand M0's claim ceiling.

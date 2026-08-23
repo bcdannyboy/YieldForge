@@ -27,7 +27,9 @@ The milestones answer a chain of increasingly expensive questions:
 
 Only the active milestone receives a detailed implementation plan. Later milestone notes explain their meaning and acceptance boundary, but we will plan them when we reach them.
 
-M0 has passed with a frozen executable economic constitution, a complete 51-task calibration, and
-a confirmation-ready protocol selecting 10 seconds per seed. M2 is active. Its next permitted work
-is the prelisted 203-task confirmatory geometry evaluation; this does not authorize residual
-geometry or later economic implementation.
+M0 passed with a frozen executable economic constitution and a complete 51-task calibration. M2
+also passed: the registered 203-task confirmation completed all 812 cells with valid archives, all
+203 tasks met the 0.5% near-tie criterion, and the frozen decision was `proceed_to_m3`. M3 is next;
+its first work is a bounded implementation plan for exact residual geometry and material
+reconciliation. This does not authorize remnant reuse, simulation, oracle, savings, or commercial
+claims.
