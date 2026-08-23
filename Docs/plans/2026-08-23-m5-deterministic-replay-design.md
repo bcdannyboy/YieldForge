@@ -1,7 +1,7 @@
 # M5 Deterministic Replay Design
 
-**Date:** 2026-08-23  
-**Status:** Approved for implementation  
+**Date:** 2026-08-23
+**Status:** Approved for implementation
 **Milestone:** M5 — Deterministic replay
 
 ## Decision
