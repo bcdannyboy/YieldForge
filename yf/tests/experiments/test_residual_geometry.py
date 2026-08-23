@@ -88,9 +88,7 @@ def _candidate(
         seed=seed,
         width=width,
         density=4.0 / (width * 10.0),
-        placements=[
-            Placement(part_id="part-a", rotation=0.0, translation=(translation_x, 0.0))
-        ],
+        placements=[Placement(part_id="part-a", rotation=0.0, translation=(translation_x, 0.0))],
     )
 
 
@@ -110,8 +108,7 @@ def _batch(
             num_workers=1,
             min_items_separation=None,
         ),
-        candidates=candidates
-        or [_candidate("candidate-a", 10.0, seed=seed, translation_x=0.0)],
+        candidates=candidates or [_candidate("candidate-a", 10.0, seed=seed, translation_x=0.0)],
     )
 
 
@@ -120,15 +117,11 @@ def _binding(tasks_index: int = 7) -> SourceTaskBinding:
         dataset_id="lectra-7030786-v1.1",
         source_slice_sha256="b" * 64,
         tasks_index=tasks_index,
-        acknowledged_assumption_codes=(
-            "interpret_s1_degenerate_entries_as_allowed_rotations",
-        ),
+        acknowledged_assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
         solver_projection=SolverProjectionBinding(
             mode=ProjectionMode.SOURCE_AS_RECORDED,
             projection_sha256="c" * 64,
-            assumption_codes=(
-                "interpret_s1_degenerate_entries_as_allowed_rotations",
-            ),
+            assumption_codes=("interpret_s1_degenerate_entries_as_allowed_rotations",),
             source_flip_part_count=0,
         ),
     )
@@ -584,9 +577,7 @@ def test_result_is_canonical_immutable_and_rejects_tampering(tmp_path: Path) -> 
     assert load_m3_result(path) == result
 
     payload = result.model_dump(mode="json")
-    payload["task_results"][0]["first_observation"]["components"][0][
-        "component_sha256"
-    ] = "f" * 64
+    payload["task_results"][0]["first_observation"]["components"][0]["component_sha256"] = "f" * 64
     path.write_text(json.dumps(payload) + "\n")
     with pytest.raises(M3EvidenceError, match="immutable"):
         publish_m3_result(tmp_path, result)

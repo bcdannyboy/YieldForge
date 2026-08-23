@@ -1,6 +1,6 @@
 # M4 — Remnant reuse proof
 
-**Status:** Later
+**Status:** Next — M3 passed; experiment design pending
 
 M4 turns an exact retained remnant back into stock. A later part or batch must fit inside that irregular container and produce another exact residual while preserving provenance.
 

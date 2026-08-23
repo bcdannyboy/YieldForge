@@ -49,9 +49,7 @@ class ResidualGeometryConfig(ResidualContractModel):
     schema_version: Literal["yieldforge.residual-geometry-config.v1"] = (
         "yieldforge.residual-geometry-config.v1"
     )
-    process_model: Literal["explicit_symmetric_part_buffer"] = (
-        "explicit_symmetric_part_buffer"
-    )
+    process_model: Literal["explicit_symmetric_part_buffer"] = "explicit_symmetric_part_buffer"
     buffer_join_style: Literal["mitre"] = "mitre"
     part_buffer_distance: StrictFloat = Field(default=0.0, ge=0)
     forbidden_polygons: tuple[ForbiddenRing, ...] = ()
@@ -127,9 +125,7 @@ def rule_set_from_m0(eligibility: RemnantEligibility) -> ResidualRuleSet:
     """Project the approved M0 eligibility grid into the geometry boundary."""
 
     return ResidualRuleSet(
-        permissive=_residual_rule(
-            ResidualRuleName.PERMISSIVE, eligibility.permissive_sensitivity
-        ),
+        permissive=_residual_rule(ResidualRuleName.PERMISSIVE, eligibility.permissive_sensitivity),
         primary=_residual_rule(ResidualRuleName.PRIMARY, eligibility.primary),
         conservative=_residual_rule(
             ResidualRuleName.CONSERVATIVE, eligibility.conservative_sensitivity
@@ -229,9 +225,10 @@ class CandidateResidualObservation(ResidualContractModel):
         classification_names = tuple(item.rule_name for item in self.classifications)
         if len(classification_names) != len(set(classification_names)):
             raise ValueError("observation classifications must be unique")
-        if tuple(
-            sorted(classification_names, key=lambda item: _RULE_ORDER[item.value])
-        ) != classification_names:
+        if (
+            tuple(sorted(classification_names, key=lambda item: _RULE_ORDER[item.value]))
+            != classification_names
+        ):
             raise ValueError("observation classifications must use registered order")
         return self
 

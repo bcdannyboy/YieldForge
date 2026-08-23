@@ -135,9 +135,7 @@ class M3TaskPair(FrozenExperimentModel):
 class M3ResidualInputPack(FrozenExperimentModel):
     """Content-addressed portable input for the exact M3 replay."""
 
-    schema_version: Literal["yieldforge.m3-residual-input.v1"] = (
-        "yieldforge.m3-residual-input.v1"
-    )
+    schema_version: Literal["yieldforge.m3-residual-input.v1"] = "yieldforge.m3-residual-input.v1"
     input_id: StrictStr = Field(pattern=r"^yfgi-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     m2_result_id: StrictStr = Field(pattern=r"^yfgfr-[0-9a-f]{24}$")
@@ -249,9 +247,7 @@ class M3Summary(FrozenExperimentModel):
 class M3ResidualGeometryResult(FrozenExperimentModel):
     """Canonical bounded result of the exact M3 residual replay."""
 
-    schema_version: Literal["yieldforge.m3-residual-result.v1"] = (
-        "yieldforge.m3-residual-result.v1"
-    )
+    schema_version: Literal["yieldforge.m3-residual-result.v1"] = "yieldforge.m3-residual-result.v1"
     result_id: StrictStr = Field(pattern=r"^yfgr-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     input_id: StrictStr = Field(pattern=r"^yfgi-[0-9a-f]{24}$")
@@ -265,9 +261,11 @@ class M3ResidualGeometryResult(FrozenExperimentModel):
     task_results: tuple[M3TaskResult, ...] = Field(min_length=1)
     summary: M3Summary
     claim_ceiling: Literal[
-        "exact_residual_geometry_only_not_future_reuse_material_savings_roi_or_physical_process_evidence"
+        "exact_residual_geometry_only_not_future_reuse_material_savings_roi_"
+        "or_physical_process_evidence"
     ] = (
-        "exact_residual_geometry_only_not_future_reuse_material_savings_roi_or_physical_process_evidence"
+        "exact_residual_geometry_only_not_future_reuse_material_savings_roi_"
+        "or_physical_process_evidence"
     )
 
     @model_validator(mode="after")
@@ -490,9 +488,7 @@ def build_m3_task_pair(
         key=lambda item: (item[0].width, item[0].candidate_id),
     )
     if len(eligible) < 2:
-        raise M3EvidenceError(
-            "M3 task requires two distinct candidates inside the frozen envelope"
-        )
+        raise M3EvidenceError("M3 task requires two distinct candidates inside the frozen envelope")
 
     selected = tuple(
         M3SelectedCandidate(
@@ -660,8 +656,7 @@ def prepare_m3_input_pack(
         raise M3EvidenceError("M2 archive root must be a directory and not a symlink")
 
     attempts_by_key: dict[tuple[str, int], CalibrationAttemptOutcome] = {
-        (attempt.cell.cell_id, attempt.attempt_number): attempt
-        for attempt in confirmation.attempts
+        (attempt.cell.cell_id, attempt.attempt_number): attempt for attempt in confirmation.attempts
     }
     selected_by_task: dict[int, list[CalibrationAttemptOutcome]] = defaultdict(list)
     for selected in confirmation.selected_attempts:
@@ -732,8 +727,7 @@ def recompute_m3_summary(
         if not item.valid and item.error_code is not None:
             failures[item.error_code] += 1
     exact_differences = sum(
-        item.comparison is not None and not item.comparison.exact_residual_equal
-        for item in valid
+        item.comparison is not None and not item.comparison.exact_residual_equal for item in valid
     )
     rule_counts = {rule_name: 0 for rule_name in ResidualRuleName}
     fractions = []

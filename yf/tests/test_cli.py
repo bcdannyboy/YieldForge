@@ -690,8 +690,9 @@ def test_prepare_residual_geometry_command_binds_m2_archives_and_m0(
     monkeypatch.setattr("yieldforge.cli.prepare_m3_input_pack", fake_prepare)
     monkeypatch.setattr(
         "yieldforge.cli.publish_m3_input_pack",
-        lambda output_arg, pack_arg: output_arg
-        / f"residual-geometry-input-{pack_arg.input_id}.json",
+        lambda output_arg, pack_arg: (
+            output_arg / f"residual-geometry-input-{pack_arg.input_id}.json"
+        ),
     )
 
     exit_code = main(
@@ -753,8 +754,9 @@ def test_evaluate_residual_geometry_command_publishes_canonical_result(
     monkeypatch.setattr("yieldforge.cli.evaluate_m3_residual_geometry", fake_evaluate)
     monkeypatch.setattr(
         "yieldforge.cli.publish_m3_result",
-        lambda output_arg, result_arg: output_arg
-        / f"residual-geometry-result-{result_arg.result_id}.json",
+        lambda output_arg, result_arg: (
+            output_arg / f"residual-geometry-result-{result_arg.result_id}.json"
+        ),
     )
 
     exit_code = main(

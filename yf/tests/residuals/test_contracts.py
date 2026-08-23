@@ -46,14 +46,10 @@ def test_geometry_config_is_explicit_and_rejects_invalid_polygons() -> None:
     with pytest.raises(ValidationError):
         ResidualGeometryConfig(part_buffer_distance=-0.1)
     with pytest.raises(ValidationError, match="closed"):
-        ResidualGeometryConfig(
-            forbidden_polygons=(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0)),)
-        )
+        ResidualGeometryConfig(forbidden_polygons=(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0)),))
     with pytest.raises(ValidationError):
         ResidualGeometryConfig(
-            forbidden_polygons=(
-                ((0.0, 0.0), (float("nan"), 0.0), (1.0, 1.0), (0.0, 0.0)),
-            )
+            forbidden_polygons=(((0.0, 0.0), (float("nan"), 0.0), (1.0, 1.0), (0.0, 0.0)),)
         )
 
 

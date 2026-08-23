@@ -125,9 +125,7 @@ def placed_part_polygons(
     )
 
     placements = {placement.part_id: placement for placement in candidate.placements}
-    placed = {
-        part.id: _transform_polygon(part, placements[part.id]) for part in problem.parts
-    }
+    placed = {part.id: _transform_polygon(part, placements[part.id]) for part in problem.parts}
     try:
         for part_id, polygon in placed.items():
             if polygon.difference(stock).area > area_tolerance:
@@ -188,9 +186,7 @@ def _polygon_components(geometry: BaseGeometry) -> tuple[Polygon, ...]:
                     "nonpolygonal_residual", "residual contains nonpolygonal geometry"
                 )
         return tuple(polygons)
-    raise ResidualGeometryError(
-        "nonpolygonal_residual", "residual material is not polygonal"
-    )
+    raise ResidualGeometryError("nonpolygonal_residual", "residual material is not polygonal")
 
 
 def _require_reconciliation(
@@ -260,9 +256,7 @@ def _classify_components(
         for component_hash, component in component_by_hash.items():
             metric = metric_by_hash[component_hash]
             minimum_area = stock_area * rule.minimum_area_sheet_fraction
-            minimum_access = (
-                short_side * rule.minimum_exterior_access_short_side_fraction
-            )
+            minimum_access = short_side * rule.minimum_exterior_access_short_side_fraction
             eligible = (
                 (not rule.requires_exterior_connection or metric.exterior_connected)
                 and component.area + area_tolerance >= minimum_area
@@ -415,9 +409,7 @@ def _classification_changed(
         or len(first.scrap_component_sha256) != len(second.scrap_component_sha256)
         or abs(first.retained_area - second.retained_area) > area_tolerance
         or abs(first.scrap_area - second.scrap_area) > area_tolerance
-        or abs(
-            first.largest_retained_component_area - second.largest_retained_component_area
-        )
+        or abs(first.largest_retained_component_area - second.largest_retained_component_area)
         > area_tolerance
     )
 
@@ -439,20 +431,14 @@ def compare_candidate_residuals(
             "invalid_observation", "candidate residual comparison requires valid observations"
         )
     try:
-        symmetric_difference_area = float(
-            first.residual.symmetric_difference(second.residual).area
-        )
+        symmetric_difference_area = float(first.residual.symmetric_difference(second.residual).area)
     except GEOSException as error:
         raise ResidualGeometryError(
             "geometry_operation_failed", "residual comparison failed"
         ) from error
 
-    first_classifications = {
-        item.rule_name: item for item in first.observation.classifications
-    }
-    second_classifications = {
-        item.rule_name: item for item in second.observation.classifications
-    }
+    first_classifications = {item.rule_name: item for item in first.observation.classifications}
+    second_classifications = {item.rule_name: item for item in second.observation.classifications}
     if set(first_classifications) != set(second_classifications):
         raise ResidualGeometryError(
             "classification_mismatch", "candidate residual rule sets do not match"

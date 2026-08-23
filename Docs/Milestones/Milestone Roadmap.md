@@ -28,8 +28,12 @@ The milestones answer a chain of increasingly expensive questions:
 Only the active milestone receives a detailed implementation plan. Later milestone notes explain their meaning and acceptance boundary, but we will plan them when we reach them.
 
 M0 passed with a frozen executable economic constitution and a complete 51-task calibration. M2
-also passed: the registered 203-task confirmation completed all 812 cells with valid archives, all
-203 tasks met the 0.5% near-tie criterion, and the frozen decision was `proceed_to_m3`. M3 is next;
-its first work is a bounded implementation plan for exact residual geometry and material
-reconciliation. This does not authorize remnant reuse, simulation, oracle, savings, or commercial
-claims.
+also passed: the registered 203-task confirmation completed all 812 cells with valid archives and
+all 203 tasks met the 0.5% near-tie criterion. M3 then evaluated one residual-blind candidate pair
+per task: all 203 pairs were valid and reconciled, 202 differed in exact residual geometry, and no
+pair changed classification under any frozen remnant rule. The canonical M3 result is
+`yfgr-0ac2c37f0938d9d399e7a076`.
+
+M4 is next. Its first work is a bounded design and implementation plan for exact future-shape fit
+inside retained residual components. The M3 differences authorize that reuse test; they do not
+establish reuse, avoided purchases, savings, physical recovery, or commercial value.

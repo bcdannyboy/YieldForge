@@ -2,21 +2,21 @@
 
 ## Active milestone
 
-[[M3 - Residual geometry truth]]
+[[M4 - Remnant reuse proof]]
 
 ## Current objective
 
-Plan the bounded M3 residual-geometry slice, then establish exact material reconciliation on
-adversarial fixtures before evaluating residual differences between M2 candidate layouts. The
-reusable implementation remains in the single `yf/` project.
+Freeze the bounded M4 exact-fit experiment, then prove on adversarial fixtures that a retained
+irregular residual can accept a later compatible source-observed shape while preserving strict
+geometry and provenance. The reusable implementation remains in the single `yf/` project.
 
 ## Next step
 
-Write the M3 design and implementation plan around exact sheet-minus-placed-material geometry,
-kerf/clearance treatment, connected residual polygons, scrap/remnant classification, and a strict
-material-reconciliation invariant. Begin with adversarial fixtures and fail-closed invalid geometry.
-Do not begin remnant reuse, simulation, baseline/oracle implementation, oracle UI, savings, or
-commercial claims during this milestone.
+Write the M4 design and implementation plan around exact polygon containment, allowed
+source-backed orientation states, material compatibility, clearance, retained-component identity,
+and immutable lineage. Begin with hand-verifiable favorable and unfavorable fixtures before any
+corpus evaluation. Do not begin chronological simulation, baseline/oracle implementation, oracle
+UI, savings, or commercial claims during this milestone.
 
 ## Evidence bridge completed
 
@@ -38,14 +38,20 @@ commercial claims during this milestone.
 The M0 economic constitution is frozen and executable: net cost, information sets, event order, candidate parity, remnant eligibility, failures, reporting, and economic thresholds are explicit. The pure-geometry population, split, arms, calibration ladder, candidate identity, 0.5% primary outcome, supporting strata, and pass/redesign/stop rules are also pre-registered.
 
 M0 is Passed. The registered calibration completed all 612 cells with 100% archive validity and no
-retry, selecting 10 seconds per seed. M2 is also Passed. The registered confirmation completed all
-812 cells with 100% archive validity and no retry, archived 124,641 candidates, and found 203/203
-tasks qualifying inside the primary 0.5% envelope. The frozen decision is `proceed_to_m3`; the
-canonical result is `yfgfr-47d42952e0003154baceee02`, with a 98.1428% Wilson 95% lower bound.
+retry, selecting 10 seconds per seed. M2 is Passed. Its registered confirmation completed all 812
+cells with valid archives and found 203/203 qualifying tasks; the canonical result is
+`yfgfr-47d42952e0003154baceee02`.
 
-This proves only a sufficiently rich source-recorded near-tied geometric action space. No exact
-residual-geometry proof, remnant reuse, chronological simulator, future-aware policy, economic
-benchmark, solver-optimality result, or validated savings claim exists. The registered no-flip
-ablation and 20-task repeatability subset remain supporting diagnostics.
+M3 is also Passed. The residual-blind input `yfgi-2fe5b848ea643d282c284f90` selected one pair for
+each of the 203 qualifying tasks. The canonical result `yfgr-0ac2c37f0938d9d399e7a076` evaluated
+all 203 pairs with no failures and zero maximum reconciliation delta. Exact residual geometry
+differed for 202 pairs (99.5074%); the median symmetric difference was 0.1343% of sheet area, P95
+was 3.5361%, and the maximum was 22.1654%. None of the 203 pairs changed classification under the
+permissive, primary, or conservative M0 rule.
+
+This proves exact residual accounting and widespread exact residual differences for the selected
+pairs. It does not prove a later shape can use the difference. No remnant-reuse result,
+chronological simulator, future-aware policy, economic benchmark, solver-optimality result, or
+validated savings claim exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

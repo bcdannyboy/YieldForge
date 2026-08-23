@@ -63,9 +63,7 @@ def _rectangle(part_id: str, width: float, height: float) -> Part:
 
 
 def _rules():  # type: ignore[no-untyped-def]
-    contract = M0ExperimentContract.model_validate_json(
-        M0_CONTRACT_PATH.read_text(), strict=True
-    )
+    contract = M0ExperimentContract.model_validate_json(M0_CONTRACT_PATH.read_text(), strict=True)
     return rule_set_from_m0(contract.remnant_eligibility)
 
 
@@ -77,9 +75,7 @@ def test_rotation_around_origin_precedes_translation() -> None:
         allowed_orientations=[90.0],
     )
     problem = _problem(triangle)
-    candidate = _candidate(
-        Placement(part_id="triangle", rotation=90.0, translation=(3.0, 4.0))
-    )
+    candidate = _candidate(Placement(part_id="triangle", rotation=90.0, translation=(3.0, 4.0)))
 
     placed = placed_part_polygons(problem, candidate, ResidualGeometryConfig())
 
@@ -128,9 +124,7 @@ def test_placement_identifiers_fail_closed(
 
 def test_nonfinite_transform_fails_closed() -> None:
     problem = _problem(_square("a"))
-    candidate = _candidate(
-        Placement(part_id="a", rotation=math.nan, translation=(0.0, 0.0))
-    )
+    candidate = _candidate(Placement(part_id="a", rotation=math.nan, translation=(0.0, 0.0)))
 
     with pytest.raises(ResidualGeometryError) as captured:
         placed_part_polygons(problem, candidate, ResidualGeometryConfig())
@@ -170,9 +164,7 @@ def test_material_overlap_fails_closed() -> None:
 
 def test_out_of_sheet_material_fails_closed() -> None:
     problem = _problem(_square("a"))
-    candidate = _candidate(
-        Placement(part_id="a", rotation=0.0, translation=(9.0, 9.0))
-    )
+    candidate = _candidate(Placement(part_id="a", rotation=0.0, translation=(9.0, 9.0)))
 
     with pytest.raises(ResidualGeometryError) as captured:
         placed_part_polygons(problem, candidate, ResidualGeometryConfig())
@@ -277,9 +269,7 @@ def test_enclosed_component_is_scrap_while_exterior_component_is_retained() -> N
         Placement(part_id="right", rotation=0.0, translation=(6.0, 4.0)),
     )
 
-    result = extract_candidate_residual(
-        problem, candidate, _rules(), ResidualGeometryConfig()
-    )
+    result = extract_candidate_residual(problem, candidate, _rules(), ResidualGeometryConfig())
 
     assert len(result.observation.components) == 2
     interior = next(
@@ -298,19 +288,13 @@ def test_enclosed_component_is_scrap_while_exterior_component_is_retained() -> N
 
 def test_effective_width_separates_permissive_from_stricter_rules() -> None:
     problem = _problem(_rectangle("block", 9.9, 10.0))
-    candidate = _candidate(
-        Placement(part_id="block", rotation=0.0, translation=(0.1, 0.0))
-    )
+    candidate = _candidate(Placement(part_id="block", rotation=0.0, translation=(0.1, 0.0)))
 
-    result = extract_candidate_residual(
-        problem, candidate, _rules(), ResidualGeometryConfig()
-    )
+    result = extract_candidate_residual(problem, candidate, _rules(), ResidualGeometryConfig())
 
     component = result.observation.components[0]
     assert component.effective_width_rule_names == (ResidualRuleName.PERMISSIVE,)
-    classifications = {
-        item.rule_name: item for item in result.observation.classifications
-    }
+    classifications = {item.rule_name: item for item in result.observation.classifications}
     assert classifications[ResidualRuleName.PERMISSIVE].retained_area == pytest.approx(1.0)
     assert classifications[ResidualRuleName.PRIMARY].scrap_area == pytest.approx(1.0)
     assert classifications[ResidualRuleName.CONSERVATIVE].scrap_area == pytest.approx(1.0)
