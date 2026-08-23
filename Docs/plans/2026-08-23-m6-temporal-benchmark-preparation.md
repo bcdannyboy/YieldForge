@@ -1,7 +1,9 @@
 # M6 Temporal Benchmark Preparation
 
-**Prepared:** 2026-08-23  
-**Entry state:** M5 canonical replay passed  
+**Prepared:** 2026-08-23
+
+**Entry state:** M5 canonical replay passed
+
 **Decision:** Reuse and extend the existing order-book contracts; do not treat current fixtures as a benchmark result.
 
 ## Purpose and claim ceiling

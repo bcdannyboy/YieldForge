@@ -62,6 +62,21 @@ Independent loading reconstructs M4 exact evidence, replays every M5 transition,
 equality. One hundred repeated M5 executions were identical and averaged approximately `4.08 ms`
 per two-order replay on the development machine.
 
+## Verification
+
+- Full Python suite: 727 passed and 3 environment-specific qualifier tests skipped in 16 minutes
+  10 seconds. The skips are the existing Linux sealed-memory test and two Docker-fixture tests.
+- Post-review replay and canonical-artifact suite: 20 passed after adding adversarial order-count and
+  cumulative-ledger reidentification checks.
+- Python lint and formatting: all checks passed across 83 files.
+- Source distribution and wheel builds: passed.
+- Frontend regression suite: 56 passed; TypeScript checking and the production build passed.
+- Real-browser mutation suite: not applicable because M5 adds a solver-independent experiment CLI,
+  replay kernel, and evidence artifacts without changing browser or API behavior.
+
+The implementation and evidence sequence is `1a63f28`, `1d50fdf`, `d441298`, `b8d6685`,
+`73ae6e3`, `d576c01`, and `abec6b1`.
+
 ## Decision and next boundary
 
 M5 passes its frozen technical gate. Deterministic inventory, lineage, chronology, and net-cost
