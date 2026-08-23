@@ -984,6 +984,29 @@ def _validate_m4_result_evidence(
         raise M4EvidenceError("M4 witness full-sheet reference does not revalidate")
 
 
+def validate_m4_result_evidence(
+    result: M4ReuseResult,
+    *,
+    pack: M4ReuseInputPack,
+    m0: M0ExperimentContract,
+) -> M4ReuseResult:
+    """Strictly revalidate persisted M4 evidence without repeating bounded witness search."""
+
+    try:
+        validated_result = M4ReuseResult.model_validate_json(
+            json.dumps(result.model_dump(mode="json"), allow_nan=False), strict=True
+        )
+    except (ValidationError, ValueError) as error:
+        raise M4EvidenceError("M4 result evidence failed strict revalidation") from error
+    try:
+        _validate_m4_result_evidence(validated_result, pack, m0)
+    except ReuseGeometryError as error:
+        raise M4EvidenceError(
+            "M4 result placement or residual evidence failed revalidation"
+        ) from error
+    return validated_result
+
+
 def _canonical_model_bytes(value: FrozenExperimentModel) -> bytes:
     return (
         json.dumps(
@@ -1100,10 +1123,4 @@ def load_m4_result(
         raise M4EvidenceError("M4 result artifact validation failed") from error
     if _canonical_model_bytes(result) != data:
         raise M4EvidenceError("M4 result artifact does not use canonical JSON encoding")
-    try:
-        _validate_m4_result_evidence(result, pack, m0)
-    except ReuseGeometryError as error:
-        raise M4EvidenceError(
-            "M4 result placement or residual evidence failed revalidation"
-        ) from error
-    return result
+    return validate_m4_result_evidence(result, pack=pack, m0=m0)

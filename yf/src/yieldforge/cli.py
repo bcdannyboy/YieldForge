@@ -30,10 +30,18 @@ from yieldforge.experiments.contracts import (
     load_frozen_json,
     validate_experiment_bundle,
 )
+from yieldforge.experiments.deterministic_replay import (
+    evaluate_m5_replay,
+    load_m5_replay_input_unbound,
+    prepare_m5_replay_input,
+    publish_m5_replay_input,
+    publish_m5_replay_result,
+)
 from yieldforge.experiments.remnant_reuse import (
     REGISTERED_M4_SEARCH_CONFIG,
     evaluate_m4_remnant_reuse,
     load_m4_input_pack,
+    load_m4_result,
     prepare_m4_input_pack,
     publish_m4_input_pack,
     publish_m4_result,
@@ -282,6 +290,36 @@ def _evaluate_remnant_reuse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prepare_deterministic_replay(args: argparse.Namespace) -> int:
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    m4_pack = load_m4_input_pack(args.m4_input)
+    m4_result = load_m4_result(args.m4_result, pack=m4_pack, m0=m0)
+    replay_input = prepare_m5_replay_input(m4_pack, m4_result, m0)
+    path = publish_m5_replay_input(args.output, replay_input)
+    print(
+        "Published M5 deterministic replay input: "
+        f"input_id={replay_input.input_id} orders={len(replay_input.orders)} "
+        f"horizon_end={replay_input.horizon_end} output={path}"
+    )
+    return 0
+
+
+def _evaluate_deterministic_replay(args: argparse.Namespace) -> int:
+    replay_input = load_m5_replay_input_unbound(args.input)
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    result = evaluate_m5_replay(replay_input, m0)
+    path = publish_m5_replay_result(args.output, result)
+    summary = result.summary
+    print(
+        "Published M5 deterministic replay result: "
+        f"result_id={result.result_id} "
+        f"fulfilled={summary.fulfilled_order_count}/{summary.order_count} "
+        f"final_net_cost={summary.final_net_cost} "
+        f"decision={summary.technical_decision} output={path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -403,6 +441,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_reuse.add_argument("--input", type=Path, required=True)
     evaluate_reuse.add_argument("--output", type=Path, required=True)
     evaluate_reuse.set_defaults(handler=_evaluate_remnant_reuse)
+
+    prepare_replay = experiment_commands.add_parser(
+        "prepare-deterministic-replay",
+        help="bind canonical M0/M4 evidence and freeze the generated M5 replay input",
+    )
+    prepare_replay.add_argument("--m0", type=Path, required=True)
+    prepare_replay.add_argument("--m4-input", type=Path, required=True)
+    prepare_replay.add_argument("--m4-result", type=Path, required=True)
+    prepare_replay.add_argument("--output", type=Path, required=True)
+    prepare_replay.set_defaults(handler=_prepare_deterministic_replay)
+
+    evaluate_replay = experiment_commands.add_parser(
+        "evaluate-deterministic-replay",
+        help="execute and publish the frozen M5 chronological replay",
+    )
+    evaluate_replay.add_argument("--m0", type=Path, required=True)
+    evaluate_replay.add_argument("--input", type=Path, required=True)
+    evaluate_replay.add_argument("--output", type=Path, required=True)
+    evaluate_replay.set_defaults(handler=_evaluate_deterministic_replay)
     return parser
 
 

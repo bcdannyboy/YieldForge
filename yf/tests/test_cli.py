@@ -918,3 +918,121 @@ def test_evaluate_remnant_reuse_command_publishes_bounded_result(
     assert "attempted_pairs=17/100" in text
     assert "decision=pass" in text
     assert "avoided_full_sheet_openings=1" in text
+
+
+def test_prepare_deterministic_replay_command_binds_m4_and_publishes_input(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    m0_path = tmp_path / "m0.json"
+    m4_input_path = tmp_path / "m4-input.json.gz"
+    m4_result_path = tmp_path / "m4-result.json"
+    output = tmp_path / "results"
+    m0 = SimpleNamespace(contract_id="yfm0-" + "a" * 24)
+    m4_pack = SimpleNamespace(input_id="yfri-" + "b" * 24)
+    m4_result = SimpleNamespace(result_id="yfrr-" + "c" * 24)
+    replay_input = SimpleNamespace(
+        input_id="yfrpi-" + "d" * 24,
+        orders=(1, 2),
+        horizon_end="2026-01-01T02:00:00Z",
+    )
+    calls = []
+
+    monkeypatch.setattr("yieldforge.cli.load_frozen_json", lambda path, model: m0)
+    monkeypatch.setattr("yieldforge.cli.load_m4_input_pack", lambda path: m4_pack)
+    monkeypatch.setattr(
+        "yieldforge.cli.load_m4_result",
+        lambda path, *, pack, m0: m4_result,
+    )
+
+    def fake_prepare(pack_arg, result_arg, m0_arg):  # type: ignore[no-untyped-def]
+        calls.append((pack_arg, result_arg, m0_arg))
+        return replay_input
+
+    monkeypatch.setattr("yieldforge.cli.prepare_m5_replay_input", fake_prepare)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_m5_replay_input",
+        lambda output_arg, input_arg: (
+            output_arg / f"deterministic-replay-input-{input_arg.input_id}.json"
+        ),
+    )
+
+    exit_code = main(
+        [
+            "experiments",
+            "prepare-deterministic-replay",
+            "--m0",
+            str(m0_path),
+            "--m4-input",
+            str(m4_input_path),
+            "--m4-result",
+            str(m4_result_path),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(m4_pack, m4_result, m0)]
+    text = capsys.readouterr().out
+    assert "input_id=yfrpi-" in text
+    assert "orders=2" in text
+
+
+def test_evaluate_deterministic_replay_command_publishes_result(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    input_path = tmp_path / "m5-input.json"
+    m0_path = tmp_path / "m0.json"
+    output = tmp_path / "results"
+    replay_input = SimpleNamespace(input_id="yfrpi-" + "a" * 24)
+    m0 = SimpleNamespace(contract_id="yfm0-" + "b" * 24)
+    result = SimpleNamespace(
+        result_id="yfrpr-" + "c" * 24,
+        summary=SimpleNamespace(
+            fulfilled_order_count=2,
+            order_count=2,
+            final_net_cost=104.9,
+            technical_decision="pass",
+        ),
+    )
+    calls = []
+
+    monkeypatch.setattr("yieldforge.cli.load_m5_replay_input_unbound", lambda path: replay_input)
+    monkeypatch.setattr("yieldforge.cli.load_frozen_json", lambda path, model: m0)
+
+    def fake_evaluate(input_arg, m0_arg):  # type: ignore[no-untyped-def]
+        calls.append((input_arg, m0_arg))
+        return result
+
+    monkeypatch.setattr("yieldforge.cli.evaluate_m5_replay", fake_evaluate)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_m5_replay_result",
+        lambda output_arg, result_arg: (
+            output_arg / f"deterministic-replay-result-{result_arg.result_id}.json"
+        ),
+    )
+
+    exit_code = main(
+        [
+            "experiments",
+            "evaluate-deterministic-replay",
+            "--m0",
+            str(m0_path),
+            "--input",
+            str(input_path),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(replay_input, m0)]
+    text = capsys.readouterr().out
+    assert "result_id=yfrpr-" in text
+    assert "fulfilled=2/2" in text
+    assert "final_net_cost=104.9" in text
+    assert "decision=pass" in text
