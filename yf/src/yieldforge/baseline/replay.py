@@ -7,6 +7,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import Executor
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -486,6 +487,80 @@ class M7StandardActionProfile:
     returned_regularity: float
 
 
+@dataclass(frozen=True)
+class M7ReplayCursor:
+    """Exact M7 state immediately before ``next_event_position``."""
+
+    next_event_position: int
+    current_time: datetime
+    inventory: tuple[InventoryItem, ...]
+    cumulative_costs: ReplayCostLedger
+    timestamp_group_sequence: int
+    timestamp_subsequence: int
+    previous_release: datetime | None
+
+
+@dataclass(frozen=True)
+class M7ActionDescriptor:
+    """Lazy standard action or exact feasible remnant action at one M7 event."""
+
+    action_id: str
+    kind: M7ActionKind
+    candidate_id: str
+    selected_remnant_id: str | None
+    evidence: M7LayoutActionEvidence | None = None
+
+
+@dataclass(frozen=True)
+class M7ActionCatalog:
+    """Complete current M7 action set and policy-visible terms."""
+
+    event_position: int
+    actions: tuple[M7ActionDescriptor, ...]
+    contexts: tuple[ActionPolicyContext, ...]
+    standard_action_count: int
+    remnant_action_count: int
+    storage_cost: float
+    timestamp_group_sequence: int
+    timestamp_subsequence: int
+    generated: GeneratedActionSet
+
+
+@dataclass(frozen=True)
+class M7StepResult:
+    descriptor: M7ActionDescriptor
+    event: M7ReplayEvent
+    cursor: M7ReplayCursor
+
+
+@dataclass(frozen=True)
+class M7ContinuationResult:
+    events: tuple[M7ReplayEvent, ...]
+    terminal: ReplayTerminalRecord
+    final_costs: ReplayCostLedger
+
+
+@dataclass
+class M7ReplayRuntime:
+    """Runtime-only dependencies and caches for exact arbitrary-state replay."""
+
+    replay_input: M7ReplayInput
+    runtime_candidates: dict[str, VerifiedProblemCandidates]
+    rules: ResidualRuleSet
+    runtime_metrics: M7ReplayRuntimeMetrics | None = None
+    standard_profile_cache: dict[tuple[str, str], M7StandardActionProfile] = dataclass_field(
+        default_factory=dict
+    )
+    fit_search_cache: dict[
+        tuple[str, str, str], tuple[LayoutFitSearchResult, ...]
+    ] = dataclass_field(default_factory=dict)
+    shared_fit_search_cache: M7SharedFitSearchCache | None = None
+    prepared_layout_cache: M7PreparedLayoutCache = dataclass_field(default_factory=OrderedDict)
+    standard_profile_executor: Executor | None = None
+    jagua_executable: Path | None = None
+    jagua_differential_audit: bool = False
+
+
 def _build_standard_profile(
     problem: ReusableGeometryProblem,
     evidence: M7CandidateSetEvidence,
@@ -535,6 +610,7 @@ def _generate_actions(
     fit_search_cache: dict[tuple[str, str, str], tuple[LayoutFitSearchResult, ...]],
     shared_fit_search_cache: M7SharedFitSearchCache | None,
     prepared_layout_cache: M7PreparedLayoutCache,
+    retain_all_remnant_actions: bool = False,
 ) -> GeneratedActionSet:
     evidence = verified.evidence
     if (
@@ -741,7 +817,43 @@ def _generate_actions(
                     )
                 )
     materialization_started = perf_counter()
-    if policy is M7PolicyName.MYOPIC_GEOMETRY:
+    if retain_all_remnant_actions:
+        materialized_actions = []
+        materialized_action_ids: set[str] = set()
+        for offset in range(
+            0,
+            len(remnant_action_arguments),
+            _REMNANT_ACTION_MATERIALIZATION_BATCH_SIZE,
+        ):
+            batch = remnant_action_arguments[
+                offset : offset + _REMNANT_ACTION_MATERIALIZATION_BATCH_SIZE
+            ]
+            if runtime_metrics is not None:
+                runtime_metrics.remnant_action_materialization_peak_batch_size = max(
+                    runtime_metrics.remnant_action_materialization_peak_batch_size,
+                    len(batch),
+                )
+            if standard_profile_executor is None:
+                built_batch = map(_build_remnant_action_from_arguments, batch)
+            else:
+                built_batch = standard_profile_executor.map(
+                    _build_remnant_action_from_arguments,
+                    batch,
+                )
+            for action in built_batch:
+                if action is None:
+                    raise ValueError("M7 fit witness did not materialize an exact remnant action")
+                if action.action_id in materialized_action_ids:
+                    raise ValueError("M7 action set contains duplicate identities")
+                materialized_action_ids.add(action.action_id)
+                materialized_actions.append(action)
+        remnant_actions = tuple(materialized_actions)
+        if runtime_metrics is not None:
+            runtime_metrics.remnant_action_peak_retained_count = max(
+                runtime_metrics.remnant_action_peak_retained_count,
+                len(remnant_actions),
+            )
+    elif policy is M7PolicyName.MYOPIC_GEOMETRY:
         best_standard_key = min(
             (
                 profile.candidate_width,
@@ -761,7 +873,7 @@ def _generate_actions(
             )
             if best_remnant_key < best_standard_key:
                 raise ValueError("M7 myopic lazy-materialization ordering invariant failed")
-        selected_remnant_action = None
+        remnant_actions = ()
     else:
         candidate_widths = {item.candidate_id: item.width for item in verified.candidates}
         inventory_by_id = {item.remnant.remnant_id: item for item in inventory}
@@ -817,11 +929,13 @@ def _generate_actions(
                         runtime_metrics.remnant_action_peak_retained_count,
                         int(selected_remnant_action is not None),
                     )
-    remnant_actions = (
-        (selected_remnant_action,) if selected_remnant_action is not None else ()
-    )
-    if policy is not M7PolicyName.MYOPIC_GEOMETRY and bool(remnant_actions) != bool(
-        remnant_action_arguments
+        remnant_actions = (
+            (selected_remnant_action,) if selected_remnant_action is not None else ()
+        )
+    if (
+        not retain_all_remnant_actions
+        and policy is not M7PolicyName.MYOPIC_GEOMETRY
+        and bool(remnant_actions) != bool(remnant_action_arguments)
     ):
         raise ValueError("M7 fit witness did not produce an exact policy winner")
     if runtime_metrics is not None:
@@ -1292,6 +1406,311 @@ def _result(
     )
 
 
+def _validate_runtime(runtime: M7ReplayRuntime) -> None:
+    expected_evidence = {
+        item.problem_id: item for item in runtime.replay_input.candidate_sets
+    }
+    if set(runtime.runtime_candidates) != set(expected_evidence) or any(
+        runtime.runtime_candidates[key].evidence != expected_evidence[key]
+        for key in expected_evidence
+    ):
+        raise ValueError("M7 runtime candidate sets differ from replay input")
+    jagua_enabled = (
+        runtime.replay_input.collision_backend
+        == "jagua_rs_0_7_0_guarded_prefilter_shapely_witness"
+    )
+    if jagua_enabled != (runtime.jagua_executable is not None):
+        raise ValueError("M7 replay collision backend differs from runtime extension")
+
+
+def initial_m7_cursor(replay_input: M7ReplayInput) -> M7ReplayCursor:
+    """Return the exact empty state before the first registered event."""
+
+    return M7ReplayCursor(
+        next_event_position=0,
+        current_time=replay_input.instances[0].released_at,
+        inventory=(),
+        cumulative_costs=ReplayCostLedger.zero(),
+        timestamp_group_sequence=-1,
+        timestamp_subsequence=0,
+        previous_release=None,
+    )
+
+
+def cursor_after_event(result: M7ReplayResult, *, sequence: int) -> M7ReplayCursor:
+    """Reconstruct an exact continuation cursor from persisted M7 evidence."""
+
+    if sequence < 0 or sequence >= len(result.events):
+        raise ValueError("M7 cursor event sequence is outside the replay result")
+    event = result.events[sequence]
+    return M7ReplayCursor(
+        next_event_position=sequence + 1,
+        current_time=event.occurred_at,
+        inventory=event.inventory_after,
+        cumulative_costs=event.cumulative_costs,
+        timestamp_group_sequence=event.timestamp_group_sequence,
+        timestamp_subsequence=event.timestamp_subsequence,
+        previous_release=event.occurred_at,
+    )
+
+
+def enumerate_m7_action_catalog(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    event_position: int | None = None,
+) -> M7ActionCatalog:
+    """Enumerate every exact feasible action at one arbitrary M7 cursor."""
+
+    _validate_runtime(runtime)
+    position = cursor.next_event_position if event_position is None else event_position
+    if position != cursor.next_event_position:
+        raise ValueError("M7 catalog position differs from cursor")
+    if position < 0 or position >= len(runtime.replay_input.instances):
+        raise ValueError("M7 catalog position is outside the replay stream")
+    replay_input = runtime.replay_input
+    binding = replay_input.instances[position]
+    if binding.released_at != cursor.previous_release:
+        group_sequence = cursor.timestamp_group_sequence + 1
+        group_subsequence = 0
+    else:
+        group_sequence = cursor.timestamp_group_sequence
+        group_subsequence = cursor.timestamp_subsequence + 1
+    storage = _storage_cost(
+        cursor.inventory,
+        start=cursor.current_time,
+        end=binding.released_at,
+        rate=replay_input.rates.storage_cost_per_area_hour,
+    )
+    problem_by_id = {item.problem_id: item for item in replay_input.problems}
+    problem = problem_by_id[binding.problem_id]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    generated = _generate_actions(
+        binding=binding,
+        problem=problem,
+        verified=verified,
+        inventory=cursor.inventory,
+        rules=runtime.rules,
+        fit_config=replay_input.fit_config,
+        search_config=replay_input.search_config,
+        policy=replay_input.policy.name,
+        rates=replay_input.rates,
+        runtime_metrics=runtime.runtime_metrics,
+        standard_profile_cache=runtime.standard_profile_cache,
+        standard_profile_executor=runtime.standard_profile_executor,
+        jagua_executable=runtime.jagua_executable,
+        jagua_container_guard=replay_input.jagua_container_guard or 1.0,
+        jagua_differential_audit=runtime.jagua_differential_audit,
+        fit_search_cache=runtime.fit_search_cache,
+        shared_fit_search_cache=runtime.shared_fit_search_cache,
+        prepared_layout_cache=runtime.prepared_layout_cache,
+        retain_all_remnant_actions=True,
+    )
+    contexts = _policy_contexts(
+        generated,
+        candidates=verified.candidates,
+        inventory=cursor.inventory,
+        occurred_at=binding.released_at,
+        rates=replay_input.rates,
+    )
+    actions = tuple(
+        M7ActionDescriptor(
+            action_id=f"m7-standard:{profile.candidate_id}",
+            kind=M7ActionKind.OPEN_STANDARD_SHEET,
+            candidate_id=profile.candidate_id,
+            selected_remnant_id=None,
+        )
+        for profile in generated.standard_profiles
+    ) + tuple(
+        M7ActionDescriptor(
+            action_id=action.action_id,
+            kind=action.kind,
+            candidate_id=action.candidate_id,
+            selected_remnant_id=action.selected_remnant_id,
+            evidence=action,
+        )
+        for action in generated.remnant_actions
+    )
+    if len(actions) != len(generated.standard_profiles) + generated.remnant_action_count:
+        raise ValueError("M7 complete action catalog count does not reconcile")
+    return M7ActionCatalog(
+        event_position=position,
+        actions=actions,
+        contexts=contexts,
+        standard_action_count=len(generated.standard_profiles),
+        remnant_action_count=generated.remnant_action_count,
+        storage_cost=storage,
+        timestamp_group_sequence=group_sequence,
+        timestamp_subsequence=group_subsequence,
+        generated=generated,
+    )
+
+
+def select_m7_fallback(
+    catalog: M7ActionCatalog,
+    *,
+    policy: M7PolicyIdentity | M7PolicyName,
+):  # type: ignore[no-untyped-def]
+    """Select the exact frozen M7 fallback from a complete catalog."""
+
+    name = policy.name if isinstance(policy, M7PolicyIdentity) else policy
+    selection = select_policy_action(name, catalog.contexts)
+    if selection.action_id not in {item.action_id for item in catalog.actions}:
+        raise ValueError("M7 fallback is absent from the complete action catalog")
+    return selection
+
+
+def apply_m7_action_descriptor(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    catalog: M7ActionCatalog,
+    descriptor: M7ActionDescriptor,
+    decision_key: tuple[str, ...],
+) -> M7StepResult:
+    """Materialize and execute one catalog action with exact M7 accounting."""
+
+    if catalog.event_position != cursor.next_event_position:
+        raise ValueError("M7 action catalog differs from cursor")
+    registered = {item.action_id: item for item in catalog.actions}
+    if registered.get(descriptor.action_id) != descriptor:
+        raise ValueError("M7 action descriptor is absent from the catalog")
+    replay_input = runtime.replay_input
+    binding = replay_input.instances[catalog.event_position]
+    problem = next(
+        item for item in replay_input.problems if item.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    if descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET:
+        candidate = next(
+            item for item in verified.candidates if item.candidate_id == descriptor.candidate_id
+        )
+        materialization_started = perf_counter()
+        action = build_standard_sheet_action(
+            problem_id=problem.problem_id,
+            problem_sha256=problem.content_sha256,
+            candidate_set_id=verified.evidence.candidate_set_id,
+            candidate_set_sha256=verified.evidence.content_sha256,
+            problem=problem.problem,
+            candidate=candidate,
+            material=binding.material,
+            stock_id=binding.binding_id,
+            rules=runtime.rules,
+            fit_config=replay_input.fit_config,
+        )
+        if runtime.runtime_metrics is not None:
+            runtime.runtime_metrics.standard_action_seconds += (
+                perf_counter() - materialization_started
+            )
+        profile = runtime.standard_profile_cache[(problem.problem_id, descriptor.candidate_id)]
+        if (
+            action.accounting != profile.accounting
+            or len(action.returned_remnants) != profile.returned_remnant_count
+            or abs(_returned_regularity(action) - profile.returned_regularity) > 1e-9
+        ):
+            raise ValueError("M7 standard action differs from its exact cached profile")
+    else:
+        if descriptor.evidence is None:
+            raise ValueError("M7 remnant descriptor has no exact evidence")
+        action = descriptor.evidence
+    inventory_after = _execute_action(action, cursor.inventory, binding.released_at)
+    delta = _ledger(
+        purchase_cost=(
+            action.selected_stock.geometry.area * replay_input.rates.purchase_cost_per_area
+            if action.kind is M7ActionKind.OPEN_STANDARD_SHEET
+            else 0.0
+        ),
+        storage_cost=catalog.storage_cost,
+        return_handling_cost=(
+            len(action.returned_remnants) * replay_input.rates.return_handling_cost_per_remnant
+        ),
+        retrieval_handling_cost=(
+            replay_input.rates.retrieval_handling_cost_per_remnant
+            if action.kind is M7ActionKind.CONSUME_REMNANT
+            else 0.0
+        ),
+        scrap_proceeds=action.accounting.scrap_area * replay_input.rates.scrap_credit_per_area,
+    )
+    cumulative = _add_ledgers(cursor.cumulative_costs, delta)
+    event = _event(
+        sequence=catalog.event_position,
+        binding=binding,
+        group_sequence=catalog.timestamp_group_sequence,
+        group_subsequence=catalog.timestamp_subsequence,
+        storage_interval_start=cursor.current_time,
+        inventory_before=cursor.inventory,
+        generated=catalog.generated,
+        decision_key=decision_key,
+        action=action,
+        inventory_after=inventory_after,
+        delta=delta,
+        cumulative=cumulative,
+    )
+    next_cursor = M7ReplayCursor(
+        next_event_position=catalog.event_position + 1,
+        current_time=binding.released_at,
+        inventory=inventory_after,
+        cumulative_costs=cumulative,
+        timestamp_group_sequence=catalog.timestamp_group_sequence,
+        timestamp_subsequence=catalog.timestamp_subsequence,
+        previous_release=binding.released_at,
+    )
+    return M7StepResult(descriptor=descriptor, event=event, cursor=next_cursor)
+
+
+def run_m7_continuation(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+) -> M7ContinuationResult:
+    """Run the unchanged frozen M7 policy from an arbitrary exact cursor."""
+
+    events = []
+    while cursor.next_event_position < len(runtime.replay_input.instances):
+        catalog = enumerate_m7_action_catalog(runtime, cursor=cursor)
+        selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
+        descriptor = next(
+            item for item in catalog.actions if item.action_id == selection.action_id
+        )
+        step = apply_m7_action_descriptor(
+            runtime,
+            cursor=cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+            decision_key=selection.decision_key,
+        )
+        events.append(step.event)
+        cursor = step.cursor
+    terminal_storage = _storage_cost(
+        cursor.inventory,
+        start=cursor.current_time,
+        end=runtime.replay_input.horizon_end,
+        rate=runtime.replay_input.rates.storage_cost_per_area_hour,
+    )
+    terminal_credit = rounded_cost(
+        sum(item.remnant.geometry.area for item in cursor.inventory)
+        * runtime.replay_input.rates.scrap_credit_per_area
+    )
+    terminal_delta = _ledger(
+        storage_cost=terminal_storage,
+        terminal_scrap_credit=terminal_credit,
+    )
+    cumulative = _add_ledgers(cursor.cumulative_costs, terminal_delta)
+    terminal = ReplayTerminalRecord(
+        horizon_end=runtime.replay_input.horizon_end,
+        storage_interval_start=cursor.current_time,
+        inventory_before_liquidation=cursor.inventory,
+        liquidated_remnant_ids=_inventory_ids(cursor.inventory),
+        delta_costs=terminal_delta,
+        cumulative_costs=cumulative,
+    )
+    return M7ContinuationResult(
+        events=tuple(events),
+        terminal=terminal,
+        final_costs=cumulative,
+    )
+
+
 def run_m7_replay(
     replay_input: M7ReplayInput,
     runtime_candidates: dict[str, VerifiedProblemCandidates],
@@ -1498,14 +1917,26 @@ def run_m7_replay(
 
 
 __all__ = [
+    "M7ActionCatalog",
+    "M7ActionDescriptor",
+    "M7ContinuationResult",
     "M7ReplayEvent",
     "M7ReplayInput",
     "M7ReplayResult",
+    "M7ReplayCursor",
+    "M7ReplayRuntime",
     "M7ReplayRuntimeMetrics",
     "M7ReplaySummary",
+    "M7StepResult",
     "M7StandardActionProfile",
     "M7SharedFitSearchCache",
     "M7PreparedLayoutCache",
+    "apply_m7_action_descriptor",
     "build_m7_replay_input",
+    "cursor_after_event",
+    "enumerate_m7_action_catalog",
+    "initial_m7_cursor",
     "run_m7_replay",
+    "run_m7_continuation",
+    "select_m7_fallback",
 ]

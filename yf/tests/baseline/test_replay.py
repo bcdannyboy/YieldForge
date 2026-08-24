@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import yieldforge.baseline.replay as replay_module
 from yieldforge.baseline.archives import VerifiedProblemCandidates
 from yieldforge.baseline.contracts import (
     M7CandidateArchiveEvidence,
@@ -765,3 +766,71 @@ def test_replay_bounds_prepared_layout_cache_to_two_problems() -> None:
     assert tuple(key[0] for key in prepared_cache) == tuple(
         _problem(part_width=width).problem_id for width in (5.0, 6.0)
     )
+
+
+def _two_event_runtime():  # type: ignore[no-untyped-def]
+    problem = _problem()
+    verified = _verified(problem, candidate_ids=("candidate-one", "candidate-two"))
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    replay_input = build_m7_replay_input(
+        m0_contract_id=_m0().contract_id,
+        m0_contract_sha256=_m0().content_sha256,
+        problem_index_id="yfm7i-" + "4" * 24,
+        problem_index_sha256="sha256:" + "5" * 64,
+        m6_contract_id="yfm6-" + "6" * 24,
+        m6_contract_sha256="sha256:" + "7" * 64,
+        m6_population_id="yftp-" + "8" * 24,
+        m6_population_sha256="sha256:" + "9" * 64,
+        policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.01,
+            return_handling_cost_per_remnant=2.0,
+            retrieval_handling_cost_per_remnant=3.0,
+            scrap_credit_per_area=0.1,
+        ),
+        fit_config=RemnantFitConfig(),
+        problems=(problem,),
+        candidate_sets=(verified.evidence,),
+        instances=(
+            _binding(problem, sequence=0, released_at=started),
+            _binding(problem, sequence=1, released_at=started + timedelta(hours=1)),
+        ),
+        horizon_end=started + timedelta(hours=2),
+    )
+    runtime = replay_module.M7ReplayRuntime(
+        replay_input=replay_input,
+        runtime_candidates={problem.problem_id: verified},
+        rules=rule_set_from_m0(_m0().remnant_eligibility),
+    )
+    return runtime
+
+
+def test_public_catalog_contains_every_action_and_exact_m7_fallback() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(runtime, cursor=cursor)
+    fallback = replay_module.select_m7_fallback(
+        catalog,
+        policy=runtime.replay_input.policy,
+    )
+
+    assert fallback.action_id in {item.action_id for item in catalog.actions}
+    assert len(catalog.actions) == catalog.standard_action_count + catalog.remnant_action_count
+    assert catalog.standard_action_count == 2
+    assert catalog.remnant_action_count == 0
+
+
+def test_public_nonzero_continuation_matches_complete_replay() -> None:
+    runtime = _two_event_runtime()
+    complete = run_m7_replay(
+        runtime.replay_input,
+        runtime.runtime_candidates,
+        runtime.rules,
+    )
+    cursor = replay_module.cursor_after_event(complete, sequence=0)
+    continued = replay_module.run_m7_continuation(runtime, cursor=cursor)
+
+    assert continued.events == complete.events[1:]
+    assert continued.terminal == complete.terminal
+    assert continued.final_costs == complete.terminal.cumulative_costs
