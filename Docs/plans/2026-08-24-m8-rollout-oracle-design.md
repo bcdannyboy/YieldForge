@@ -95,36 +95,55 @@ Hidden regime labels, future task IDs, future geometries, future material identi
 availability, and future fit outcomes are inaccessible outside the full oracle scorer. Persisted
 decision evidence records the visibility mode and the exact visible-suffix identity.
 
-### 4. Exact performance layer
+### 4. Sparse exact delta replay
 
-M7 evaluated 550,542 current actions across 864 held-out events, about 637 per event. Naively
-replaying a typical remaining suffix for every action would create billions of repeated downstream
-action evaluations. M8 therefore adds a persistent exact cache before held-out execution.
+M7 evaluated 550,542 current actions across 864 held-out events, about 637 per event. Replaying every
+remaining event from scratch for every action would require roughly 6.3 million continuation-event
+executions and is rejected as the production M8 architecture.
 
-The cache uses strict content-addressed keys and validated payload hashes for:
+The frozen M7 policy exposes an exact reusable decomposition:
 
-- standard action profiles;
-- prepared layout footprints;
-- remnant fit-search results;
-- materialized residual/transition results; and
-- frozen-M7 continuation results from an exact state and stream suffix.
+- every standard-sheet action's policy terms depend on its verified candidate profile and frozen
+  rates, not on current inventory;
+- inventory can alter the future choice only by supplying an exact feasible remnant action; and
+- storage and terminal liquidation for a remnant that cannot affect a future choice are direct M0
+  ledger calculations.
 
-Every key includes the relevant schema, M7 freeze/runtime identity, geometry and candidate hashes,
-rules, fit/search configuration, collision backend, exact inventory state, event position, and
-horizon. A cache entry is a performance fact, never evidence authority. Every load validates the key,
-payload schema, and payload hash. Corruption or a same-key/different-value conflict fails closed.
+M8 therefore compiles the frozen best standard action once for every reusable problem and evaluates
+each hypothetical current action as a delta from the common continuation:
 
-Branches may share a continuation result only when their canonical post-action state, cumulative
-ledger, current time, remaining suffix, and engine identity are byte-equivalent. Approximate polygon
-similarity is never sufficient. Cache-disabled and cache-enabled execution must produce identical
-semantic artifacts, and worker count must not affect result identity.
+1. Materialize the current action once and identify the added, removed, and unchanged remnants.
+2. Carry the common frozen-M7 future trajectory without rebuilding standard candidate profiles.
+3. Use rejection-safe material, area, and axis-aligned footprint-bound tests to identify future
+   problem/candidate pairs that cannot fit under the frozen translation-only search.
+4. Accrue storage and terminal value analytically for branch-only remnants with a complete no-fit
+   certificate over the remaining suffix.
+5. Invoke the registered Jagua/Shapely exact fit path only for surviving branch-remnant/event pairs.
+6. Recompute the future decision only when a branch remnant has an exact feasible action that can
+   compete with the compiled standard or common-remnant winner.
+7. Memoize and rejoin only byte-equivalent exact states; never merge approximately similar polygons.
 
-The implementation will use a process-safe local persistent store under ignored runtime storage.
-Checkpoints occur after each scored action and completed event so interrupted calibration work can
-resume without publishing a partial result. The canonical computation has no algorithmic timeout or
-semantic truncation. Parallelism is operationally bounded to eight local worker processes unless a
-later frozen execution manifest declares a different value; outputs must be invariant to that
-choice.
+The sparse evaluator and a deliberately slow full-replay reference implement the same score and
+tie rule. Toy cases and calibration prefixes compare every action score, selected action, inventory
+transition, and terminal ledger. A single mismatch rejects the sparse evaluator.
+
+The persistent cache uses strict content-addressed keys and validated payload hashes for compiled
+standard winners, prepared footprints, safe rejection certificates, remnant fit-search results,
+materialized transitions, exact state deltas, and continuation results. Every key includes the
+relevant schema, M7 freeze/runtime identity, geometry and candidate hashes, rules, fit/search
+configuration, collision backend, exact state, suffix, and horizon. Corruption or a
+same-key/different-value conflict fails closed.
+
+Checkpoints occur after each scored action and completed event. The canonical computation retains
+the full horizon and complete candidate set; it has no semantic timeout, heuristic pruning, or
+approximate merge. Parallelism begins at no more than eight local workers and must not affect result
+identity.
+
+Before the six-stream pilot, a bounded calibration-prefix proof must show zero semantic mismatches
+and at least a 20x end-to-end speedup over the full-replay reference. Its measured projection must
+support completing held-out M8 within seven calendar days on the declared execution resources. If
+either gate fails, local evaluation remains closed and the next permitted path is exact distributed
+execution or further semantics-preserving optimization.
 
 ### 5. Contracts and evidence
 
@@ -180,12 +199,16 @@ Before any M8 evaluation stream is opened, executable gates must cover:
    worker counts produce identical semantic results.
 9. **Published-M7 regression:** refactored M7 replay regenerates the frozen evaluation content
    identity before oracle evaluation is authorized.
+10. **Sparse-reference differential:** every score, choice, transition, and terminal ledger matches
+    the slow full-replay reference on all registered small cases and calibration proof prefixes.
+11. **Runtime gate:** the sparse path demonstrates at least 20x end-to-end speedup and projects no
+    more than seven calendar days for the frozen held-out execution resources.
 
-A deterministic calibration-only runtime pilot uses one registered calibration stream per regime.
-It records action/state counts, cache hit rates, storage, wall time, and projected held-out runtime.
-The final M8 execution manifest is frozen only after that pilot shows an exact completion path. If
-the projection is impractical, work remains in exact optimization or distribution; the primary
-oracle is not silently shortened.
+A deterministic calibration-only runtime proof precedes the six-stream pilot. The proof uses short
+registered prefixes against the slow reference; the pilot then uses one complete calibration stream
+per regime. Both record action/state counts, rejection certificates, exact searches, branch points,
+cache hits, storage, wall time, and projected held-out runtime. The final execution manifest is
+frozen only after the zero-mismatch, speed, and seven-day projection gates pass.
 
 ## Alternatives and sensitivities
 
@@ -194,6 +217,10 @@ oracle is not silently shortened.
 - **Pre-ranked or capped candidates:** substantially cheaper, but it weakens candidate parity and is
   an explicitly labeled candidate-budget ablation.
 - **Approximate state similarity:** may help M9 beam diversity but cannot merge M8 rollout states.
+- **Naive branch-by-branch replay:** source-faithful but operationally rejected because measured M7
+  rates project multi-week or multi-month local execution without sparse exact reuse.
+- **Distributed exact replay:** the fallback if sparse local execution remains over seven days. It
+  preserves semantics but requires a separately frozen worker/runtime manifest.
 - **GPU prefilter:** remains a separate optimization experiment. It cannot replace authoritative
   Shapely topology and is not required for M8 correctness.
 - **Beam or exhaustive multi-step oracle:** belongs to M9 search validation and must not be folded
@@ -201,7 +228,7 @@ oracle is not silently shortened.
 
 ## Exit boundary
 
-M8 preparation is complete when this design and its implementation plan are committed. M8
-implementation may then build the reusable transition seam, exact persistent cache, oracle kernel,
-acceptance tests, calibration-only runtime pilot, and frozen execution manifest. Held-out execution
-is a later explicit step after those gates pass.
+M8 preparation is complete when this sparse exact design and its revised implementation plan are
+committed. M8 implementation first builds the full-replay reference and sparse differential proof.
+The persistent cache, six-stream pilot, and execution freeze follow only after the 20x zero-mismatch
+gate passes. Held-out execution remains closed unless its frozen projection is seven days or less.
