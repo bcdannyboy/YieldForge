@@ -11,6 +11,8 @@ from yieldforge.baseline.experiment import (
     M7CollisionDifferentialResult,
     M7EvaluationStreamResult,
     M7FeasibilityStreamResult,
+    M7FrozenBaseline,
+    amend_frozen_baseline_runtime,
     evaluate_collision_gate,
     finalize_calibration_result,
     finalize_collision_differential_result,
@@ -19,6 +21,7 @@ from yieldforge.baseline.experiment import (
     publish_calibration_result,
     publish_evaluation_result,
     publish_feasibility_result,
+    publish_frozen_baseline,
     select_calibration_instances,
     select_calibration_winner,
     select_evaluation_instances,
@@ -374,6 +377,9 @@ def test_evaluation_result_accepts_only_frozen_policy_and_reproduces_identically
     )
     candidate_set_ids = tuple(f"yfm7c-{offset:024x}" for offset in range(1, 199))
     candidate_set_sha256s = tuple(f"sha256:{offset:064x}" for offset in range(1, 199))
+    first_pass = (
+        streams[0].model_copy(update={"jagua_representation_fallback_count": 1}),
+    ) + streams[1:]
     result = finalize_evaluation_result(
         freeze_id="yfm7freeze-" + "a" * 24,
         freeze_sha256="sha256:" + "b" * 64,
@@ -389,7 +395,7 @@ def test_evaluation_result_accepts_only_frozen_policy_and_reproduces_identically
         raw_candidate_count=60_000,
         distinct_candidate_count=50_000,
         rejected_candidate_count=1,
-        first_pass_streams=streams,
+        first_pass_streams=first_pass,
         second_pass_streams=streams,
     )
 
@@ -397,6 +403,7 @@ def test_evaluation_result_accepts_only_frozen_policy_and_reproduces_identically
     assert result.instance_count == 864
     assert result.repeat_count == 2
     assert result.repeat_content_identity_match is True
+    assert result.total_jagua_representation_fallbacks == 1
     assert result.evaluation_partition_opened is True
     assert "policy_scores" not in result.model_dump()
     assert result.result_id == f"yfm7eval-{result.content_sha256[7:31]}"
@@ -449,3 +456,44 @@ def test_evaluation_result_accepts_only_frozen_policy_and_reproduces_identically
             first_pass_streams=streams,
             second_pass_streams=changed_result,
         )
+
+
+def test_runtime_amendment_preserves_frozen_inputs_and_versions_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = (
+        Path(__file__).parents[2]
+        / "experiments"
+        / "results"
+        / "m7-frozen-baseline-v1.json"
+    )
+    original = M7FrozenBaseline.model_validate_json(source.read_text(), strict=True)
+    amended_runtime = original.runtime.model_copy(
+        update={"replay_engine": "yieldforge.m7-baseline-replay@1.0.1"}
+    )
+    monkeypatch.setattr(
+        "yieldforge.baseline.experiment._baseline_runtime_identity",
+        lambda _executable: amended_runtime,
+    )
+
+    amended = amend_frozen_baseline_runtime(
+        original,
+        jagua_executable=Path("/unused/jagua"),
+        trigger_stream_id="yfts-" + "9" * 24,
+    )
+    published = publish_frozen_baseline(tmp_path, amended)
+
+    assert original.runtime.replay_engine == "yieldforge.m7-baseline-replay@1.0.0"
+    assert amended.runtime.replay_engine == "yieldforge.m7-baseline-replay@1.0.1"
+    assert amended.freeze_id != original.freeze_id
+    assert amended.content_sha256 != original.content_sha256
+    assert amended.winning_policy == original.winning_policy
+    assert amended.candidate_set_ids == original.candidate_set_ids
+    assert amended.candidate_set_sha256s == original.candidate_set_sha256s
+    assert amended.runtime_amendment is not None
+    assert amended.runtime_amendment.prior_freeze_id == original.freeze_id
+    assert amended.runtime_amendment.policy_changed is False
+    assert amended.runtime_amendment.candidate_population_changed is False
+    assert published.name == "m7-frozen-baseline-v1.0.1.json"
+    assert M7FrozenBaseline.model_validate_json(published.read_text(), strict=True) == amended

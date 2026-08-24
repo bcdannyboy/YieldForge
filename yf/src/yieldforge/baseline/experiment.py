@@ -1279,8 +1279,11 @@ def finalize_calibration_result(
 
 
 class M7BaselineRuntimeIdentity(BaselineContractModel):
-    replay_engine: Literal["yieldforge.m7-baseline-replay@1.0.0"] = (
-        "yieldforge.m7-baseline-replay@1.0.0"
+    replay_engine: Literal[
+        "yieldforge.m7-baseline-replay@1.0.0",
+        "yieldforge.m7-baseline-replay@1.0.1",
+    ] = (
+        "yieldforge.m7-baseline-replay@1.0.1"
     )
     python_implementation: StrictStr
     python_version: StrictStr
@@ -1292,6 +1295,33 @@ class M7BaselineRuntimeIdentity(BaselineContractModel):
     jagua_version: Literal["0.7.0"] = "0.7.0"
     jagua_coordinate_precision: Literal["f32"] = "f32"
     jagua_executable_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class M7RuntimeAmendment(BaselineContractModel):
+    """Transparent, semantics-preserving runtime amendment after an unpublished failure."""
+
+    schema_version: Literal["yieldforge.m7-runtime-amendment.v1"] = (
+        "yieldforge.m7-runtime-amendment.v1"
+    )
+    prior_freeze_id: StrictStr = Field(pattern=r"^yfm7freeze-[0-9a-f]{24}$")
+    prior_freeze_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    trigger_stream_id: StrictStr = Field(pattern=r"^yfts-[0-9a-f]{24}$")
+    trigger_regime: Literal[TemporalRegime.REGIME_SHIFT] = TemporalRegime.REGIME_SHIFT
+    trigger_temporal_seed: Literal[2026082305] = 2026082305
+    trigger_event_number: Literal[24] = 24
+    reason: Literal["jagua_guard_not_representable_as_one_valid_polygon"] = (
+        "jagua_guard_not_representable_as_one_valid_polygon"
+    )
+    resolution: Literal[
+        "unrepresentable_jagua_guard_uses_unfiltered_authoritative_shapely"
+    ] = "unrepresentable_jagua_guard_uses_unfiltered_authoritative_shapely"
+    evaluation_artifact_published_before_amendment: Literal[False] = False
+    policy_changed: Literal[False] = False
+    candidate_population_changed: Literal[False] = False
+    calibration_outcomes_reopened: Literal[False] = False
+    claim_ceiling: Literal[
+        "runtime_compatibility_amendment_only_not_policy_tuning_or_evaluation_advantage"
+    ] = "runtime_compatibility_amendment_only_not_policy_tuning_or_evaluation_advantage"
 
 
 class M7FrozenBaseline(BaselineContractModel):
@@ -1310,6 +1340,7 @@ class M7FrozenBaseline(BaselineContractModel):
     candidate_set_ids: tuple[StrictStr, ...] = Field(min_length=90, max_length=90)
     candidate_set_sha256s: tuple[StrictStr, ...] = Field(min_length=90, max_length=90)
     runtime: M7BaselineRuntimeIdentity
+    runtime_amendment: M7RuntimeAmendment | None = None
     evaluation_partition_opened: Literal[False] = False
     claim_ceiling: Literal[
         "frozen_calibration_selected_baseline_only_not_evaluation_advantage_savings_physical_or_"
@@ -1325,7 +1356,13 @@ class M7FrozenBaseline(BaselineContractModel):
             self.candidate_set_sha256s
         ):
             raise ValueError("M7 frozen baseline candidate identities differ")
-        digest = semantic_sha256(self, excluded_fields={"freeze_id", "content_sha256"})
+        digest = semantic_sha256(
+            self.model_dump(
+                mode="json",
+                exclude={"freeze_id", "content_sha256"},
+                exclude_none=True,
+            )
+        )
         if self.content_sha256 != f"sha256:{digest}" or self.freeze_id != (
             f"yfm7freeze-{digest[:24]}"
         ):
@@ -1350,6 +1387,7 @@ class M7EvaluationStreamResult(BaselineContractModel):
     full_sheet_opening_count: StrictInt = Field(ge=0)
     remnant_retrieval_count: StrictInt = Field(ge=0)
     terminal_remnant_count: StrictInt = Field(ge=0)
+    jagua_representation_fallback_count: StrictInt = Field(default=0, ge=0)
     final_net_cost: StrictFloat
     technical_decision: Literal["pass"] = "pass"
 
@@ -1394,6 +1432,7 @@ class M7EvaluationResult(BaselineContractModel):
     total_action_count: StrictInt = Field(ge=864)
     total_sheet_openings: StrictInt = Field(ge=0)
     total_remnant_retrievals: StrictInt = Field(ge=0)
+    total_jagua_representation_fallbacks: StrictInt = Field(ge=0)
     mean_final_net_cost: StrictFloat
     evaluation_partition_opened: Literal[True] = True
     technical_decision: Literal["frozen_baseline_evaluation_complete"] = (
@@ -1430,7 +1469,15 @@ class M7EvaluationResult(BaselineContractModel):
         if any(item.policy != self.frozen_policy for item in self.streams):
             raise ValueError("M7 evaluation stream differs from frozen policy")
         expected_pass_digest = semantic_sha256(
-            {"streams": [item.model_dump(mode="json") for item in self.streams]}
+            {
+                "streams": [
+                    item.model_dump(
+                        mode="json",
+                        exclude={"jagua_representation_fallback_count"},
+                    )
+                    for item in self.streams
+                ]
+            }
         )
         if self.reproducibility_content_sha256 != f"sha256:{expected_pass_digest}":
             raise ValueError("M7 evaluation reproducibility identity differs")
@@ -1438,12 +1485,14 @@ class M7EvaluationResult(BaselineContractModel):
             sum(item.action_count for item in self.streams),
             sum(item.full_sheet_opening_count for item in self.streams),
             sum(item.remnant_retrieval_count for item in self.streams),
+            sum(item.jagua_representation_fallback_count for item in self.streams),
             round(fmean(item.final_net_cost for item in self.streams), 6),
         )
         observed_totals = (
             self.total_action_count,
             self.total_sheet_openings,
             self.total_remnant_retrievals,
+            self.total_jagua_representation_fallbacks,
             self.mean_final_net_cost,
         )
         if observed_totals != expected_totals:
@@ -1494,10 +1543,23 @@ def finalize_evaluation_result(
     if any(item.policy != frozen_policy for item in first + second):
         raise ValueError("M7 evaluation accepts only the frozen policy")
     first_semantic = [item.model_dump(mode="json") for item in first]
-    second_semantic = [item.model_dump(mode="json") for item in second]
-    if first_semantic != second_semantic:
+    first_replay_content = [
+        item.model_dump(
+            mode="json",
+            exclude={"jagua_representation_fallback_count"},
+        )
+        for item in first
+    ]
+    second_replay_content = [
+        item.model_dump(
+            mode="json",
+            exclude={"jagua_representation_fallback_count"},
+        )
+        for item in second
+    ]
+    if first_replay_content != second_replay_content:
         raise ValueError("M7 evaluation repeat execution differs")
-    pass_digest = semantic_sha256({"streams": first_semantic})
+    pass_digest = semantic_sha256({"streams": first_replay_content})
     semantic = {
         "schema_version": "yieldforge.m7-evaluation-result.v1",
         "freeze_id": freeze_id,
@@ -1526,6 +1588,9 @@ def finalize_evaluation_result(
         "total_action_count": sum(item.action_count for item in first),
         "total_sheet_openings": sum(item.full_sheet_opening_count for item in first),
         "total_remnant_retrievals": sum(item.remnant_retrieval_count for item in first),
+        "total_jagua_representation_fallbacks": sum(
+            item.jagua_representation_fallback_count for item in first
+        ),
         "mean_final_net_cost": round(fmean(item.final_net_cost for item in first), 6),
         "evaluation_partition_opened": True,
         "technical_decision": "frozen_baseline_evaluation_complete",
@@ -1563,6 +1628,68 @@ def _baseline_runtime_identity(jagua_executable: Path) -> M7BaselineRuntimeIdent
         python_version=platform.python_version(),
         shapely_version=shapely.__version__,
         jagua_executable_sha256=f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}",
+    )
+
+
+def amend_frozen_baseline_runtime(
+    frozen: M7FrozenBaseline,
+    *,
+    jagua_executable: Path,
+    trigger_stream_id: str,
+) -> M7FrozenBaseline:
+    """Version the semantics-preserving Jagua representation fallback before rerun."""
+
+    runtime = _baseline_runtime_identity(jagua_executable)
+    if (
+        frozen.runtime_amendment is not None
+        or frozen.runtime.replay_engine != "yieldforge.m7-baseline-replay@1.0.0"
+        or runtime.replay_engine != "yieldforge.m7-baseline-replay@1.0.1"
+        or frozen.runtime.python_implementation != runtime.python_implementation
+        or frozen.runtime.python_version != runtime.python_version
+        or frozen.runtime.shapely_version != runtime.shapely_version
+        or frozen.runtime.collision_backend != runtime.collision_backend
+        or frozen.runtime.jagua_backend != runtime.jagua_backend
+        or frozen.runtime.jagua_version != runtime.jagua_version
+        or frozen.runtime.jagua_coordinate_precision != runtime.jagua_coordinate_precision
+        or frozen.runtime.jagua_executable_sha256 != runtime.jagua_executable_sha256
+    ):
+        raise ValueError("M7 runtime amendment differs beyond the registered fallback")
+    amendment = M7RuntimeAmendment(
+        prior_freeze_id=frozen.freeze_id,
+        prior_freeze_sha256=frozen.content_sha256,
+        trigger_stream_id=trigger_stream_id,
+    )
+    semantic = {
+        "schema_version": "yieldforge.m7-frozen-baseline.v1",
+        "calibration_result_id": frozen.calibration_result_id,
+        "calibration_result_sha256": frozen.calibration_result_sha256,
+        "m0_contract_id": frozen.m0_contract_id,
+        "m0_contract_sha256": frozen.m0_contract_sha256,
+        "problem_index_id": frozen.problem_index_id,
+        "problem_index_sha256": frozen.problem_index_sha256,
+        "winning_policy": frozen.winning_policy.model_dump(mode="json"),
+        "candidate_set_ids": list(frozen.candidate_set_ids),
+        "candidate_set_sha256s": list(frozen.candidate_set_sha256s),
+        "runtime": runtime.model_dump(mode="json"),
+        "runtime_amendment": amendment.model_dump(mode="json"),
+        "evaluation_partition_opened": False,
+        "claim_ceiling": frozen.claim_ceiling,
+    }
+    digest = semantic_sha256(semantic)
+    return M7FrozenBaseline(
+        freeze_id=f"yfm7freeze-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        calibration_result_id=frozen.calibration_result_id,
+        calibration_result_sha256=frozen.calibration_result_sha256,
+        m0_contract_id=frozen.m0_contract_id,
+        m0_contract_sha256=frozen.m0_contract_sha256,
+        problem_index_id=frozen.problem_index_id,
+        problem_index_sha256=frozen.problem_index_sha256,
+        winning_policy=frozen.winning_policy,
+        candidate_set_ids=frozen.candidate_set_ids,
+        candidate_set_sha256s=frozen.candidate_set_sha256s,
+        runtime=runtime,
+        runtime_amendment=amendment,
     )
 
 
@@ -1894,10 +2021,12 @@ def execute_evaluation(
                         f"event={done}/{total}"
                     )
 
+            runtime_metrics = M7ReplayRuntimeMetrics()
             replay = run_m7_replay(
                 replay_input,
                 {item: verified[item] for item in stream_problem_ids},
                 rules,
+                runtime_metrics=runtime_metrics,
                 standard_profile_cache=standard_profile_cache,
                 standard_profile_executor=profile_executor,
                 jagua_executable=jagua_executable,
@@ -1920,6 +2049,9 @@ def execute_evaluation(
                     full_sheet_opening_count=replay.summary.full_sheet_opening_count,
                     remnant_retrieval_count=replay.summary.remnant_retrieval_count,
                     terminal_remnant_count=replay.summary.terminal_remnant_count,
+                    jagua_representation_fallback_count=(
+                        runtime_metrics.jagua_representation_fallback_count
+                    ),
                     final_net_cost=replay.summary.final_net_cost,
                 )
             )
@@ -2058,7 +2190,11 @@ def publish_frozen_baseline(
 
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
-    path = output / "m7-frozen-baseline-v1.json"
+    path = output / (
+        "m7-frozen-baseline-v1.json"
+        if frozen.runtime_amendment is None
+        else "m7-frozen-baseline-v1.0.1.json"
+    )
     data = _canonical_bytes(frozen)
     if path.exists():
         if _read_regular(path) != data:

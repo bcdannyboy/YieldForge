@@ -163,6 +163,10 @@ class JaguaGeneratedPrefilterResult:
     wall_seconds: float
 
 
+class JaguaRepresentationError(ValueError):
+    """The guarded f32 prefilter cannot represent an otherwise valid exact query."""
+
+
 def _canonical_ring(coordinates) -> Ring:  # type: ignore[no-untyped-def]
     points = tuple((float(x), float(y)) for x, y in tuple(coordinates)[:-1])
     if len(points) < 3 or any(not math.isfinite(value) for point in points for value in point):
@@ -191,7 +195,9 @@ def build_jagua_request(
         raise ValueError("Jagua request requires unique non-empty layouts")
     guarded = container.buffer(container_guard, join_style="mitre")
     if not isinstance(guarded, Polygon) or guarded.is_empty or not guarded.is_valid:
-        raise ValueError("Jagua guarded container must remain one valid polygon")
+        raise JaguaRepresentationError(
+            "Jagua guarded container must remain one valid polygon"
+        )
     layout_polygons = []
     query_indexes = []
     query_translations = []
@@ -201,7 +207,9 @@ def build_jagua_request(
         rings = []
         for polygon in layout.polygons:
             if polygon.interiors:
-                raise ValueError("Jagua layout polygons with holes require Shapely fallback")
+                raise JaguaRepresentationError(
+                    "Jagua layout polygons with holes require Shapely fallback"
+                )
             if polygon.is_empty or not polygon.is_valid:
                 raise ValueError("Jagua layout polygon is invalid")
             rings.append(_canonical_ring(polygon.exterior.coords))
@@ -233,7 +241,7 @@ def build_jagua_search_request(
     """Build one request that preserves M7's exact f64 translation-source order."""
 
     if not isinstance(remnant.geometry, Polygon):
-        raise ValueError("Jagua search requires one polygonal remnant")
+        raise JaguaRepresentationError("Jagua search requires one polygonal remnant")
     guarded = build_jagua_request(
         container=remnant.geometry,
         container_guard=container_guard,
@@ -431,7 +439,9 @@ def run_jagua_generated_prefilter(
     if not layouts or any(
         polygon.interiors for layout in layouts for polygon in layout.part_polygons
     ):
-        raise ValueError("Jagua generated search requires compatible non-empty layouts")
+        raise JaguaRepresentationError(
+            "Jagua generated search requires compatible non-empty layouts"
+        )
     request = build_jagua_search_request(
         remnant=remnant,
         container_guard=container_guard,

@@ -41,6 +41,7 @@ from yieldforge.baseline.geometry import (
 )
 from yieldforge.baseline.jagua import (
     JaguaPrefilterResult,
+    JaguaRepresentationError,
     run_jagua_generated_prefilter,
     run_jagua_prefilter,
 )
@@ -138,7 +139,7 @@ def _storage_cost(
 
 class M7ReplayEngineIdentity(BaselineContractModel):
     name: Literal["yieldforge.m7-baseline-replay"] = "yieldforge.m7-baseline-replay"
-    version: Literal["1.0.0"] = "1.0.0"
+    version: Literal["1.0.0", "1.0.1"] = "1.0.1"
     shapely_version: StrictStr = Field(min_length=1)
 
 
@@ -469,6 +470,7 @@ class M7ReplayRuntimeMetrics:
     jagua_authoritative_audit_seconds: float = 0.0
     jagua_translation_generation_seconds: float = 0.0
     jagua_accelerated_evaluation_seconds: float = 0.0
+    jagua_representation_fallback_count: int = 0
     fit_search_cache_hit_count: int = 0
     fit_search_cache_miss_count: int = 0
 
@@ -712,6 +714,9 @@ def _generate_actions(
                 runtime_metrics.jagua_accelerated_evaluation_seconds += (
                     jagua_metrics.accelerated_evaluation_seconds
                 )
+                runtime_metrics.jagua_representation_fallback_count += (
+                    jagua_metrics.representation_fallback_count
+                )
         elif runtime_metrics is not None and not cache_hit_recorded:
             runtime_metrics.fit_search_cache_hit_count += 1
         for candidate, search in zip(verified.candidates, searches, strict=True):
@@ -936,6 +941,7 @@ class _JaguaChunkMetrics:
     authoritative_audit_seconds: float = 0.0
     translation_generation_seconds: float = 0.0
     accelerated_evaluation_seconds: float = 0.0
+    representation_fallback_count: int = 0
 
 
 def _merge_jagua_metrics(values: tuple[_JaguaChunkMetrics, ...]) -> _JaguaChunkMetrics:
@@ -949,6 +955,9 @@ def _merge_jagua_metrics(values: tuple[_JaguaChunkMetrics, ...]) -> _JaguaChunkM
         authoritative_audit_seconds=sum(item.authoritative_audit_seconds for item in values),
         translation_generation_seconds=sum(item.translation_generation_seconds for item in values),
         accelerated_evaluation_seconds=sum(item.accelerated_evaluation_seconds for item in values),
+        representation_fallback_count=sum(
+            item.representation_fallback_count for item in values
+        ),
     )
 
 
@@ -971,19 +980,25 @@ def _search_candidate_chunk(  # type: ignore[no-untyped-def]
     rust_generated = jagua_executable is not None and not any(
         polygon.interiors for layout in prepared_layouts for polygon in layout.part_polygons
     )
+    representation_fallback_count = 0
     if rust_generated:
         evaluation_started = perf_counter()
-        prefilter = run_jagua_generated_prefilter(
-            jagua_executable,
-            remnant=prepared_remnant,
-            layouts=prepared_layouts,
-            fit_config=fit_config,
-            search_config=search_config,
-            container_guard=jagua_container_guard,
-        )
-        translation_batches = prefilter.translation_batches
-        generation_seconds = 0.0
-    else:
+        try:
+            prefilter = run_jagua_generated_prefilter(
+                jagua_executable,
+                remnant=prepared_remnant,
+                layouts=prepared_layouts,
+                fit_config=fit_config,
+                search_config=search_config,
+                container_guard=jagua_container_guard,
+            )
+        except JaguaRepresentationError:
+            rust_generated = False
+            representation_fallback_count = 1
+        else:
+            translation_batches = prefilter.translation_batches
+            generation_seconds = 0.0
+    if not rust_generated:
         generation_started = perf_counter()
         translation_batches = tuple(
             generate_layout_translations(
@@ -998,7 +1013,7 @@ def _search_candidate_chunk(  # type: ignore[no-untyped-def]
         )
         generation_seconds = perf_counter() - generation_started
         evaluation_started = perf_counter()
-        if jagua_executable is None:
+        if jagua_executable is None or representation_fallback_count:
             prefilter = JaguaPrefilterResult(
                 collision_masks=tuple(
                     (False,) * len(item.translations) for item in translation_batches
@@ -1010,13 +1025,26 @@ def _search_candidate_chunk(  # type: ignore[no-untyped-def]
                 wall_seconds=0.0,
             )
         else:
-            prefilter = run_jagua_prefilter(
-                jagua_executable,
-                remnant=prepared_remnant,
-                layouts=prepared_layouts,
-                translations=translation_batches,
-                container_guard=jagua_container_guard,
-            )
+            try:
+                prefilter = run_jagua_prefilter(
+                    jagua_executable,
+                    remnant=prepared_remnant,
+                    layouts=prepared_layouts,
+                    translations=translation_batches,
+                    container_guard=jagua_container_guard,
+                )
+            except JaguaRepresentationError:
+                representation_fallback_count = 1
+                prefilter = JaguaPrefilterResult(
+                    collision_masks=tuple(
+                        (False,) * len(item.translations) for item in translation_batches
+                    ),
+                    guarded_query_count=0,
+                    jagua_rejection_count=0,
+                    build_microseconds=0,
+                    query_microseconds=0,
+                    wall_seconds=0.0,
+                )
     accelerated = tuple(
         search_layout_translation(
             remnant,
@@ -1096,6 +1124,7 @@ def _search_candidate_chunk(  # type: ignore[no-untyped-def]
         authoritative_audit_seconds=audit_seconds,
         translation_generation_seconds=generation_seconds,
         accelerated_evaluation_seconds=evaluation_seconds,
+        representation_fallback_count=representation_fallback_count,
     )
 
 

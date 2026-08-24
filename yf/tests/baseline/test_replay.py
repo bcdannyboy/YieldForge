@@ -14,6 +14,7 @@ from yieldforge.baseline.contracts import (
     ReusableGeometryProblem,
     TemporalInstanceBinding,
 )
+from yieldforge.baseline.jagua import JaguaRepresentationError
 from yieldforge.baseline.policies import M7PolicyName, policy_identity
 from yieldforge.baseline.replay import (
     M7ReplayRuntimeMetrics,
@@ -483,6 +484,76 @@ def test_replay_can_use_guarded_jagua_prefilter(
     assert metrics.jagua_guarded_query_count > 0
     assert metrics.jagua_audit_search_count == 0
     assert metrics.jagua_audit_mismatch_count == 0
+
+
+def test_replay_falls_back_to_exact_shapely_for_unrepresentable_jagua_guard(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    problem = _problem()
+    verified = _verified(problem)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def replay_input(*, accelerated: bool):
+        return build_m7_replay_input(
+            m0_contract_id=_m0().contract_id,
+            m0_contract_sha256=_m0().content_sha256,
+            problem_index_id="yfm7i-" + "4" * 24,
+            problem_index_sha256="sha256:" + "5" * 64,
+            m6_contract_id="yfm6-" + "6" * 24,
+            m6_contract_sha256="sha256:" + "7" * 64,
+            m6_population_id="yftp-" + "8" * 24,
+            m6_population_sha256="sha256:" + "9" * 64,
+            policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+            rates=FeasibilityRateManifest(
+                purchase_cost_per_area=1.0,
+                storage_cost_per_area_hour=0.01,
+                return_handling_cost_per_remnant=2.0,
+                retrieval_handling_cost_per_remnant=3.0,
+                scrap_credit_per_area=0.1,
+            ),
+            fit_config=RemnantFitConfig(),
+            problems=(problem,),
+            candidate_sets=(verified.evidence,),
+            instances=(
+                _binding(problem, sequence=0, released_at=started),
+                _binding(problem, sequence=1, released_at=started),
+            ),
+            horizon_end=started + timedelta(hours=1),
+            collision_backend=(
+                "jagua_rs_0_7_0_guarded_prefilter_shapely_witness"
+                if accelerated
+                else "shapely_authoritative"
+            ),
+            jagua_container_guard=1.0 if accelerated else None,
+        )
+
+    authoritative = run_m7_replay(
+        replay_input(accelerated=False),
+        {problem.problem_id: verified},
+        rule_set_from_m0(_m0().remnant_eligibility),
+    )
+
+    def unrepresentable(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise JaguaRepresentationError("synthetic unrepresentable guard")
+
+    monkeypatch.setattr(
+        "yieldforge.baseline.replay.run_jagua_generated_prefilter",
+        unrepresentable,
+    )
+    metrics = M7ReplayRuntimeMetrics()
+    accelerated = run_m7_replay(
+        replay_input(accelerated=True),
+        {problem.problem_id: verified},
+        rule_set_from_m0(_m0().remnant_eligibility),
+        runtime_metrics=metrics,
+        jagua_executable=Path("/usr/bin/true"),
+    )
+
+    assert accelerated.events == authoritative.events
+    assert accelerated.terminal == authoritative.terminal
+    assert accelerated.summary == authoritative.summary
+    assert metrics.jagua_representation_fallback_count == 1
+    assert metrics.jagua_guarded_query_count == 0
 
 
 def test_replay_caches_immutable_no_fit_remnant_searches() -> None:
