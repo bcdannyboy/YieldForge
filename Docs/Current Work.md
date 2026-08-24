@@ -2,22 +2,22 @@
 
 ## Active milestone
 
-[[M5 - Deterministic replay]]
+[[M7 - Strong baseline]]
 
 ## Current objective
 
-Build the smallest deterministic chronological replay that carries exact stock and recursive
-remnants through time, applies a policy using only its permitted information, and produces a
-canonical event history and reconciled cost totals. The reusable implementation remains in the
-single `yf/` project.
+Build and freeze a competent deterministic as-of-safe baseline over the canonical M6 population.
+The baseline must receive batch-capable candidate actions, exact current inventory, remnant age and
+regularity, declared costs, and only legitimately known work. Variant selection occurs on the 12
+calibration streams before the 36 evaluation streams are opened.
 
 ## Next step
 
-Freeze the M5 event order, inventory state transitions, information boundary, terminal rule, and
-canonical history identity. Start with a hand-computable manifest and replay fixture. Profile the
-existing exact fit path under repeated queries; add a narrow `jagua-rs` collision-acceleration spike
-only if measured replay throughput warrants the second runtime. Do not begin the M6 benchmark,
-baseline/oracle comparison, oracle UI, savings claim, or commercial claim during this milestone.
+Freeze a reusable geometry-problem identity for the 273 distinct M6 batch geometries, then extend
+the M5 mechanism kernel to consume multi-part batch actions without changing M5's canonical v1
+result. Run a small calibration-only candidate/archive and replay slice before committing the full
+ordinary candidate budget. Do not inspect evaluation policy outcomes or begin M8 oracle work during
+baseline selection.
 
 ## Evidence bridge completed
 
@@ -33,6 +33,16 @@ baseline/oracle comparison, oracle UI, savings claim, or commercial claim during
 - A dedicated local Postgres read model serves the validated committed catalog with signed pagination, server-owned filtering, lazy detail loading, strict startup identity checks, and no database authority over the evidence artifact.
 - Corpus Explorer, Nest Lab, and Order Book Lab are implemented under `yf/web/`; the real browser suite exercises multiple corpus pages, creates a task `6669` matched projection pair through the frontend-to-API-to-Spyrrow boundary, observes progressive candidates, verifies both immutable archives, compares their exact projection/settings/archive identities, reopens and renders both arms, and verifies deterministic order-book generation.
 - The Postgres-backed visible corpus is exactly the 256-task committed selection; the no-database fallback remains the two original tasks. Order-book chronology/economics are generated and material is assumed; the UI labels those fields and treats full manifests as analysis-only.
+- M5 deterministic replay now carries exact recursive remnants, inventory lineage, event staging,
+  and generated costs through time; canonical result `yfrpr-3e53070d65447bef0e7bcc24` fulfills
+  2/2 toy orders and reconciles the cost path `102.0 → 107.6 → 104.9`.
+- M6 contract `yfm6-3eeda3f4feb80813807c501a` binds the full 254-runnable-task catalog pool,
+  six regimes, eight common seeds, and immutable 12/36 calibration/evaluation partitions.
+- M6 population `yftp-49bd7ce5fd34b2779440c52f` contains 48/48 reproducible streams, 1,152
+  events, and 37,247 source-part references. All streams lower into 1,024 exact compatible batches.
+- M6 lowering pilot `yfm6p-c5852afe0dd52f41689f3ed6` validated 4,769 part instances with
+  14,307 exact Shapely geometry queries and zero invalid geometry. It contained no repeated
+  fit/search calls, so the optional Jagua spike remains gated on measured M7 replay workload.
 
 ## Experiment status
 
@@ -58,8 +68,9 @@ full-sheet opening in the declared one-order toy state.
 
 This proves exact remnant reuse is possible in the modeled geometry. Exact collision detection is
 implemented with Shapely; what remains optional is a faster collision-search backend for repeated
-queries. No observed chronology, reuse-frequency estimate, deterministic simulator, future-aware
-policy, economic benchmark, solver-optimality result, physical-recovery result, or validated
-savings claim exists.
+queries. M5 proves deterministic mechanism replay, and M6 proves controlled temporal construction,
+partition integrity, regeneration, and lossless lowering. No observed chronology, strong frozen
+baseline, future-aware policy, oracle comparison, reuse-frequency estimate, economic verdict,
+solver-optimality result, physical-recovery result, or validated savings claim exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.
