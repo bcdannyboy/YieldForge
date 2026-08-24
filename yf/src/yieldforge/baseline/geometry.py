@@ -77,6 +77,63 @@ class LayoutTranslationCandidates:
     budget_truncated: bool
 
 
+@dataclass(frozen=True)
+class TranslationRejectionCertificate:
+    """A conservative proof that rigid translation cannot produce a registered fit."""
+
+    impossible: bool
+    reason: str | None
+    layout_area: float
+    remnant_area: float
+    layout_width: float
+    remnant_width: float
+    layout_height: float
+    remnant_height: float
+    area_tolerance: float
+
+
+def certify_translation_impossible(
+    layout: PreparedLayoutFootprint,
+    remnant: RemnantStock,
+    *,
+    material: MaterialIdentity,
+    fit_config: RemnantFitConfig,
+) -> TranslationRejectionCertificate:
+    """Reject only material, area, or axis-aligned bound impossibilities."""
+
+    parent = polygon_from_record(remnant.geometry)
+    foot_min_x, foot_min_y, foot_max_x, foot_max_y = layout.bounds
+    rem_min_x, rem_min_y, rem_max_x, rem_max_y = parent.bounds
+    layout_width = foot_max_x - foot_min_x
+    layout_height = foot_max_y - foot_min_y
+    remnant_width = rem_max_x - rem_min_x
+    remnant_height = rem_max_y - rem_min_y
+    area_tolerance = max(
+        fit_config.coordinate_tolerance,
+        parent.area * fit_config.relative_area_tolerance,
+    )
+    reason = None
+    if material_key(material) != material_key(remnant.material):
+        reason = "material_mismatch"
+    elif layout.geometry.area > parent.area + area_tolerance:
+        reason = "footprint_area_exceeds_remnant"
+    elif layout_width > remnant_width + fit_config.coordinate_tolerance:
+        reason = "footprint_width_exceeds_remnant"
+    elif layout_height > remnant_height + fit_config.coordinate_tolerance:
+        reason = "footprint_height_exceeds_remnant"
+    return TranslationRejectionCertificate(
+        impossible=reason is not None,
+        reason=reason,
+        layout_area=float(layout.geometry.area),
+        remnant_area=float(parent.area),
+        layout_width=float(layout_width),
+        remnant_width=float(remnant_width),
+        layout_height=float(layout_height),
+        remnant_height=float(remnant_height),
+        area_tolerance=float(area_tolerance),
+    )
+
+
 def _rotation_allowed(rotation: float, allowed: list[float], tolerance: float) -> bool:
     return any(abs(math.remainder(rotation - item, 360.0)) <= tolerance for item in allowed)
 
