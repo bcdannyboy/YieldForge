@@ -1662,11 +1662,19 @@ def run_m7_continuation(
     runtime: M7ReplayRuntime,
     *,
     cursor: M7ReplayCursor,
+    stop_event_position: int | None = None,
 ) -> M7ContinuationResult:
     """Run the unchanged frozen M7 policy from an arbitrary exact cursor."""
 
+    stop = (
+        len(runtime.replay_input.instances)
+        if stop_event_position is None
+        else stop_event_position
+    )
+    if stop < cursor.next_event_position or stop > len(runtime.replay_input.instances):
+        raise ValueError("M7 continuation stop position is outside the remaining stream")
     events = []
-    while cursor.next_event_position < len(runtime.replay_input.instances):
+    while cursor.next_event_position < stop:
         catalog = enumerate_m7_action_catalog(runtime, cursor=cursor)
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
         descriptor = next(
