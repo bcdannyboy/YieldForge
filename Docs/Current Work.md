@@ -2,22 +2,21 @@
 
 ## Active milestone
 
-[[M7 - Strong baseline]]
+[[M8 - Rollout oracle]]
 
 ## Current objective
 
-Build and freeze a competent deterministic as-of-safe baseline over the canonical M6 population.
-The baseline must receive batch-capable candidate actions, exact current inventory, remnant age and
-regularity, declared costs, and only legitimately known work. Variant selection occurs on the 12
-calibration streams before the 36 evaluation streams are opened.
+Plan the isolated future-aware rollout oracle against the immutable M7 baseline freeze and the same
+canonical M6 evaluation worlds. Preserve action parity, baseline information masking, exact
+accounting, and paired evidence boundaries.
 
 ## Next step
 
-Prepare Task 6 calibration without opening evaluation. First reduce or explicitly accept the
-measured 644.149271-minute five-policy projection. Preserve the frozen 12-stream calibration set,
-equal policy information, complete-layout action boundary, exact Jagua/Shapely differential
-binding, and failure accounting. Then execute all five variants, freeze the winning policy and
-runtime identity, and only afterward permit the 36 evaluation streams.
+Freeze the M8 design before implementation: rollout horizon, terminal baseline behavior, candidate
+parity, future-information isolation, cache identity, failure treatment, paired estimand, and compute
+budget. Add hand-computed toy, no-signal, and information-leakage gates. The source-faithful path
+must compare against M7 freeze `yfm7freeze-5c13c3fe531828d8cd986c39` and evaluation result
+`yfm7eval-f2cb310c4b7e879d119e8f94` without reopening calibration.
 
 ## Evidence bridge completed
 
@@ -52,6 +51,13 @@ runtime identity, and only afterward permit the 36 evaluation streams.
 - M7 feasibility `yfm7f-7edef2fa8719168941e431d2` completed 144/144 events, evaluated 89,936
   actions, and selected 144 standard-sheet openings with zero remnant retrievals. Fit search used
   3,225.582819 of 3,864.895624 replay seconds and projects 644.149271 calibration minutes.
+- M7 calibration `yfm7cal-172006fc66891ceee0c41d49` executed all five policies on all 12
+  calibration streams. Four exact policies tied numerically; `age_regularity` won only the frozen
+  lexical tie-break. The amended runtime freeze is `yfm7freeze-5c13c3fe531828d8cd986c39`.
+- M7 evaluation `yfm7eval-f2cb310c4b7e879d119e8f94` reverified 198 problems and 792 archives,
+  then replayed all 36 streams and 864 events twice with identical content. It opened 826 sheets,
+  retrieved 38 remnants, and recorded mean net cost 29,733.304499. One Jagua-unrepresentable guard
+  used the registered unfiltered Shapely fallback; policy and exact replay semantics were unchanged.
 
 ## Experiment status
 
@@ -75,12 +81,12 @@ future source-shape roles, and 1,331,906 eligible generated-order pairs. The can
 from task `2531` fits a task `147` remnant, creates one reconciled child remnant, and avoids one
 full-sheet opening in the declared one-order toy state.
 
-This proves exact remnant reuse is possible in the modeled M4 one-part geometry. M7 now has a
-validated faster collision backend, but its complete archived layouts found no remnant action in the
-registered 144-event feasibility slice. M5 proves deterministic mechanism replay, and M6 proves
-controlled temporal construction, partition integrity, regeneration, and lossless lowering. No
-observed chronology, frozen winning M7 policy, evaluation result, future-aware policy, oracle
-comparison, general reuse-frequency estimate, economic verdict, solver-optimality result,
-physical-recovery result, or validated savings claim exists.
+This proves exact remnant reuse is possible in the modeled M4 one-part geometry. M7 has now passed:
+its calibrated and frozen baseline reproduced all 36 evaluation streams and selected 38 remnant
+retrievals. M5 proves deterministic mechanism replay, and M6 proves controlled temporal
+construction, partition integrity, regeneration, and lossless lowering. No observed chronology,
+future-aware policy, oracle comparison, paired advantage estimate, general reuse-frequency estimate,
+economic verdict, solver-optimality result, physical-recovery result, or validated savings claim
+exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

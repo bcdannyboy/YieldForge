@@ -114,7 +114,7 @@ measured 644.149271-minute calibration projection is the Task 6 runtime-preparat
 - Modify: `yf/src/yieldforge/cli.py`
 - Modify: `yf/tests/baseline/test_experiment.py`
 - Create: `yf/experiments/results/m7-calibration-<id>.json`
-- Create: `yf/experiments/m7-frozen-baseline-v1.json`
+- Create: `yf/experiments/results/m7-frozen-baseline-v1.json`
 
 1. Write failing tests for all-12-stream inclusion, selector score, tie-breakers, failure treatment,
    freeze identity, and evaluation-blind inputs.
@@ -124,6 +124,11 @@ measured 644.149271-minute calibration projection is the Task 6 runtime-preparat
 5. Freeze the winning policy and runtime identity.
 6. Re-run focused tests and Ruff.
 7. Commit `experiment: freeze M7 strong baseline`.
+
+**Executed:** Calibration `yfm7cal-172006fc66891ceee0c41d49` completed all 60 policy-stream
+replays. Four exact policies tied numerically and `age_regularity` won only the registered lexical
+tie-break. The original freeze was superseded before evaluation by explicit runtime amendment
+`yfm7freeze-5c13c3fe531828d8cd986c39`; policy, candidates, and calibration outcomes did not change.
 
 ### Task 7: Execute frozen evaluation and close M7
 
@@ -145,3 +150,8 @@ measured 644.149271-minute calibration projection is the Task 6 runtime-preparat
    entry requirements.
 6. Run the full Python suite, Ruff, package build, and targeted CLI regeneration checks.
 7. Commit `docs: close M7 and prepare rollout oracle`.
+
+**Executed:** Evaluation `yfm7eval-f2cb310c4b7e879d119e8f94` reverified 198 problems and 792
+archives, ran all 36 streams and 864 events twice, and reproduced identical semantic content. One
+Jagua-unrepresentable guarded remnant used the registered unfiltered authoritative Shapely fallback.
+M7 is closed; M8 is ready for design planning, not implementation.
