@@ -170,6 +170,40 @@ def build_remnant_action(
         fit_config=fit_config,
         search_config=search_config,
     )
+    return build_remnant_action_from_search(
+        problem_id=problem_id,
+        problem_sha256=problem_sha256,
+        candidate_set_id=candidate_set_id,
+        candidate_set_sha256=candidate_set_sha256,
+        problem=problem,
+        candidate=candidate,
+        remnant=remnant,
+        material=material,
+        rules=rules,
+        fit_config=fit_config,
+        search_result=search,
+    )
+
+
+def build_remnant_action_from_search(
+    *,
+    problem_id: str,
+    problem_sha256: str,
+    candidate_set_id: str,
+    candidate_set_sha256: str,
+    problem: StripPackingProblem,
+    candidate: Candidate,
+    remnant: RemnantStock,
+    material: MaterialIdentity,
+    rules: ResidualRuleSet,
+    fit_config: RemnantFitConfig,
+    search_result: LayoutFitSearchResult,
+) -> M7LayoutActionEvidence | None:
+    """Build one remnant action from already-recorded deterministic search evidence."""
+
+    search = LayoutFitSearchResult.model_validate(search_result)
+    if search.candidate_id != candidate.candidate_id or search.remnant_id != remnant.remnant_id:
+        raise ValueError("layout search evidence does not match candidate and remnant")
     if search.status is LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH:
         return None
     if search.translation is None:

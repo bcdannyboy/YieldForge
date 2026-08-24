@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import pytest
+
+from yieldforge.baseline.contracts import M7ActionKind
+from yieldforge.baseline.policies import (
+    ActionPolicyContext,
+    M7PolicyName,
+    registered_policy_identities,
+    select_policy_action,
+)
+
+
+def _choice(
+    action_id: str,
+    *,
+    kind: M7ActionKind,
+    width: float,
+    cost: float,
+    age: float = 0.0,
+    regularity: float = 0.0,
+) -> ActionPolicyContext:
+    return ActionPolicyContext(
+        action_id=action_id,
+        kind=kind,
+        candidate_id=f"candidate-{action_id}",
+        candidate_width=width,
+        selected_stock_id=f"stock-{action_id}",
+        immediate_net_cost=cost,
+        selected_remnant_age_hours=age,
+        returned_regularity=regularity,
+        known_order_lookahead_term=0.0,
+    )
+
+
+def test_registered_policies_freeze_five_as_of_safe_variants() -> None:
+    identities = registered_policy_identities()
+
+    assert tuple(item.name for item in identities) == tuple(M7PolicyName)
+    assert len(identities) == 5
+    assert all(item.seed == 0 for item in identities)
+    lookahead = next(item for item in identities if item.name is M7PolicyName.KNOWN_ORDER_LOOKAHEAD)
+    assert lookahead.information_set == "released_work_inventory_and_firm_known_orders_only"
+    assert lookahead.lookahead_availability == "zero_no_pre_release_known_at_field"
+
+
+def test_policy_variants_apply_their_frozen_ordering_and_stable_keys() -> None:
+    remnant = _choice(
+        "remnant",
+        kind=M7ActionKind.CONSUME_REMNANT,
+        width=6.0,
+        cost=9.0,
+        age=8.0,
+        regularity=0.8,
+    )
+    sheet = _choice(
+        "sheet",
+        kind=M7ActionKind.OPEN_STANDARD_SHEET,
+        width=4.0,
+        cost=5.0,
+        regularity=0.9,
+    )
+
+    myopic = select_policy_action(M7PolicyName.MYOPIC_GEOMETRY, (remnant, sheet))
+    remnant_first = select_policy_action(M7PolicyName.REMNANT_FIRST, (remnant, sheet))
+    net_cost = select_policy_action(M7PolicyName.NET_COST, (remnant, sheet))
+
+    assert myopic.action_id == "sheet"
+    assert remnant_first.action_id == "remnant"
+    assert net_cost.action_id == "sheet"
+    assert myopic == select_policy_action(M7PolicyName.MYOPIC_GEOMETRY, (sheet, remnant))
+    assert myopic.decision_key
+    assert all("=" in term for term in myopic.decision_key)
+
+
+def test_age_regularity_prefers_age_then_regular_children_after_equal_cost() -> None:
+    younger = _choice(
+        "younger",
+        kind=M7ActionKind.CONSUME_REMNANT,
+        width=4.0,
+        cost=5.0,
+        age=1.0,
+        regularity=1.0,
+    )
+    older = _choice(
+        "older",
+        kind=M7ActionKind.CONSUME_REMNANT,
+        width=4.0,
+        cost=5.0,
+        age=8.0,
+        regularity=0.5,
+    )
+
+    selected = select_policy_action(M7PolicyName.AGE_REGULARITY, (younger, older))
+
+    assert selected.action_id == "older"
+
+
+def test_known_order_lookahead_is_explicitly_zero_and_matches_net_cost() -> None:
+    expensive = _choice(
+        "expensive",
+        kind=M7ActionKind.CONSUME_REMNANT,
+        width=3.0,
+        cost=7.0,
+    )
+    cheap = _choice(
+        "cheap",
+        kind=M7ActionKind.OPEN_STANDARD_SHEET,
+        width=5.0,
+        cost=4.0,
+    )
+
+    lookahead = select_policy_action(
+        M7PolicyName.KNOWN_ORDER_LOOKAHEAD,
+        (expensive, cheap),
+    )
+    net_cost = select_policy_action(M7PolicyName.NET_COST, (expensive, cheap))
+
+    assert lookahead.action_id == net_cost.action_id == "cheap"
+    assert "known_order_lookahead_term=0" in lookahead.decision_key
+
+
+def test_policy_fails_closed_when_no_action_exists() -> None:
+    with pytest.raises(ValueError, match="no action"):
+        select_policy_action(M7PolicyName.NET_COST, ())
