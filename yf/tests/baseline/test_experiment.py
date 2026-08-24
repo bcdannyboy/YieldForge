@@ -9,15 +9,19 @@ from yieldforge.baseline.experiment import (
     M7CalibrationStreamResult,
     M7CollisionBackendDecision,
     M7CollisionDifferentialResult,
+    M7EvaluationStreamResult,
     M7FeasibilityStreamResult,
     evaluate_collision_gate,
     finalize_calibration_result,
     finalize_collision_differential_result,
+    finalize_evaluation_result,
     finalize_feasibility_result,
     publish_calibration_result,
+    publish_evaluation_result,
     publish_feasibility_result,
     select_calibration_instances,
     select_calibration_winner,
+    select_evaluation_instances,
     select_feasibility_instances,
 )
 from yieldforge.baseline.policies import (
@@ -57,6 +61,16 @@ def test_calibration_selection_includes_all_12_streams_and_no_evaluation(index) 
     assert len({item.problem_id for item in instances}) == 90
     assert {item.temporal_seed for item in instances} == {2026082300, 2026082301}
     assert all(item.partition.value == "calibration" for item in instances)
+
+
+def test_evaluation_selection_includes_all_36_streams_and_no_calibration(index) -> None:  # type: ignore[no-untyped-def]
+    instances = select_evaluation_instances(index)
+
+    assert len(instances) == 864
+    assert len({item.stream_id for item in instances}) == 36
+    assert len({item.problem_id for item in instances}) == 198
+    assert {item.temporal_seed for item in instances} == set(range(2026082302, 2026082308))
+    assert all(item.partition.value == "evaluation" for item in instances)
 
 
 def _score(
@@ -320,3 +334,118 @@ def test_calibration_result_reconciles_all_policies_and_freezes_winner(
     assert result.total_fit_search_cache_hit_count == 180
     assert result.result_id == f"yfm7cal-{result.content_sha256[7:31]}"
     assert publish_calibration_result(tmp_path, result) == path
+
+
+def _evaluation_stream(
+    regime: TemporalRegime,
+    seed: int,
+    offset: int,
+    *,
+    policy: M7PolicyName = M7PolicyName.AGE_REGULARITY,
+) -> M7EvaluationStreamResult:
+    return M7EvaluationStreamResult(
+        policy=policy_identity(policy),
+        regime=regime,
+        temporal_seed=seed,
+        stream_id=f"yfts-{offset:024x}",
+        stream_sha256=f"sha256:{offset:064x}",
+        replay_input_id=f"yfm7ri-{offset:024x}",
+        replay_input_sha256=f"sha256:{offset + 1:064x}",
+        replay_result_id=f"yfm7r-{offset:024x}",
+        replay_result_sha256=f"sha256:{offset + 2:064x}",
+        action_count=48,
+        full_sheet_opening_count=20,
+        remnant_retrieval_count=4,
+        terminal_remnant_count=3,
+        final_net_cost=float(offset),
+    )
+
+
+def test_evaluation_result_accepts_only_frozen_policy_and_reproduces_identically(
+    tmp_path: Path,
+) -> None:
+    streams = tuple(
+        _evaluation_stream(regime, seed, offset + 1)
+        for offset, (seed, regime) in enumerate(
+            (seed, regime)
+            for seed in range(2026082302, 2026082308)
+            for regime in TemporalRegime
+        )
+    )
+    candidate_set_ids = tuple(f"yfm7c-{offset:024x}" for offset in range(1, 199))
+    candidate_set_sha256s = tuple(f"sha256:{offset:064x}" for offset in range(1, 199))
+    result = finalize_evaluation_result(
+        freeze_id="yfm7freeze-" + "a" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+        calibration_result_id="yfm7cal-" + "c" * 24,
+        calibration_result_sha256="sha256:" + "d" * 64,
+        m0_contract_id="yfm0-" + "e" * 24,
+        m0_contract_sha256="sha256:" + "f" * 64,
+        problem_index_id="yfm7i-" + "1" * 24,
+        problem_index_sha256="sha256:" + "2" * 64,
+        frozen_policy=policy_identity(M7PolicyName.AGE_REGULARITY),
+        candidate_set_ids=candidate_set_ids,
+        candidate_set_sha256s=candidate_set_sha256s,
+        raw_candidate_count=60_000,
+        distinct_candidate_count=50_000,
+        rejected_candidate_count=1,
+        first_pass_streams=streams,
+        second_pass_streams=streams,
+    )
+
+    assert result.stream_count == 36
+    assert result.instance_count == 864
+    assert result.repeat_count == 2
+    assert result.repeat_content_identity_match is True
+    assert result.evaluation_partition_opened is True
+    assert "policy_scores" not in result.model_dump()
+    assert result.result_id == f"yfm7eval-{result.content_sha256[7:31]}"
+    assert publish_evaluation_result(tmp_path, result) == publish_evaluation_result(
+        tmp_path, result
+    )
+
+    changed_policy = streams[:-1] + (
+        streams[-1].model_copy(update={"policy": policy_identity(M7PolicyName.NET_COST)}),
+    )
+    with pytest.raises(ValueError, match="frozen policy"):
+        finalize_evaluation_result(
+            freeze_id="yfm7freeze-" + "a" * 24,
+            freeze_sha256="sha256:" + "b" * 64,
+            calibration_result_id="yfm7cal-" + "c" * 24,
+            calibration_result_sha256="sha256:" + "d" * 64,
+            m0_contract_id="yfm0-" + "e" * 24,
+            m0_contract_sha256="sha256:" + "f" * 64,
+            problem_index_id="yfm7i-" + "1" * 24,
+            problem_index_sha256="sha256:" + "2" * 64,
+            frozen_policy=policy_identity(M7PolicyName.AGE_REGULARITY),
+            candidate_set_ids=candidate_set_ids,
+            candidate_set_sha256s=candidate_set_sha256s,
+            raw_candidate_count=60_000,
+            distinct_candidate_count=50_000,
+            rejected_candidate_count=1,
+            first_pass_streams=changed_policy,
+            second_pass_streams=changed_policy,
+        )
+
+    changed_result = streams[:-1] + (
+        streams[-1].model_copy(update={"final_net_cost": 999.0}),
+    )
+    with pytest.raises(ValueError, match="repeat execution differs"):
+        finalize_evaluation_result(
+            freeze_id="yfm7freeze-" + "a" * 24,
+            freeze_sha256="sha256:" + "b" * 64,
+            calibration_result_id="yfm7cal-" + "c" * 24,
+            calibration_result_sha256="sha256:" + "d" * 64,
+            m0_contract_id="yfm0-" + "e" * 24,
+            m0_contract_sha256="sha256:" + "f" * 64,
+            problem_index_id="yfm7i-" + "1" * 24,
+            problem_index_sha256="sha256:" + "2" * 64,
+            frozen_policy=policy_identity(M7PolicyName.AGE_REGULARITY),
+            candidate_set_ids=candidate_set_ids,
+            candidate_set_sha256s=candidate_set_sha256s,
+            raw_candidate_count=60_000,
+            distinct_candidate_count=50_000,
+            rejected_candidate_count=1,
+            first_pass_streams=streams,
+            second_pass_streams=changed_result,
+        )

@@ -9,11 +9,14 @@ from yieldforge.archive import CandidateArchive
 from yieldforge.baseline.experiment import (
     M7CollisionDifferentialResult,
     M7FeasibilityResult,
+    M7FrozenBaseline,
     execute_calibration,
     execute_collision_differential_probe,
+    execute_evaluation,
     execute_feasibility_slice,
     publish_calibration_result,
     publish_collision_differential_result,
+    publish_evaluation_result,
     publish_feasibility_result,
     publish_frozen_baseline,
     publish_problem_index,
@@ -505,6 +508,35 @@ def _calibrate_m7_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _evaluate_m7_baseline(args: argparse.Namespace) -> int:
+    index = build_registered_problem_index()
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    frozen = M7FrozenBaseline.model_validate_json(
+        args.frozen_baseline.read_bytes(), strict=True
+    )
+
+    def progress(message: str) -> None:
+        print(f"M7 evaluation: {message}")
+
+    result = execute_evaluation(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        progress=progress,
+    )
+    result_path = publish_evaluation_result(args.output, result)
+    print(
+        "Published M7 frozen-policy evaluation: "
+        f"result={result.result_id} policy={result.frozen_policy.name.value} "
+        f"streams={result.stream_count} instances={result.instance_count} "
+        f"repeat_match={str(result.repeat_content_identity_match).lower()} "
+        f"mean_final_net_cost={result.mean_final_net_cost} output={result_path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -733,6 +765,23 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_m7.add_argument("--feasibility", type=Path, required=True)
     calibrate_m7.add_argument("--output", type=Path, required=True)
     calibrate_m7.set_defaults(handler=_calibrate_m7_baseline)
+
+    evaluate_m7 = benchmark_commands.add_parser(
+        "m7-evaluate",
+        help="execute the frozen M7 policy twice on all evaluation streams",
+    )
+    evaluate_m7.add_argument("--m0", type=Path, required=True)
+    evaluate_m7.add_argument("--frozen-baseline", type=Path, required=True)
+    evaluate_m7.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    evaluate_m7.add_argument("--jagua-binary", type=Path, required=True)
+    evaluate_m7.add_argument("--output", type=Path, required=True)
+    evaluate_m7.set_defaults(handler=_evaluate_m7_baseline)
     return parser
 
 

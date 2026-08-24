@@ -1032,6 +1032,25 @@ def select_calibration_instances(index: M7ProblemIndex) -> tuple:
     return instances
 
 
+def select_evaluation_instances(index: M7ProblemIndex) -> tuple:
+    """Select all and only the 36 frozen evaluation streams."""
+
+    instances = tuple(
+        item for item in index.instances if item.partition is TemporalPartition.EVALUATION
+    )
+    if (
+        len(instances) != 864
+        or len({item.stream_id for item in instances}) != 36
+        or len({item.problem_id for item in instances}) != 198
+        or any(
+            sum(candidate.stream_id == stream_id for candidate in instances) != 24
+            for stream_id in {item.stream_id for item in instances}
+        )
+    ):
+        raise ValueError("M7 evaluation population differs from frozen census")
+    return instances
+
+
 def select_calibration_winner(
     scores: tuple[M7CalibrationPolicyScore, ...],
 ) -> M7CalibrationPolicyScore:
@@ -1314,6 +1333,239 @@ class M7FrozenBaseline(BaselineContractModel):
         return self
 
 
+class M7EvaluationStreamResult(BaselineContractModel):
+    """Deterministic evidence for one frozen-policy evaluation stream."""
+
+    policy: M7PolicyIdentity
+    regime: TemporalRegime
+    temporal_seed: StrictInt
+    stream_id: StrictStr = Field(pattern=r"^yfts-[0-9a-f]{24}$")
+    stream_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    instance_count: Literal[24] = 24
+    replay_input_id: StrictStr = Field(pattern=r"^yfm7ri-[0-9a-f]{24}$")
+    replay_input_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    replay_result_id: StrictStr = Field(pattern=r"^yfm7r-[0-9a-f]{24}$")
+    replay_result_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    action_count: StrictInt = Field(ge=24)
+    full_sheet_opening_count: StrictInt = Field(ge=0)
+    remnant_retrieval_count: StrictInt = Field(ge=0)
+    terminal_remnant_count: StrictInt = Field(ge=0)
+    final_net_cost: StrictFloat
+    technical_decision: Literal["pass"] = "pass"
+
+    @model_validator(mode="after")
+    def require_complete_replay(self) -> Self:
+        if self.full_sheet_opening_count + self.remnant_retrieval_count != self.instance_count:
+            raise ValueError("M7 evaluation replay did not fulfill every instance")
+        return self
+
+
+class M7EvaluationResult(BaselineContractModel):
+    """Twice-reproduced execution of the one calibration-frozen baseline policy."""
+
+    schema_version: Literal["yieldforge.m7-evaluation-result.v1"] = (
+        "yieldforge.m7-evaluation-result.v1"
+    )
+    result_id: StrictStr = Field(pattern=r"^yfm7eval-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    freeze_id: StrictStr = Field(pattern=r"^yfm7freeze-[0-9a-f]{24}$")
+    freeze_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    calibration_result_id: StrictStr = Field(pattern=r"^yfm7cal-[0-9a-f]{24}$")
+    calibration_result_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    m0_contract_id: StrictStr = Field(pattern=r"^yfm0-[0-9a-f]{24}$")
+    m0_contract_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    problem_index_id: StrictStr = Field(pattern=r"^yfm7i-[0-9a-f]{24}$")
+    problem_index_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    frozen_policy: M7PolicyIdentity
+    candidate_problem_count: Literal[198] = 198
+    candidate_archive_count: Literal[792] = 792
+    shared_calibration_problem_count: Literal[79] = 79
+    candidate_set_ids: tuple[StrictStr, ...] = Field(min_length=198, max_length=198)
+    candidate_set_sha256s: tuple[StrictStr, ...] = Field(min_length=198, max_length=198)
+    raw_candidate_count: StrictInt = Field(ge=198)
+    distinct_candidate_count: StrictInt = Field(ge=198)
+    rejected_candidate_count: StrictInt = Field(ge=0)
+    stream_count: Literal[36] = 36
+    instance_count: Literal[864] = 864
+    streams: tuple[M7EvaluationStreamResult, ...] = Field(min_length=36, max_length=36)
+    repeat_count: Literal[2] = 2
+    reproducibility_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    repeat_content_identity_match: Literal[True] = True
+    total_action_count: StrictInt = Field(ge=864)
+    total_sheet_openings: StrictInt = Field(ge=0)
+    total_remnant_retrievals: StrictInt = Field(ge=0)
+    mean_final_net_cost: StrictFloat
+    evaluation_partition_opened: Literal[True] = True
+    technical_decision: Literal["frozen_baseline_evaluation_complete"] = (
+        "frozen_baseline_evaluation_complete"
+    )
+    claim_ceiling: Literal[
+        "frozen_baseline_execution_only_not_oracle_advantage_savings_physical_or_commercial_"
+        "evidence"
+    ] = (
+        "frozen_baseline_execution_only_not_oracle_advantage_savings_physical_or_commercial_"
+        "evidence"
+    )
+
+    @model_validator(mode="after")
+    def require_complete_evaluation(self) -> Self:
+        if (
+            len(set(self.candidate_set_ids)) != self.candidate_problem_count
+            or len(self.candidate_set_ids) != len(self.candidate_set_sha256s)
+        ):
+            raise ValueError("M7 evaluation candidate identities differ")
+        if (
+            len({item.stream_id for item in self.streams}) != self.stream_count
+            or sum(item.instance_count for item in self.streams) != self.instance_count
+            or {item.temporal_seed for item in self.streams}
+            != set(range(2026082302, 2026082308))
+            or {(item.temporal_seed, item.regime) for item in self.streams}
+            != {
+                (seed, regime)
+                for seed in range(2026082302, 2026082308)
+                for regime in TemporalRegime
+            }
+        ):
+            raise ValueError("M7 evaluation streams differ from frozen census")
+        if any(item.policy != self.frozen_policy for item in self.streams):
+            raise ValueError("M7 evaluation stream differs from frozen policy")
+        expected_pass_digest = semantic_sha256(
+            {"streams": [item.model_dump(mode="json") for item in self.streams]}
+        )
+        if self.reproducibility_content_sha256 != f"sha256:{expected_pass_digest}":
+            raise ValueError("M7 evaluation reproducibility identity differs")
+        expected_totals = (
+            sum(item.action_count for item in self.streams),
+            sum(item.full_sheet_opening_count for item in self.streams),
+            sum(item.remnant_retrieval_count for item in self.streams),
+            round(fmean(item.final_net_cost for item in self.streams), 6),
+        )
+        observed_totals = (
+            self.total_action_count,
+            self.total_sheet_openings,
+            self.total_remnant_retrievals,
+            self.mean_final_net_cost,
+        )
+        if observed_totals != expected_totals:
+            raise ValueError("M7 evaluation totals do not reconcile")
+        digest = semantic_sha256(self, excluded_fields={"result_id", "content_sha256"})
+        if self.content_sha256 != f"sha256:{digest}" or self.result_id != (
+            f"yfm7eval-{digest[:24]}"
+        ):
+            raise ValueError("M7 evaluation identity does not match content")
+        return self
+
+
+def finalize_evaluation_result(
+    *,
+    freeze_id: str,
+    freeze_sha256: str,
+    calibration_result_id: str,
+    calibration_result_sha256: str,
+    m0_contract_id: str,
+    m0_contract_sha256: str,
+    problem_index_id: str,
+    problem_index_sha256: str,
+    frozen_policy: M7PolicyIdentity,
+    candidate_set_ids: tuple[str, ...],
+    candidate_set_sha256s: tuple[str, ...],
+    raw_candidate_count: int,
+    distinct_candidate_count: int,
+    rejected_candidate_count: int,
+    first_pass_streams: tuple[M7EvaluationStreamResult, ...],
+    second_pass_streams: tuple[M7EvaluationStreamResult, ...],
+) -> M7EvaluationResult:
+    """Fail closed unless two complete frozen-policy passes are content-identical."""
+
+    regime_order = tuple(TemporalRegime)
+
+    def ordered(
+        streams: tuple[M7EvaluationStreamResult, ...],
+    ) -> tuple[M7EvaluationStreamResult, ...]:
+        return tuple(
+            sorted(
+                streams,
+                key=lambda item: (item.temporal_seed, regime_order.index(item.regime)),
+            )
+        )
+
+    first = ordered(first_pass_streams)
+    second = ordered(second_pass_streams)
+    if any(item.policy != frozen_policy for item in first + second):
+        raise ValueError("M7 evaluation accepts only the frozen policy")
+    first_semantic = [item.model_dump(mode="json") for item in first]
+    second_semantic = [item.model_dump(mode="json") for item in second]
+    if first_semantic != second_semantic:
+        raise ValueError("M7 evaluation repeat execution differs")
+    pass_digest = semantic_sha256({"streams": first_semantic})
+    semantic = {
+        "schema_version": "yieldforge.m7-evaluation-result.v1",
+        "freeze_id": freeze_id,
+        "freeze_sha256": freeze_sha256,
+        "calibration_result_id": calibration_result_id,
+        "calibration_result_sha256": calibration_result_sha256,
+        "m0_contract_id": m0_contract_id,
+        "m0_contract_sha256": m0_contract_sha256,
+        "problem_index_id": problem_index_id,
+        "problem_index_sha256": problem_index_sha256,
+        "frozen_policy": frozen_policy.model_dump(mode="json"),
+        "candidate_problem_count": 198,
+        "candidate_archive_count": 792,
+        "shared_calibration_problem_count": 79,
+        "candidate_set_ids": list(candidate_set_ids),
+        "candidate_set_sha256s": list(candidate_set_sha256s),
+        "raw_candidate_count": raw_candidate_count,
+        "distinct_candidate_count": distinct_candidate_count,
+        "rejected_candidate_count": rejected_candidate_count,
+        "stream_count": 36,
+        "instance_count": 864,
+        "streams": first_semantic,
+        "repeat_count": 2,
+        "reproducibility_content_sha256": f"sha256:{pass_digest}",
+        "repeat_content_identity_match": True,
+        "total_action_count": sum(item.action_count for item in first),
+        "total_sheet_openings": sum(item.full_sheet_opening_count for item in first),
+        "total_remnant_retrievals": sum(item.remnant_retrieval_count for item in first),
+        "mean_final_net_cost": round(fmean(item.final_net_cost for item in first), 6),
+        "evaluation_partition_opened": True,
+        "technical_decision": "frozen_baseline_evaluation_complete",
+        "claim_ceiling": (
+            "frozen_baseline_execution_only_not_oracle_advantage_savings_physical_or_"
+            "commercial_evidence"
+        ),
+    }
+    digest = semantic_sha256(semantic)
+    validated = dict(semantic)
+    validated.update(
+        {
+            "frozen_policy": frozen_policy,
+            "candidate_set_ids": candidate_set_ids,
+            "candidate_set_sha256s": candidate_set_sha256s,
+            "streams": first,
+        }
+    )
+    return M7EvaluationResult(
+        result_id=f"yfm7eval-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        **validated,
+    )
+
+
+def _baseline_runtime_identity(jagua_executable: Path) -> M7BaselineRuntimeIdentity:
+    """Capture the exact executable and language runtime used by replay."""
+
+    executable = Path(jagua_executable)
+    metadata = executable.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("M7 Jagua runtime must be a regular file")
+    return M7BaselineRuntimeIdentity(
+        python_implementation=platform.python_implementation(),
+        python_version=platform.python_version(),
+        shapely_version=shapely.__version__,
+        jagua_executable_sha256=f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}",
+    )
+
+
 def freeze_calibrated_baseline(
     calibration: M7CalibrationResult,
     candidate_sets: tuple[M7CandidateSetEvidence, ...],
@@ -1324,16 +1576,7 @@ def freeze_calibrated_baseline(
     ordered = tuple(sorted(candidate_sets, key=lambda item: item.problem_id))
     if len(ordered) != 90 or len({item.problem_id for item in ordered}) != 90:
         raise ValueError("M7 freeze requires all 90 calibration candidate sets")
-    executable = Path(jagua_executable)
-    metadata = executable.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("M7 Jagua runtime must be a regular file")
-    runtime = M7BaselineRuntimeIdentity(
-        python_implementation=platform.python_implementation(),
-        python_version=platform.python_version(),
-        shapely_version=shapely.__version__,
-        jagua_executable_sha256=f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}",
-    )
+    runtime = _baseline_runtime_identity(jagua_executable)
     semantic = {
         "schema_version": "yieldforge.m7-frozen-baseline.v1",
         "calibration_result_id": calibration.result_id,
@@ -1526,6 +1769,191 @@ def execute_calibration(
     return calibration, frozen
 
 
+def execute_evaluation(
+    *,
+    index: M7ProblemIndex,
+    m0: M0ExperimentContract,
+    frozen: M7FrozenBaseline,
+    archive_roots: Path | tuple[Path, ...],
+    jagua_executable: Path,
+    progress: Callable[[str], None] | None = None,
+) -> M7EvaluationResult:
+    """Verify all evaluation candidates and replay the frozen policy exactly twice."""
+
+    contract = build_registered_contract()
+    if (
+        index.m6_contract_id != contract.contract_id
+        or index.m6_contract_sha256 != contract.content_sha256
+        or (m0.contract_id, m0.content_sha256)
+        != (contract.m0_contract_id, contract.m0_contract_sha256)
+        or (frozen.m0_contract_id, frozen.m0_contract_sha256)
+        != (m0.contract_id, m0.content_sha256)
+        or (frozen.problem_index_id, frozen.problem_index_sha256)
+        != (index.index_id, index.content_sha256)
+        or frozen.evaluation_partition_opened is not False
+        or frozen.runtime != _baseline_runtime_identity(jagua_executable)
+    ):
+        raise ValueError("M7 evaluation inputs differ from the frozen baseline boundary")
+
+    instances = select_evaluation_instances(index)
+    selected_problem_ids = tuple(sorted({item.problem_id for item in instances}))
+    problem_by_id = {item.problem_id: item for item in index.problems}
+    references_by_task = {}
+    for reference in canonical_m2_archive_references():
+        references_by_task.setdefault(reference.tasks_index, []).append(reference)
+
+    verified = {}
+    for offset, problem_id in enumerate(selected_problem_ids, start=1):
+        problem = problem_by_id[problem_id]
+        verified[problem_id] = verify_problem_candidates(
+            problem,
+            tuple(references_by_task[problem.tasks_index]),
+            archive_roots,
+        )
+        if progress is not None:
+            progress(f"verified evaluation candidate problem {offset}/198")
+
+    calibration_problem_ids = tuple(
+        sorted(
+            {
+                item.problem_id
+                for item in index.instances
+                if item.partition is TemporalPartition.CALIBRATION
+            }
+        )
+    )
+    frozen_candidate_by_problem = dict(
+        zip(
+            calibration_problem_ids,
+            zip(frozen.candidate_set_ids, frozen.candidate_set_sha256s, strict=True),
+            strict=True,
+        )
+    )
+    shared_problem_ids = tuple(
+        problem_id
+        for problem_id in selected_problem_ids
+        if problem_id in frozen_candidate_by_problem
+    )
+    if len(shared_problem_ids) != 79 or any(
+        (
+            verified[problem_id].evidence.candidate_set_id,
+            verified[problem_id].evidence.content_sha256,
+        )
+        != frozen_candidate_by_problem[problem_id]
+        for problem_id in shared_problem_ids
+    ):
+        raise ValueError("M7 evaluation shared candidates differ from calibration freeze")
+
+    stream_ids = tuple(dict.fromkeys(item.stream_id for item in instances))
+    standard_profile_cache = {}
+    shared_fit_cache: M7SharedFitSearchCache = {}
+    prepared_layout_cache: M7PreparedLayoutCache = OrderedDict()
+    rules = rule_set_from_m0(m0.remnant_eligibility)
+
+    def execute_pass(
+        pass_number: int,
+        profile_executor: ProcessPoolExecutor,
+    ) -> tuple[M7EvaluationStreamResult, ...]:
+        stream_results = []
+        for stream_offset, stream_id in enumerate(stream_ids, start=1):
+            stream_instances = tuple(item for item in instances if item.stream_id == stream_id)
+            stream_problem_ids = tuple(sorted({item.problem_id for item in stream_instances}))
+            replay_input = build_m7_replay_input(
+                m0_contract_id=m0.contract_id,
+                m0_contract_sha256=m0.content_sha256,
+                problem_index_id=index.index_id,
+                problem_index_sha256=index.content_sha256,
+                m6_contract_id=index.m6_contract_id,
+                m6_contract_sha256=index.m6_contract_sha256,
+                m6_population_id=index.m6_population_id,
+                m6_population_sha256=index.m6_population_sha256,
+                policy=frozen.winning_policy,
+                rates=contract.rates,
+                fit_config=RemnantFitConfig(),
+                problems=tuple(problem_by_id[item] for item in stream_problem_ids),
+                candidate_sets=tuple(verified[item].evidence for item in stream_problem_ids),
+                instances=stream_instances,
+                horizon_end=stream_instances[-1].released_at
+                + timedelta(minutes=contract.timing.interval_minutes),
+                collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+                jagua_container_guard=1.0,
+            )
+            replay_progress = None
+            if progress is not None:
+                progress_seed = stream_instances[0].temporal_seed
+                progress_regime = stream_instances[0].regime.value
+
+                def replay_progress(
+                    done: int,
+                    total: int,
+                    seed: int = progress_seed,
+                    regime: str = progress_regime,
+                ) -> None:
+                    progress(
+                        f"evaluating pass={pass_number}/2 seed={seed} regime={regime} "
+                        f"event={done}/{total}"
+                    )
+
+            replay = run_m7_replay(
+                replay_input,
+                {item: verified[item] for item in stream_problem_ids},
+                rules,
+                standard_profile_cache=standard_profile_cache,
+                standard_profile_executor=profile_executor,
+                jagua_executable=jagua_executable,
+                shared_fit_search_cache=shared_fit_cache,
+                prepared_layout_cache=prepared_layout_cache,
+                progress=replay_progress,
+            )
+            stream_results.append(
+                M7EvaluationStreamResult(
+                    policy=replay.policy,
+                    regime=stream_instances[0].regime,
+                    temporal_seed=stream_instances[0].temporal_seed,
+                    stream_id=replay_input.stream_id,
+                    stream_sha256=replay_input.stream_sha256,
+                    replay_input_id=replay_input.input_id,
+                    replay_input_sha256=replay_input.content_sha256,
+                    replay_result_id=replay.result_id,
+                    replay_result_sha256=replay.content_sha256,
+                    action_count=replay.summary.total_action_count,
+                    full_sheet_opening_count=replay.summary.full_sheet_opening_count,
+                    remnant_retrieval_count=replay.summary.remnant_retrieval_count,
+                    terminal_remnant_count=replay.summary.terminal_remnant_count,
+                    final_net_cost=replay.summary.final_net_cost,
+                )
+            )
+            if progress is not None:
+                progress(
+                    f"completed evaluation pass={pass_number}/2 stream={stream_offset}/36"
+                )
+        return tuple(stream_results)
+
+    with ProcessPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as profile_executor:
+        first_pass = execute_pass(1, profile_executor)
+        second_pass = execute_pass(2, profile_executor)
+
+    evidence = tuple(verified[item].evidence for item in selected_problem_ids)
+    return finalize_evaluation_result(
+        freeze_id=frozen.freeze_id,
+        freeze_sha256=frozen.content_sha256,
+        calibration_result_id=frozen.calibration_result_id,
+        calibration_result_sha256=frozen.calibration_result_sha256,
+        m0_contract_id=m0.contract_id,
+        m0_contract_sha256=m0.content_sha256,
+        problem_index_id=index.index_id,
+        problem_index_sha256=index.content_sha256,
+        frozen_policy=frozen.winning_policy,
+        candidate_set_ids=tuple(item.candidate_set_id for item in evidence),
+        candidate_set_sha256s=tuple(item.content_sha256 for item in evidence),
+        raw_candidate_count=sum(item.raw_candidate_count for item in evidence),
+        distinct_candidate_count=sum(item.distinct_candidate_count for item in evidence),
+        rejected_candidate_count=sum(len(item.rejected_candidate_ids) for item in evidence),
+        first_pass_streams=first_pass,
+        second_pass_streams=second_pass,
+    )
+
+
 def _canonical_bytes(result: BaseModel) -> bytes:
     return (
         json.dumps(result.model_dump(mode="json"), allow_nan=False, indent=2, sort_keys=True) + "\n"
@@ -1635,6 +2063,32 @@ def publish_frozen_baseline(
     if path.exists():
         if _read_regular(path) != data:
             raise ValueError("M7 frozen baseline is immutable and differs")
+        return path
+    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        temporary.rename(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return path
+
+
+def publish_evaluation_result(
+    output_directory: Path,
+    result: M7EvaluationResult,
+) -> Path:
+    """Publish or byte-verify one immutable twice-reproduced evaluation artifact."""
+
+    output = Path(output_directory)
+    output.mkdir(parents=True, exist_ok=True)
+    path = output / f"m7-evaluation-{result.result_id}.json"
+    data = _canonical_bytes(result)
+    if path.exists():
+        if _read_regular(path) != data:
+            raise ValueError("M7 evaluation artifact is immutable and differs")
         return path
     temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -1372,3 +1372,69 @@ def test_m7_calibration_command_freezes_selected_policy(
     text = capsys.readouterr().out
     assert "winner=net_cost" in text
     assert "streams=60" in text
+
+
+def test_m7_evaluation_command_executes_only_frozen_baseline(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    output = tmp_path / "results"
+    roots = (tmp_path / "calibration", tmp_path / "confirmation")
+    frozen_path = tmp_path / "frozen.json"
+    frozen_path.write_text("{}")
+    index = object()
+    m0 = object()
+    frozen = object()
+    result = SimpleNamespace(
+        result_id="yfm7eval-" + "a" * 24,
+        frozen_policy=SimpleNamespace(name=SimpleNamespace(value="age_regularity")),
+        stream_count=36,
+        instance_count=864,
+        repeat_content_identity_match=True,
+        mean_final_net_cost=123.5,
+    )
+    calls = []
+    monkeypatch.setattr("yieldforge.cli.build_registered_problem_index", lambda: index)
+    monkeypatch.setattr("yieldforge.cli.load_frozen_json", lambda *args: m0)
+    monkeypatch.setattr(
+        "yieldforge.cli.M7FrozenBaseline",
+        SimpleNamespace(model_validate_json=lambda *args, **kwargs: frozen),
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.execute_evaluation",
+        lambda **kwargs: calls.append(kwargs) or result,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_evaluation_result",
+        lambda output_arg, result_arg: output / "evaluation.json",
+    )
+
+    assert (
+        main(
+            [
+                "benchmark",
+                "m7-evaluate",
+                "--m0",
+                str(tmp_path / "m0.json"),
+                "--frozen-baseline",
+                str(frozen_path),
+                "--archive-root",
+                str(roots[0]),
+                "--archive-root",
+                str(roots[1]),
+                "--jagua-binary",
+                str(tmp_path / "jagua"),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    assert calls[0]["index"] is index
+    assert calls[0]["m0"] is m0
+    assert calls[0]["frozen"] is frozen
+    assert calls[0]["archive_roots"] == roots
+    text = capsys.readouterr().out
+    assert "policy=age_regularity" in text
+    assert "streams=36" in text
+    assert "repeat_match=true" in text
