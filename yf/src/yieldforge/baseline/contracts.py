@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 from yieldforge.domain import SolverProjectionBinding, StripPackingProblem
+from yieldforge.experiments.calibration import CalibrationCandidateObservation
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.reuse.contracts import MaterialIdentity, MaterialProvenance
 from yieldforge.temporal_benchmark.contracts import (
@@ -206,4 +207,66 @@ class M7ProblemIndex(BaselineContractModel):
             raise ValueError("M7 problem index content SHA-256 does not match semantic content")
         if self.index_id != f"yfm7i-{digest[:24]}":
             raise ValueError("M7 problem index ID does not match semantic content")
+        return self
+
+
+class M2ArchiveReference(BaselineContractModel):
+    """Canonical M2 result evidence required to re-open one immutable archive."""
+
+    tasks_index: StrictInt = Field(ge=0)
+    seed: Literal[0, 1, 2, 3]
+    job_id: StrictStr = Field(min_length=1)
+    batch_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    candidates: tuple[CalibrationCandidateObservation, ...] = Field(min_length=1)
+    source_result_id: StrictStr = Field(pattern=r"^yfg[cf]r-[0-9a-f]{24}$")
+    source_result_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class M7CandidateArchiveEvidence(BaselineContractModel):
+    """Verified portable identity for one reused ordinary M2 archive."""
+
+    seed: Literal[0, 1, 2, 3]
+    job_id: StrictStr = Field(min_length=1)
+    batch_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_count: StrictInt = Field(gt=0)
+    source_result_id: StrictStr = Field(pattern=r"^yfg[cf]r-[0-9a-f]{24}$")
+    source_result_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class M7CandidateSetEvidence(BaselineContractModel):
+    """Content-addressed common action-candidate identity for one reusable problem."""
+
+    schema_version: Literal["yieldforge.m7-candidate-set.v1"] = "yieldforge.m7-candidate-set.v1"
+    candidate_set_id: StrictStr = Field(pattern=r"^yfm7c-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    problem_id: StrictStr = Field(pattern=r"^yfm7p-[0-9a-f]{24}$")
+    problem_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    archives: tuple[
+        M7CandidateArchiveEvidence,
+        M7CandidateArchiveEvidence,
+        M7CandidateArchiveEvidence,
+        M7CandidateArchiveEvidence,
+    ]
+    raw_candidate_count: StrictInt = Field(gt=0)
+    distinct_candidate_count: StrictInt = Field(gt=0)
+    candidate_ids: tuple[StrictStr, ...] = Field(min_length=1)
+    claim_ceiling: Literal[
+        "verified_shared_geometry_candidates_only_not_actions_policy_value_or_savings_evidence"
+    ] = "verified_shared_geometry_candidates_only_not_actions_policy_value_or_savings_evidence"
+
+    @model_validator(mode="after")
+    def require_complete_identity(self) -> Self:
+        if tuple(item.seed for item in self.archives) != (0, 1, 2, 3):
+            raise ValueError("M7 candidate evidence requires the four ordinary seeds")
+        if self.raw_candidate_count != sum(item.candidate_count for item in self.archives):
+            raise ValueError("M7 raw candidate count does not reconcile")
+        if self.candidate_ids != tuple(sorted(set(self.candidate_ids))):
+            raise ValueError("M7 candidate IDs must be sorted and unique")
+        if self.distinct_candidate_count != len(self.candidate_ids):
+            raise ValueError("M7 distinct candidate count does not reconcile")
+        digest = semantic_sha256(self, excluded_fields={"candidate_set_id", "content_sha256"})
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("M7 candidate set content SHA-256 does not match semantic content")
+        if self.candidate_set_id != f"yfm7c-{digest[:24]}":
+            raise ValueError("M7 candidate set ID does not match semantic content")
         return self
