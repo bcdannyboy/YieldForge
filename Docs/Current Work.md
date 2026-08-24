@@ -6,17 +6,17 @@
 
 ## Current objective
 
-Plan the isolated future-aware rollout oracle against the immutable M7 baseline freeze and the same
-canonical M6 evaluation worlds. Preserve action parity, baseline information masking, exact
-accounting, and paired evidence boundaries.
+Implement the prepared exact full-horizon rollout oracle against the immutable M7 baseline freeze.
+Preserve complete action parity, baseline information masking, exact accounting, and paired evidence
+boundaries while making the computation practical through semantics-preserving persistent caches.
 
 ## Next step
 
-Freeze the M8 design before implementation: rollout horizon, terminal baseline behavior, candidate
-parity, future-information isolation, cache identity, failure treatment, paired estimand, and compute
-budget. Add hand-computed toy, no-signal, and information-leakage gates. The source-faithful path
-must compare against M7 freeze `yfm7freeze-5c13c3fe531828d8cd986c39` and evaluation result
-`yfm7eval-f2cb310c4b7e879d119e8f94` without reopening calibration.
+Execute Task 1 of [[plans/2026-08-24-m8-rollout-oracle-implementation]]: expose complete M7 action
+descriptors, one-action execution, and frozen-policy continuation from arbitrary state while
+regression-locking all published M7 content identities. Then add the strict persistent cache before
+the rollout kernel. Do not open M8 evaluation until the hand-computed gates and six-stream
+calibration-only runtime pilot support a frozen exact execution manifest.
 
 ## Evidence bridge completed
 
@@ -58,6 +58,10 @@ must compare against M7 freeze `yfm7freeze-5c13c3fe531828d8cd986c39` and evaluat
   then replayed all 36 streams and 864 events twice with identical content. It opened 826 sheets,
   retrieved 38 remnants, and recorded mean net cost 29,733.304499. One Jagua-unrepresentable guard
   used the registered unfiltered Shapely fallback; policy and exact replay semantics were unchanged.
+- M8 preparation freezes the complete-remaining-horizon rollout design, exact M7 fallback tie rule,
+  full-versus-known-only visibility boundary, semantics-preserving cache rules, acceptance gates,
+  calibration-only runtime pilot, and held-out evaluation hold point. No M8 oracle execution or
+  savings result exists yet.
 
 ## Experiment status
 

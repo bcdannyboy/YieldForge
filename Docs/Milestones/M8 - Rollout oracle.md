@@ -1,6 +1,6 @@
 # M8 — Rollout oracle
 
-**Status:** Ready for planning — M7 freeze and evaluation evidence are available
+**Status:** Prepared — exact full-horizon design frozen; implementation not started
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -23,6 +23,16 @@ Rollout is not a mathematical upper bound and may miss value requiring coordinat
 
 ## Planning boundary
 
-Specify the rollout horizon, terminal baseline behavior, candidate parity, cache identity, failure
-treatment, paired estimand, and compute budget before implementation. Include hand-computed toy
-cases, future-information isolation tests, and no-signal sanity cases as executable acceptance gates.
+The approved design uses the complete remaining registered stream for every current action, frozen
+M7 for each hypothetical continuation, the exact common action set, the M7 action as the tie-preferred
+fallback, M0 scrap-only terminal treatment, and strict paired failure handling. Only content-addressed
+exact caches and byte-equivalent state coalescing may accelerate the primary arm.
+
+The implementation plan begins by extracting an arbitrary-state M7 transition seam and proving that
+published M7 identities do not change. It then adds persistent exact caching, isolated full and
+known-only visibility providers, hand-computed acceptance cases, and a six-stream calibration-only
+runtime pilot. M8 evaluation remains closed until that pilot supports a frozen exact execution
+manifest.
+
+See [[plans/2026-08-24-m8-rollout-oracle-design]] and
+[[plans/2026-08-24-m8-rollout-oracle-implementation]].

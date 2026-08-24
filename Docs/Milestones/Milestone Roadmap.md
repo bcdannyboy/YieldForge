@@ -55,5 +55,11 @@ four exact policies tied on every numeric selector term. Amended immutable freez
 Evaluation result `yfm7eval-f2cb310c4b7e879d119e8f94` then executed the frozen policy twice on all
 36 evaluation streams and 864 events with identical replay content. The baseline opened 826 sheets,
 retrieved 38 remnants, and had mean net cost 29,733.304499. These are baseline measurements, not an
-oracle comparison or savings claim. M8 is next: plan the isolated future-aware rollout arm against
-this freeze and the same candidate/action evidence.
+oracle comparison or savings claim.
+
+M8 is prepared. Its approved design evaluates every exact current action over the complete remaining
+stream with frozen M7 as the hypothetical continuation, preferring the M7 action on exact ties. The
+primary arm permits only exact content-addressed caching and byte-equivalent state coalescing; fixed
+horizons and candidate caps remain labeled sensitivities. Implementation begins with a published-M7
+regression-locked transition seam and a calibration-only runtime pilot. No M8 oracle evaluation or
+savings result exists yet.
