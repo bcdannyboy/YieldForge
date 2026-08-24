@@ -11,6 +11,7 @@ from yieldforge.baseline.contracts import (
     M7CandidateSetEvidence,
     ReusableGeometryProblem,
 )
+from yieldforge.baseline.geometry import prepare_layout_footprint
 from yieldforge.domain import Candidate
 from yieldforge.experiments.calibration import (
     GeometryCalibrationResult,
@@ -21,6 +22,7 @@ from yieldforge.experiments.residual_geometry import (
     M3EvidenceError,
     load_verified_candidate_archive,
 )
+from yieldforge.reuse.contracts import RemnantFitConfig
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 _CALIBRATION_RESULT_PATH = (
@@ -100,6 +102,26 @@ def _candidate_geometry_content(candidate: Candidate) -> dict[str, object]:
     return payload
 
 
+def _is_valid_exact_layout(
+    problem: ReusableGeometryProblem,
+    candidate: Candidate,
+) -> bool:
+    config = RemnantFitConfig()
+    try:
+        prepared = prepare_layout_footprint(problem.problem, candidate, config)
+    except ValueError:
+        return False
+    min_x, min_y, max_x, max_y = prepared.bounds
+    tolerance = config.coordinate_tolerance
+    return (
+        min_x >= -tolerance
+        and min_y >= -tolerance
+        and max_x <= candidate.width + tolerance
+        and max_x <= problem.problem.sheet_length + tolerance
+        and max_y <= problem.problem.strip_height + tolerance
+    )
+
+
 def _resolve_archive(
     archive_roots: Path | tuple[Path, ...],
     job_id: str,
@@ -173,7 +195,15 @@ def verify_problem_candidates(
             unique[candidate.candidate_id] = candidate
     if not unique:
         raise ValueError("candidate archive set contains zero candidates")
-    candidates = tuple(unique[item] for item in sorted(unique))
+    rejected_candidate_ids = tuple(
+        candidate_id
+        for candidate_id in sorted(unique)
+        if not _is_valid_exact_layout(problem, unique[candidate_id])
+    )
+    rejected = set(rejected_candidate_ids)
+    candidates = tuple(unique[item] for item in sorted(unique) if item not in rejected)
+    if not candidates:
+        raise ValueError("candidate archive set contains zero exact-layout-valid candidates")
     semantic = {
         "schema_version": "yieldforge.m7-candidate-set.v1",
         "problem_id": problem.problem_id,
@@ -182,6 +212,7 @@ def verify_problem_candidates(
         "raw_candidate_count": sum(item.candidate_count for item in archive_evidence),
         "distinct_candidate_count": len(candidates),
         "candidate_ids": [item.candidate_id for item in candidates],
+        "rejected_candidate_ids": list(rejected_candidate_ids),
         "claim_ceiling": (
             "verified_shared_geometry_candidates_only_not_actions_policy_value_or_savings_evidence"
         ),
@@ -196,6 +227,7 @@ def verify_problem_candidates(
         raw_candidate_count=sum(item.candidate_count for item in archive_evidence),
         distinct_candidate_count=len(candidates),
         candidate_ids=tuple(item.candidate_id for item in candidates),
+        rejected_candidate_ids=rejected_candidate_ids,
     )
     return VerifiedProblemCandidates(evidence=evidence, candidates=candidates)
 

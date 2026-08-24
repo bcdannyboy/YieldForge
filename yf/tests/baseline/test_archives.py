@@ -87,7 +87,11 @@ def _candidate(seed: int, *, offset: float = 0.0) -> Candidate:
     )
 
 
-def _archives(tmp_path: Path) -> tuple[ReusableGeometryProblem, tuple[M2ArchiveReference, ...]]:
+def _archives(
+    tmp_path: Path,
+    *,
+    include_invalid: bool = False,
+) -> tuple[ReusableGeometryProblem, tuple[M2ArchiveReference, ...]]:
     problem = _problem()
     binding = SourceTaskBinding(
         dataset_id="lectra-7030786-v1.1",
@@ -100,6 +104,23 @@ def _archives(tmp_path: Path) -> tuple[ReusableGeometryProblem, tuple[M2ArchiveR
         candidates = [_candidate(seed)]
         if seed == 3:
             candidates.append(_candidate(seed, offset=1.0))
+            if include_invalid:
+                candidates.append(
+                    Candidate(
+                        candidate_id="cand-invalid",
+                        report_type=CandidateReportType.FINAL,
+                        seed=seed,
+                        width=2.0,
+                        density=0.1,
+                        placements=[
+                            Placement(
+                                part_id="part-1",
+                                rotation=90.0,
+                                translation=(0.0, 0.0),
+                            )
+                        ],
+                    )
+                )
         batch = CandidateBatch(
             problem=problem.problem,
             solver=SolverIdentity(
@@ -167,6 +188,22 @@ def test_problem_verification_requires_four_archives_and_deduplicates_layouts(
         "cand-shared",
     )
     assert verified.evidence.candidate_set_id == (f"yfm7c-{verified.evidence.content_sha256[7:31]}")
+
+
+def test_problem_verification_records_and_excludes_invalid_exact_layouts(
+    tmp_path: Path,
+) -> None:
+    problem, references = _archives(tmp_path, include_invalid=True)
+
+    verified = verify_problem_candidates(problem, references, tmp_path)
+
+    assert verified.evidence.raw_candidate_count == 6
+    assert verified.evidence.distinct_candidate_count == 2
+    assert verified.evidence.rejected_candidate_ids == ("cand-invalid",)
+    assert tuple(item.candidate_id for item in verified.candidates) == (
+        "cand-3",
+        "cand-shared",
+    )
 
 
 def test_problem_verification_rejects_incomplete_seed_set(tmp_path: Path) -> None:

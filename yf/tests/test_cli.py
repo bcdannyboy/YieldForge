@@ -1296,3 +1296,79 @@ def test_m7_pilot_command_accepts_isolated_archive_roots(
     text = capsys.readouterr().out
     assert "streams=6" in text
     assert "build_jagua_differential_spike" in text
+
+
+def test_m7_calibration_command_freezes_selected_policy(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    output = tmp_path / "results"
+    roots = (tmp_path / "calibration", tmp_path / "confirmation")
+    collision_path = tmp_path / "collision.json"
+    feasibility_path = tmp_path / "feasibility.json"
+    collision_path.write_text("{}")
+    feasibility_path.write_text("{}")
+    index = object()
+    m0 = object()
+    collision = object()
+    feasibility = object()
+    result = SimpleNamespace(
+        result_id="yfm7cal-" + "a" * 24,
+        winning_policy=SimpleNamespace(name=SimpleNamespace(value="net_cost")),
+        streams=tuple(range(60)),
+        total_replay_seconds=12.5,
+    )
+    frozen = object()
+    calls = []
+    monkeypatch.setattr("yieldforge.cli.build_registered_problem_index", lambda: index)
+    monkeypatch.setattr("yieldforge.cli.load_frozen_json", lambda *args: m0)
+    monkeypatch.setattr(
+        "yieldforge.cli.M7CollisionDifferentialResult",
+        SimpleNamespace(model_validate_json=lambda *args, **kwargs: collision),
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.M7FeasibilityResult",
+        SimpleNamespace(model_validate_json=lambda *args, **kwargs: feasibility),
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.execute_calibration",
+        lambda **kwargs: calls.append(kwargs) or (result, frozen),
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_calibration_result",
+        lambda output_arg, result_arg: output / "calibration.json",
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_frozen_baseline",
+        lambda output_arg, frozen_arg: output / "m7-frozen-baseline-v1.json",
+    )
+
+    assert (
+        main(
+            [
+                "benchmark",
+                "m7-calibrate",
+                "--m0",
+                str(tmp_path / "m0.json"),
+                "--archive-root",
+                str(roots[0]),
+                "--archive-root",
+                str(roots[1]),
+                "--jagua-binary",
+                str(tmp_path / "jagua"),
+                "--collision-differential",
+                str(collision_path),
+                "--feasibility",
+                str(feasibility_path),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    assert calls[0]["archive_roots"] == roots
+    assert calls[0]["collision_differential"] is collision
+    assert calls[0]["feasibility"] is feasibility
+    text = capsys.readouterr().out
+    assert "winner=net_cost" in text
+    assert "streams=60" in text

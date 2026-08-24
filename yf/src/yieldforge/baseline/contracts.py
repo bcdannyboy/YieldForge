@@ -259,6 +259,7 @@ class M7CandidateSetEvidence(BaselineContractModel):
     raw_candidate_count: StrictInt = Field(gt=0)
     distinct_candidate_count: StrictInt = Field(gt=0)
     candidate_ids: tuple[StrictStr, ...] = Field(min_length=1)
+    rejected_candidate_ids: tuple[StrictStr, ...] = ()
     claim_ceiling: Literal[
         "verified_shared_geometry_candidates_only_not_actions_policy_value_or_savings_evidence"
     ] = "verified_shared_geometry_candidates_only_not_actions_policy_value_or_savings_evidence"
@@ -271,8 +272,14 @@ class M7CandidateSetEvidence(BaselineContractModel):
             raise ValueError("M7 raw candidate count does not reconcile")
         if self.candidate_ids != tuple(sorted(set(self.candidate_ids))):
             raise ValueError("M7 candidate IDs must be sorted and unique")
+        if self.rejected_candidate_ids != tuple(sorted(set(self.rejected_candidate_ids))):
+            raise ValueError("M7 rejected candidate IDs must be sorted and unique")
+        if set(self.candidate_ids) & set(self.rejected_candidate_ids):
+            raise ValueError("M7 valid and rejected candidate IDs must be disjoint")
         if self.distinct_candidate_count != len(self.candidate_ids):
             raise ValueError("M7 distinct candidate count does not reconcile")
+        if self.raw_candidate_count < len(self.candidate_ids) + len(self.rejected_candidate_ids):
+            raise ValueError("M7 raw candidate count cannot cover valid and rejected IDs")
         digest = semantic_sha256(self, excluded_fields={"candidate_set_id", "content_sha256"})
         if self.content_sha256 != f"sha256:{digest}":
             raise ValueError("M7 candidate set content SHA-256 does not match semantic content")

@@ -5,16 +5,26 @@ from pathlib import Path
 import pytest
 
 from yieldforge.baseline.experiment import (
+    M7CalibrationPolicyScore,
+    M7CalibrationStreamResult,
     M7CollisionBackendDecision,
     M7CollisionDifferentialResult,
     M7FeasibilityStreamResult,
     evaluate_collision_gate,
+    finalize_calibration_result,
     finalize_collision_differential_result,
     finalize_feasibility_result,
+    publish_calibration_result,
     publish_feasibility_result,
+    select_calibration_instances,
+    select_calibration_winner,
     select_feasibility_instances,
 )
-from yieldforge.baseline.policies import M7PolicyName, policy_identity
+from yieldforge.baseline.policies import (
+    M7PolicyName,
+    policy_identity,
+    registered_policy_identities,
+)
 from yieldforge.baseline.problems import build_registered_problem_index
 from yieldforge.temporal_benchmark.contracts import TemporalRegime
 
@@ -37,6 +47,63 @@ def test_feasibility_slice_is_first_calibration_seed_in_every_regime(index) -> N
         == tuple(range(24))
         for stream_id in {item.stream_id for item in instances}
     )
+
+
+def test_calibration_selection_includes_all_12_streams_and_no_evaluation(index) -> None:  # type: ignore[no-untyped-def]
+    instances = select_calibration_instances(index)
+
+    assert len(instances) == 288
+    assert len({item.stream_id for item in instances}) == 12
+    assert len({item.problem_id for item in instances}) == 90
+    assert {item.temporal_seed for item in instances} == {2026082300, 2026082301}
+    assert all(item.partition.value == "calibration" for item in instances)
+
+
+def _score(
+    policy: M7PolicyName,
+    *,
+    mean: float,
+    median_cost: float,
+    sheets: int,
+) -> M7CalibrationPolicyScore:
+    return M7CalibrationPolicyScore(
+        policy=policy_identity(policy),
+        mean_final_net_cost=mean,
+        median_final_net_cost=median_cost,
+        total_sheet_openings=sheets,
+        replay_result_ids=tuple(f"yfm7r-{policy.value}-{offset}" for offset in range(12)),
+    )
+
+
+def test_calibration_selector_applies_score_ties_and_failure_gate() -> None:
+    scores = tuple(
+        _score(policy.name, mean=10.0, median_cost=5.0, sheets=288)
+        for policy in registered_policy_identities()
+    )
+    lower_mean = tuple(
+        item.model_copy(update={"mean_final_net_cost": 9.0})
+        if item.policy.name is M7PolicyName.NET_COST
+        else item
+        for item in scores
+    )
+    median_tie = tuple(
+        item.model_copy(update={"median_final_net_cost": 4.0})
+        if item.policy.name is M7PolicyName.REMNANT_FIRST
+        else item
+        for item in scores
+    )
+
+    assert select_calibration_winner(lower_mean).policy.name is M7PolicyName.NET_COST
+    assert select_calibration_winner(median_tie).policy.name is M7PolicyName.REMNANT_FIRST
+    assert select_calibration_winner(scores).policy.name is M7PolicyName.AGE_REGULARITY
+    invalid = tuple(
+        item.model_copy(update={"invalid_stream_count": 1})
+        if item.policy.name is M7PolicyName.AGE_REGULARITY
+        else item
+        for item in scores
+    )
+    with pytest.raises(ValueError, match="fails closed"):
+        select_calibration_winner(invalid)
 
 
 def test_collision_gate_triggers_on_search_share_or_projected_runtime() -> None:
@@ -200,3 +267,56 @@ def test_feasibility_can_bind_validated_jagua_backend() -> None:
     assert result.total_jagua_guarded_query_count == 600
     assert result.total_jagua_rejection_count == 540
     assert result.technical_decision == "ready_for_calibration_with_validated_jagua_prefilter"
+
+
+def test_calibration_result_reconciles_all_policies_and_freezes_winner(
+    tmp_path: Path,
+) -> None:
+    streams = []
+    for policy_offset, policy in enumerate(M7PolicyName):
+        for seed_offset, seed in enumerate((2026082300, 2026082301)):
+            for regime_offset, regime in enumerate(TemporalRegime):
+                stream_offset = seed_offset * 6 + regime_offset + 1
+                replay_offset = policy_offset * 12 + stream_offset
+                streams.append(
+                    M7CalibrationStreamResult(
+                        policy=policy,
+                        regime=regime,
+                        temporal_seed=seed,
+                        stream_id=f"yfts-{stream_offset:024x}",
+                        stream_sha256=f"sha256:{stream_offset:064x}",
+                        replay_input_id=f"yfm7ri-{replay_offset:024x}",
+                        replay_input_sha256=f"sha256:{replay_offset + 1:064x}",
+                        replay_result_id=f"yfm7r-{replay_offset:024x}",
+                        replay_result_sha256=f"sha256:{replay_offset + 2:064x}",
+                        replay_elapsed_seconds=1.0,
+                        fit_search_seconds=0.2,
+                        fit_search_cache_hit_count=3,
+                        fit_search_cache_miss_count=1,
+                        action_count=24,
+                        full_sheet_opening_count=24,
+                        remnant_retrieval_count=0,
+                        final_net_cost=float(policy_offset + 1),
+                    )
+                )
+
+    result = finalize_calibration_result(
+        m0_contract_id="yfm0-" + "a" * 24,
+        m0_contract_sha256="sha256:" + "b" * 64,
+        problem_index_id="yfm7i-" + "c" * 24,
+        problem_index_sha256="sha256:" + "d" * 64,
+        feasibility_result_id="yfm7f-" + "e" * 24,
+        feasibility_result_sha256="sha256:" + "f" * 64,
+        collision_differential_result_id="yfm7d-" + "1" * 24,
+        collision_differential_result_sha256="sha256:" + "2" * 64,
+        candidate_verification_seconds=3.0,
+        streams=tuple(streams),
+    )
+    path = publish_calibration_result(tmp_path, result)
+
+    assert result.winning_policy.name is M7PolicyName.MYOPIC_GEOMETRY
+    assert result.evaluation_partition_opened is False
+    assert result.total_replay_seconds == 60.0
+    assert result.total_fit_search_cache_hit_count == 180
+    assert result.result_id == f"yfm7cal-{result.content_sha256[7:31]}"
+    assert publish_calibration_result(tmp_path, result) == path

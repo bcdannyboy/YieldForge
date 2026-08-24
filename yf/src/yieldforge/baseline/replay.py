@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import Executor
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from yieldforge.baseline.contracts import (
     BaselineContractModel,
     LayoutFitSearchConfig,
     LayoutFitSearchResult,
+    LayoutFitSearchStatus,
     M7ActionKind,
     M7CandidateSetEvidence,
     M7LayoutActionEvidence,
@@ -45,6 +47,7 @@ from yieldforge.baseline.jagua import (
 from yieldforge.baseline.policies import (
     ActionPolicyContext,
     M7PolicyIdentity,
+    M7PolicyName,
     select_policy_action,
 )
 from yieldforge.domain import Candidate
@@ -60,6 +63,12 @@ from yieldforge.residuals.contracts import ResidualRuleSet
 from yieldforge.reuse.contracts import RemnantFitConfig, ReuseAccounting, polygon_from_record
 from yieldforge.reuse.geometry import material_key
 from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
+
+type M7SharedFitSearchCache = dict[tuple[str, str, str], tuple[LayoutFitSearchResult, ...]]
+type M7PreparedLayoutCache = OrderedDict[tuple[str, str], tuple[PreparedLayoutFootprint, ...]]
+
+_MAX_PREPARED_LAYOUT_CACHE_PROBLEMS = 2
+_REMNANT_ACTION_MATERIALIZATION_BATCH_SIZE = 64
 
 
 def _utc(value: datetime, label: str) -> datetime:
@@ -434,6 +443,7 @@ class M7ReplayResult(BaselineContractModel):
 class GeneratedActionSet:
     standard_profiles: tuple[M7StandardActionProfile, ...]
     remnant_actions: tuple[M7LayoutActionEvidence, ...]
+    remnant_action_count: int
     fit_search_query_count: int
     fit_search_generated_candidate_count: int
     fit_search_evaluated_candidate_count: int
@@ -448,6 +458,8 @@ class M7ReplayRuntimeMetrics:
     standard_action_seconds: float = 0.0
     fit_search_seconds: float = 0.0
     remnant_action_materialization_seconds: float = 0.0
+    remnant_action_materialization_peak_batch_size: int = 0
+    remnant_action_peak_retained_count: int = 0
     jagua_wall_seconds: float = 0.0
     jagua_guarded_query_count: int = 0
     jagua_rejection_count: int = 0
@@ -470,7 +482,6 @@ class M7StandardActionProfile:
     accounting: ReuseAccounting
     returned_remnant_count: int
     returned_regularity: float
-    prepared_layout: PreparedLayoutFootprint
 
 
 def _build_standard_profile(
@@ -499,7 +510,6 @@ def _build_standard_profile(
         accounting=template.accounting,
         returned_remnant_count=len(template.returned_remnants),
         returned_regularity=_returned_regularity(template),
-        prepared_layout=prepare_layout_footprint(problem.problem, candidate, fit_config),
     )
 
 
@@ -512,6 +522,8 @@ def _generate_actions(
     rules: ResidualRuleSet,
     fit_config: RemnantFitConfig,
     search_config: LayoutFitSearchConfig,
+    policy: M7PolicyName,
+    rates: FeasibilityRateManifest,
     runtime_metrics: M7ReplayRuntimeMetrics | None,
     standard_profile_cache: dict[tuple[str, str], M7StandardActionProfile],
     standard_profile_executor: Executor | None,
@@ -519,6 +531,8 @@ def _generate_actions(
     jagua_container_guard: float,
     jagua_differential_audit: bool,
     fit_search_cache: dict[tuple[str, str, str], tuple[LayoutFitSearchResult, ...]],
+    shared_fit_search_cache: M7SharedFitSearchCache | None,
+    prepared_layout_cache: M7PreparedLayoutCache,
 ) -> GeneratedActionSet:
     evidence = verified.evidence
     if (
@@ -553,16 +567,77 @@ def _generate_actions(
     )
     if runtime_metrics is not None:
         runtime_metrics.standard_action_seconds += perf_counter() - standard_started
-    remnant_actions = []
+    remnant_action_arguments = []
     query_count = 0
     generated_count = 0
     evaluated_count = 0
     truncated_count = 0
-    for item in inventory:
-        if material_key(item.remnant.material) != material_key(binding.material):
-            continue
+    compatible_inventory = tuple(
+        item
+        for item in inventory
+        if material_key(item.remnant.material) == material_key(binding.material)
+    )
+    prepared_layouts: tuple[PreparedLayoutFootprint, ...] = ()
+    if compatible_inventory:
+        prepared_key = (problem.problem_id, evidence.candidate_set_id)
+        cached_layouts = prepared_layout_cache.get(prepared_key)
+        if cached_layouts is None:
+            layout_arguments = tuple(
+                (problem.problem, candidate, fit_config) for candidate in verified.candidates
+            )
+            if standard_profile_executor is None:
+                cached_layouts = tuple(
+                    _prepare_layout_from_arguments(arguments) for arguments in layout_arguments
+                )
+            else:
+                cached_layouts = tuple(
+                    standard_profile_executor.map(
+                        _prepare_layout_from_arguments,
+                        layout_arguments,
+                    )
+                )
+            prepared_layout_cache[prepared_key] = cached_layouts
+            while len(prepared_layout_cache) > _MAX_PREPARED_LAYOUT_CACHE_PROBLEMS:
+                prepared_layout_cache.popitem(last=False)
+        else:
+            prepared_layout_cache.move_to_end(prepared_key)
+        prepared_layouts = cached_layouts
+
+    for item in compatible_inventory:
         cache_key = (item.remnant.remnant_id, problem.problem_id, evidence.candidate_set_id)
         searches = fit_search_cache.get(cache_key)
+        cache_hit_recorded = False
+        shared_cache_key = (
+            semantic_sha256(
+                {
+                    "geometry": item.remnant.geometry.model_dump(mode="json"),
+                    "fit_config": fit_config.model_dump(mode="json"),
+                    "search_config": search_config.model_dump(mode="json"),
+                }
+            ),
+            problem.problem_id,
+            evidence.candidate_set_id,
+        )
+        if searches is None and shared_fit_search_cache is not None:
+            cached_shared = shared_fit_search_cache.get(shared_cache_key)
+            if cached_shared is not None:
+                expected_candidate_ids = tuple(
+                    candidate.candidate_id for candidate in verified.candidates
+                )
+                if tuple(
+                    search.candidate_id for search in cached_shared
+                ) != expected_candidate_ids or any(
+                    search.config != search_config for search in cached_shared
+                ):
+                    raise ValueError("M7 shared geometry-search cache differs from current search")
+                searches = tuple(
+                    search.model_copy(update={"remnant_id": item.remnant.remnant_id})
+                    for search in cached_shared
+                )
+                fit_search_cache[cache_key] = searches
+                if runtime_metrics is not None:
+                    runtime_metrics.fit_search_cache_hit_count += 1
+                    cache_hit_recorded = True
         if searches is None:
             if runtime_metrics is not None:
                 runtime_metrics.fit_search_cache_miss_count += 1
@@ -576,12 +651,7 @@ def _generate_actions(
                         binding.material,
                         fit_config,
                         search_config,
-                        tuple(
-                            standard_profile_cache[
-                                (problem.problem_id, candidate.candidate_id)
-                            ].prepared_layout
-                            for candidate in verified.candidates
-                        ),
+                        prepared_layouts,
                         jagua_executable,
                         jagua_container_guard,
                         jagua_differential_audit,
@@ -589,9 +659,9 @@ def _generate_actions(
                 )
             else:
                 chunk_size = max(1, math.ceil(len(verified.candidates) / 32))
+                chunk_offsets = tuple(range(0, len(verified.candidates), chunk_size))
                 chunks = tuple(
-                    verified.candidates[offset : offset + chunk_size]
-                    for offset in range(0, len(verified.candidates), chunk_size)
+                    verified.candidates[offset : offset + chunk_size] for offset in chunk_offsets
                 )
                 arguments = tuple(
                     (
@@ -601,17 +671,12 @@ def _generate_actions(
                         binding.material,
                         fit_config,
                         search_config,
-                        tuple(
-                            standard_profile_cache[
-                                (problem.problem_id, candidate.candidate_id)
-                            ].prepared_layout
-                            for candidate in chunk
-                        ),
+                        prepared_layouts[offset : offset + len(chunk)],
                         jagua_executable,
                         jagua_container_guard,
                         jagua_differential_audit,
                     )
-                    for chunk in chunks
+                    for offset, chunk in zip(chunk_offsets, chunks, strict=True)
                 )
                 chunk_results = tuple(
                     standard_profile_executor.map(
@@ -626,6 +691,8 @@ def _generate_actions(
                     tuple(metrics for _searches, metrics in chunk_results)
                 )
             fit_search_cache[cache_key] = searches
+            if shared_fit_search_cache is not None:
+                shared_fit_search_cache[shared_cache_key] = searches
             if runtime_metrics is not None:
                 runtime_metrics.fit_search_seconds += perf_counter() - search_started
                 runtime_metrics.jagua_wall_seconds += jagua_metrics.wall_seconds
@@ -645,33 +712,117 @@ def _generate_actions(
                 runtime_metrics.jagua_accelerated_evaluation_seconds += (
                     jagua_metrics.accelerated_evaluation_seconds
                 )
-        elif runtime_metrics is not None:
+        elif runtime_metrics is not None and not cache_hit_recorded:
             runtime_metrics.fit_search_cache_hit_count += 1
         for candidate, search in zip(verified.candidates, searches, strict=True):
             query_count += 1
             generated_count += search.generated_candidate_count
             evaluated_count += search.evaluated_candidate_count
             truncated_count += int(search.budget_truncated)
-            materialization_started = perf_counter()
-            action = build_remnant_action_from_search(
-                problem_id=problem.problem_id,
-                problem_sha256=problem.content_sha256,
-                candidate_set_id=evidence.candidate_set_id,
-                candidate_set_sha256=evidence.content_sha256,
-                problem=problem.problem,
-                candidate=candidate,
-                remnant=item.remnant,
-                material=binding.material,
-                rules=rules,
-                fit_config=fit_config,
-                search_result=search,
-            )
-            if runtime_metrics is not None:
-                runtime_metrics.remnant_action_materialization_seconds += (
-                    perf_counter() - materialization_started
+            if search.status is LayoutFitSearchStatus.FIT:
+                remnant_action_arguments.append(
+                    (
+                        problem.problem_id,
+                        problem.content_sha256,
+                        evidence.candidate_set_id,
+                        evidence.content_sha256,
+                        problem.problem,
+                        candidate,
+                        item.remnant,
+                        binding.material,
+                        rules,
+                        fit_config,
+                        search,
+                    )
                 )
-            if action is not None:
-                remnant_actions.append(action)
+    materialization_started = perf_counter()
+    if policy is M7PolicyName.MYOPIC_GEOMETRY:
+        best_standard_key = min(
+            (
+                profile.candidate_width,
+                profile.candidate_id,
+                "current_standard_sheet",
+            )
+            for profile in profiles
+        )
+        if remnant_action_arguments:
+            best_remnant_key = min(
+                (
+                    arguments[5].width,
+                    arguments[5].candidate_id,
+                    arguments[6].remnant_id,
+                )
+                for arguments in remnant_action_arguments
+            )
+            if best_remnant_key < best_standard_key:
+                raise ValueError("M7 myopic lazy-materialization ordering invariant failed")
+        selected_remnant_action = None
+    else:
+        candidate_widths = {item.candidate_id: item.width for item in verified.candidates}
+        inventory_by_id = {item.remnant.remnant_id: item for item in inventory}
+        selected_remnant_action = None
+        selected_remnant_context = None
+        materialized_action_ids: set[str] = set()
+        for offset in range(
+            0,
+            len(remnant_action_arguments),
+            _REMNANT_ACTION_MATERIALIZATION_BATCH_SIZE,
+        ):
+            batch = remnant_action_arguments[
+                offset : offset + _REMNANT_ACTION_MATERIALIZATION_BATCH_SIZE
+            ]
+            if runtime_metrics is not None:
+                runtime_metrics.remnant_action_materialization_peak_batch_size = max(
+                    runtime_metrics.remnant_action_materialization_peak_batch_size,
+                    len(batch),
+                )
+            if standard_profile_executor is None:
+                built_batch = map(_build_remnant_action_from_arguments, batch)
+            else:
+                built_batch = standard_profile_executor.map(
+                    _build_remnant_action_from_arguments,
+                    batch,
+                )
+            for action in built_batch:
+                if action is None:
+                    raise ValueError("M7 fit witness did not materialize an exact remnant action")
+                if action.action_id in materialized_action_ids:
+                    raise ValueError("M7 action set contains duplicate identities")
+                materialized_action_ids.add(action.action_id)
+                context = _remnant_policy_context(
+                    action,
+                    candidate_widths=candidate_widths,
+                    inventory_by_id=inventory_by_id,
+                    occurred_at=binding.released_at,
+                    rates=rates,
+                )
+                if selected_remnant_context is None:
+                    selected_remnant_action = action
+                    selected_remnant_context = context
+                else:
+                    selection = select_policy_action(
+                        policy,
+                        (selected_remnant_context, context),
+                    )
+                    if selection.action_id == context.action_id:
+                        selected_remnant_action = action
+                        selected_remnant_context = context
+                if runtime_metrics is not None:
+                    runtime_metrics.remnant_action_peak_retained_count = max(
+                        runtime_metrics.remnant_action_peak_retained_count,
+                        int(selected_remnant_action is not None),
+                    )
+    remnant_actions = (
+        (selected_remnant_action,) if selected_remnant_action is not None else ()
+    )
+    if policy is not M7PolicyName.MYOPIC_GEOMETRY and bool(remnant_actions) != bool(
+        remnant_action_arguments
+    ):
+        raise ValueError("M7 fit witness did not produce an exact policy winner")
+    if runtime_metrics is not None:
+        runtime_metrics.remnant_action_materialization_seconds += (
+            perf_counter() - materialization_started
+        )
     ordered_remnant = tuple(sorted(remnant_actions, key=lambda item: item.action_id))
     if not profiles and not ordered_remnant:
         raise ValueError("M7 instance has no valid action")
@@ -680,6 +831,7 @@ def _generate_actions(
     return GeneratedActionSet(
         standard_profiles=profiles,
         remnant_actions=ordered_remnant,
+        remnant_action_count=len(remnant_action_arguments),
         fit_search_query_count=query_count,
         fit_search_generated_candidate_count=generated_count,
         fit_search_evaluated_candidate_count=evaluated_count,
@@ -700,8 +852,77 @@ def _returned_regularity(action: M7LayoutActionEvidence) -> float:
     return min(1.0, max(0.0, area / rectangle_area))
 
 
+def _remnant_policy_context(
+    action: M7LayoutActionEvidence,
+    *,
+    candidate_widths: dict[str, float],
+    inventory_by_id: dict[str, InventoryItem],
+    occurred_at: datetime,
+    rates: FeasibilityRateManifest,
+) -> ActionPolicyContext:
+    retained_area = sum(item.geometry.area for item in action.returned_remnants)
+    immediate = rounded_cost(
+        len(action.returned_remnants) * rates.return_handling_cost_per_remnant
+        + rates.retrieval_handling_cost_per_remnant
+        + retained_area * rates.storage_cost_per_area_hour
+        - action.accounting.scrap_area * rates.scrap_credit_per_area
+    )
+    if action.selected_remnant_id is None:
+        raise ValueError("M7 generated remnant action has no selected remnant")
+    selected = inventory_by_id.get(action.selected_remnant_id)
+    if selected is None:
+        raise ValueError("M7 action selected a remnant absent from inventory")
+    age_hours = (occurred_at - selected.entered_at).total_seconds() / 3600.0
+    if age_hours < 0:
+        raise ValueError("M7 selected remnant cannot have a future inventory entry")
+    return ActionPolicyContext(
+        action_id=action.action_id,
+        kind=action.kind,
+        candidate_id=action.candidate_id,
+        candidate_width=candidate_widths[action.candidate_id],
+        selected_stock_id=action.selected_stock.remnant_id,
+        immediate_net_cost=immediate,
+        selected_remnant_age_hours=age_hours,
+        returned_regularity=_returned_regularity(action),
+        known_order_lookahead_term=0.0,
+    )
+
+
 def _build_standard_profile_from_arguments(arguments) -> M7StandardActionProfile:  # type: ignore[no-untyped-def]
     return _build_standard_profile(*arguments)
+
+
+def _prepare_layout_from_arguments(arguments) -> PreparedLayoutFootprint:  # type: ignore[no-untyped-def]
+    return prepare_layout_footprint(*arguments)
+
+
+def _build_remnant_action_from_arguments(arguments):  # type: ignore[no-untyped-def]
+    (
+        problem_id,
+        problem_sha256,
+        candidate_set_id,
+        candidate_set_sha256,
+        problem,
+        candidate,
+        remnant,
+        material,
+        rules,
+        fit_config,
+        search_result,
+    ) = arguments
+    return build_remnant_action_from_search(
+        problem_id=problem_id,
+        problem_sha256=problem_sha256,
+        candidate_set_id=candidate_set_id,
+        candidate_set_sha256=candidate_set_sha256,
+        problem=problem,
+        candidate=candidate,
+        remnant=remnant,
+        material=material,
+        rules=rules,
+        fit_config=fit_config,
+        search_result=search_result,
+    )
 
 
 @dataclass(frozen=True)
@@ -937,32 +1158,13 @@ def _policy_contexts(
             )
         )
     for action in generated.remnant_actions:
-        retained_area = sum(item.geometry.area for item in action.returned_remnants)
-        immediate = rounded_cost(
-            len(action.returned_remnants) * rates.return_handling_cost_per_remnant
-            + rates.retrieval_handling_cost_per_remnant
-            + retained_area * rates.storage_cost_per_area_hour
-            - action.accounting.scrap_area * rates.scrap_credit_per_area
-        )
-        if action.selected_remnant_id is None:
-            raise ValueError("M7 generated remnant action has no selected remnant")
-        selected = inventory_by_id.get(action.selected_remnant_id)
-        if selected is None:
-            raise ValueError("M7 action selected a remnant absent from inventory")
-        age_hours = (occurred_at - selected.entered_at).total_seconds() / 3600.0
-        if age_hours < 0:
-            raise ValueError("M7 selected remnant cannot have a future inventory entry")
         contexts.append(
-            ActionPolicyContext(
-                action_id=action.action_id,
-                kind=action.kind,
-                candidate_id=action.candidate_id,
-                candidate_width=candidate_width[action.candidate_id],
-                selected_stock_id=action.selected_stock.remnant_id,
-                immediate_net_cost=immediate,
-                selected_remnant_age_hours=age_hours,
-                returned_regularity=_returned_regularity(action),
-                known_order_lookahead_term=0.0,
+            _remnant_policy_context(
+                action,
+                candidate_widths=candidate_width,
+                inventory_by_id=inventory_by_id,
+                occurred_at=occurred_at,
+                rates=rates,
             )
         )
     return tuple(contexts)
@@ -1014,9 +1216,9 @@ def _event(
         "storage_interval_start": storage_interval_start,
         "storage_interval_end": binding.released_at,
         "inventory_before": inventory_before,
-        "action_set_size": len(generated.standard_profiles) + len(generated.remnant_actions),
+        "action_set_size": len(generated.standard_profiles) + generated.remnant_action_count,
         "standard_action_count": len(generated.standard_profiles),
-        "remnant_action_count": len(generated.remnant_actions),
+        "remnant_action_count": generated.remnant_action_count,
         "fit_search_query_count": generated.fit_search_query_count,
         "fit_search_generated_candidate_count": (generated.fit_search_generated_candidate_count),
         "fit_search_evaluated_candidate_count": (generated.fit_search_evaluated_candidate_count),
@@ -1072,6 +1274,8 @@ def run_m7_replay(
     standard_profile_executor: Executor | None = None,
     jagua_executable: Path | None = None,
     jagua_differential_audit: bool = False,
+    shared_fit_search_cache: M7SharedFitSearchCache | None = None,
+    prepared_layout_cache: M7PreparedLayoutCache | None = None,
 ) -> M7ReplayResult:
     """Execute one M7 stream deterministically with exact shared action generation."""
 
@@ -1083,6 +1287,7 @@ def run_m7_replay(
     ):
         raise ValueError("M7 runtime candidate sets differ from replay input")
     profile_cache = standard_profile_cache if standard_profile_cache is not None else {}
+    layout_cache = prepared_layout_cache if prepared_layout_cache is not None else OrderedDict()
     fit_search_cache: dict[tuple[str, str, str], tuple[LayoutFitSearchResult, ...]] = {}
     jagua_enabled = (
         replay_input.collision_backend == "jagua_rs_0_7_0_guarded_prefilter_shapely_witness"
@@ -1122,6 +1327,8 @@ def run_m7_replay(
             rules=rules,
             fit_config=replay_input.fit_config,
             search_config=replay_input.search_config,
+            policy=replay_input.policy.name,
+            rates=replay_input.rates,
             runtime_metrics=runtime_metrics,
             standard_profile_cache=profile_cache,
             standard_profile_executor=standard_profile_executor,
@@ -1129,6 +1336,8 @@ def run_m7_replay(
             jagua_container_guard=jagua_guard,
             jagua_differential_audit=jagua_differential_audit,
             fit_search_cache=fit_search_cache,
+            shared_fit_search_cache=shared_fit_search_cache,
+            prepared_layout_cache=layout_cache,
         )
         contexts = _policy_contexts(
             generated,
@@ -1266,6 +1475,8 @@ __all__ = [
     "M7ReplayRuntimeMetrics",
     "M7ReplaySummary",
     "M7StandardActionProfile",
+    "M7SharedFitSearchCache",
+    "M7PreparedLayoutCache",
     "build_m7_replay_input",
     "run_m7_replay",
 ]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -100,22 +102,29 @@ def _problem(*, part_width: float = 4.0) -> ReusableGeometryProblem:
     )
 
 
-def _verified(problem: ReusableGeometryProblem) -> VerifiedProblemCandidates:
+def _verified(
+    problem: ReusableGeometryProblem,
+    *,
+    candidate_ids: tuple[str, ...] = ("candidate-one",),
+) -> VerifiedProblemCandidates:
     part_width = max(point[0] for point in problem.problem.parts[0].shape)
-    candidate = Candidate(
-        candidate_id="candidate-one",
-        report_type=CandidateReportType.FINAL,
-        seed=0,
-        width=part_width,
-        density=part_width / 10.0,
-        placements=[Placement(part_id="part-1", rotation=0.0, translation=(0.0, 0.0))],
+    candidates = tuple(
+        Candidate(
+            candidate_id=candidate_id,
+            report_type=CandidateReportType.FINAL,
+            seed=0,
+            width=part_width,
+            density=part_width / 10.0,
+            placements=[Placement(part_id="part-1", rotation=0.0, translation=(0.0, 0.0))],
+        )
+        for candidate_id in candidate_ids
     )
     archives = tuple(
         M7CandidateArchiveEvidence(
             seed=seed,  # type: ignore[arg-type]
             job_id=f"job-{seed}",
             batch_sha256=f"{seed}" * 64,
-            candidate_count=1,
+            candidate_count=len(candidates),
             source_result_id="yfgcr-" + "c" * 24,
             source_result_sha256="sha256:" + "d" * 64,
         )
@@ -126,9 +135,10 @@ def _verified(problem: ReusableGeometryProblem) -> VerifiedProblemCandidates:
         "problem_id": problem.problem_id,
         "problem_sha256": problem.content_sha256,
         "archives": [item.model_dump(mode="json") for item in archives],
-        "raw_candidate_count": 4,
-        "distinct_candidate_count": 1,
-        "candidate_ids": [candidate.candidate_id],
+        "raw_candidate_count": 4 * len(candidates),
+        "distinct_candidate_count": len(candidates),
+        "candidate_ids": list(candidate_ids),
+        "rejected_candidate_ids": [],
         "claim_ceiling": (
             "verified_shared_geometry_candidates_only_not_actions_policy_value_or_savings_evidence"
         ),
@@ -140,11 +150,11 @@ def _verified(problem: ReusableGeometryProblem) -> VerifiedProblemCandidates:
         problem_id=problem.problem_id,
         problem_sha256=problem.content_sha256,
         archives=archives,  # type: ignore[arg-type]
-        raw_candidate_count=4,
-        distinct_candidate_count=1,
-        candidate_ids=(candidate.candidate_id,),
+        raw_candidate_count=4 * len(candidates),
+        distinct_candidate_count=len(candidates),
+        candidate_ids=candidate_ids,
     )
-    return VerifiedProblemCandidates(evidence=evidence, candidates=(candidate,))
+    return VerifiedProblemCandidates(evidence=evidence, candidates=candidates)
 
 
 def _binding(
@@ -239,11 +249,13 @@ def test_replay_groups_equal_timestamps_preserves_inventory_and_reconciles_costs
         {problem.problem_id: verified},
         rule_set_from_m0(_m0().remnant_eligibility),
     )
-    second = run_m7_replay(
-        replay_input,
-        {problem.problem_id: verified},
-        rule_set_from_m0(_m0().remnant_eligibility),
-    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        second = run_m7_replay(
+            replay_input,
+            {problem.problem_id: verified},
+            rule_set_from_m0(_m0().remnant_eligibility),
+            standard_profile_executor=executor,
+        )
 
     assert first == second
     assert first.result_id == f"yfm7r-{first.content_sha256[7:31]}"
@@ -262,6 +274,120 @@ def test_replay_groups_equal_timestamps_preserves_inventory_and_reconciles_costs
     assert first.summary.remnant_retrieval_count == 1
     assert first.summary.fulfilled_instance_count == 2
     assert first.summary.technical_decision == "pass"
+
+
+def test_myopic_policy_counts_feasible_remnant_actions_without_eager_materialization() -> None:
+    problem = _problem(part_width=4.0)
+    verified = _verified(problem)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    replay_input = build_m7_replay_input(
+        m0_contract_id=_m0().contract_id,
+        m0_contract_sha256=_m0().content_sha256,
+        problem_index_id="yfm7i-" + "4" * 24,
+        problem_index_sha256="sha256:" + "5" * 64,
+        m6_contract_id="yfm6-" + "6" * 24,
+        m6_contract_sha256="sha256:" + "7" * 64,
+        m6_population_id="yftp-" + "8" * 24,
+        m6_population_sha256="sha256:" + "9" * 64,
+        policy=policy_identity(M7PolicyName.MYOPIC_GEOMETRY),
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.01,
+            return_handling_cost_per_remnant=2.0,
+            retrieval_handling_cost_per_remnant=3.0,
+            scrap_credit_per_area=0.1,
+        ),
+        fit_config=RemnantFitConfig(),
+        problems=(problem,),
+        candidate_sets=(verified.evidence,),
+        instances=(
+            _binding(problem, sequence=0, released_at=started),
+            _binding(problem, sequence=1, released_at=started + timedelta(hours=1)),
+        ),
+        horizon_end=started + timedelta(hours=2),
+    )
+    metrics = M7ReplayRuntimeMetrics()
+
+    result = run_m7_replay(
+        replay_input,
+        {problem.problem_id: verified},
+        rule_set_from_m0(_m0().remnant_eligibility),
+        runtime_metrics=metrics,
+    )
+
+    assert result.events[1].remnant_action_count == 1
+    assert result.events[1].action.kind.value == "open_standard_sheet"
+    assert result.summary.full_sheet_opening_count == 2
+    assert result.summary.remnant_retrieval_count == 0
+    assert metrics.remnant_action_materialization_seconds < 0.01
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        M7PolicyName.REMNANT_FIRST,
+        M7PolicyName.NET_COST,
+        M7PolicyName.AGE_REGULARITY,
+        M7PolicyName.KNOWN_ORDER_LOOKAHEAD,
+    ),
+)
+def test_exact_policy_reduction_retains_only_the_best_remnant_action(
+    policy: M7PolicyName,
+) -> None:
+    problem = _problem(part_width=4.0)
+    verified = _verified(
+        problem,
+        candidate_ids=("candidate-a", "candidate-b", "candidate-c"),
+    )
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    replay_input = build_m7_replay_input(
+        m0_contract_id=_m0().contract_id,
+        m0_contract_sha256=_m0().content_sha256,
+        problem_index_id="yfm7i-" + "4" * 24,
+        problem_index_sha256="sha256:" + "5" * 64,
+        m6_contract_id="yfm6-" + "6" * 24,
+        m6_contract_sha256="sha256:" + "7" * 64,
+        m6_population_id="yftp-" + "8" * 24,
+        m6_population_sha256="sha256:" + "9" * 64,
+        policy=policy_identity(policy),
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.01,
+            return_handling_cost_per_remnant=2.0,
+            retrieval_handling_cost_per_remnant=3.0,
+            scrap_credit_per_area=0.1,
+        ),
+        fit_config=RemnantFitConfig(),
+        problems=(problem,),
+        candidate_sets=(verified.evidence,),
+        instances=(
+            _binding(problem, sequence=0, released_at=started),
+            _binding(problem, sequence=1, released_at=started + timedelta(hours=1)),
+        ),
+        horizon_end=started + timedelta(hours=2),
+    )
+    metrics = M7ReplayRuntimeMetrics()
+
+    result = run_m7_replay(
+        replay_input,
+        {problem.problem_id: verified},
+        rule_set_from_m0(_m0().remnant_eligibility),
+        runtime_metrics=metrics,
+    )
+    parallel_metrics = M7ReplayRuntimeMetrics()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        parallel = run_m7_replay(
+            replay_input,
+            {problem.problem_id: verified},
+            rule_set_from_m0(_m0().remnant_eligibility),
+            runtime_metrics=parallel_metrics,
+            standard_profile_executor=executor,
+        )
+
+    assert parallel == result
+    assert result.events[1].remnant_action_count == 3
+    assert metrics.remnant_action_peak_retained_count == 1
+    assert parallel_metrics.remnant_action_peak_retained_count == 1
 
 
 def test_replay_rejects_runtime_candidate_set_mismatch() -> None:
@@ -402,3 +528,169 @@ def test_replay_caches_immutable_no_fit_remnant_searches() -> None:
     assert result.summary.remnant_retrieval_count == 0
     assert metrics.fit_search_cache_miss_count == 2
     assert metrics.fit_search_cache_hit_count == 1
+
+
+def test_replay_reuses_negative_geometry_searches_across_streams() -> None:
+    problem = _problem(part_width=6.0)
+    verified = _verified(problem)
+    shared_cache = {}
+
+    def replay_at(started: datetime, metrics: M7ReplayRuntimeMetrics):
+        replay_input = build_m7_replay_input(
+            m0_contract_id=_m0().contract_id,
+            m0_contract_sha256=_m0().content_sha256,
+            problem_index_id="yfm7i-" + "4" * 24,
+            problem_index_sha256="sha256:" + "5" * 64,
+            m6_contract_id="yfm6-" + "6" * 24,
+            m6_contract_sha256="sha256:" + "7" * 64,
+            m6_population_id="yftp-" + "8" * 24,
+            m6_population_sha256="sha256:" + "9" * 64,
+            policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+            rates=FeasibilityRateManifest(
+                purchase_cost_per_area=1.0,
+                storage_cost_per_area_hour=0.01,
+                return_handling_cost_per_remnant=2.0,
+                retrieval_handling_cost_per_remnant=3.0,
+                scrap_credit_per_area=0.1,
+            ),
+            fit_config=RemnantFitConfig(),
+            problems=(problem,),
+            candidate_sets=(verified.evidence,),
+            instances=tuple(
+                _binding(
+                    problem,
+                    sequence=sequence,
+                    released_at=started + timedelta(hours=sequence),
+                )
+                for sequence in range(2)
+            ),
+            horizon_end=started + timedelta(hours=2),
+        )
+        return run_m7_replay(
+            replay_input,
+            {problem.problem_id: verified},
+            rule_set_from_m0(_m0().remnant_eligibility),
+            runtime_metrics=metrics,
+            shared_fit_search_cache=shared_cache,
+        )
+
+    first_metrics = M7ReplayRuntimeMetrics()
+    first = replay_at(datetime(2026, 1, 1, tzinfo=UTC), first_metrics)
+    second_metrics = M7ReplayRuntimeMetrics()
+    second = replay_at(datetime(2026, 1, 2, tzinfo=UTC), second_metrics)
+
+    assert first.summary.remnant_retrieval_count == 0
+    assert second.summary.remnant_retrieval_count == 0
+    assert first.events[1].inventory_before[0].remnant.remnant_id != (
+        second.events[1].inventory_before[0].remnant.remnant_id
+    )
+    assert first_metrics.fit_search_cache_miss_count == 1
+    assert second_metrics.fit_search_cache_hit_count == 1
+    assert second_metrics.fit_search_cache_miss_count == 0
+
+
+def test_replay_reuses_and_rebinds_positive_witnesses_across_streams() -> None:
+    problem = _problem(part_width=4.0)
+    verified = _verified(problem)
+    shared_cache = {}
+
+    def replay_at(started: datetime, metrics: M7ReplayRuntimeMetrics):
+        replay_input = build_m7_replay_input(
+            m0_contract_id=_m0().contract_id,
+            m0_contract_sha256=_m0().content_sha256,
+            problem_index_id="yfm7i-" + "4" * 24,
+            problem_index_sha256="sha256:" + "5" * 64,
+            m6_contract_id="yfm6-" + "6" * 24,
+            m6_contract_sha256="sha256:" + "7" * 64,
+            m6_population_id="yftp-" + "8" * 24,
+            m6_population_sha256="sha256:" + "9" * 64,
+            policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+            rates=FeasibilityRateManifest(
+                purchase_cost_per_area=1.0,
+                storage_cost_per_area_hour=0.01,
+                return_handling_cost_per_remnant=2.0,
+                retrieval_handling_cost_per_remnant=3.0,
+                scrap_credit_per_area=0.1,
+            ),
+            fit_config=RemnantFitConfig(),
+            problems=(problem,),
+            candidate_sets=(verified.evidence,),
+            instances=tuple(
+                _binding(
+                    problem,
+                    sequence=sequence,
+                    released_at=started + timedelta(hours=sequence),
+                )
+                for sequence in range(2)
+            ),
+            horizon_end=started + timedelta(hours=2),
+        )
+        return run_m7_replay(
+            replay_input,
+            {problem.problem_id: verified},
+            rule_set_from_m0(_m0().remnant_eligibility),
+            runtime_metrics=metrics,
+            shared_fit_search_cache=shared_cache,
+        )
+
+    first_metrics = M7ReplayRuntimeMetrics()
+    first = replay_at(datetime(2026, 1, 1, tzinfo=UTC), first_metrics)
+    second_metrics = M7ReplayRuntimeMetrics()
+    second = replay_at(datetime(2026, 1, 2, tzinfo=UTC), second_metrics)
+
+    assert first.summary.remnant_retrieval_count == 1
+    assert second.summary.remnant_retrieval_count == 1
+    assert len(shared_cache) == 1
+    assert first_metrics.fit_search_cache_miss_count == 1
+    assert second_metrics.fit_search_cache_hit_count == 1
+    assert second_metrics.fit_search_cache_miss_count == 0
+
+
+def test_replay_bounds_prepared_layout_cache_to_two_problems() -> None:
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    prepared_cache = OrderedDict()
+
+    for problem_offset, width in enumerate((4.0, 5.0, 6.0)):
+        problem = _problem(part_width=width)
+        verified = _verified(problem)
+        replay_input = build_m7_replay_input(
+            m0_contract_id=_m0().contract_id,
+            m0_contract_sha256=_m0().content_sha256,
+            problem_index_id="yfm7i-" + "4" * 24,
+            problem_index_sha256="sha256:" + "5" * 64,
+            m6_contract_id="yfm6-" + "6" * 24,
+            m6_contract_sha256="sha256:" + "7" * 64,
+            m6_population_id="yftp-" + "8" * 24,
+            m6_population_sha256="sha256:" + "9" * 64,
+            policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+            rates=FeasibilityRateManifest(
+                purchase_cost_per_area=1.0,
+                storage_cost_per_area_hour=0.01,
+                return_handling_cost_per_remnant=2.0,
+                retrieval_handling_cost_per_remnant=3.0,
+                scrap_credit_per_area=0.1,
+            ),
+            fit_config=RemnantFitConfig(),
+            problems=(problem,),
+            candidate_sets=(verified.evidence,),
+            instances=tuple(
+                _binding(
+                    problem,
+                    sequence=sequence,
+                    released_at=started + timedelta(days=problem_offset, hours=sequence),
+                )
+                for sequence in range(2)
+            ),
+            horizon_end=started + timedelta(days=problem_offset, hours=2),
+        )
+        run_m7_replay(
+            replay_input,
+            {problem.problem_id: verified},
+            rule_set_from_m0(_m0().remnant_eligibility),
+            prepared_layout_cache=prepared_cache,
+        )
+
+    assert len(prepared_cache) == 2
+    assert tuple(key[0] for key in prepared_cache) == tuple(
+        _problem(part_width=width).problem_id for width in (5.0, 6.0)
+    )
