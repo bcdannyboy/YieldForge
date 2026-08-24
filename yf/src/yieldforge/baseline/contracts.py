@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictFloat,
     StrictInt,
     StrictStr,
     field_validator,
@@ -18,7 +20,14 @@ from pydantic import (
 from yieldforge.domain import SolverProjectionBinding, StripPackingProblem
 from yieldforge.experiments.calibration import CalibrationCandidateObservation
 from yieldforge.experiments.contracts import semantic_sha256
-from yieldforge.reuse.contracts import MaterialIdentity, MaterialProvenance
+from yieldforge.reuse.contracts import (
+    CanonicalPolygon,
+    FitPlacement,
+    MaterialIdentity,
+    MaterialProvenance,
+    RemnantStock,
+    ReuseAccounting,
+)
 from yieldforge.temporal_benchmark.contracts import (
     CandidateArchiveRequirement,
     TemporalPartition,
@@ -269,4 +278,120 @@ class M7CandidateSetEvidence(BaselineContractModel):
             raise ValueError("M7 candidate set content SHA-256 does not match semantic content")
         if self.candidate_set_id != f"yfm7c-{digest[:24]}":
             raise ValueError("M7 candidate set ID does not match semantic content")
+        return self
+
+
+class LayoutFitSearchConfig(BaselineContractModel):
+    """Frozen bounded translation search for one complete archived layout."""
+
+    schema_version: Literal["yieldforge.m7-layout-fit-search-config.v1"] = (
+        "yieldforge.m7-layout-fit-search-config.v1"
+    )
+    grid_columns: StrictInt = Field(default=5, ge=2)
+    grid_rows: StrictInt = Field(default=5, ge=2)
+    maximum_candidates: StrictInt = Field(default=256, ge=1)
+    candidate_source_order: tuple[StrictStr, ...] = (
+        "bbox_alignments",
+        "vertex_alignments",
+        "uniform_grid",
+    )
+
+    @field_validator("candidate_source_order")
+    @classmethod
+    def require_frozen_sources(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != ("bbox_alignments", "vertex_alignments", "uniform_grid"):
+            raise ValueError("layout fit search sources must use the frozen order")
+        return value
+
+
+class LayoutFitSearchStatus(StrEnum):
+    FIT = "fit"
+    NO_WITNESS_WITHIN_REGISTERED_SEARCH = "no_witness_within_registered_search"
+
+
+class LayoutFitSearchResult(BaselineContractModel):
+    """Deterministic outcome and counts for one complete-layout remnant search."""
+
+    schema_version: Literal["yieldforge.m7-layout-fit-search-result.v1"] = (
+        "yieldforge.m7-layout-fit-search-result.v1"
+    )
+    status: LayoutFitSearchStatus
+    candidate_id: StrictStr = Field(min_length=1)
+    remnant_id: StrictStr = Field(pattern=r"^yfrm-[0-9a-f]{24}$")
+    config: LayoutFitSearchConfig
+    generated_candidate_count: StrictInt = Field(ge=0)
+    duplicate_candidate_count: StrictInt = Field(ge=0)
+    evaluated_candidate_count: StrictInt = Field(ge=0)
+    budget_truncated: bool
+    translation: tuple[StrictFloat, StrictFloat] | None = None
+
+    @model_validator(mode="after")
+    def require_status_shape(self) -> Self:
+        if self.evaluated_candidate_count > self.generated_candidate_count:
+            raise ValueError("layout search evaluated count exceeds generated count")
+        if self.status is LayoutFitSearchStatus.FIT and self.translation is None:
+            raise ValueError("layout fit requires a translation witness")
+        if (
+            self.status is LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH
+            and self.translation is not None
+        ):
+            raise ValueError("layout no-fit result cannot carry a translation")
+        return self
+
+
+class M7ActionKind(StrEnum):
+    OPEN_STANDARD_SHEET = "open_standard_sheet"
+    CONSUME_REMNANT = "consume_remnant"
+
+
+class PlacedPartEvidence(BaselineContractModel):
+    part_id: StrictStr = Field(min_length=1)
+    geometry: CanonicalPolygon
+
+
+class M7LayoutActionEvidence(BaselineContractModel):
+    """One exact complete-layout action available to every paired M7+ policy."""
+
+    schema_version: Literal["yieldforge.m7-layout-action.v1"] = "yieldforge.m7-layout-action.v1"
+    action_id: StrictStr = Field(pattern=r"^yfm7a-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    problem_id: StrictStr = Field(pattern=r"^yfm7p-[0-9a-f]{24}$")
+    problem_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    candidate_set_id: StrictStr = Field(pattern=r"^yfm7c-[0-9a-f]{24}$")
+    candidate_set_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    candidate_id: StrictStr = Field(min_length=1)
+    kind: M7ActionKind
+    selected_stock: RemnantStock
+    selected_remnant_id: StrictStr | None = Field(default=None, pattern=r"^yfrm-[0-9a-f]{24}$")
+    translation: tuple[StrictFloat, StrictFloat]
+    placements: tuple[FitPlacement, ...] = Field(min_length=1)
+    placed_parts: tuple[PlacedPartEvidence, ...] = Field(min_length=1)
+    search_result: LayoutFitSearchResult | None = None
+    accounting: ReuseAccounting
+    returned_remnants: tuple[RemnantStock, ...]
+
+    @model_validator(mode="after")
+    def require_action_consistency_and_identity(self) -> Self:
+        placement_ids = tuple(item.part_id for item in self.placements)
+        placed_ids = tuple(item.part_id for item in self.placed_parts)
+        if placement_ids != placed_ids or len(placement_ids) != len(set(placement_ids)):
+            raise ValueError("M7 action placement and geometry part IDs must agree uniquely")
+        if self.kind is M7ActionKind.OPEN_STANDARD_SHEET:
+            if self.selected_remnant_id is not None or self.search_result is not None:
+                raise ValueError("standard-sheet action cannot carry remnant search evidence")
+        elif (
+            self.selected_remnant_id != self.selected_stock.remnant_id
+            or self.search_result is None
+            or self.search_result.status is not LayoutFitSearchStatus.FIT
+            or self.search_result.translation != self.translation
+        ):
+            raise ValueError("remnant action requires matching exact search evidence")
+        returned_ids = tuple(item.remnant_id for item in self.returned_remnants)
+        if returned_ids != tuple(sorted(set(returned_ids))):
+            raise ValueError("M7 returned remnants must use sorted unique identities")
+        digest = semantic_sha256(self, excluded_fields={"action_id", "content_sha256"})
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("M7 action content SHA-256 does not match semantic content")
+        if self.action_id != f"yfm7a-{digest[:24]}":
+            raise ValueError("M7 action ID does not match semantic content")
         return self
