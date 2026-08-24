@@ -1,15 +1,16 @@
-# M8 Full-Horizon Rollout Oracle Implementation Plan
+# M8 Sparse Exact Rollout Oracle Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build, validate, freeze, and execute an exact full-remaining-horizon rollout policy over
-the M6 streams using the frozen M7 policy as every hypothetical continuation.
+**Goal:** Build and execute the complete-candidate, full-horizon M8 rollout oracle through a sparse
+exact delta evaluator that must match brute force and project no more than seven days of held-out
+execution.
 
-**Architecture:** First expose M7's existing action generation and state transition as a reusable
-arbitrary-state seam while preserving published M7 identities. Add a strict persistent cache, then
-build an isolated rollout kernel that scores every common current action through frozen-M7
-continuation, with full and known-only visibility supplied by separate providers. Calibration-only
-acceptance and runtime evidence freeze the execution manifest before held-out evaluation opens.
+**Architecture:** Expose M7's exact action/transition seam, then build a deliberately slow reference
+oracle for correctness. Compile inventory-independent M7 standard winners and safe future-fit
+rejection certificates so the sparse evaluator can skip passive stretches and branch only where an
+inventory delta can change a future action. Persistent caching and complete-stream orchestration are
+authorized only after a calibration-prefix proof records zero mismatches and at least 20x speedup.
 
 **Tech Stack:** Python 3.12, Pydantic v2, Shapely 2.1.2, pinned Jagua 0.7.0 extension, standard
 library SQLite, pytest, Ruff, existing argparse CLI and content-addressed JSON artifact conventions.
@@ -24,14 +25,13 @@ library SQLite, pytest, Ruff, existing argparse CLI and content-addressed JSON a
 - Modify: `yf/src/yieldforge/baseline/__init__.py`
 - Modify: `yf/tests/baseline/test_replay.py`
 
-**Step 1: Write the failing descriptor and transition tests**
+**Step 1: Write failing public-seam tests**
 
-Add tests that require the public seam to enumerate every standard candidate plus every feasible
-remnant candidate, retain the existing M7-selected fallback, apply one descriptor from an arbitrary
-state, and continue from a nonzero event position.
+Require complete standard/remnant descriptors, the exact frozen-policy fallback, one-action
+execution from an arbitrary cursor, and continuation from a nonzero event position.
 
 ```python
-def test_action_catalog_contains_exact_m7_fallback(replay_fixture):
+def test_catalog_contains_exact_m7_fallback(replay_fixture):
     cursor = initial_m7_cursor(replay_fixture.replay_input)
     catalog = enumerate_m7_action_catalog(
         replay_fixture.runtime,
@@ -43,44 +43,36 @@ def test_action_catalog_contains_exact_m7_fallback(replay_fixture):
     assert len(catalog.actions) == catalog.standard_action_count + catalog.remnant_action_count
 
 
-def test_continuation_from_selected_action_matches_complete_replay(replay_fixture):
+def test_nonzero_continuation_matches_complete_replay(replay_fixture):
     complete = run_m7_replay(**replay_fixture.arguments)
-    cursor = initial_m7_cursor(replay_fixture.replay_input)
-    first = apply_m7_action_descriptor(
-        replay_fixture.runtime,
-        cursor=cursor,
-        event_position=0,
-        descriptor=descriptor_for(complete.events[0].action),
-    )
+    cursor = cursor_after_event(complete, sequence=0)
     continued = run_m7_continuation(
         replay_fixture.runtime,
-        cursor=first.cursor_after,
+        cursor=cursor,
         next_event_position=1,
     )
-    assert continued.final_costs == complete.terminal.cumulative_costs
     assert continued.events == complete.events[1:]
+    assert continued.final_costs == complete.terminal.cumulative_costs
 ```
 
-**Step 2: Run the focused tests and verify the expected failure**
+**Step 2: Run the focused test and confirm failure**
 
 Run: `cd yf && uv run pytest tests/baseline/test_replay.py -q`
 
-Expected: FAIL because the public cursor, catalog, descriptor application, and continuation APIs do
-not exist.
+Expected: FAIL because the cursor, catalog, fallback, transition, and continuation APIs do not exist.
 
-**Step 3: Implement the minimal public seam**
+**Step 3: Implement the minimal seam**
 
 Add immutable `M7ReplayCursor`, `M7ActionDescriptor`, `M7ActionCatalog`, and `M7StepResult` types.
-Refactor the existing private generation path so M7 can keep lazy winner materialization while M8
-can iterate every exact descriptor. Add `initial_m7_cursor`, `enumerate_m7_action_catalog`,
+Extract `initial_m7_cursor`, `enumerate_m7_action_catalog`, `select_m7_fallback`,
 `apply_m7_action_descriptor`, and `run_m7_continuation`. Keep `run_m7_replay` as the compatibility
-caller and do not change its persisted schema.
+caller and preserve its persisted schema and lazy M7 winner materialization.
 
-**Step 4: Verify focused and published-result compatibility**
+**Step 4: Verify M7 compatibility**
 
 Run: `cd yf && uv run pytest tests/baseline/test_replay.py tests/baseline/test_experiment.py -q`
 
-Expected: PASS, including fixture-level byte identity for the pre-refactor replay.
+Expected: PASS with fixture-level pre/post-refactor content identity.
 
 Run: `cd yf && uv run ruff check src/yieldforge/baseline tests/baseline`
 
@@ -93,178 +85,74 @@ git add yf/src/yieldforge/baseline yf/tests/baseline
 git commit -m "refactor: expose exact M7 transition seam"
 ```
 
-### Task 2: Add strict persistent exact caching
+### Task 2: Build strict M8 contracts and the slow reference oracle
 
 **Files:**
 - Create: `yf/src/yieldforge/oracle/__init__.py`
-- Create: `yf/src/yieldforge/oracle/cache.py`
-- Create: `yf/tests/oracle/__init__.py`
-- Create: `yf/tests/oracle/test_cache.py`
-- Modify: `yf/src/yieldforge/baseline/replay.py`
-
-**Step 1: Write failing cache tests**
-
-Cover cold miss, validated warm hit, identical concurrent insertion, same-key conflict, payload
-tampering, schema/version mismatch, disabled-cache behavior, and checkpoint resume.
-
-```python
-def test_same_key_different_payload_fails_closed(tmp_path):
-    cache = ExactRuntimeCache(tmp_path / "m8.sqlite3")
-    cache.put(kind="fit_search", key={"geometry": "a"}, payload={"fit": True})
-    with pytest.raises(CacheConflictError, match="same key has different payload"):
-        cache.put(kind="fit_search", key={"geometry": "a"}, payload={"fit": False})
-
-
-def test_disabled_and_warm_cache_are_semantically_identical(oracle_fixture, tmp_path):
-    uncached = oracle_fixture.run(cache=None)
-    cold = oracle_fixture.run(cache=ExactRuntimeCache(tmp_path / "m8.sqlite3"))
-    warm = oracle_fixture.run(cache=ExactRuntimeCache(tmp_path / "m8.sqlite3"))
-    assert uncached == cold == warm
-```
-
-**Step 2: Run and confirm failure**
-
-Run: `cd yf && uv run pytest tests/oracle/test_cache.py -q`
-
-Expected: FAIL because `yieldforge.oracle.cache` does not exist.
-
-**Step 3: Implement the cache**
-
-Use SQLite WAL mode with a table keyed by `(kind, key_sha256)`. Persist canonical key JSON,
-canonical payload JSON, payload SHA-256, schema version, and engine identity. Use transactions plus
-`INSERT OR IGNORE`; validate an ignored row is byte-identical. Strictly validate every returned
-payload. Add checkpoint rows keyed by freeze, stream, visibility, event position, and action
-position. Never treat corruption as a miss.
-
-Integrate optional cache adapters for standard profiles, prepared footprints, and fit-search
-results without changing M7 content identities.
-
-**Step 4: Verify cache and M7 regression tests**
-
-Run: `cd yf && uv run pytest tests/oracle/test_cache.py tests/baseline/test_replay.py -q`
-
-Expected: PASS.
-
-Run: `cd yf && uv run ruff check src/yieldforge/oracle src/yieldforge/baseline tests/oracle`
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add yf/src/yieldforge/oracle yf/src/yieldforge/baseline/replay.py yf/tests/oracle
-git commit -m "feat: persist exact M8 runtime caches"
-```
-
-### Task 3: Freeze M8 contracts and future-visibility isolation
-
-**Files:**
 - Create: `yf/src/yieldforge/oracle/contracts.py`
+- Create: `yf/src/yieldforge/oracle/reference.py`
 - Create: `yf/src/yieldforge/oracle/visibility.py`
+- Create: `yf/tests/oracle/__init__.py`
+- Create: `yf/tests/oracle/fixtures.py`
 - Create: `yf/tests/oracle/test_contracts.py`
+- Create: `yf/tests/oracle/test_reference.py`
 - Create: `yf/tests/oracle/test_visibility.py`
 
-**Step 1: Write failing strict-contract tests**
+**Step 1: Write failing contract and information-isolation tests**
 
-Require content-addressed identities, complete remaining horizon, M7 fallback tie preference, no
-candidate cap, maximum eight local workers in the preparation manifest, and exact binding to the
-M0/M6/M7 artifacts. Reject extra fields, nonfinite numbers, altered hashes, and unregistered
-visibility modes.
+Bind the M0/M6/M7 identities, complete remaining horizon, full and known-only visibility, exact M7
+fallback tie preference, no candidate cap, and strict failure evidence. M6 known-only must expose an
+empty future because it has no pre-release `known_at` field.
 
 ```python
-def test_m6_known_only_has_no_visible_future(m8_fixture):
+def test_m6_known_only_has_no_visible_suffix(m8_fixture):
     provider = KnownOnlyVisibility(m8_fixture.stream)
     assert provider.visible_suffix(current_position=0) == ()
 
 
-def test_hidden_suffix_never_reaches_known_only(m8_fixture):
+def test_hidden_suffix_does_not_change_known_only(m8_fixture):
     left = KnownOnlyVisibility(m8_fixture.stream)
     right = KnownOnlyVisibility(m8_fixture.mutate_hidden_suffix())
     assert left.visible_suffix(current_position=3) == right.visible_suffix(current_position=3)
 ```
 
-**Step 2: Run and confirm failure**
+**Step 2: Write failing reference-oracle tests**
 
-Run: `cd yf && uv run pytest tests/oracle/test_contracts.py tests/oracle/test_visibility.py -q`
-
-Expected: FAIL because the contracts and visibility providers do not exist.
-
-**Step 3: Implement contracts and providers**
-
-Define strict models for `M8OracleContract`, `M8RuntimeManifest`, `M8ActionRolloutScore`,
-`M8EventDecision`, `M8StreamResult`, and failure evidence. Define only
-`full_realized_future` and `known_only` visibility modes. Full visibility returns the exact
-post-current suffix; known-only requires explicit `known_at` evidence and returns empty for M6.
-Neither provider exposes regime labels to the action policy.
-
-**Step 4: Verify**
-
-Run: `cd yf && uv run pytest tests/oracle/test_contracts.py tests/oracle/test_visibility.py -q`
-
-Expected: PASS.
-
-Run: `cd yf && uv run ruff check src/yieldforge/oracle tests/oracle`
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add yf/src/yieldforge/oracle yf/tests/oracle
-git commit -m "feat: freeze M8 oracle and visibility contracts"
-```
-
-### Task 4: Implement the one-step rollout kernel with hand-computed cases
-
-**Files:**
-- Create: `yf/src/yieldforge/oracle/rollout.py`
-- Create: `yf/tests/oracle/test_rollout.py`
-- Create: `yf/tests/oracle/fixtures.py`
-
-**Step 1: Write failing independent kernel tests**
-
-Build a tiny injected action graph with hand-computed ledgers. Test delayed reuse, fallback tie,
-policy improvement, complete horizon, terminal liquidation, exact state coalescing, and deterministic
-action order before invoking real polygon machinery.
+The reference must materialize every current action, replay the complete visible suffix through M7,
+apply the registered terminal ledger, and select by
+`(final_net_cost, action_id != baseline_action_id, action_id)`.
 
 ```python
-def test_delayed_reuse_beats_cheaper_current_layout(delayed_reuse_case):
-    result = choose_rollout_action(delayed_reuse_case.request)
-    assert result.selected_action_id == "keep-future-fit"
+def test_reference_delayed_reuse_case(delayed_reuse_case):
+    result = score_reference_event(delayed_reuse_case.request)
     assert result.scores_by_action == {
         "myopic-cheap": 200.0,
         "keep-future-fit": 101.0,
     }
+    assert result.selected_action_id == "keep-future-fit"
 
 
-def test_exact_tie_prefers_frozen_baseline_action(no_signal_case):
-    result = choose_rollout_action(no_signal_case.request)
+def test_reference_exact_tie_prefers_m7_fallback(no_signal_case):
+    result = score_reference_event(no_signal_case.request)
     assert result.selected_action_id == result.baseline_action_id
-    assert result.selected_score == result.baseline_score
 ```
 
-**Step 2: Run and confirm failure**
+**Step 3: Run and confirm failure**
 
-Run: `cd yf && uv run pytest tests/oracle/test_rollout.py -q`
+Run: `cd yf && uv run pytest tests/oracle/test_contracts.py tests/oracle/test_visibility.py tests/oracle/test_reference.py -q`
 
-Expected: FAIL because the rollout kernel does not exist.
+Expected: FAIL because the oracle package does not exist.
 
-**Step 3: Implement the minimal kernel**
+**Step 4: Implement contracts, visibility providers, and slow reference**
 
-For each descriptor, apply the current transition, obtain the visibility-provided suffix, run the
-frozen M7 continuation, and score the final M0 ledger. Select by
-`(final_net_cost, action_id != baseline_action_id, action_id)`. Hash the exact cursor and suffix for
-continuation caching. Coalesce only identical hashes after full canonical equality validation.
-
-**Step 4: Add real M7 integration tests**
-
-Use small existing Shapely fixtures to prove the M7 selected action is present, every scored action
-can execute, current action counts match, and changing hidden future geometry affects only full
-visibility.
+Define strict content-addressed request, score, decision, stream, and failure models. Full visibility
+returns the exact post-current suffix; known-only requires explicit `known_at` evidence. Implement
+the straightforward per-action full replay with no performance shortcuts. Label it test/reference
+only so production evaluation cannot invoke it accidentally.
 
 **Step 5: Verify and commit**
 
-Run: `cd yf && uv run pytest tests/oracle/test_rollout.py tests/baseline/test_replay.py -q`
+Run: `cd yf && uv run pytest tests/oracle/test_contracts.py tests/oracle/test_visibility.py tests/oracle/test_reference.py -q`
 
 Expected: PASS.
 
@@ -274,110 +162,203 @@ Expected: PASS.
 
 ```bash
 git add yf/src/yieldforge/oracle yf/tests/oracle
-git commit -m "feat: add exact M8 rollout kernel"
+git commit -m "feat: add M8 reference oracle"
 ```
 
-### Task 5: Execute complete full and known-only stream policies
+### Task 3: Compile standard winners and safe relevance certificates
 
 **Files:**
-- Create: `yf/src/yieldforge/oracle/stream.py`
-- Create: `yf/tests/oracle/test_stream.py`
-- Modify: `yf/src/yieldforge/oracle/contracts.py`
+- Create: `yf/src/yieldforge/oracle/compiled.py`
+- Create: `yf/tests/oracle/test_compiled.py`
+- Modify: `yf/src/yieldforge/baseline/geometry.py`
+- Modify: `yf/tests/baseline/test_geometry.py`
 
-**Step 1: Write failing stream tests**
+**Step 1: Write failing compiled-standard tests**
 
-Test that the oracle re-scores at every real event, hypothetical futures remain M7-only, equal
-timestamps preserve source subsequence, actual known-only costs use the realized stream without
-revealing it early, and any branch/parity/fallback failure invalidates the stream.
+For every test problem, compile the `age_regularity` winner among standard profiles and require it to
+equal ordinary M7 selection for empty inventory.
 
 ```python
-def test_oracle_reoptimizes_only_the_real_current_action(stream_case):
-    result = run_m8_stream(stream_case.full_request)
-    assert len(result.events) == len(stream_case.instances)
-    assert all(event.hypothetical_policy == "age_regularity" for event in result.events)
-    assert tuple(event.sequence for event in result.events) == tuple(range(len(result.events)))
-
-
-def test_missing_fallback_invalidates_stream(stream_case):
-    request = stream_case.without_fallback_at(sequence=1)
-    with pytest.raises(M8ParityError, match="baseline fallback"):
-        run_m8_stream(request)
+def test_compiled_standard_winner_matches_m7(compiled_fixture):
+    compiled = compile_standard_winner(compiled_fixture.problem)
+    ordinary = compiled_fixture.select_with_empty_inventory()
+    assert compiled.action_id == ordinary.action_id
+    assert compiled.decision_key == ordinary.decision_key
 ```
 
-**Step 2: Run and confirm failure**
+**Step 2: Write failing safe-rejection tests**
 
-Run: `cd yf && uv run pytest tests/oracle/test_stream.py -q`
+Reject a fixed-orientation rigid layout only when material differs, footprint area exceeds remnant
+area beyond tolerance, footprint width exceeds remnant width, or footprint height exceeds remnant
+height. Every rejected pair must produce no fit under the registered exact search; only geometric
+bound rejects are expected to produce an empty translation sequence. Survivors are unknown, never
+presumed feasible.
 
-Expected: FAIL because stream execution is absent.
+```python
+@pytest.mark.parametrize("case", SAFE_REJECTION_CASES)
+def test_safe_rejection_has_no_registered_fit(case):
+    certificate = certify_translation_impossible(case.layout, case.remnant, case.config)
+    assert certificate.impossible
+    assert search_layout_translation(**case.arguments).status is NO_WITNESS
 
-**Step 3: Implement stream execution and resume**
 
-Execute selected actions on one real cursor, rebuild the current catalog at every event, and persist
-per-action and per-event checkpoints. Resume only after validating the entire bound request and
-checkpoint hashes. Persist full decision evidence but keep wall-clock/cache observations outside
-semantic result identity.
+def test_prefilter_never_rejects_known_fit(known_fit_case):
+    certificate = certify_translation_impossible(
+        known_fit_case.layout,
+        known_fit_case.remnant,
+        known_fit_case.config,
+    )
+    assert not certificate.impossible
+```
 
-**Step 4: Verify deterministic replay**
+**Step 3: Run and confirm failure**
 
-Run each toy stream cache-disabled, cold, warm, and with worker counts one and two. Require identical
-stream result IDs and event decisions.
+Run: `cd yf && uv run pytest tests/oracle/test_compiled.py tests/baseline/test_geometry.py -q`
 
-Run: `cd yf && uv run pytest tests/oracle/test_stream.py tests/oracle/test_cache.py -q`
+Expected: FAIL because compiled winners and certificates do not exist.
+
+**Step 4: Implement compilation and certificates**
+
+Persist exact candidate/profile hashes with each compiled winner. Add a strict
+`TranslationRejectionCertificate` recording the first valid rejection reason and all compared
+values. Compile a suffix index by material and footprint bounds so impossible event/candidate pairs
+can be skipped without GEOS or Jagua.
+
+**Step 5: Differentially audit against existing M7 fixtures**
+
+Run every archived test layout/remnant pair through both the prefilter and registered search. Require
+zero false rejections and identical winners.
+
+Run: `cd yf && uv run pytest tests/oracle/test_compiled.py tests/baseline/test_geometry.py tests/baseline/test_replay.py -q`
 
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
+
+```bash
+git add yf/src/yieldforge/oracle/compiled.py yf/tests/oracle/test_compiled.py \
+  yf/src/yieldforge/baseline/geometry.py yf/tests/baseline/test_geometry.py
+git commit -m "feat: compile exact M8 future relevance"
+```
+
+### Task 4: Implement sparse delta replay and zero-mismatch tests
+
+**Files:**
+- Create: `yf/src/yieldforge/oracle/sparse.py`
+- Create: `yf/tests/oracle/test_sparse.py`
+- Modify: `yf/src/yieldforge/oracle/contracts.py`
+
+**Step 1: Write failing passive-delta tests**
+
+Prove that a branch-only remnant with complete no-fit certificates across the suffix changes only
+storage and terminal liquidation. Added/removed remnant deltas must reconcile against the reference.
+
+```python
+def test_passive_remnant_is_charged_without_future_replay(passive_case):
+    sparse = score_sparse_event(passive_case.request)
+    reference = score_reference_event(passive_case.request)
+    assert sparse.decision == reference.decision
+    assert sparse.scores == reference.scores
+    assert sparse.metrics.skipped_passive_event_count > 0
+    assert sparse.metrics.exact_branch_event_count == 0
+```
+
+**Step 2: Write failing branch/rejoin tests**
+
+Require exact replay at the first potentially relevant event, exact M7 policy comparison when a fit
+exists, continuation after consumption, and memoization only after canonical state equality.
+
+```python
+def test_sparse_branch_matches_reference_at_first_future_fit(future_fit_case):
+    sparse = score_sparse_event(future_fit_case.request)
+    reference = score_reference_event(future_fit_case.request)
+    assert sparse.scores == reference.scores
+    assert sparse.selected_action_id == reference.selected_action_id
+    assert sparse.metrics.exact_branch_event_count == 1
+```
+
+**Step 3: Run and confirm failure**
+
+Run: `cd yf && uv run pytest tests/oracle/test_sparse.py -q`
+
+Expected: FAIL because the sparse evaluator does not exist.
+
+**Step 4: Implement minimal exact delta evaluation**
+
+Represent branch state as added/removed inventory plus ledger delta against the common M7 cursor.
+Jump across a future interval only when every delta remnant has a complete no-fit certificate and no
+removed remnant is selected by the common path in that interval. Add storage and terminal effects
+with the existing M0 rounding functions. At a potentially relevant event, reconstruct the exact
+cursor, invoke registered fit search, execute M7's actual winner, and continue from the new delta.
+
+**Step 5: Differentially compare all registered small cases**
+
+For every action in every toy event, compare final score, selected action, action evidence, inventory,
+ledger, and terminal result against the reference. Do not compare wall-clock/cache metrics.
+
+Run: `cd yf && uv run pytest tests/oracle/test_sparse.py tests/oracle/test_reference.py -q`
+
+Expected: PASS with zero mismatch.
+
+Run: `cd yf && uv run ruff check src/yieldforge/oracle tests/oracle`
+
+Expected: PASS.
+
+**Step 6: Commit**
 
 ```bash
 git add yf/src/yieldforge/oracle yf/tests/oracle
-git commit -m "feat: add deterministic M8 stream replay"
+git commit -m "feat: add sparse exact M8 delta replay"
 ```
 
-### Task 6: Run the calibration-only runtime pilot and freeze execution
+### Task 5: Execute the 20x calibration-prefix proof
 
 **Files:**
 - Create: `yf/src/yieldforge/oracle/experiment.py`
 - Create: `yf/tests/oracle/test_experiment.py`
 - Modify: `yf/src/yieldforge/cli.py`
 - Modify: `yf/tests/test_cli.py`
-- Create: `yf/experiments/results/m8-calibration-pilot-<id>.json`
-- Create: `yf/experiments/results/m8-rollout-freeze-v1.json`
+- Create: `yf/experiments/results/m8-sparse-proof-<id>.json`
 
-**Step 1: Write failing pilot and freeze tests**
+**Step 1: Write failing proof-contract tests**
 
-Require one immutable calibration stream per regime, zero evaluation streams, both visibility modes,
-complete action scoring, runtime/cache/storage measurements, idempotent publication, and a freeze
-that cannot exist until all acceptance gates pass. Reject any horizon or candidate truncation.
+Freeze one short prefix from the first calibration stream in every regime, all current actions in
+those prefixes, reference/sparse semantic equality, runtime fields, and fail-closed decisions:
+`pass_sparse_exact`, `redesign_sparse_exact`, or `require_distributed_exact`.
 
 **Step 2: Run and confirm failure**
 
 Run: `cd yf && uv run pytest tests/oracle/test_experiment.py tests/test_cli.py -q`
 
-Expected: FAIL because the M8 commands and artifacts do not exist.
+Expected: FAIL because the sparse proof command and artifact do not exist.
 
-**Step 3: Implement pilot orchestration and publishers**
+**Step 3: Implement `benchmark m8-sparse-proof`**
 
-Add `benchmark m8-pilot` and `benchmark m8-freeze`. Reuse the canonical M7 archive loader and verify
-all problem/candidate evidence before replay. Record semantic results separately from runtime
-observations. Freeze exact horizon, tie rule, cache schema, worker ceiling, retry rule, and bound
-artifact hashes.
+Verify candidate evidence once, execute reference then sparse in the frozen order, compare every
+semantic field, and report action count, brute and sparse event executions, rejection counts, exact
+searches, state rejoins, elapsed seconds, speedup, and seven-day held-out projection. The command
+must never load an M8 evaluation stream.
 
-**Step 4: Execute the six-stream calibration pilot**
+**Step 4: Execute the bounded proof**
 
-Run the smallest exact smoke prefix first to estimate checkpoint volume, then execute the six full
-registered calibration streams. Do not inspect or execute M8 evaluation streams. Repeat from the
-warm cache and require identical semantic content.
+Run the six registered prefixes within a maximum 24-hour proof budget. Publish all completed cells
+and failures; never replace a prefix or seed.
 
-**Step 5: Apply the execution-readiness gate**
+**Step 5: Apply the hard gate**
 
-If all six streams complete and the measured projection has a practical exact local or distributed
-completion path, publish `m8-rollout-freeze-v1.json`. Otherwise publish only the pilot with
-`technical_decision = optimize_exact_runtime` and continue performance work without weakening the
-primary semantics.
+Continue locally only when:
+
+- semantic mismatch count is zero;
+- end-to-end sparse speedup is at least 20x;
+- every registered proof cell completes; and
+- the conservative eight-worker held-out projection is no more than seven calendar days.
+
+Otherwise stop before persistent-cache or full-stream work and choose further exact optimization or
+a separately frozen distributed execution plan.
 
 **Step 6: Verify and commit**
 
-Run: `cd yf && uv run pytest tests/oracle tests/test_cli.py -q`
+Run: `cd yf && uv run pytest tests/oracle/test_experiment.py tests/test_cli.py -q`
 
 Expected: PASS.
 
@@ -387,82 +368,137 @@ Expected: PASS.
 
 ```bash
 git add yf/src/yieldforge/oracle yf/src/yieldforge/cli.py yf/tests/oracle \
-  yf/tests/test_cli.py yf/experiments/results/m8-*.json
-git commit -m "experiment: freeze M8 rollout execution"
+  yf/tests/test_cli.py yf/experiments/results/m8-sparse-proof-*.json
+git commit -m "experiment: prove sparse exact M8 replay"
 ```
 
-### Task 7: Reproduce M7 and execute held-out M8 evaluation
+### Task 6: Add persistent caches and complete-stream checkpoints
 
-**Gate:** Do not begin this task unless Task 6 published a valid frozen M8 execution artifact.
+**Gate:** Do not begin unless Task 5 records `pass_sparse_exact`.
+
+**Files:**
+- Create: `yf/src/yieldforge/oracle/cache.py`
+- Create: `yf/src/yieldforge/oracle/stream.py`
+- Create: `yf/tests/oracle/test_cache.py`
+- Create: `yf/tests/oracle/test_stream.py`
+
+**Step 1: Write failing cache tests**
+
+Cover cold miss, validated warm hit, identical concurrent insertion, same-key conflict, payload
+tampering, disabled cache, interrupted resume, and one/two/eight-worker semantic identity.
+
+```python
+def test_same_key_different_payload_fails_closed(tmp_path):
+    cache = ExactRuntimeCache(tmp_path / "m8.sqlite3")
+    cache.put(kind="fit_search", key={"geometry": "a"}, payload={"fit": True})
+    with pytest.raises(CacheConflictError, match="same key has different payload"):
+        cache.put(kind="fit_search", key={"geometry": "a"}, payload={"fit": False})
+```
+
+**Step 2: Write failing complete-stream tests**
+
+Require re-scoring at every real event, M7-only hypothetical continuations, full and known-only
+actual trajectories, candidate parity, fallback presence, deterministic resume, and fail-closed
+partial streams.
+
+**Step 3: Implement SQLite cache and stream runner**
+
+Use WAL mode and canonical `(kind, key_sha256)` identities. Persist key JSON, payload JSON, payload
+SHA-256, schema, and engine identity. Checkpoint after every scored action and completed event.
+Validate every loaded value; corruption is not a miss.
+
+**Step 4: Verify and commit**
+
+Run: `cd yf && uv run pytest tests/oracle/test_cache.py tests/oracle/test_stream.py -q`
+
+Expected: PASS.
+
+```bash
+git add yf/src/yieldforge/oracle yf/tests/oracle
+git commit -m "feat: persist sparse M8 execution"
+```
+
+### Task 7: Run the six-stream pilot and freeze held-out execution
 
 **Files:**
 - Modify: `yf/src/yieldforge/oracle/experiment.py`
 - Modify: `yf/src/yieldforge/cli.py`
 - Modify: `yf/tests/oracle/test_experiment.py`
 - Modify: `yf/tests/test_cli.py`
-- Create: `yf/experiments/results/m8-evaluation-<id>.json`
+- Create: `yf/experiments/results/m8-calibration-pilot-<id>.json`
+- Create: `yf/experiments/results/m8-rollout-freeze-v1.json`
 
-**Step 1: Write failing evaluation-boundary tests**
+**Step 1: Write failing pilot/freeze tests**
 
-Require the frozen M8 artifact, exact 36-stream evaluation partition, immutable M7 paired baseline,
-both visibility modes, no calibration reselection, no per-stream substitution, complete failure
-denominator, and repeated semantic identity.
+Require one complete calibration stream per regime, full and known-only modes, zero evaluation
+streams, complete action scoring, repeated semantic identity, runtime/cache metrics, and a
+conservative projection no greater than seven days.
 
-**Step 2: Reproduce the M7 compatibility identity**
+**Step 2: Implement and execute `benchmark m8-pilot`**
 
-Regenerate the canonical M7 evaluation semantic content through the refactored seam and require
-reproducibility SHA-256 `47cc40ff16ab71f70163df23bb1a346c061d2765d2e2113eca5f0c06e5756cf8`.
+Run the six streams with at most eight workers, then repeat from the warm cache. Persist all failures
+and exact proof bindings.
 
-**Step 3: Implement and execute frozen evaluation**
+**Step 3: Freeze or stop**
 
-Run full and known-only M8 over all 36 evaluation streams. Checkpoint every action/event, retain all
-failures, and publish no savings for an invalid paired stream. Repeat from the validated warm cache
-and require identical content.
+Publish `m8-rollout-freeze-v1.json` only if every stream passes and the complete-pilot projection
+remains within seven days. Otherwise preserve the pilot and stop local execution.
 
 **Step 4: Verify and commit**
 
-Run: `cd yf && uv run pytest tests/oracle/test_experiment.py tests/test_cli.py -q`
+Run: `cd yf && uv run pytest tests/oracle tests/test_cli.py -q`
 
 Expected: PASS.
 
 ```bash
 git add yf/src/yieldforge/oracle yf/src/yieldforge/cli.py yf/tests/oracle \
-  yf/tests/test_cli.py yf/experiments/results/m8-evaluation-*.json
-git commit -m "experiment: execute frozen M8 rollout evaluation"
+  yf/tests/test_cli.py yf/experiments/results/m8-*.json
+git commit -m "experiment: freeze sparse M8 execution"
 ```
 
-### Task 8: Publish paired M8 evidence and prepare M9
+### Task 8: Execute evaluation, publish paired evidence, and prepare M9
+
+**Gate:** Do not begin unless Task 7 published a valid frozen execution artifact.
 
 **Files:**
 - Modify: `yf/src/yieldforge/oracle/experiment.py`
+- Modify: `yf/src/yieldforge/cli.py`
 - Modify: `yf/tests/oracle/test_experiment.py`
+- Modify: `yf/tests/test_cli.py`
 - Modify: `Docs/Milestones/M8 - Rollout oracle.md`
 - Modify: `Docs/Milestones/M9 - Search validation.md`
 - Modify: `Docs/Milestones/Milestone Roadmap.md`
 - Modify: `Docs/Current Work.md`
+- Create: `yf/experiments/results/m8-evaluation-<id>.json`
 
-**Step 1: Write failing paired-summary tests**
+**Step 1: Write failing evaluation-boundary tests**
 
-Require `OracleSavings`, `UnknownFutureContribution`, every M0 registered summary, no-signal and
-concentration diagnostics, action divergence, immediate sacrifice, reuse realization, and explicit
-claim ceilings. Verify the publisher cannot emit the final M10 green/yellow/red verdict.
+Require the exact 36-stream evaluation partition, immutable M7 baseline, both visibility modes, no
+calibration reselection, no substitution, complete failure denominator, repeated semantic identity,
+and deterministic M0 paired summaries.
 
-**Step 2: Implement deterministic summaries**
+**Step 2: Reproduce the M7 compatibility identity**
 
-Use the paired stream as the unit and the frozen 10,000-resample stratified percentile bootstrap
-with seed zero. Keep baseline, full, and known-only costs individually auditable. Report all invalid
-streams before any aggregate interpretation.
+Through the refactored seam, require M7 evaluation reproducibility SHA-256
+`47cc40ff16ab71f70163df23bb1a346c061d2765d2e2113eca5f0c06e5756cf8`.
 
-**Step 3: Update milestone evidence**
+**Step 3: Execute frozen held-out M8**
 
-Record measured results, failures, runtime, cache behavior, information-control results, and exact
-limitations. Move M9 to planning only if M8 acceptance passes.
+Run full and known-only on all 36 streams, checkpoint every action/event, and abort rather than exceed
+the frozen seven-day execution boundary. A boundary breach produces no M8 savings result and moves
+execution to the distributed-exact path; it never truncates a stream.
 
-**Step 4: Run final verification**
+**Step 4: Publish paired evidence**
+
+Compute `OracleSavings`, `UnknownFutureContribution`, the frozen 10,000-resample stratified bootstrap
+with seed zero, no-signal and concentration diagnostics, action divergence, immediate sacrifice,
+reuse realization, and explicit claim ceilings. Do not emit M10's final project verdict.
+
+**Step 5: Run final verification**
 
 Run: `cd yf && uv run pytest -q`
 
-Expected: the full suite passes; environment-gated skips remain explicitly reported.
+Expected: the full suite passes; environment-gated skips are reported.
 
 Run: `cd yf && uv run ruff check src tests`
 
@@ -472,9 +508,10 @@ Run: `cd yf && uv build`
 
 Expected: source distribution and wheel build successfully.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add yf/src/yieldforge/oracle yf/tests/oracle Docs
-git commit -m "docs: close M8 and prepare search validation"
+git add yf/src/yieldforge/oracle yf/src/yieldforge/cli.py yf/tests/oracle \
+  yf/tests/test_cli.py yf/experiments/results/m8-evaluation-*.json Docs
+git commit -m "docs: close sparse M8 and prepare search validation"
 ```

@@ -59,7 +59,8 @@ oracle comparison or savings claim.
 
 M8 is prepared. Its approved design evaluates every exact current action over the complete remaining
 stream with frozen M7 as the hypothetical continuation, preferring the M7 action on exact ties. The
-primary arm permits only exact content-addressed caching and byte-equivalent state coalescing; fixed
-horizons and candidate caps remain labeled sensitivities. Implementation begins with a published-M7
-regression-locked transition seam and a calibration-only runtime pilot. No M8 oracle evaluation or
-savings result exists yet.
+primary arm uses sparse exact inventory deltas, compiled standard winners, safe no-fit certificates,
+and registered exact search for survivors; fixed horizons and candidate caps remain labeled
+sensitivities. A slow full-replay reference must show zero mismatch and at least 20x speedup on
+registered calibration prefixes, with a held-out projection no greater than seven days, before
+complete-stream work. No M8 oracle evaluation or savings result exists yet.

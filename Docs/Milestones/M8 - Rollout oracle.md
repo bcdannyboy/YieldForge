@@ -25,14 +25,16 @@ Rollout is not a mathematical upper bound and may miss value requiring coordinat
 
 The approved design uses the complete remaining registered stream for every current action, frozen
 M7 for each hypothetical continuation, the exact common action set, the M7 action as the tie-preferred
-fallback, M0 scrap-only terminal treatment, and strict paired failure handling. Only content-addressed
-exact caches and byte-equivalent state coalescing may accelerate the primary arm.
+fallback, M0 scrap-only terminal treatment, and strict paired failure handling. Naive branch-by-branch
+replay is operationally rejected. The primary engine compiles inventory-independent M7 standard
+winners, evaluates exact inventory deltas, skips only intervals covered by complete no-fit
+certificates, and uses registered exact search for every survivor.
 
 The implementation plan begins by extracting an arbitrary-state M7 transition seam and proving that
-published M7 identities do not change. It then adds persistent exact caching, isolated full and
-known-only visibility providers, hand-computed acceptance cases, and a six-stream calibration-only
-runtime pilot. M8 evaluation remains closed until that pilot supports a frozen exact execution
-manifest.
+published M7 identities do not change. A slow full-replay reference then audits the sparse engine on
+toys and registered calibration prefixes. Zero mismatch, at least 20x speedup, and a conservative
+held-out projection no greater than seven days are hard gates before persistent caching, the
+six-stream pilot, or M8 evaluation.
 
 See [[plans/2026-08-24-m8-rollout-oracle-design]] and
 [[plans/2026-08-24-m8-rollout-oracle-implementation]].

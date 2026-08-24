@@ -8,15 +8,16 @@
 
 Implement the prepared exact full-horizon rollout oracle against the immutable M7 baseline freeze.
 Preserve complete action parity, baseline information masking, exact accounting, and paired evidence
-boundaries while making the computation practical through semantics-preserving persistent caches.
+boundaries through sparse exact delta replay rather than branch-by-branch future replay.
 
 ## Next step
 
 Execute Task 1 of [[plans/2026-08-24-m8-rollout-oracle-implementation]]: expose complete M7 action
 descriptors, one-action execution, and frozen-policy continuation from arbitrary state while
-regression-locking all published M7 content identities. Then add the strict persistent cache before
-the rollout kernel. Do not open M8 evaluation until the hand-computed gates and six-stream
-calibration-only runtime pilot support a frozen exact execution manifest.
+regression-locking all published M7 content identities. Then build the slow reference, compile M7
+standard winners and safe future-fit rejection certificates, and require a zero-mismatch 20x sparse
+proof with a seven-day-or-less held-out projection. Persistent cache and complete-stream work remain
+gated on that proof.
 
 ## Evidence bridge completed
 
@@ -59,9 +60,9 @@ calibration-only runtime pilot support a frozen exact execution manifest.
   retrieved 38 remnants, and recorded mean net cost 29,733.304499. One Jagua-unrepresentable guard
   used the registered unfiltered Shapely fallback; policy and exact replay semantics were unchanged.
 - M8 preparation freezes the complete-remaining-horizon rollout design, exact M7 fallback tie rule,
-  full-versus-known-only visibility boundary, semantics-preserving cache rules, acceptance gates,
-  calibration-only runtime pilot, and held-out evaluation hold point. No M8 oracle execution or
-  savings result exists yet.
+  full-versus-known-only visibility boundary, sparse exact delta architecture, slow-reference
+  differential, 20x speed gate, seven-day execution ceiling, calibration-only pilot, and held-out
+  evaluation hold point. No M8 oracle execution or savings result exists yet.
 
 ## Experiment status
 

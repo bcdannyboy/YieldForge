@@ -5,8 +5,8 @@
 **Entry state:** M7 baseline calibrated, frozen, evaluated, and twice reproduced
 
 **Decision:** Build the canonical M8 arm as an exact full-remaining-horizon one-step rollout over
-every common current action. Use only exact persistent caching and byte-equivalent state coalescing
-to reduce runtime.
+every common current action. Reject naive branch-by-branch replay; compile the common M7 future and
+evaluate only exact inventory deltas that can affect later actions.
 
 ## Purpose and claim ceiling
 
@@ -39,21 +39,24 @@ merge, or oracle-only expanded search. Those options remain labeled sensitivitie
 
 ## Runtime preparation
 
-M7 recorded 550,542 action alternatives across 864 evaluation events. Full rollout compounds that
-work across remaining suffixes, so M8 begins with:
+M7 recorded 550,542 action alternatives across 864 evaluation events. Naive full rollout projects
+roughly 6.3 million continuation events and multi-week local execution, so that implementation is
+rejected. M8 begins with:
 
 1. a reusable arbitrary-state M7 transition/continuation seam whose output is regression-locked to
    the published M7 identities;
-2. a strict local persistent cache for standard profiles, prepared footprints, fit searches,
-   exact transitions, and exact continuation results;
-3. checkpoints after each scored action and completed event;
-4. exact coalescing only for byte-equivalent state, ledger, time, suffix, and engine identities; and
-5. a six-stream calibration-only runtime pilot before an evaluation execution manifest is frozen.
+2. a deliberately slow full-replay reference used only for correctness checks;
+3. compiled inventory-independent M7 standard winners and rejection-safe future-fit indexes;
+4. sparse exact delta replay that skips passive future intervals and branches only on possible
+   action-changing remnant events;
+5. a calibration-prefix proof requiring zero mismatch, at least 20x speedup, and a conservative
+   held-out projection no greater than seven days; and
+6. persistent caching, checkpoints, and a six-stream pilot only after that proof passes.
 
-The canonical calculation has no semantic timeout or truncation. Operational concurrency begins at
-no more than eight local workers and must not affect content identity. If the calibration pilot does
-not establish a practical exact completion path, M8 remains in preparation while caching,
-incremental replay, or distribution is improved.
+The canonical calculation has no semantic truncation. Operational concurrency begins at no more
+than eight local workers and must not affect content identity. If either runtime gate fails, local
+evaluation remains closed while sparse execution is redesigned or a separate distributed-exact
+manifest is prepared.
 
 ## Information controls
 
@@ -71,25 +74,26 @@ not change the baseline or known-only current decision.
 Expose complete current action descriptors, one-action execution, and frozen-policy continuation
 from arbitrary state. Preserve the existing fast M7 policy path and published replay identities.
 
-### M8.1 — Add persistent exact caches
+### M8.1 — Build the slow exact reference
 
-Create strict content-addressed runtime storage with conflict detection, process-safe access,
-checkpoint/resume, and cold/warm/disabled differential tests.
+Score every current action by direct complete-suffix M7 replay on toys and short calibration
+prefixes. This is correctness authority for the sparse implementation, not an evaluation engine.
 
-### M8.2 — Implement oracle contracts and isolation
+### M8.2 — Compile sparse future relevance
 
-Bind the M0/M6/M7 identities, full and known-only visibility modes, complete horizon, fallback tie
-rule, per-action scores, failures, runtime manifest, and claim ceiling.
+Compile the M7 standard winner per problem. Add safe material, area, and footprint-bound rejection
+certificates and a suffix relevance index. Survivors still require registered exact search.
 
-### M8.3 — Prove the rollout kernel on small cases
+### M8.3 — Prove sparse exact delta replay
 
-Pass hand-computed delayed-reuse, no-signal, terminal-accounting, policy-improvement, candidate
-parity, information-isolation, state-coalescing, and determinism tests.
+Pass hand-computed cases, then compare every sparse score and transition with the reference on six
+registered calibration prefixes. Require zero mismatch, at least 20x speedup, and a seven-day-or-less
+held-out projection within a 24-hour proof budget.
 
-### M8.4 — Run the calibration-only runtime pilot
+### M8.4 — Add caches and run the calibration-only pilot
 
-Execute one calibration stream per regime, record exact workload and cache behavior, reproduce its
-content, and freeze the evaluation execution manifest only if an exact completion path exists.
+Only after M8.3 passes, add strict persistent caching and checkpoint/resume. Execute one complete
+calibration stream per regime and freeze evaluation only if the seven-day projection survives.
 
 ### M8.5 — Hold before evaluation
 
@@ -99,4 +103,5 @@ reproduced. Full held-out execution and paired summaries are separate implementa
 ## Immediate next action
 
 Start TDD Task 1: extract and test the arbitrary-state M7 transition seam without changing any
-published M7 artifact identity.
+published M7 artifact identity. The slow reference and sparse 20x proof come before cache or
+complete-stream infrastructure.
