@@ -13,7 +13,11 @@ from yieldforge.baseline.contracts import (
     TemporalInstanceBinding,
 )
 from yieldforge.baseline.policies import M7PolicyName, policy_identity
-from yieldforge.baseline.replay import build_m7_replay_input, run_m7_replay
+from yieldforge.baseline.replay import (
+    M7ReplayRuntimeMetrics,
+    build_m7_replay_input,
+    run_m7_replay,
+)
 from yieldforge.domain import (
     Candidate,
     CandidateReportType,
@@ -45,7 +49,7 @@ def _material() -> MaterialIdentity:
     )
 
 
-def _problem() -> ReusableGeometryProblem:
+def _problem(*, part_width: float = 4.0) -> ReusableGeometryProblem:
     projection = SolverProjectionBinding(
         mode=ProjectionMode.SOURCE_AS_RECORDED,
         projection_sha256="a" * 64,
@@ -59,7 +63,12 @@ def _problem() -> ReusableGeometryProblem:
         parts=[
             Part(
                 id="part-1",
-                shape=[(0.0, 0.0), (4.0, 0.0), (4.0, 10.0), (0.0, 10.0)],
+                shape=[
+                    (0.0, 0.0),
+                    (part_width, 0.0),
+                    (part_width, 10.0),
+                    (0.0, 10.0),
+                ],
                 demand=1,
                 allowed_orientations=[0.0],
             )
@@ -92,12 +101,13 @@ def _problem() -> ReusableGeometryProblem:
 
 
 def _verified(problem: ReusableGeometryProblem) -> VerifiedProblemCandidates:
+    part_width = max(point[0] for point in problem.problem.parts[0].shape)
     candidate = Candidate(
         candidate_id="candidate-one",
         report_type=CandidateReportType.FINAL,
         seed=0,
-        width=4.0,
-        density=0.4,
+        width=part_width,
+        density=part_width / 10.0,
         placements=[Placement(part_id="part-1", rotation=0.0, translation=(0.0, 0.0))],
     )
     archives = tuple(
@@ -284,3 +294,111 @@ def test_replay_rejects_runtime_candidate_set_mismatch() -> None:
 
     with pytest.raises(ValueError, match="runtime candidate"):
         run_m7_replay(replay_input, {}, rule_set_from_m0(_m0().remnant_eligibility))
+
+
+def test_replay_can_use_guarded_jagua_prefilter(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-jagua"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "python3 -c 'import json,sys; request=json.load(sys.stdin); "
+        'print(json.dumps({"schema_version":"yieldforge.m7-jagua-search-response.v1",'
+        '"backend":"jagua-rs","backend_version":"0.7.0","coordinate_precision":"f32",'
+        '"build_microseconds":1,"generation_microseconds":2,"query_microseconds":3,'
+        '"searches":[{"layout_id":request["layouts"][0]["layout_id"],'
+        '"generated_candidate_count":1,"duplicate_candidate_count":0,'
+        '"budget_truncated":False,"translations":[[4.0,0.0]],'
+        '"collisions":[False]}]}))\'\n'
+    )
+    executable.chmod(0o700)
+    problem = _problem()
+    verified = _verified(problem)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    replay_input = build_m7_replay_input(
+        m0_contract_id=_m0().contract_id,
+        m0_contract_sha256=_m0().content_sha256,
+        problem_index_id="yfm7i-" + "4" * 24,
+        problem_index_sha256="sha256:" + "5" * 64,
+        m6_contract_id="yfm6-" + "6" * 24,
+        m6_contract_sha256="sha256:" + "7" * 64,
+        m6_population_id="yftp-" + "8" * 24,
+        m6_population_sha256="sha256:" + "9" * 64,
+        policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.01,
+            return_handling_cost_per_remnant=2.0,
+            retrieval_handling_cost_per_remnant=3.0,
+            scrap_credit_per_area=0.1,
+        ),
+        fit_config=RemnantFitConfig(),
+        problems=(problem,),
+        candidate_sets=(verified.evidence,),
+        instances=(
+            _binding(problem, sequence=0, released_at=started),
+            _binding(problem, sequence=1, released_at=started),
+        ),
+        horizon_end=started + timedelta(hours=1),
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_container_guard=1.0,
+    )
+    metrics = M7ReplayRuntimeMetrics()
+
+    accelerated = run_m7_replay(
+        replay_input,
+        {problem.problem_id: verified},
+        rule_set_from_m0(_m0().remnant_eligibility),
+        runtime_metrics=metrics,
+        jagua_executable=executable,
+    )
+
+    assert accelerated.summary.fulfilled_instance_count == 2
+    assert metrics.jagua_guarded_query_count > 0
+    assert metrics.jagua_audit_search_count == 0
+    assert metrics.jagua_audit_mismatch_count == 0
+
+
+def test_replay_caches_immutable_no_fit_remnant_searches() -> None:
+    problem = _problem(part_width=6.0)
+    verified = _verified(problem)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    replay_input = build_m7_replay_input(
+        m0_contract_id=_m0().contract_id,
+        m0_contract_sha256=_m0().content_sha256,
+        problem_index_id="yfm7i-" + "4" * 24,
+        problem_index_sha256="sha256:" + "5" * 64,
+        m6_contract_id="yfm6-" + "6" * 24,
+        m6_contract_sha256="sha256:" + "7" * 64,
+        m6_population_id="yftp-" + "8" * 24,
+        m6_population_sha256="sha256:" + "9" * 64,
+        policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.01,
+            return_handling_cost_per_remnant=2.0,
+            retrieval_handling_cost_per_remnant=3.0,
+            scrap_credit_per_area=0.1,
+        ),
+        fit_config=RemnantFitConfig(),
+        problems=(problem,),
+        candidate_sets=(verified.evidence,),
+        instances=tuple(
+            _binding(problem, sequence=sequence, released_at=started + timedelta(hours=sequence))
+            for sequence in range(3)
+        ),
+        horizon_end=started + timedelta(hours=3),
+    )
+    metrics = M7ReplayRuntimeMetrics()
+
+    result = run_m7_replay(
+        replay_input,
+        {problem.problem_id: verified},
+        rule_set_from_m0(_m0().remnant_eligibility),
+        runtime_metrics=metrics,
+    )
+
+    assert result.summary.full_sheet_opening_count == 3
+    assert result.summary.remnant_retrieval_count == 0
+    assert metrics.fit_search_cache_miss_count == 2
+    assert metrics.fit_search_cache_hit_count == 1

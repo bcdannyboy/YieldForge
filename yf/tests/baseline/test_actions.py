@@ -10,6 +10,12 @@ from yieldforge.baseline.actions import (
     build_standard_sheet_action,
 )
 from yieldforge.baseline.contracts import LayoutFitSearchConfig, M7ActionKind
+from yieldforge.baseline.geometry import (
+    generate_layout_translations,
+    prepare_layout_footprint,
+    prepare_remnant_geometry,
+    search_layout_translation,
+)
 from yieldforge.domain import (
     Candidate,
     CandidateReportType,
@@ -242,3 +248,42 @@ def test_remnant_action_returns_none_when_complete_layout_has_no_registered_fit(
     )
 
     assert result is None
+
+
+def test_layout_translation_generation_is_reusable_without_changing_search_order() -> None:
+    remnant = _remnant()
+    problem = _problem()
+    candidate = _candidate()
+    fit_config = RemnantFitConfig()
+    search_config = LayoutFitSearchConfig(maximum_candidates=8)
+    prepared_layout = prepare_layout_footprint(problem, candidate, fit_config)
+    prepared_remnant = prepare_remnant_geometry(remnant)
+
+    translations = generate_layout_translations(
+        remnant,
+        candidate,
+        fit_config=fit_config,
+        search_config=search_config,
+        prepared_layout=prepared_layout,
+        prepared_remnant=prepared_remnant,
+    )
+    result = search_layout_translation(
+        remnant,
+        problem,
+        candidate,
+        material=_material(),
+        fit_config=fit_config,
+        search_config=search_config,
+        prepared_layout=prepared_layout,
+        prepared_remnant=prepared_remnant,
+        translation_candidates=translations,
+    )
+
+    assert translations.translations[:4] == (
+        (10.0, 10.0),
+        (10.0, 12.0),
+        (12.0, 10.0),
+        (12.0, 12.0),
+    )
+    assert result.translation == (10.0, 10.0)
+    assert result.evaluated_candidate_count == 1

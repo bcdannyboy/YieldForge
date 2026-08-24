@@ -1217,3 +1217,82 @@ def test_m6_pilot_command_validates_population_and_publishes_measurement(
     assert "streams=6" in text
     assert "fit_search_calls=0" in text
     assert "defer_until_repeated_fit_search_pilot" in text
+
+
+def test_m7_index_command_publishes_corrected_census(tmp_path: Path, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    output = tmp_path / "results"
+    index = SimpleNamespace(
+        index_id="yfm7i-" + "a" * 24,
+        instance_count=1152,
+        problem_count=209,
+        calibration_problem_count=90,
+        evaluation_problem_count=198,
+    )
+    monkeypatch.setattr("yieldforge.cli.build_registered_problem_index", lambda: index)
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_problem_index",
+        lambda output_arg, index_arg: output / f"index-{index_arg.index_id}.json",
+    )
+
+    assert main(["benchmark", "m7-index", "--output", str(output)]) == 0
+
+    text = capsys.readouterr().out
+    assert "instances=1152" in text
+    assert "problems=209" in text
+    assert "calibration_problems=90" in text
+
+
+def test_m7_pilot_command_accepts_isolated_archive_roots(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    output = tmp_path / "results"
+    roots = (tmp_path / "calibration", tmp_path / "confirmation")
+    index = object()
+    contract = object()
+    result = SimpleNamespace(
+        result_id="yfm7f-" + "b" * 24,
+        stream_count=6,
+        instance_count=144,
+        total_action_count=500,
+        collision_gate=SimpleNamespace(
+            fit_search_share=0.4,
+            projected_calibration_minutes=20.0,
+            decision=SimpleNamespace(value="build_jagua_differential_spike"),
+        ),
+    )
+    calls = []
+    monkeypatch.setattr("yieldforge.cli.build_registered_problem_index", lambda: index)
+    monkeypatch.setattr("yieldforge.cli.load_frozen_json", lambda *args: contract)
+    monkeypatch.setattr(
+        "yieldforge.cli.execute_feasibility_slice",
+        lambda **kwargs: calls.append(kwargs) or result,
+    )
+    monkeypatch.setattr(
+        "yieldforge.cli.publish_feasibility_result",
+        lambda output_arg, result_arg: output / f"pilot-{result_arg.result_id}.json",
+    )
+
+    assert (
+        main(
+            [
+                "benchmark",
+                "m7-pilot",
+                "--m0",
+                str(tmp_path / "m0.json"),
+                "--archive-root",
+                str(roots[0]),
+                "--archive-root",
+                str(roots[1]),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    assert calls[0]["index"] is index
+    assert calls[0]["m0"] is contract
+    assert calls[0]["archive_roots"] == roots
+    text = capsys.readouterr().out
+    assert "streams=6" in text
+    assert "build_jagua_differential_spike" in text

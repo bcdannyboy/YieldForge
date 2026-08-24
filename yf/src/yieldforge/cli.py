@@ -6,6 +6,15 @@ from pathlib import Path
 from typing import cast
 
 from yieldforge.archive import CandidateArchive
+from yieldforge.baseline.experiment import (
+    M7CollisionDifferentialResult,
+    execute_collision_differential_probe,
+    execute_feasibility_slice,
+    publish_collision_differential_result,
+    publish_feasibility_result,
+    publish_problem_index,
+)
+from yieldforge.baseline.problems import build_registered_problem_index
 from yieldforge.datasets.fetch import fetch_file
 from yieldforge.datasets.passive_report import (
     PassiveEvidenceError,
@@ -385,6 +394,80 @@ def _pilot_m6_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _index_m7_baseline(args: argparse.Namespace) -> int:
+    index = build_registered_problem_index()
+    path = publish_problem_index(args.output, index)
+    print(
+        "Published M7 problem index: "
+        f"index={index.index_id} instances={index.instance_count} "
+        f"problems={index.problem_count} calibration_problems={index.calibration_problem_count} "
+        f"evaluation_problems={index.evaluation_problem_count} output={path}"
+    )
+    return 0
+
+
+def _pilot_m7_baseline(args: argparse.Namespace) -> int:
+    index = build_registered_problem_index()
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    collision_differential = (
+        M7CollisionDifferentialResult.model_validate_json(
+            args.collision_differential.read_bytes(), strict=True
+        )
+        if args.collision_differential is not None
+        else None
+    )
+
+    def progress(message: str) -> None:
+        print(f"M7 pilot: {message}")
+
+    result = execute_feasibility_slice(
+        index=index,
+        m0=m0,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        collision_differential=collision_differential,
+        progress=progress,
+    )
+    path = publish_feasibility_result(args.output, result)
+    gate = result.collision_gate
+    print(
+        "Published M7 feasibility result: "
+        f"result={result.result_id} streams={result.stream_count} "
+        f"instances={result.instance_count} actions={result.total_action_count} "
+        f"fit_search_share={gate.fit_search_share} "
+        f"projected_calibration_minutes={gate.projected_calibration_minutes} "
+        f"collision_backend={gate.decision.value} output={path}"
+    )
+    return 0
+
+
+def _probe_m7_collision_backend(args: argparse.Namespace) -> int:
+    index = build_registered_problem_index()
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+
+    def progress(message: str) -> None:
+        print(f"M7 collision probe: {message}")
+
+    result = execute_collision_differential_probe(
+        index=index,
+        m0=m0,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        progress=progress,
+    )
+    path = publish_collision_differential_result(args.output, result)
+    print(
+        "Published M7 collision differential: "
+        f"result={result.result_id} queries={result.jagua_guarded_query_count} "
+        f"rejections={result.jagua_rejection_count} "
+        f"mismatches={result.jagua_audit_mismatch_count} "
+        f"search_speedup={result.measured_search_speedup} "
+        f"backend_speedup={result.measured_backend_speedup} "
+        f"decision={result.technical_decision} output={path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -555,6 +638,46 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_m6.add_argument("--stream-root", type=Path, required=True)
     pilot_m6.add_argument("--output", type=Path, required=True)
     pilot_m6.set_defaults(handler=_pilot_m6_benchmark)
+
+    index_m7 = benchmark_commands.add_parser(
+        "m7-index",
+        help="regenerate and publish the corrected reusable M7 problem index",
+    )
+    index_m7.add_argument("--output", type=Path, required=True)
+    index_m7.set_defaults(handler=_index_m7_baseline)
+
+    pilot_m7 = benchmark_commands.add_parser(
+        "m7-pilot",
+        help="verify shared M2 evidence and execute the six-regime M7 feasibility slice",
+    )
+    pilot_m7.add_argument("--m0", type=Path, required=True)
+    pilot_m7.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    pilot_m7.add_argument("--output", type=Path, required=True)
+    pilot_m7.add_argument("--jagua-binary", type=Path)
+    pilot_m7.add_argument("--collision-differential", type=Path)
+    pilot_m7.set_defaults(handler=_pilot_m7_baseline)
+
+    probe_m7 = benchmark_commands.add_parser(
+        "m7-collision-probe",
+        help="audit the pinned Jagua extension against the first real recurrence search",
+    )
+    probe_m7.add_argument("--m0", type=Path, required=True)
+    probe_m7.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    probe_m7.add_argument("--jagua-binary", type=Path, required=True)
+    probe_m7.add_argument("--output", type=Path, required=True)
+    probe_m7.set_defaults(handler=_probe_m7_collision_backend)
     return parser
 
 

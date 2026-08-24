@@ -125,3 +125,16 @@ ledgers fail closed. Tests cover identity reuse, decomposition, archive tamperin
 containment rejection, deterministic action order, replay repeatability, information masking, and
 selector freeze. The six-regime calibration slice is required before full calibration execution.
 
+## Task 5 execution checkpoint
+
+The collision gate triggered on the first exact-recurrence opportunity. The implemented local
+extension pins `jagua-rs` 0.7.0, transports registered translation inputs as exact IEEE-754 `f64`
+bits, uses a one-unit guarded container for `f32` rejection queries, and retains Shapely as the
+accepted-witness and residual oracle. Differential `yfm7d-055c3aa7a09c85fbee2f1ca2` recorded zero
+mismatches over 174,626 real translations.
+
+Feasibility `yfm7f-7edef2fa8719168941e431d2` completed all 144 registered slice events. It found no
+complete-layout remnant action; every selected action opened a standard sheet. Runtime was
+3,864.895624 seconds and the frozen calibration projection is 644.149271 minutes. This passes the
+software-feasibility/collision-backend boundary but requires runtime work or an accepted long run
+before Task 6 execution.

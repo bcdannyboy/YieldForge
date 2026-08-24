@@ -13,11 +13,11 @@ calibration streams before the 36 evaluation streams are opened.
 
 ## Next step
 
-Freeze a reusable geometry-problem identity for the 273 distinct M6 batch geometries, then extend
-the M5 mechanism kernel to consume multi-part batch actions without changing M5's canonical v1
-result. Run a small calibration-only candidate/archive and replay slice before committing the full
-ordinary candidate budget. Do not inspect evaluation policy outcomes or begin M8 oracle work during
-baseline selection.
+Prepare Task 6 calibration without opening evaluation. First reduce or explicitly accept the
+measured 644.149271-minute five-policy projection. Preserve the frozen 12-stream calibration set,
+equal policy information, complete-layout action boundary, exact Jagua/Shapely differential
+binding, and failure accounting. Then execute all five variants, freeze the winning policy and
+runtime identity, and only afterward permit the 36 evaluation streams.
 
 ## Evidence bridge completed
 
@@ -42,7 +42,16 @@ baseline selection.
   events, and 37,247 source-part references. All streams lower into 1,024 exact compatible batches.
 - M6 lowering pilot `yfm6p-c5852afe0dd52f41689f3ed6` validated 4,769 part instances with
   14,307 exact Shapely geometry queries and zero invalid geometry. It contained no repeated
-  fit/search calls, so the optional Jagua spike remains gated on measured M7 replay workload.
+  fit/search calls, so the optional Jagua spike remained gated on measured M7 replay workload.
+- M7 problem index `yfm7i-116c24d7fce8ce415d46533e` binds 1,152 instances to 209 reusable
+  problems. The first-seed feasibility slice reverified 51 problems and 204 ordinary M2 archives.
+- M7 differential `yfm7d-055c3aa7a09c85fbee2f1ca2` validated exact Rust/Python translation
+  parity and zero guarded Jagua/Shapely result mismatches across 174,626 translations. Jagua is now
+  the registered rejection prefilter; Shapely remains authoritative for accepted witnesses and
+  residual/accounting geometry.
+- M7 feasibility `yfm7f-7edef2fa8719168941e431d2` completed 144/144 events, evaluated 89,936
+  actions, and selected 144 standard-sheet openings with zero remnant retrievals. Fit search used
+  3,225.582819 of 3,864.895624 replay seconds and projects 644.149271 calibration minutes.
 
 ## Experiment status
 
@@ -66,11 +75,12 @@ future source-shape roles, and 1,331,906 eligible generated-order pairs. The can
 from task `2531` fits a task `147` remnant, creates one reconciled child remnant, and avoids one
 full-sheet opening in the declared one-order toy state.
 
-This proves exact remnant reuse is possible in the modeled geometry. Exact collision detection is
-implemented with Shapely; what remains optional is a faster collision-search backend for repeated
-queries. M5 proves deterministic mechanism replay, and M6 proves controlled temporal construction,
-partition integrity, regeneration, and lossless lowering. No observed chronology, strong frozen
-baseline, future-aware policy, oracle comparison, reuse-frequency estimate, economic verdict,
-solver-optimality result, physical-recovery result, or validated savings claim exists.
+This proves exact remnant reuse is possible in the modeled M4 one-part geometry. M7 now has a
+validated faster collision backend, but its complete archived layouts found no remnant action in the
+registered 144-event feasibility slice. M5 proves deterministic mechanism replay, and M6 proves
+controlled temporal construction, partition integrity, regeneration, and lossless lowering. No
+observed chronology, frozen winning M7 policy, evaluation result, future-aware policy, oracle
+comparison, general reuse-frequency estimate, economic verdict, solver-optimality result,
+physical-recovery result, or validated savings claim exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

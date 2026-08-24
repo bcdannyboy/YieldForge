@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from time import perf_counter
 from typing import Literal, Self
 
 import shapely
@@ -19,18 +23,31 @@ from yieldforge.baseline.archives import VerifiedProblemCandidates
 from yieldforge.baseline.contracts import (
     BaselineContractModel,
     LayoutFitSearchConfig,
+    LayoutFitSearchResult,
     M7ActionKind,
     M7CandidateSetEvidence,
     M7LayoutActionEvidence,
     ReusableGeometryProblem,
     TemporalInstanceBinding,
 )
-from yieldforge.baseline.geometry import search_layout_translation
+from yieldforge.baseline.geometry import (
+    PreparedLayoutFootprint,
+    generate_layout_translations,
+    prepare_layout_footprint,
+    prepare_remnant_geometry,
+    search_layout_translation,
+)
+from yieldforge.baseline.jagua import (
+    JaguaPrefilterResult,
+    run_jagua_generated_prefilter,
+    run_jagua_prefilter,
+)
 from yieldforge.baseline.policies import (
     ActionPolicyContext,
     M7PolicyIdentity,
     select_policy_action,
 )
+from yieldforge.domain import Candidate
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.replay.contracts import (
     M0_EVENT_STAGE_ORDER,
@@ -40,7 +57,7 @@ from yieldforge.replay.contracts import (
     rounded_cost,
 )
 from yieldforge.residuals.contracts import ResidualRuleSet
-from yieldforge.reuse.contracts import RemnantFitConfig, polygon_from_record
+from yieldforge.reuse.contracts import RemnantFitConfig, ReuseAccounting, polygon_from_record
 from yieldforge.reuse.geometry import material_key
 from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
 
@@ -137,6 +154,11 @@ class M7ReplayInput(BaselineContractModel):
     rates: FeasibilityRateManifest
     fit_config: RemnantFitConfig
     search_config: LayoutFitSearchConfig
+    collision_backend: Literal[
+        "shapely_authoritative",
+        "jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+    ] = "shapely_authoritative"
+    jagua_container_guard: StrictFloat | None = None
     event_stage_order: tuple[StrictStr, ...] = M0_EVENT_STAGE_ORDER
     problems: tuple[ReusableGeometryProblem, ...] = Field(min_length=1)
     candidate_sets: tuple[M7CandidateSetEvidence, ...] = Field(min_length=1)
@@ -159,6 +181,12 @@ class M7ReplayInput(BaselineContractModel):
     def require_complete_stream_and_identity(self) -> Self:
         if self.event_stage_order != M0_EVENT_STAGE_ORDER:
             raise ValueError("M7 event stage order differs from M0")
+        if (self.collision_backend == "jagua_rs_0_7_0_guarded_prefilter_shapely_witness") != (
+            self.jagua_container_guard is not None
+        ):
+            raise ValueError("M7 Jagua backend and container guard must appear together")
+        if self.jagua_container_guard is not None and self.jagua_container_guard <= 0:
+            raise ValueError("M7 Jagua container guard must be positive")
         problem_ids = tuple(item.problem_id for item in self.problems)
         if problem_ids != tuple(sorted(set(problem_ids))):
             raise ValueError("M7 replay problems must use sorted unique IDs")
@@ -217,6 +245,11 @@ def build_m7_replay_input(
     instances: tuple[TemporalInstanceBinding, ...],
     horizon_end: datetime,
     search_config: LayoutFitSearchConfig | None = None,
+    collision_backend: Literal[
+        "shapely_authoritative",
+        "jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+    ] = "shapely_authoritative",
+    jagua_container_guard: float | None = None,
 ) -> M7ReplayInput:
     """Build one strict replay input after canonical stream ordering."""
 
@@ -244,6 +277,8 @@ def build_m7_replay_input(
         "rates": rates.model_dump(mode="json"),
         "fit_config": fit_config.model_dump(mode="json"),
         "search_config": search.model_dump(mode="json"),
+        "collision_backend": collision_backend,
+        "jagua_container_guard": jagua_container_guard,
         "event_stage_order": M0_EVENT_STAGE_ORDER,
         "problems": [item.model_dump(mode="json") for item in ordered_problems],
         "candidate_sets": [item.model_dump(mode="json") for item in ordered_candidates],
@@ -273,6 +308,8 @@ def build_m7_replay_input(
         rates=rates,
         fit_config=fit_config,
         search_config=search,
+        collision_backend=collision_backend,
+        jagua_container_guard=jagua_container_guard,
         problems=ordered_problems,
         candidate_sets=ordered_candidates,
         instances=instances,
@@ -395,11 +432,75 @@ class M7ReplayResult(BaselineContractModel):
 
 @dataclass(frozen=True)
 class GeneratedActionSet:
-    actions: tuple[M7LayoutActionEvidence, ...]
+    standard_profiles: tuple[M7StandardActionProfile, ...]
+    remnant_actions: tuple[M7LayoutActionEvidence, ...]
     fit_search_query_count: int
     fit_search_generated_candidate_count: int
     fit_search_evaluated_candidate_count: int
     fit_search_budget_truncated_count: int
+
+
+@dataclass
+class M7ReplayRuntimeMetrics:
+    """Non-persisted wall-clock observations; never part of deterministic identities."""
+
+    replay_elapsed_seconds: float = 0.0
+    standard_action_seconds: float = 0.0
+    fit_search_seconds: float = 0.0
+    remnant_action_materialization_seconds: float = 0.0
+    jagua_wall_seconds: float = 0.0
+    jagua_guarded_query_count: int = 0
+    jagua_rejection_count: int = 0
+    jagua_audit_search_count: int = 0
+    jagua_audit_mismatch_count: int = 0
+    jagua_accelerated_search_seconds: float = 0.0
+    jagua_authoritative_audit_seconds: float = 0.0
+    jagua_translation_generation_seconds: float = 0.0
+    jagua_accelerated_evaluation_seconds: float = 0.0
+    fit_search_cache_hit_count: int = 0
+    fit_search_cache_miss_count: int = 0
+
+
+@dataclass(frozen=True)
+class M7StandardActionProfile:
+    """Stock-independent exact score terms cached for one standard-sheet layout."""
+
+    candidate_id: str
+    candidate_width: float
+    accounting: ReuseAccounting
+    returned_remnant_count: int
+    returned_regularity: float
+    prepared_layout: PreparedLayoutFootprint
+
+
+def _build_standard_profile(
+    problem: ReusableGeometryProblem,
+    evidence: M7CandidateSetEvidence,
+    candidate: Candidate,
+    material,  # type: ignore[no-untyped-def]
+    rules: ResidualRuleSet,
+    fit_config: RemnantFitConfig,
+) -> M7StandardActionProfile:
+    template = build_standard_sheet_action(
+        problem_id=problem.problem_id,
+        problem_sha256=problem.content_sha256,
+        candidate_set_id=evidence.candidate_set_id,
+        candidate_set_sha256=evidence.content_sha256,
+        problem=problem.problem,
+        candidate=candidate,
+        material=material,
+        stock_id=f"m7-profile-{problem.problem_id}",
+        rules=rules,
+        fit_config=fit_config,
+    )
+    return M7StandardActionProfile(
+        candidate_id=candidate.candidate_id,
+        candidate_width=candidate.width,
+        accounting=template.accounting,
+        returned_remnant_count=len(template.returned_remnants),
+        returned_regularity=_returned_regularity(template),
+        prepared_layout=prepare_layout_footprint(problem.problem, candidate, fit_config),
+    )
 
 
 def _generate_actions(
@@ -411,6 +512,13 @@ def _generate_actions(
     rules: ResidualRuleSet,
     fit_config: RemnantFitConfig,
     search_config: LayoutFitSearchConfig,
+    runtime_metrics: M7ReplayRuntimeMetrics | None,
+    standard_profile_cache: dict[tuple[str, str], M7StandardActionProfile],
+    standard_profile_executor: Executor | None,
+    jagua_executable: Path | None,
+    jagua_container_guard: float,
+    jagua_differential_audit: bool,
+    fit_search_cache: dict[tuple[str, str, str], tuple[LayoutFitSearchResult, ...]],
 ) -> GeneratedActionSet:
     evidence = verified.evidence
     if (
@@ -419,21 +527,32 @@ def _generate_actions(
         or tuple(item.candidate_id for item in verified.candidates) != evidence.candidate_ids
     ):
         raise ValueError("M7 runtime candidate evidence does not match replay input")
-    standard = tuple(
-        build_standard_sheet_action(
-            problem_id=problem.problem_id,
-            problem_sha256=problem.content_sha256,
-            candidate_set_id=evidence.candidate_set_id,
-            candidate_set_sha256=evidence.content_sha256,
-            problem=problem.problem,
-            candidate=candidate,
-            material=binding.material,
-            stock_id=binding.binding_id,
-            rules=rules,
-            fit_config=fit_config,
+    standard_started = perf_counter()
+    missing = tuple(
+        candidate
+        for candidate in verified.candidates
+        if (problem.problem_id, candidate.candidate_id) not in standard_profile_cache
+    )
+    profile_arguments = tuple(
+        (problem, evidence, candidate, binding.material, rules, fit_config) for candidate in missing
+    )
+    if standard_profile_executor is None:
+        built = tuple(_build_standard_profile(*arguments) for arguments in profile_arguments)
+    else:
+        built = tuple(
+            standard_profile_executor.map(
+                _build_standard_profile_from_arguments,
+                profile_arguments,
+            )
         )
+    for profile in built:
+        standard_profile_cache[(problem.problem_id, profile.candidate_id)] = profile
+    profiles = tuple(
+        standard_profile_cache[(problem.problem_id, candidate.candidate_id)]
         for candidate in verified.candidates
     )
+    if runtime_metrics is not None:
+        runtime_metrics.standard_action_seconds += perf_counter() - standard_started
     remnant_actions = []
     query_count = 0
     generated_count = 0
@@ -442,19 +561,98 @@ def _generate_actions(
     for item in inventory:
         if material_key(item.remnant.material) != material_key(binding.material):
             continue
-        for candidate in verified.candidates:
-            search = search_layout_translation(
-                item.remnant,
-                problem.problem,
-                candidate,
-                material=binding.material,
-                fit_config=fit_config,
-                search_config=search_config,
-            )
+        cache_key = (item.remnant.remnant_id, problem.problem_id, evidence.candidate_set_id)
+        searches = fit_search_cache.get(cache_key)
+        if searches is None:
+            if runtime_metrics is not None:
+                runtime_metrics.fit_search_cache_miss_count += 1
+            search_started = perf_counter()
+            if standard_profile_executor is None:
+                searches, jagua_metrics = _search_candidate_chunk(
+                    (
+                        item.remnant,
+                        problem.problem,
+                        verified.candidates,
+                        binding.material,
+                        fit_config,
+                        search_config,
+                        tuple(
+                            standard_profile_cache[
+                                (problem.problem_id, candidate.candidate_id)
+                            ].prepared_layout
+                            for candidate in verified.candidates
+                        ),
+                        jagua_executable,
+                        jagua_container_guard,
+                        jagua_differential_audit,
+                    )
+                )
+            else:
+                chunk_size = max(1, math.ceil(len(verified.candidates) / 32))
+                chunks = tuple(
+                    verified.candidates[offset : offset + chunk_size]
+                    for offset in range(0, len(verified.candidates), chunk_size)
+                )
+                arguments = tuple(
+                    (
+                        item.remnant,
+                        problem.problem,
+                        chunk,
+                        binding.material,
+                        fit_config,
+                        search_config,
+                        tuple(
+                            standard_profile_cache[
+                                (problem.problem_id, candidate.candidate_id)
+                            ].prepared_layout
+                            for candidate in chunk
+                        ),
+                        jagua_executable,
+                        jagua_container_guard,
+                        jagua_differential_audit,
+                    )
+                    for chunk in chunks
+                )
+                chunk_results = tuple(
+                    standard_profile_executor.map(
+                        _search_candidate_chunk,
+                        arguments,
+                    )
+                )
+                searches = tuple(
+                    search for result_chunk, _metrics in chunk_results for search in result_chunk
+                )
+                jagua_metrics = _merge_jagua_metrics(
+                    tuple(metrics for _searches, metrics in chunk_results)
+                )
+            fit_search_cache[cache_key] = searches
+            if runtime_metrics is not None:
+                runtime_metrics.fit_search_seconds += perf_counter() - search_started
+                runtime_metrics.jagua_wall_seconds += jagua_metrics.wall_seconds
+                runtime_metrics.jagua_guarded_query_count += jagua_metrics.guarded_query_count
+                runtime_metrics.jagua_rejection_count += jagua_metrics.rejection_count
+                runtime_metrics.jagua_audit_search_count += jagua_metrics.audit_search_count
+                runtime_metrics.jagua_audit_mismatch_count += jagua_metrics.audit_mismatch_count
+                runtime_metrics.jagua_accelerated_search_seconds += (
+                    jagua_metrics.accelerated_search_seconds
+                )
+                runtime_metrics.jagua_authoritative_audit_seconds += (
+                    jagua_metrics.authoritative_audit_seconds
+                )
+                runtime_metrics.jagua_translation_generation_seconds += (
+                    jagua_metrics.translation_generation_seconds
+                )
+                runtime_metrics.jagua_accelerated_evaluation_seconds += (
+                    jagua_metrics.accelerated_evaluation_seconds
+                )
+        elif runtime_metrics is not None:
+            runtime_metrics.fit_search_cache_hit_count += 1
+        for candidate, search in zip(verified.candidates, searches, strict=True):
             query_count += 1
             generated_count += search.generated_candidate_count
             evaluated_count += search.evaluated_candidate_count
             truncated_count += int(search.budget_truncated)
+            materialization_started = perf_counter()
             action = build_remnant_action_from_search(
                 problem_id=problem.problem_id,
                 problem_sha256=problem.content_sha256,
@@ -468,15 +666,20 @@ def _generate_actions(
                 fit_config=fit_config,
                 search_result=search,
             )
+            if runtime_metrics is not None:
+                runtime_metrics.remnant_action_materialization_seconds += (
+                    perf_counter() - materialization_started
+                )
             if action is not None:
                 remnant_actions.append(action)
-    actions = tuple(sorted(standard + tuple(remnant_actions), key=lambda item: item.action_id))
-    if not actions:
+    ordered_remnant = tuple(sorted(remnant_actions, key=lambda item: item.action_id))
+    if not profiles and not ordered_remnant:
         raise ValueError("M7 instance has no valid action")
-    if len({item.action_id for item in actions}) != len(actions):
+    if len({item.action_id for item in ordered_remnant}) != len(ordered_remnant):
         raise ValueError("M7 action set contains duplicate identities")
     return GeneratedActionSet(
-        actions=actions,
+        standard_profiles=profiles,
+        remnant_actions=ordered_remnant,
         fit_search_query_count=query_count,
         fit_search_generated_candidate_count=generated_count,
         fit_search_evaluated_candidate_count=evaluated_count,
@@ -495,6 +698,184 @@ def _returned_regularity(action: M7LayoutActionEvidence) -> float:
     if rectangle_area <= 0.0:
         return 0.0
     return min(1.0, max(0.0, area / rectangle_area))
+
+
+def _build_standard_profile_from_arguments(arguments) -> M7StandardActionProfile:  # type: ignore[no-untyped-def]
+    return _build_standard_profile(*arguments)
+
+
+@dataclass(frozen=True)
+class _JaguaChunkMetrics:
+    wall_seconds: float = 0.0
+    guarded_query_count: int = 0
+    rejection_count: int = 0
+    audit_search_count: int = 0
+    audit_mismatch_count: int = 0
+    accelerated_search_seconds: float = 0.0
+    authoritative_audit_seconds: float = 0.0
+    translation_generation_seconds: float = 0.0
+    accelerated_evaluation_seconds: float = 0.0
+
+
+def _merge_jagua_metrics(values: tuple[_JaguaChunkMetrics, ...]) -> _JaguaChunkMetrics:
+    return _JaguaChunkMetrics(
+        wall_seconds=sum(item.wall_seconds for item in values),
+        guarded_query_count=sum(item.guarded_query_count for item in values),
+        rejection_count=sum(item.rejection_count for item in values),
+        audit_search_count=sum(item.audit_search_count for item in values),
+        audit_mismatch_count=sum(item.audit_mismatch_count for item in values),
+        accelerated_search_seconds=sum(item.accelerated_search_seconds for item in values),
+        authoritative_audit_seconds=sum(item.authoritative_audit_seconds for item in values),
+        translation_generation_seconds=sum(item.translation_generation_seconds for item in values),
+        accelerated_evaluation_seconds=sum(item.accelerated_evaluation_seconds for item in values),
+    )
+
+
+def _search_candidate_chunk(  # type: ignore[no-untyped-def]
+    arguments,
+) -> tuple[tuple[LayoutFitSearchResult, ...], _JaguaChunkMetrics]:
+    (
+        remnant,
+        problem,
+        candidates,
+        material,
+        fit_config,
+        search_config,
+        prepared_layouts,
+        jagua_executable,
+        jagua_container_guard,
+        jagua_differential_audit,
+    ) = arguments
+    prepared_remnant = prepare_remnant_geometry(remnant)
+    rust_generated = jagua_executable is not None and not any(
+        polygon.interiors for layout in prepared_layouts for polygon in layout.part_polygons
+    )
+    if rust_generated:
+        evaluation_started = perf_counter()
+        prefilter = run_jagua_generated_prefilter(
+            jagua_executable,
+            remnant=prepared_remnant,
+            layouts=prepared_layouts,
+            fit_config=fit_config,
+            search_config=search_config,
+            container_guard=jagua_container_guard,
+        )
+        translation_batches = prefilter.translation_batches
+        generation_seconds = 0.0
+    else:
+        generation_started = perf_counter()
+        translation_batches = tuple(
+            generate_layout_translations(
+                remnant,
+                candidate,
+                fit_config=fit_config,
+                search_config=search_config,
+                prepared_layout=prepared_layout,
+                prepared_remnant=prepared_remnant,
+            )
+            for candidate, prepared_layout in zip(candidates, prepared_layouts, strict=True)
+        )
+        generation_seconds = perf_counter() - generation_started
+        evaluation_started = perf_counter()
+        if jagua_executable is None:
+            prefilter = JaguaPrefilterResult(
+                collision_masks=tuple(
+                    (False,) * len(item.translations) for item in translation_batches
+                ),
+                guarded_query_count=0,
+                jagua_rejection_count=0,
+                build_microseconds=0,
+                query_microseconds=0,
+                wall_seconds=0.0,
+            )
+        else:
+            prefilter = run_jagua_prefilter(
+                jagua_executable,
+                remnant=prepared_remnant,
+                layouts=prepared_layouts,
+                translations=translation_batches,
+                container_guard=jagua_container_guard,
+            )
+    accelerated = tuple(
+        search_layout_translation(
+            remnant,
+            problem,
+            candidate,
+            material=material,
+            fit_config=fit_config,
+            search_config=search_config,
+            prepared_layout=prepared_layout,
+            prepared_remnant=prepared_remnant,
+            translation_candidates=translations,
+            collision_prefilter=collision_mask,
+        )
+        for candidate, prepared_layout, translations, collision_mask in zip(
+            candidates,
+            prepared_layouts,
+            translation_batches,
+            prefilter.collision_masks,
+            strict=True,
+        )
+    )
+    evaluation_seconds = perf_counter() - evaluation_started
+    accelerated_seconds = generation_seconds + evaluation_seconds
+    audit_count = 0
+    mismatch_count = 0
+    audit_seconds = 0.0
+    if jagua_executable is not None and jagua_differential_audit:
+        if rust_generated:
+            generation_started = perf_counter()
+            authoritative_batches = tuple(
+                generate_layout_translations(
+                    remnant,
+                    candidate,
+                    fit_config=fit_config,
+                    search_config=search_config,
+                    prepared_layout=prepared_layout,
+                    prepared_remnant=prepared_remnant,
+                )
+                for candidate, prepared_layout in zip(candidates, prepared_layouts, strict=True)
+            )
+            generation_seconds = perf_counter() - generation_started
+        else:
+            authoritative_batches = translation_batches
+        audit_started = perf_counter()
+        authoritative = tuple(
+            search_layout_translation(
+                remnant,
+                problem,
+                candidate,
+                material=material,
+                fit_config=fit_config,
+                search_config=search_config,
+                prepared_layout=prepared_layout,
+                prepared_remnant=prepared_remnant,
+                translation_candidates=translations,
+            )
+            for candidate, prepared_layout, translations in zip(
+                candidates,
+                prepared_layouts,
+                authoritative_batches,
+                strict=True,
+            )
+        )
+        audit_count = len(authoritative)
+        mismatch_count = sum(
+            left != right
+            for left, right in zip(authoritative_batches, translation_batches, strict=True)
+        ) + sum(left != right for left, right in zip(authoritative, accelerated, strict=True))
+        audit_seconds = perf_counter() - audit_started
+    return accelerated, _JaguaChunkMetrics(
+        wall_seconds=prefilter.wall_seconds,
+        guarded_query_count=prefilter.guarded_query_count,
+        rejection_count=prefilter.jagua_rejection_count,
+        audit_search_count=audit_count,
+        audit_mismatch_count=mismatch_count,
+        accelerated_search_seconds=accelerated_seconds,
+        authoritative_audit_seconds=audit_seconds,
+        translation_generation_seconds=generation_seconds,
+        accelerated_evaluation_seconds=evaluation_seconds,
+    )
 
 
 def _minimum_rotated_rectangle_area(geometry) -> float:  # type: ignore[no-untyped-def]
@@ -526,7 +907,7 @@ def _minimum_rotated_rectangle_area(geometry) -> float:  # type: ignore[no-untyp
 def _policy_contexts(
     generated: GeneratedActionSet,
     *,
-    candidates: tuple,  # type: ignore[type-arg]
+    candidates: tuple[Candidate, ...],
     inventory: tuple[InventoryItem, ...],
     occurred_at: datetime,
     rates: FeasibilityRateManifest,
@@ -534,28 +915,43 @@ def _policy_contexts(
     candidate_width = {item.candidate_id: item.width for item in candidates}
     inventory_by_id = {item.remnant.remnant_id: item for item in inventory}
     contexts = []
-    for action in generated.actions:
-        is_sheet = action.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    for profile in generated.standard_profiles:
+        retained_area = profile.accounting.retained_child_area
+        immediate = rounded_cost(
+            profile.accounting.parent_remnant_area * rates.purchase_cost_per_area
+            + profile.returned_remnant_count * rates.return_handling_cost_per_remnant
+            + retained_area * rates.storage_cost_per_area_hour
+            - profile.accounting.scrap_area * rates.scrap_credit_per_area
+        )
+        contexts.append(
+            ActionPolicyContext(
+                action_id=f"m7-standard:{profile.candidate_id}",
+                kind=M7ActionKind.OPEN_STANDARD_SHEET,
+                candidate_id=profile.candidate_id,
+                candidate_width=profile.candidate_width,
+                selected_stock_id="current_standard_sheet",
+                immediate_net_cost=immediate,
+                selected_remnant_age_hours=0.0,
+                returned_regularity=profile.returned_regularity,
+                known_order_lookahead_term=0.0,
+            )
+        )
+    for action in generated.remnant_actions:
         retained_area = sum(item.geometry.area for item in action.returned_remnants)
         immediate = rounded_cost(
-            (
-                action.selected_stock.geometry.area * rates.purchase_cost_per_area
-                if is_sheet
-                else 0.0
-            )
-            + len(action.returned_remnants) * rates.return_handling_cost_per_remnant
-            + (0.0 if is_sheet else rates.retrieval_handling_cost_per_remnant)
+            len(action.returned_remnants) * rates.return_handling_cost_per_remnant
+            + rates.retrieval_handling_cost_per_remnant
             + retained_area * rates.storage_cost_per_area_hour
             - action.accounting.scrap_area * rates.scrap_credit_per_area
         )
-        age_hours = 0.0
-        if action.selected_remnant_id is not None:
-            selected = inventory_by_id.get(action.selected_remnant_id)
-            if selected is None:
-                raise ValueError("M7 action selected a remnant absent from inventory")
-            age_hours = (occurred_at - selected.entered_at).total_seconds() / 3600.0
-            if age_hours < 0:
-                raise ValueError("M7 selected remnant cannot have a future inventory entry")
+        if action.selected_remnant_id is None:
+            raise ValueError("M7 generated remnant action has no selected remnant")
+        selected = inventory_by_id.get(action.selected_remnant_id)
+        if selected is None:
+            raise ValueError("M7 action selected a remnant absent from inventory")
+        age_hours = (occurred_at - selected.entered_at).total_seconds() / 3600.0
+        if age_hours < 0:
+            raise ValueError("M7 selected remnant cannot have a future inventory entry")
         contexts.append(
             ActionPolicyContext(
                 action_id=action.action_id,
@@ -618,13 +1014,9 @@ def _event(
         "storage_interval_start": storage_interval_start,
         "storage_interval_end": binding.released_at,
         "inventory_before": inventory_before,
-        "action_set_size": len(generated.actions),
-        "standard_action_count": sum(
-            item.kind is M7ActionKind.OPEN_STANDARD_SHEET for item in generated.actions
-        ),
-        "remnant_action_count": sum(
-            item.kind is M7ActionKind.CONSUME_REMNANT for item in generated.actions
-        ),
+        "action_set_size": len(generated.standard_profiles) + len(generated.remnant_actions),
+        "standard_action_count": len(generated.standard_profiles),
+        "remnant_action_count": len(generated.remnant_actions),
         "fit_search_query_count": generated.fit_search_query_count,
         "fit_search_generated_candidate_count": (generated.fit_search_generated_candidate_count),
         "fit_search_evaluated_candidate_count": (generated.fit_search_evaluated_candidate_count),
@@ -673,15 +1065,31 @@ def run_m7_replay(
     replay_input: M7ReplayInput,
     runtime_candidates: dict[str, VerifiedProblemCandidates],
     rules: ResidualRuleSet,
+    *,
+    runtime_metrics: M7ReplayRuntimeMetrics | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    standard_profile_cache: dict[tuple[str, str], M7StandardActionProfile] | None = None,
+    standard_profile_executor: Executor | None = None,
+    jagua_executable: Path | None = None,
+    jagua_differential_audit: bool = False,
 ) -> M7ReplayResult:
     """Execute one M7 stream deterministically with exact shared action generation."""
 
+    replay_started = perf_counter()
     problem_by_id = {item.problem_id: item for item in replay_input.problems}
     expected_evidence = {item.problem_id: item for item in replay_input.candidate_sets}
     if set(runtime_candidates) != set(expected_evidence) or any(
         runtime_candidates[key].evidence != expected_evidence[key] for key in expected_evidence
     ):
         raise ValueError("M7 runtime candidate sets differ from replay input")
+    profile_cache = standard_profile_cache if standard_profile_cache is not None else {}
+    fit_search_cache: dict[tuple[str, str, str], tuple[LayoutFitSearchResult, ...]] = {}
+    jagua_enabled = (
+        replay_input.collision_backend == "jagua_rs_0_7_0_guarded_prefilter_shapely_witness"
+    )
+    if jagua_enabled != (jagua_executable is not None):
+        raise ValueError("M7 replay collision backend differs from runtime extension")
+    jagua_guard = replay_input.jagua_container_guard or 1.0
 
     current_time = replay_input.instances[0].released_at
     inventory: tuple[InventoryItem, ...] = ()
@@ -714,6 +1122,13 @@ def run_m7_replay(
             rules=rules,
             fit_config=replay_input.fit_config,
             search_config=replay_input.search_config,
+            runtime_metrics=runtime_metrics,
+            standard_profile_cache=profile_cache,
+            standard_profile_executor=standard_profile_executor,
+            jagua_executable=jagua_executable,
+            jagua_container_guard=jagua_guard,
+            jagua_differential_audit=jagua_differential_audit,
+            fit_search_cache=fit_search_cache,
         )
         contexts = _policy_contexts(
             generated,
@@ -723,8 +1138,37 @@ def run_m7_replay(
             rates=replay_input.rates,
         )
         selection = select_policy_action(replay_input.policy.name, contexts)
-        action_by_id = {item.action_id: item for item in generated.actions}
-        action = action_by_id[selection.action_id]
+        if selection.action_id.startswith("m7-standard:"):
+            selected_candidate_id = selection.action_id.removeprefix("m7-standard:")
+            candidate_by_id = {item.candidate_id: item for item in verified.candidates}
+            candidate = candidate_by_id[selected_candidate_id]
+            materialization_started = perf_counter()
+            action = build_standard_sheet_action(
+                problem_id=problem.problem_id,
+                problem_sha256=problem.content_sha256,
+                candidate_set_id=verified.evidence.candidate_set_id,
+                candidate_set_sha256=verified.evidence.content_sha256,
+                problem=problem.problem,
+                candidate=candidate,
+                material=binding.material,
+                stock_id=binding.binding_id,
+                rules=rules,
+                fit_config=replay_input.fit_config,
+            )
+            if runtime_metrics is not None:
+                runtime_metrics.standard_action_seconds += perf_counter() - materialization_started
+            profile = profile_cache[(problem.problem_id, selected_candidate_id)]
+            if (
+                action.accounting != profile.accounting
+                or len(action.returned_remnants) != profile.returned_remnant_count
+                or abs(_returned_regularity(action) - profile.returned_regularity) > 1e-9
+            ):
+                raise ValueError(
+                    "M7 selected standard action differs from its exact cached profile"
+                )
+        else:
+            action_by_id = {item.action_id: item for item in generated.remnant_actions}
+            action = action_by_id[selection.action_id]
         inventory = _execute_action(action, inventory_before, binding.released_at)
         delta = _ledger(
             purchase_cost=(
@@ -760,6 +1204,8 @@ def run_m7_replay(
                 cumulative=cumulative,
             )
         )
+        if progress is not None:
+            progress(sequence + 1, len(replay_input.instances))
         current_time = binding.released_at
         previous_release = binding.released_at
 
@@ -807,14 +1253,19 @@ def run_m7_replay(
         final_net_cost=cumulative.net_cost,
         technical_decision="pass",
     )
-    return _result(replay_input, event_tuple, terminal, summary)
+    result = _result(replay_input, event_tuple, terminal, summary)
+    if runtime_metrics is not None:
+        runtime_metrics.replay_elapsed_seconds += perf_counter() - replay_started
+    return result
 
 
 __all__ = [
     "M7ReplayEvent",
     "M7ReplayInput",
     "M7ReplayResult",
+    "M7ReplayRuntimeMetrics",
     "M7ReplaySummary",
+    "M7StandardActionProfile",
     "build_m7_replay_input",
     "run_m7_replay",
 ]

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from shapely import Polygon, union_all
 from shapely.affinity import translate
 from shapely.geometry.base import BaseGeometry
+from shapely.prepared import PreparedGeometry, prep
 
 from yieldforge.baseline.contracts import (
     LayoutFitSearchConfig,
@@ -46,6 +47,36 @@ class LayoutConsumption:
     children: tuple[RemnantStock, ...]
 
 
+@dataclass(frozen=True)
+class PreparedLayoutFootprint:
+    candidate_id: str
+    geometry: BaseGeometry
+    part_polygons: tuple[Polygon, ...]
+    vertices: tuple[tuple[float, float], ...]
+    bounds: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class PreparedRemnantGeometry:
+    remnant_id: str
+    geometry: BaseGeometry
+    prepared: PreparedGeometry
+    vertices: tuple[tuple[float, float], ...]
+    bounds: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class LayoutTranslationCandidates:
+    """One bounded registered translation sequence, reusable across collision engines."""
+
+    candidate_id: str
+    remnant_id: str
+    translations: tuple[tuple[float, float], ...]
+    generated_candidate_count: int
+    duplicate_candidate_count: int
+    budget_truncated: bool
+
+
 def _rotation_allowed(rotation: float, allowed: list[float], tolerance: float) -> bool:
     return any(abs(math.remainder(rotation - item, 360.0)) <= tolerance for item in allowed)
 
@@ -55,7 +86,8 @@ def _translated_layout(
     candidate: Candidate,
     translation_xy: tuple[float, float],
     *,
-    tolerance: float,
+    coordinate_tolerance: float,
+    area_tolerance: float,
 ) -> tuple[tuple[FitPlacement, ...], tuple[Polygon, ...], BaseGeometry]:
     if any(part.demand != 1 for part in problem.parts):
         raise ValueError("M7 complete-layout actions require explicit demand-one parts")
@@ -69,7 +101,7 @@ def _translated_layout(
     for part in problem.parts:
         source = by_id[part.id]
         if part.allowed_orientations is None or not _rotation_allowed(
-            source.rotation, part.allowed_orientations, tolerance
+            source.rotation, part.allowed_orientations, coordinate_tolerance
         ):
             raise ValueError("layout uses a rotation not allowed by source geometry")
         placement = FitPlacement(
@@ -84,7 +116,7 @@ def _translated_layout(
         polygons.append(transform_part(part, placement))
     union = union_all(polygons)
     overlap_area = sum(item.area for item in polygons) - union.area
-    if overlap_area > tolerance:
+    if overlap_area > area_tolerance:
         raise ValueError("complete layout contains part overlap")
     return tuple(placements), tuple(polygons), union
 
@@ -112,28 +144,64 @@ def _grid(start: float, stop: float, count: int) -> tuple[float, ...]:
     return tuple(0.0 if value == 0.0 else float(value) for value in values)
 
 
-def search_layout_translation(
-    remnant: RemnantStock,
+def prepare_layout_footprint(
     problem: StripPackingProblem,
     candidate: Candidate,
-    *,
-    material: MaterialIdentity,
     fit_config: RemnantFitConfig,
-    search_config: LayoutFitSearchConfig,
-) -> LayoutFitSearchResult:
-    """Find the first bounded exact translation of a complete archived layout."""
+) -> PreparedLayoutFootprint:
+    """Validate and cache one rigid layout footprint for repeated remnant searches."""
 
-    if material_key(material) != material_key(remnant.material):
-        raise ValueError("layout material is incompatible with remnant")
-    _, _, footprint = _translated_layout(
+    _, polygons, footprint = _translated_layout(
         problem,
         candidate,
         (0.0, 0.0),
-        tolerance=fit_config.coordinate_tolerance,
+        coordinate_tolerance=fit_config.coordinate_tolerance,
+        area_tolerance=max(
+            fit_config.coordinate_tolerance,
+            problem.sheet_length * problem.strip_height * fit_config.relative_area_tolerance,
+        ),
     )
+    return PreparedLayoutFootprint(
+        candidate_id=candidate.candidate_id,
+        geometry=footprint,
+        part_polygons=polygons,
+        vertices=_vertices(footprint),
+        bounds=footprint.bounds,
+    )
+
+
+def prepare_remnant_geometry(remnant: RemnantStock) -> PreparedRemnantGeometry:
+    """Decode and prepare one remnant once for every candidate query in an event."""
+
     parent = polygon_from_record(remnant.geometry)
-    parent_min_x, parent_min_y, parent_max_x, parent_max_y = parent.bounds
-    foot_min_x, foot_min_y, foot_max_x, foot_max_y = footprint.bounds
+    return PreparedRemnantGeometry(
+        remnant_id=remnant.remnant_id,
+        geometry=parent,
+        prepared=prep(parent),
+        vertices=_vertices(parent),
+        bounds=parent.bounds,
+    )
+
+
+def generate_layout_translations(
+    remnant: RemnantStock,
+    candidate: Candidate,
+    *,
+    fit_config: RemnantFitConfig,
+    search_config: LayoutFitSearchConfig,
+    prepared_layout: PreparedLayoutFootprint,
+    prepared_remnant: PreparedRemnantGeometry,
+) -> LayoutTranslationCandidates:
+    """Generate the frozen bounded translation sequence independently of a backend."""
+
+    layout = prepared_layout
+    parent_search = prepared_remnant
+    if layout.candidate_id != candidate.candidate_id:
+        raise ValueError("prepared layout does not match candidate")
+    if parent_search.remnant_id != remnant.remnant_id:
+        raise ValueError("prepared remnant geometry does not match stock")
+    parent_min_x, parent_min_y, parent_max_x, parent_max_y = parent_search.bounds
+    foot_min_x, foot_min_y, foot_max_x, foot_max_y = layout.bounds
     min_x = parent_min_x - foot_min_x
     max_x = parent_max_x - foot_max_x
     min_y = parent_min_y - foot_min_y
@@ -142,27 +210,45 @@ def search_layout_translation(
         min_x > max_x + fit_config.coordinate_tolerance
         or min_y > max_y + fit_config.coordinate_tolerance
     ):
-        return LayoutFitSearchResult(
-            status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
+        return LayoutTranslationCandidates(
             candidate_id=candidate.candidate_id,
             remnant_id=remnant.remnant_id,
-            config=search_config,
+            translations=(),
             generated_candidate_count=0,
             duplicate_candidate_count=0,
-            evaluated_candidate_count=0,
             budget_truncated=False,
         )
 
-    raw_candidates = [
+    unique = []
+    seen = set()
+    duplicates = 0
+    truncated = False
+
+    def add_candidate(x: float, y: float) -> bool:
+        nonlocal duplicates, truncated
+        key = (0.0 if x == 0.0 else float(x), 0.0 if y == 0.0 else float(y))
+        if key in seen:
+            duplicates += 1
+            return False
+        seen.add(key)
+        unique.append(key)
+        if len(unique) > search_config.maximum_candidates:
+            truncated = True
+            return True
+        return False
+
+    for x, y in (
         (min_x, min_y),
         (min_x, max_y),
         (max_x, min_y),
         (max_x, max_y),
-    ]
-    parent_vertices = _vertices(parent)
-    footprint_vertices = _vertices(footprint)
-    for parent_x, parent_y in parent_vertices:
-        for foot_x, foot_y in footprint_vertices:
+    ):
+        if add_candidate(x, y):
+            break
+    for parent_x, parent_y in parent_search.vertices:
+        if truncated:
+            break
+        for foot_x, foot_y in layout.vertices:
             x = parent_x - foot_x
             y = parent_y - foot_y
             if (
@@ -173,41 +259,86 @@ def search_layout_translation(
                 <= y
                 <= max_y + fit_config.coordinate_tolerance
             ):
-                raw_candidates.append((x, y))
-    raw_candidates.extend(
-        (x, y)
-        for x in _grid(min_x, max_x, search_config.grid_columns)
-        for y in _grid(min_y, max_y, search_config.grid_rows)
+                if add_candidate(x, y):
+                    break
+    if not truncated:
+        for x in _grid(min_x, max_x, search_config.grid_columns):
+            if truncated:
+                break
+            for y in _grid(min_y, max_y, search_config.grid_rows):
+                if add_candidate(x, y):
+                    break
+    return LayoutTranslationCandidates(
+        candidate_id=candidate.candidate_id,
+        remnant_id=remnant.remnant_id,
+        translations=tuple(unique[: search_config.maximum_candidates]),
+        generated_candidate_count=len(unique),
+        duplicate_candidate_count=duplicates,
+        budget_truncated=truncated,
     )
 
-    unique = []
-    seen = set()
-    duplicates = 0
-    for x, y in raw_candidates:
-        key = (0.0 if x == 0.0 else float(x), 0.0 if y == 0.0 else float(y))
-        if key in seen:
-            duplicates += 1
-            continue
-        seen.add(key)
-        unique.append(key)
-    budgeted = unique[: search_config.maximum_candidates]
+
+def search_layout_translation(
+    remnant: RemnantStock,
+    problem: StripPackingProblem,
+    candidate: Candidate,
+    *,
+    material: MaterialIdentity,
+    fit_config: RemnantFitConfig,
+    search_config: LayoutFitSearchConfig,
+    prepared_layout: PreparedLayoutFootprint | None = None,
+    prepared_remnant: PreparedRemnantGeometry | None = None,
+    translation_candidates: LayoutTranslationCandidates | None = None,
+    collision_prefilter: tuple[bool, ...] | None = None,
+) -> LayoutFitSearchResult:
+    """Find the first bounded exact translation of a complete archived layout."""
+
+    if material_key(material) != material_key(remnant.material):
+        raise ValueError("layout material is incompatible with remnant")
+    layout = prepared_layout or prepare_layout_footprint(problem, candidate, fit_config)
+    parent_search = prepared_remnant or prepare_remnant_geometry(remnant)
+    candidates = translation_candidates or generate_layout_translations(
+        remnant,
+        candidate,
+        fit_config=fit_config,
+        search_config=search_config,
+        prepared_layout=layout,
+        prepared_remnant=parent_search,
+    )
+    if (
+        candidates.candidate_id != candidate.candidate_id
+        or candidates.remnant_id != remnant.remnant_id
+    ):
+        raise ValueError("prepared translation candidates do not match search")
+    if collision_prefilter is not None and len(collision_prefilter) != len(candidates.translations):
+        raise ValueError("collision prefilter count differs from translation candidates")
+    footprint = layout.geometry
+    parent = parent_search.geometry
     area_tolerance = max(
         fit_config.coordinate_tolerance,
         parent.area * fit_config.relative_area_tolerance,
     )
-    for evaluated, offset in enumerate(budgeted, start=1):
+    collisions = collision_prefilter or (False,) * len(candidates.translations)
+    for evaluated, (offset, prefiltered_collision) in enumerate(
+        zip(candidates.translations, collisions, strict=True),
+        start=1,
+    ):
+        if prefiltered_collision:
+            continue
         moved = translate(footprint, xoff=offset[0], yoff=offset[1])
-        outside_area = 0.0 if parent.covers(moved) else moved.difference(parent).area
+        outside_area = (
+            0.0 if parent_search.prepared.covers(moved) else moved.difference(parent).area
+        )
         if outside_area <= area_tolerance:
             return LayoutFitSearchResult(
                 status=LayoutFitSearchStatus.FIT,
                 candidate_id=candidate.candidate_id,
                 remnant_id=remnant.remnant_id,
                 config=search_config,
-                generated_candidate_count=len(unique),
-                duplicate_candidate_count=duplicates,
+                generated_candidate_count=candidates.generated_candidate_count,
+                duplicate_candidate_count=candidates.duplicate_candidate_count,
                 evaluated_candidate_count=evaluated,
-                budget_truncated=len(unique) > len(budgeted),
+                budget_truncated=candidates.budget_truncated,
                 translation=offset,
             )
     return LayoutFitSearchResult(
@@ -215,10 +346,10 @@ def search_layout_translation(
         candidate_id=candidate.candidate_id,
         remnant_id=remnant.remnant_id,
         config=search_config,
-        generated_candidate_count=len(unique),
-        duplicate_candidate_count=duplicates,
-        evaluated_candidate_count=len(budgeted),
-        budget_truncated=len(unique) > len(budgeted),
+        generated_candidate_count=candidates.generated_candidate_count,
+        duplicate_candidate_count=candidates.duplicate_candidate_count,
+        evaluated_candidate_count=len(candidates.translations),
+        budget_truncated=candidates.budget_truncated,
     )
 
 
@@ -239,7 +370,11 @@ def consume_layout(
         problem,
         candidate,
         translation_xy,
-        tolerance=fit_config.coordinate_tolerance,
+        coordinate_tolerance=fit_config.coordinate_tolerance,
+        area_tolerance=max(
+            fit_config.coordinate_tolerance,
+            problem.sheet_length * problem.strip_height * fit_config.relative_area_tolerance,
+        ),
     )
     part_by_id: dict[str, Part] = {item.id: item for item in problem.parts}
     validated = []

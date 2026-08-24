@@ -101,6 +101,11 @@ Typer-style argparse CLI conventions already used by YieldForge.
 6. Re-run focused tests and Ruff.
 7. Commit `experiment: measure M7 action feasibility`.
 
+**Executed:** All six regimes and 144 events passed under feasibility result
+`yfm7f-7edef2fa8719168941e431d2`. The triggered differential result
+`yfm7d-055c3aa7a09c85fbee2f1ca2` validated the guarded Jagua prefilter with zero mismatches. The
+measured 644.149271-minute calibration projection is the Task 6 runtime-preparation boundary.
+
 ### Task 6: Calibrate and freeze the strong baseline
 
 **Files:**
@@ -140,4 +145,3 @@ Typer-style argparse CLI conventions already used by YieldForge.
    entry requirements.
 6. Run the full Python suite, Ruff, package build, and targeted CLI regeneration checks.
 7. Commit `docs: close M7 and prepare rollout oracle`.
-
