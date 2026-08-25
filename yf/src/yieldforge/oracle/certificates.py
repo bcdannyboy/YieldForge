@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import weakref
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from yieldforge.baseline.contracts import LayoutFitSearchResult
 from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_policy_action
@@ -84,6 +86,54 @@ class M8CommonTransitionFact:
     content_sha256: str
 
 
+@dataclass(frozen=True)
+class ValidatedCommonTransition:
+    """Process-local capability proving one portable common fact was reconstructed."""
+
+    fact: M8CommonTransitionFact
+    _provenance_token: object = field(repr=False, compare=False)
+
+    @property
+    def step(self) -> M7StepResult:
+        return self.fact.step
+
+    @property
+    def cursor_before(self) -> M7ReplayCursor:
+        return self.fact.cursor_before
+
+    @property
+    def event_position(self) -> int:
+        return self.fact.event_position
+
+    @property
+    def policy_rank(self) -> PolicyRank:
+        return self.fact.policy_rank
+
+    @property
+    def semantic_runtime_sha256(self) -> str:
+        return self.fact.semantic_runtime_sha256
+
+    @property
+    def content_sha256(self) -> str:
+        return self.fact.content_sha256
+
+    def __reduce__(self) -> object:
+        raise TypeError("validated M8 common transition capabilities cannot be serialized")
+
+
+_VALIDATED_COMMON_PROVENANCE = object()
+_VALIDATED_COMMON_REGISTRY: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[ValidatedCommonTransition],
+        int,
+        str,
+        str,
+        int,
+    ],
+] = {}
+
+
 def _rank_payload(rank: PolicyRank) -> dict[str, object]:
     return {
         "policy": rank.policy.value,
@@ -146,15 +196,14 @@ def _common_fact_payload(
     }
 
 
-def build_m8_common_transition_fact(
+def _derive_m8_common_transition_fact(
     runtime: M7ReplayRuntime,
     *,
     cursor: M7ReplayCursor,
+    semantic_runtime_sha256: str | None = None,
 ) -> M8CommonTransitionFact:
-    """Build one deterministic runtime-bound common winner and transition fact."""
-
     event_position = cursor.next_event_position
-    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    runtime_sha256 = semantic_runtime_sha256 or m7_semantic_runtime_sha256(runtime)
     for item in cursor.inventory:
         compile_translation_rejections(
             runtime,
@@ -191,7 +240,7 @@ def build_m8_common_transition_fact(
         cursor_before=cursor,
         step=step,
         policy_rank=rank,
-        semantic_runtime_sha256=semantic_runtime_sha256,
+        semantic_runtime_sha256=runtime_sha256,
     )
     content_sha256 = f"sha256:{semantic_sha256(payload)}"
     return M8CommonTransitionFact(
@@ -204,19 +253,31 @@ def build_m8_common_transition_fact(
         cursor_after_sha256=m7_cursor_sha256(step.cursor),
         event_id=step.event.event_id,
         policy_rank=rank,
-        semantic_runtime_sha256=semantic_runtime_sha256,
+        semantic_runtime_sha256=runtime_sha256,
         content_sha256=content_sha256,
     )
 
 
-def _validate_common_transition_fact(
+def build_m8_common_transition_fact(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+) -> M8CommonTransitionFact:
+    """Build one deterministic portable fact; callers must validate it before use."""
+
+    return _derive_m8_common_transition_fact(runtime, cursor=cursor)
+
+
+def _validate_portable_common_transition_fact(
     runtime: M7ReplayRuntime,
     fact: M8CommonTransitionFact,
+    *,
+    semantic_runtime_sha256: str | None = None,
 ) -> None:
     if not isinstance(fact, M8CommonTransitionFact):
         raise ValueError("M8 common transition fact has the wrong runtime type")
-    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
-    if fact.semantic_runtime_sha256 != semantic_runtime_sha256:
+    runtime_sha256 = semantic_runtime_sha256 or m7_semantic_runtime_sha256(runtime)
+    if fact.semantic_runtime_sha256 != runtime_sha256:
         raise ValueError("M8 common fact semantic runtime fingerprint differs")
     if (
         fact.replay_input_id != runtime.replay_input.input_id
@@ -290,11 +351,109 @@ def _validate_common_transition_fact(
         cursor_before=fact.cursor_before,
         step=step,
         policy_rank=fact.policy_rank,
-        semantic_runtime_sha256=semantic_runtime_sha256,
+        semantic_runtime_sha256=runtime_sha256,
     )
     expected_content = f"sha256:{semantic_sha256(payload)}"
     if fact.content_sha256 != expected_content:
         raise ValueError("M8 common transition fact content hash differs")
+
+
+def _register_validated_common_transition(
+    fact: M8CommonTransitionFact,
+) -> ValidatedCommonTransition:
+    validated = ValidatedCommonTransition(
+        fact=fact,
+        _provenance_token=_VALIDATED_COMMON_PROVENANCE,
+    )
+    key = id(validated)
+
+    def discard(reference: weakref.ReferenceType[ValidatedCommonTransition]) -> None:
+        registered = _VALIDATED_COMMON_REGISTRY.get(key)
+        if registered is not None and registered[0] is reference:
+            _VALIDATED_COMMON_REGISTRY.pop(key, None)
+
+    reference = weakref.ref(validated, discard)
+    _VALIDATED_COMMON_REGISTRY[key] = (
+        reference,
+        id(fact),
+        fact.content_sha256,
+        fact.semantic_runtime_sha256,
+        os.getpid(),
+    )
+    return validated
+
+
+def build_validated_m8_common_transition(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+) -> ValidatedCommonTransition:
+    """Reconstruct one exact local common transition and issue a process capability."""
+
+    runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    fact = _derive_m8_common_transition_fact(
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=runtime_sha256,
+    )
+    _validate_portable_common_transition_fact(
+        runtime,
+        fact,
+        semantic_runtime_sha256=runtime_sha256,
+    )
+    return _register_validated_common_transition(fact)
+
+
+def validate_m8_common_transition_fact(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    fact: M8CommonTransitionFact,
+) -> ValidatedCommonTransition:
+    """Independently reconstruct a portable fact before granting local authority."""
+
+    runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    _validate_portable_common_transition_fact(
+        runtime,
+        fact,
+        semantic_runtime_sha256=runtime_sha256,
+    )
+    authoritative = _derive_m8_common_transition_fact(
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=runtime_sha256,
+    )
+    if fact != authoritative:
+        raise ValueError("M8 portable fact differs from authoritative common transition")
+    return _register_validated_common_transition(fact)
+
+
+def _require_validated_common_transition(
+    runtime: M7ReplayRuntime,
+    common: ValidatedCommonTransition,
+) -> M8CommonTransitionFact:
+    if type(common) is not ValidatedCommonTransition:
+        raise ValueError("M8 certifier requires a validated common transition capability")
+    registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
+    if (
+        common._provenance_token is not _VALIDATED_COMMON_PROVENANCE
+        or registered is None
+        or registered[0]() is not common
+        or registered[1] != id(common.fact)
+        or registered[2] != common.fact.content_sha256
+        or registered[3] != common.fact.semantic_runtime_sha256
+        or registered[4] != os.getpid()
+    ):
+        raise ValueError("M8 certifier requires a validated common transition capability")
+    runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    if common.fact.semantic_runtime_sha256 != runtime_sha256:
+        raise ValueError("M8 common fact semantic runtime fingerprint differs")
+    _validate_portable_common_transition_fact(
+        runtime,
+        common.fact,
+        semantic_runtime_sha256=runtime_sha256,
+    )
+    return common.fact
 
 
 def _derive_branch_inventory_delta(
@@ -741,17 +900,17 @@ def _influence(
 def certify_event_passivity(
     runtime: M7ReplayRuntime,
     *,
-    common: M8CommonTransitionFact,
+    common: ValidatedCommonTransition,
     branch_cursor: M7ReplayCursor,
 ) -> EventPassivityResult:
     """Prove one branch event selects the exact common M7 action, or fail closed."""
 
-    _validate_common_transition_fact(runtime, common)
-    delta = _derive_branch_inventory_delta(common.cursor_before, branch_cursor)
+    fact = _require_validated_common_transition(runtime, common)
+    delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
     if not delta.added and not delta.removed:
         return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
-    binding = common.step.action_binding
-    common_action_id = common.step.event.action.action_id
+    binding = fact.step.action_binding
+    common_action_id = fact.step.event.action.action_id
     branch_action_id = common_action_id
     if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
         return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
@@ -759,26 +918,26 @@ def certify_event_passivity(
     branch_after = apply_m7_frozen_action_evidence(
         runtime,
         cursor=branch_cursor,
-        event_position=common.event_position,
-        action=common.step.event.action,
+        event_position=fact.event_position,
+        action=fact.step.event.action,
     )
     state_before_sha256 = m7_cursor_sha256(branch_cursor)
     state_after_sha256 = m7_cursor_sha256(branch_after)
-    common_rank = common.policy_rank
+    common_rank = fact.policy_rank
     influences = []
     exact_search_count = 0
     for direction, items in (("added", delta.added), ("removed", delta.removed)):
         for item in items:
             influence, searches = _influence(
                 runtime,
-                cursor_template=common.cursor_before,
-                event_position=common.event_position,
+                cursor_template=fact.cursor_before,
+                event_position=fact.event_position,
                 item=item,
                 direction=direction,
                 delta=delta,
                 common=binding,
                 common_rank=common_rank,
-                common_fact_sha256=common.content_sha256,
+                common_fact_sha256=fact.content_sha256,
                 common_action_id=common_action_id,
                 branch_action_id=branch_action_id,
                 state_before_sha256=state_before_sha256,
@@ -801,7 +960,7 @@ def certify_event_passivity(
     return EventPassivityResult(
         passive=True,
         witness=M8EventWitness(
-            event_position=common.event_position,
+            event_position=fact.event_position,
             classification=classification,
             common_action_id=common_action_id,
             branch_action_id=branch_action_id,
@@ -817,6 +976,9 @@ __all__ = [
     "BranchInventoryDelta",
     "EventPassivityResult",
     "M8CommonTransitionFact",
+    "ValidatedCommonTransition",
     "build_m8_common_transition_fact",
+    "build_validated_m8_common_transition",
     "certify_event_passivity",
+    "validate_m8_common_transition_fact",
 ]

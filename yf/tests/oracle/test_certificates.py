@@ -14,7 +14,11 @@ from shapely import Polygon, box
 from tests.oracle.fixtures import inventory_item, two_problem_runtime
 from yieldforge.baseline.archives import VerifiedProblemCandidates
 from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
-from yieldforge.baseline.policies import M7PolicyName, select_policy_action
+from yieldforge.baseline.policies import (
+    M7PolicyName,
+    rank_policy_action,
+    select_policy_action,
+)
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
     apply_m7_action_descriptor,
@@ -26,10 +30,15 @@ from yieldforge.baseline.replay import (
     m7_semantic_runtime_sha256,
     select_m7_fallback,
 )
+from yieldforge.experiments.contracts import semantic_sha256
+from yieldforge.oracle import certificates as certificate_module
 from yieldforge.oracle.certificates import (
     BranchInventoryDelta,
+    ValidatedCommonTransition,
     build_m8_common_transition_fact,
+    build_validated_m8_common_transition,
     certify_event_passivity,
+    validate_m8_common_transition_fact,
 )
 from yieldforge.oracle.compiled import compile_translation_rejections
 from yieldforge.replay.contracts import InventoryItem
@@ -71,7 +80,7 @@ def _as_fit(search: LayoutFitSearchResult) -> LayoutFitSearchResult:
 
 def _common_fact(runtime, *, cursor: M7ReplayCursor | None = None):  # type: ignore[no-untyped-def]
     current = cursor or initial_m7_cursor(runtime.replay_input)
-    return current, build_m8_common_transition_fact(runtime, cursor=current)
+    return current, build_validated_m8_common_transition(runtime, cursor=current)
 
 
 def _branch_cursor(
@@ -105,6 +114,41 @@ def _certify(runtime, item, *, cursor=None, common_fact=None):  # type: ignore[n
         common=fact,
         branch_cursor=_branch_cursor(current, added=(item,)),
     )
+
+
+def _forge_and_rehash_common_context(runtime, fact):  # type: ignore[no-untyped-def]
+    context = replace(fact.step.selected_context, immediate_net_cost=-1e9)
+    binding = replace(fact.step.action_binding, context=context)
+    rank = rank_policy_action(runtime.replay_input.policy.name, context)
+    provisional_event = fact.step.event.model_copy(
+        update={
+            "event_id": "yfm7e-" + "0" * 24,
+            "policy_decision_key": rank.decision_key,
+        }
+    )
+    event_digest = semantic_sha256(provisional_event, excluded_fields={"event_id"})
+    event = provisional_event.model_copy(update={"event_id": f"yfm7e-{event_digest[:24]}"})
+    step = replace(
+        fact.step,
+        selected_context=context,
+        action_binding=binding,
+        event=event,
+    )
+    forged = replace(
+        fact,
+        step=step,
+        event_id=event.event_id,
+        policy_rank=rank,
+    )
+    payload = certificate_module._common_fact_payload(  # noqa: SLF001
+        runtime,
+        event_position=forged.event_position,
+        cursor_before=forged.cursor_before,
+        step=forged.step,
+        policy_rank=forged.policy_rank,
+        semantic_runtime_sha256=forged.semantic_runtime_sha256,
+    )
+    return replace(forged, content_sha256=f"sha256:{semantic_sha256(payload)}")
 
 
 @pytest.mark.parametrize(
@@ -502,12 +546,8 @@ def test_common_transition_fact_rejects_tampered_numeric_context() -> None:
         policy=M7PolicyName.NET_COST,
         rates=rates,
     )
-    cursor, fact = _common_fact(runtime)
-    item = inventory_item(
-        box(0, 0, 4, 10),
-        material=runtime.replay_input.instances[0].material,
-        token="forged-common-cost",
-    )
+    cursor, common = _common_fact(runtime)
+    fact = common.fact
     context = replace(fact.step.selected_context, immediate_net_cost=-1e9)
     binding = replace(fact.step.action_binding, context=context)
     forged = replace(
@@ -520,11 +560,64 @@ def test_common_transition_fact_rejects_tampered_numeric_context() -> None:
     )
 
     with pytest.raises(ValueError, match="common transition fact"):
+        validate_m8_common_transition_fact(
+            runtime,
+            cursor=cursor,
+            fact=forged,
+        )
+
+
+def test_certifier_rejects_raw_portable_common_fact() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    portable = build_m8_common_transition_fact(runtime, cursor=cursor)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="raw-fact-boundary",
+    )
+
+    with pytest.raises(ValueError, match="validated common transition capability"):
         certify_event_passivity(
             runtime,
-            common=forged,
+            common=portable,  # type: ignore[arg-type]
             branch_cursor=_branch_cursor(cursor, added=(item,)),
         )
+
+
+def test_authoritative_revalidation_rejects_forged_rehashed_portable_fact() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    portable = build_m8_common_transition_fact(runtime, cursor=cursor)
+    forged = _forge_and_rehash_common_context(runtime, portable)
+
+    with pytest.raises(ValueError, match="authoritative common transition"):
+        validate_m8_common_transition_fact(
+            runtime,
+            cursor=cursor,
+            fact=forged,
+        )
+
+
+def test_copied_or_manually_constructed_validated_capability_fails_closed() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="copied-capability",
+    )
+    branch = _branch_cursor(cursor, added=(item,))
+    copied = replace(common)
+    manually_constructed = ValidatedCommonTransition(
+        fact=common.fact,
+        _provenance_token=common._provenance_token,
+    )
+
+    assert certify_event_passivity(runtime, common=common, branch_cursor=branch).passive
+    for invalid in (copied, manually_constructed):
+        with pytest.raises(ValueError, match="validated common transition capability"):
+            certify_event_passivity(runtime, common=invalid, branch_cursor=branch)
 
 
 def test_common_transition_fact_rejects_tampered_winner_search_cache() -> None:
@@ -674,7 +767,8 @@ def test_semantic_runtime_requires_regular_jagua_executable(tmp_path) -> None:  
 
 def test_common_transition_fact_is_deterministic_and_valid_across_spawn_process() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    cursor, fact = _common_fact(runtime)
+    cursor, common = _common_fact(runtime)
+    fact = common.fact
     item = inventory_item(
         box(0, 0, 3, 20),
         material=runtime.replay_input.instances[0].material,
@@ -682,21 +776,27 @@ def test_common_transition_fact_is_deterministic_and_valid_across_spawn_process(
     )
     branch = _branch_cursor(cursor, added=(item,))
     second_runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    _, second_fact = _common_fact(second_runtime)
+    _, second_common = _common_fact(second_runtime)
 
-    assert fact.content_sha256 == second_fact.content_sha256
+    assert fact.content_sha256 == second_common.fact.content_sha256
     assert "_auth_sha256" not in fact.__dataclass_fields__
-    encoded = base64.b64encode(pickle.dumps((fact, branch)))
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(common)
+    encoded = base64.b64encode(pickle.dumps((fact, cursor, branch)))
     script = """
 import base64
 import pickle
 import sys
 from tests.oracle.fixtures import two_problem_runtime
-from yieldforge.oracle.certificates import certify_event_passivity
+from yieldforge.oracle.certificates import (
+    certify_event_passivity,
+    validate_m8_common_transition_fact,
+)
 
-fact, branch = pickle.loads(base64.b64decode(sys.stdin.buffer.read()))
+fact, cursor, branch = pickle.loads(base64.b64decode(sys.stdin.buffer.read()))
 runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-print(certify_event_passivity(runtime, common=fact, branch_cursor=branch).passive)
+common = validate_m8_common_transition_fact(runtime, cursor=cursor, fact=fact)
+print(certify_event_passivity(runtime, common=common, branch_cursor=branch).passive)
 """
 
     completed = subprocess.run(
@@ -707,11 +807,20 @@ print(certify_event_passivity(runtime, common=fact, branch_cursor=branch).passiv
     )
 
     assert completed.stdout.strip() == b"True"
+    tampered = replace(fact, content_sha256=_sha(97))
+    rejected = subprocess.run(
+        [sys.executable, "-c", script],
+        input=base64.b64encode(pickle.dumps((tampered, cursor, branch))),
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
 
 
 def test_common_transition_fact_rejects_nonwinner_action() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    cursor, fact = _common_fact(runtime)
+    cursor, common = _common_fact(runtime)
+    fact = common.fact
     catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
     selected = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
     nonwinner = next(item for item in catalog.actions if item.action_id != selected.action_id)
@@ -730,24 +839,19 @@ def test_common_transition_fact_rejects_nonwinner_action() -> None:
         decision_key=nonwinner_selection.decision_key,
     )
     forged = replace(fact, step=nonwinner_step)
-    item = inventory_item(
-        box(0, 0, 3, 20),
-        material=runtime.replay_input.instances[0].material,
-        token="nonwinner-common",
-    )
-
     with pytest.raises(ValueError, match="common transition fact"):
-        certify_event_passivity(
+        validate_m8_common_transition_fact(
             runtime,
-            common=forged,
-            branch_cursor=_branch_cursor(cursor, added=(item,)),
+            cursor=cursor,
+            fact=forged,
         )
 
 
 @pytest.mark.parametrize("mutation", ["digest", "event", "cursor", "runtime_fingerprint"])
 def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    cursor, fact = _common_fact(runtime)
+    cursor, common = _common_fact(runtime)
+    fact = common.fact
     if mutation == "digest":
         forged = replace(fact, content_sha256=_sha(99))
     elif mutation == "event":
@@ -763,17 +867,11 @@ def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) ->
         )
     else:
         forged = replace(fact, semantic_runtime_sha256=_sha(98))
-    item = inventory_item(
-        box(0, 0, 3, 20),
-        material=runtime.replay_input.instances[0].material,
-        token=f"fact-{mutation}",
-    )
-
     with pytest.raises(ValueError, match="common transition fact|common fact|replay event"):
-        certify_event_passivity(
+        validate_m8_common_transition_fact(
             runtime,
-            common=forged,
-            branch_cursor=_branch_cursor(cursor, added=(item,)),
+            cursor=cursor,
+            fact=forged,
         )
 
 
@@ -782,7 +880,8 @@ def test_common_transition_fact_rejects_tampered_action_identities_and_rank(
     mutation: str,
 ) -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    cursor, fact = _common_fact(runtime)
+    cursor, common = _common_fact(runtime)
+    fact = common.fact
     if mutation == "catalog_action_id":
         action_id = "m7-standard:forged-candidate"
         context = replace(fact.step.selected_context, action_id=action_id)
@@ -815,17 +914,11 @@ def test_common_transition_fact_rejects_tampered_action_identities_and_rank(
             fact,
             policy_rank=replace(fact.policy_rank, comparison_key=("forged",)),
         )
-    item = inventory_item(
-        box(0, 0, 3, 20),
-        material=runtime.replay_input.instances[0].material,
-        token=f"fact-{mutation}",
-    )
-
     with pytest.raises(ValueError, match="common transition fact|replay event"):
-        certify_event_passivity(
+        validate_m8_common_transition_fact(
             runtime,
-            common=forged,
-            branch_cursor=_branch_cursor(cursor, added=(item,)),
+            cursor=cursor,
+            fact=forged,
         )
 
 
