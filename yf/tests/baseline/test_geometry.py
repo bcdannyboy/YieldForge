@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
+import pytest
+from shapely import box
+
 from tests.baseline.test_replay import _problem, _two_event_runtime, _verified
+from tests.oracle.fixtures import inventory_item
+from yieldforge.baseline import geometry as geometry_module
 from yieldforge.baseline.contracts import LayoutFitSearchStatus
 from yieldforge.baseline.geometry import (
+    PreparedLayoutFootprint,
     certify_translation_impossible,
     generate_layout_translations,
     prepare_layout_footprint,
@@ -14,6 +23,7 @@ from yieldforge.baseline.replay import (
     enumerate_m7_action_catalog,
     initial_m7_cursor,
 )
+from yieldforge.reuse.contracts import MaterialIdentity
 
 
 def _returned_remnant():  # type: ignore[no-untyped-def]
@@ -94,3 +104,80 @@ def test_safe_width_rejection_produces_empty_registered_translation_sequence() -
     assert certificate.impossible
     assert certificate.reason == "footprint_width_exceeds_remnant"
     assert translations.translations == ()
+
+
+@pytest.mark.parametrize(
+    ("case", "layout_bounds", "material_mismatch", "expected_reason"),
+    [
+        ("material", (0.0, 0.0, 4.0, 4.0), True, "material_mismatch"),
+        (
+            "area",
+            (0.0, 0.0, 11.0, 10.0),
+            False,
+            "footprint_area_exceeds_remnant",
+        ),
+        (
+            "width",
+            (0.0, 0.0, 11.0, 5.0),
+            False,
+            "footprint_width_exceeds_remnant",
+        ),
+        (
+            "height",
+            (0.0, 0.0, 5.0, 11.0),
+            False,
+            "footprint_height_exceeds_remnant",
+        ),
+        ("pass", (0.0, 0.0, 5.0, 5.0), False, None),
+    ],
+)
+def test_prepared_rejection_measurements_are_byte_and_value_identical_to_legacy(
+    case: str,
+    layout_bounds: tuple[float, float, float, float],
+    material_mismatch: bool,
+    expected_reason: str | None,
+) -> None:
+    runtime = _two_event_runtime()
+    source_material = runtime.replay_input.instances[0].material
+    item = inventory_item(
+        box(0.0, 0.0, 10.0, 10.0),
+        material=source_material,
+        token=f"prepared-rejection-{case}",
+    )
+    footprint = box(*layout_bounds)
+    layout = PreparedLayoutFootprint(
+        candidate_id=f"prepared-rejection-{case}",
+        geometry=footprint,
+        part_polygons=(footprint,),
+        vertices=(),
+        bounds=tuple(float(value) for value in footprint.bounds),
+    )
+    material = source_material
+    if material_mismatch:
+        material = MaterialIdentity(
+            **(
+                source_material.model_dump(mode="python")
+                | {"grade": "prepared-rejection-mismatch"}
+            )
+        )
+
+    legacy = certify_translation_impossible(
+        layout,
+        item.remnant,
+        material=material,
+        fit_config=runtime.replay_input.fit_config,
+    )
+    prepared = geometry_module.certify_prepared_translation_impossible(
+        geometry_module.prepare_translation_rejection_layout(layout),
+        geometry_module.prepare_translation_rejection_remnant(item.remnant),
+        material=material,
+        fit_config=runtime.replay_input.fit_config,
+    )
+
+    assert prepared == legacy
+    assert prepared.reason == expected_reason
+    assert json.dumps(asdict(prepared), sort_keys=True, separators=(",", ":")) == json.dumps(
+        asdict(legacy),
+        sort_keys=True,
+        separators=(",", ":"),
+    )

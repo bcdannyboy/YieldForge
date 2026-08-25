@@ -14,6 +14,7 @@ import pytest
 from shapely import Polygon, box
 
 from tests.oracle.fixtures import inventory_item, two_problem_runtime
+from yieldforge.baseline import geometry as geometry_module
 from yieldforge.baseline.archives import VerifiedProblemCandidates
 from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
 from yieldforge.baseline.policies import (
@@ -45,7 +46,11 @@ from yieldforge.oracle.certificates import (
 )
 from yieldforge.oracle.compiled import compile_translation_rejections
 from yieldforge.replay.contracts import InventoryItem
-from yieldforge.reuse.contracts import MaterialIdentity
+from yieldforge.reuse.contracts import (
+    MaterialIdentity,
+    MaterialProvenance,
+    canonical_polygon_record,
+)
 from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
 
 
@@ -280,6 +285,313 @@ def test_private_prepared_layout_batch_constructs_each_layout_once(
     expected = runtime.runtime_candidates[problem_id].evidence.candidate_ids
     assert tuple(constructed) == expected
     assert first == second
+
+
+def test_private_prepared_batch_validates_each_semantic_remnant_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0, event_count=3)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-remnant-measurement-cache",
+    )
+    original = geometry_module.polygon_from_record
+    decoded: list[str] = []
+
+    def counted(record):  # type: ignore[no-untyped-def]
+        decoded.append(record.wkb_hex)
+        return original(record)
+
+    monkeypatch.setattr(geometry_module, "polygon_from_record", counted)
+    event_positions = tuple(range(len(runtime.replay_input.instances)))
+    semantic_copy = item.model_copy(deep=True)
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=event_positions,
+    ) as prepared:
+        assert not hasattr(prepared, "remnant_measurements")
+        for cached_item in (item, semantic_copy):
+            for event_position in event_positions:
+                compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                    runtime,
+                    prepared=prepared,
+                    event_position=event_position,
+                    item=cached_item,
+                )
+        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            id(prepared)
+        ]
+        assert all(
+            not hasattr(measurement, "geometry")
+            for _key, layouts in record.layouts
+            for measurement in layouts
+        )
+        assert all(
+            not hasattr(measurement, "geometry")
+            for measurement in record.remnant_measurements.values()
+        )
+
+    assert decoded == [item.remnant.geometry.wkb_hex]
+
+
+def test_private_prepared_batch_precomputes_each_layout_measurement_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0, event_count=3)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-layout-measurements",
+    )
+    original = compiled_module.prepare_translation_rejection_layout  # noqa: SLF001
+    measured: list[str] = []
+
+    def counted(layout):  # type: ignore[no-untyped-def]
+        measured.append(layout.candidate_id)
+        return original(layout)
+
+    monkeypatch.setattr(
+        compiled_module,
+        "prepare_translation_rejection_layout",
+        counted,
+    )
+    event_positions = tuple(range(len(runtime.replay_input.instances)))
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=event_positions,
+    ) as prepared:
+        for _ in range(2):
+            for event_position in event_positions:
+                compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                    runtime,
+                    prepared=prepared,
+                    event_position=event_position,
+                    item=item,
+                )
+
+    problem_id = runtime.replay_input.instances[0].problem_id
+    expected = runtime.runtime_candidates[problem_id].evidence.candidate_ids
+    assert tuple(measured) == expected
+
+
+def test_private_prepared_batch_rejects_registry_scalar_mutation_at_exit() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-registry-scalar-mutation",
+    )
+
+    with pytest.raises(ValueError, match="integrity differs"):
+        with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+            runtime,
+            event_positions=(0,),
+        ) as prepared:
+            compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                runtime,
+                prepared=prepared,
+                event_position=0,
+                item=item,
+            )
+            record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+                id(prepared)
+            ]
+            key = next(iter(record.remnant_measurements))
+            record.remnant_measurements[key] = replace(
+                record.remnant_measurements[key],
+                area=record.remnant_measurements[key].area + 1.0,
+            )
+
+
+def test_private_remnant_cache_commits_only_each_new_entry_before_deep_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    items = tuple(
+        inventory_item(
+            box(0, 0, width, 20),
+            material=runtime.replay_input.instances[0].material,
+            token=f"prepared-remnant-commitment-{width}",
+        )
+        for width in (1, 2, 3)
+    )
+    original = compiled_module._prepared_remnant_measurement_commitment  # noqa: SLF001
+    committed: list[str] = []
+
+    def counted(key, measurement):  # type: ignore[no-untyped-def]
+        committed.append(key.remnant_id)
+        return original(key, measurement)
+
+    monkeypatch.setattr(
+        compiled_module,
+        "_prepared_remnant_measurement_commitment",
+        counted,
+    )
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        inserted_ids = []
+        for item in items:
+            compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                runtime,
+                prepared=prepared,
+                event_position=0,
+                item=item,
+            )
+            inserted_ids.append(item.remnant.remnant_id)
+            assert committed == inserted_ids
+
+    assert sorted(committed) == sorted(
+        remnant_id for remnant_id in inserted_ids for _ in range(2)
+    )
+
+
+def test_private_remnant_cache_rejects_existing_tamper_before_another_miss() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    first = inventory_item(
+        box(0, 0, 2, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-remnant-existing-tamper-first",
+    )
+    second = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-remnant-existing-tamper-second",
+    )
+
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=first,
+        )
+        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            id(prepared)
+        ]
+        key = next(iter(record.remnant_measurements))
+        original = record.remnant_measurements[key]
+        record.remnant_measurements[key] = replace(original, area=original.area + 1.0)
+        try:
+            with pytest.raises(ValueError, match="integrity differs"):
+                compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                    runtime,
+                    prepared=prepared,
+                    event_position=0,
+                    item=second,
+                )
+            assert len(record.remnant_measurements) == 1
+        finally:
+            record.remnant_measurements[key] = original
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wkb",
+        "hash",
+        "area",
+        "material",
+        "lineage",
+        "provenance",
+        "same_id_different_semantic_tuple",
+    ],
+)
+def test_private_remnant_measurement_cache_fails_closed_on_content_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token=f"prepared-remnant-mutation-{mutation}",
+    )
+    original_decode = geometry_module.polygon_from_record
+    decode_count = 0
+
+    def counted(record):  # type: ignore[no-untyped-def]
+        nonlocal decode_count
+        decode_count += 1
+        return original_decode(record)
+
+    monkeypatch.setattr(geometry_module, "polygon_from_record", counted)
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+        geometry = item.remnant.geometry
+        material = item.remnant.material
+        lineage = item.remnant.lineage
+        restored: list[tuple[object, str, object]] = []
+        if mutation == "wkb":
+            restored.append((geometry, "wkb_hex", geometry.wkb_hex))
+            replacement = ("0" if geometry.wkb_hex[-1] != "0" else "1")
+            object.__setattr__(geometry, "wkb_hex", geometry.wkb_hex[:-1] + replacement)
+        elif mutation == "hash":
+            restored.append((geometry, "polygon_sha256", geometry.polygon_sha256))
+            replacement = "0" if geometry.polygon_sha256[-1] != "0" else "1"
+            object.__setattr__(
+                geometry,
+                "polygon_sha256",
+                geometry.polygon_sha256[:-1] + replacement,
+            )
+        elif mutation == "area":
+            restored.append((geometry, "area", geometry.area))
+            object.__setattr__(geometry, "area", geometry.area + 1.0)
+        elif mutation == "material":
+            restored.append((material, "grade", material.grade))
+            object.__setattr__(material, "grade", material.grade + "-mutated")
+        elif mutation == "lineage":
+            restored.append((lineage, "source_candidate_id", lineage.source_candidate_id))
+            object.__setattr__(
+                lineage,
+                "source_candidate_id",
+                lineage.source_candidate_id + "-mutated",
+            )
+        elif mutation == "provenance":
+            restored.append((material, "provenance", material.provenance))
+            replacement = (
+                MaterialProvenance.ASSUMED
+                if material.provenance is not MaterialProvenance.ASSUMED
+                else MaterialProvenance.OBSERVED
+            )
+            object.__setattr__(material, "provenance", replacement)
+        else:
+            replacement = canonical_polygon_record(box(0, 0, 2, 2))
+            for field_name in ("wkb_hex", "polygon_sha256", "area"):
+                restored.append((geometry, field_name, getattr(geometry, field_name)))
+                object.__setattr__(geometry, field_name, getattr(replacement, field_name))
+        try:
+            with pytest.raises(ValueError):
+                compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                    runtime,
+                    prepared=prepared,
+                    event_position=0,
+                    item=item,
+                )
+        finally:
+            for target, field_name, value in restored:
+                object.__setattr__(target, field_name, value)
+        compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+
+    assert decode_count == 2
 
 
 def test_prepared_layout_capability_transient_substitution_cannot_change_result() -> None:

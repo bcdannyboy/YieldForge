@@ -56,6 +56,58 @@ class PreparedLayoutFootprint:
     bounds: tuple[float, float, float, float]
 
 
+def _require_rejection_measurements(
+    *,
+    identity: str,
+    area: float,
+    bounds: tuple[float, float, float, float],
+) -> None:
+    if not identity:
+        raise ValueError("translation rejection measurement identity must be nonempty")
+    if not math.isfinite(area) or area <= 0:
+        raise ValueError("translation rejection measurement area must be finite and positive")
+    if len(bounds) != 4 or any(not math.isfinite(value) for value in bounds):
+        raise ValueError("translation rejection measurement bounds must be four finite values")
+    min_x, min_y, max_x, max_y = bounds
+    if max_x < min_x or max_y < min_y:
+        raise ValueError("translation rejection measurement bounds must be ordered")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTranslationRejectionLayout:
+    """Internal scalars; safe only when produced by the strict layout preparer."""
+
+    candidate_id: str
+    area: float
+    bounds: tuple[float, float, float, float]
+
+    def __post_init__(self) -> None:
+        _require_rejection_measurements(
+            identity=self.candidate_id,
+            area=self.area,
+            bounds=self.bounds,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTranslationRejectionRemnant:
+    """Internal scalars; safe only when produced by the strict remnant preparer."""
+
+    remnant_id: str
+    material_key: tuple[str, str, str, str, str]
+    area: float
+    bounds: tuple[float, float, float, float]
+
+    def __post_init__(self) -> None:
+        _require_rejection_measurements(
+            identity=self.remnant_id,
+            area=self.area,
+            bounds=self.bounds,
+        )
+        if len(self.material_key) != 5 or any(not value for value in self.material_key):
+            raise ValueError("translation rejection remnant material key must be complete")
+
+
 @dataclass(frozen=True)
 class PreparedRemnantGeometry:
     remnant_id: str
@@ -101,21 +153,72 @@ def certify_translation_impossible(
 ) -> TranslationRejectionCertificate:
     """Reject only material, area, or axis-aligned bound impossibilities."""
 
+    return certify_prepared_translation_impossible(
+        prepare_translation_rejection_layout(layout),
+        prepare_translation_rejection_remnant(remnant),
+        material=material,
+        fit_config=fit_config,
+    )
+
+
+def prepare_translation_rejection_layout(
+    layout: PreparedLayoutFootprint,
+) -> PreparedTranslationRejectionLayout:
+    """Internally reduce one validated layout to strict rejection-only scalars."""
+
+    return PreparedTranslationRejectionLayout(
+        candidate_id=layout.candidate_id,
+        area=float(layout.geometry.area),
+        bounds=tuple(float(value) for value in layout.bounds),
+    )
+
+
+def prepare_translation_rejection_remnant(
+    remnant: RemnantStock,
+) -> PreparedTranslationRejectionRemnant:
+    """Internally decode and validate one remnant, retaining no runtime geometry."""
+
     parent = polygon_from_record(remnant.geometry)
+    if remnant.lineage.source_component_sha256 != remnant.geometry.polygon_sha256:
+        raise ValueError("translation rejection remnant lineage geometry differs")
+    if (
+        remnant.remnant_id in remnant.lineage.ancestor_remnant_ids
+        or remnant.remnant_id == remnant.lineage.parent_remnant_id
+    ):
+        raise ValueError("translation rejection remnant lineage is cyclic")
+    if derive_remnant_id(remnant.lineage, remnant.geometry, remnant.material) != remnant.remnant_id:
+        raise ValueError("translation rejection remnant identity differs from content")
+    return PreparedTranslationRejectionRemnant(
+        remnant_id=remnant.remnant_id,
+        material_key=material_key(remnant.material),
+        area=float(parent.area),
+        bounds=tuple(float(value) for value in parent.bounds),
+    )
+
+
+def certify_prepared_translation_impossible(
+    layout: PreparedTranslationRejectionLayout,
+    remnant: PreparedTranslationRejectionRemnant,
+    *,
+    material: MaterialIdentity,
+    fit_config: RemnantFitConfig,
+) -> TranslationRejectionCertificate:
+    """Apply sole rejection semantics to measurements from the strict preparers."""
+
     foot_min_x, foot_min_y, foot_max_x, foot_max_y = layout.bounds
-    rem_min_x, rem_min_y, rem_max_x, rem_max_y = parent.bounds
+    rem_min_x, rem_min_y, rem_max_x, rem_max_y = remnant.bounds
     layout_width = foot_max_x - foot_min_x
     layout_height = foot_max_y - foot_min_y
     remnant_width = rem_max_x - rem_min_x
     remnant_height = rem_max_y - rem_min_y
     area_tolerance = max(
         fit_config.coordinate_tolerance,
-        parent.area * fit_config.relative_area_tolerance,
+        remnant.area * fit_config.relative_area_tolerance,
     )
     reason = None
-    if material_key(material) != material_key(remnant.material):
+    if material_key(material) != remnant.material_key:
         reason = "material_mismatch"
-    elif layout.geometry.area > parent.area + area_tolerance:
+    elif layout.area > remnant.area + area_tolerance:
         reason = "footprint_area_exceeds_remnant"
     elif layout_width > remnant_width + fit_config.coordinate_tolerance:
         reason = "footprint_width_exceeds_remnant"
@@ -124,8 +227,8 @@ def certify_translation_impossible(
     return TranslationRejectionCertificate(
         impossible=reason is not None,
         reason=reason,
-        layout_area=float(layout.geometry.area),
-        remnant_area=float(parent.area),
+        layout_area=layout.area,
+        remnant_area=remnant.area,
         layout_width=float(layout_width),
         remnant_width=float(remnant_width),
         layout_height=float(layout_height),

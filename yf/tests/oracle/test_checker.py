@@ -231,6 +231,75 @@ def test_generator_and_checker_are_separate_scoped_authorities() -> None:
         generator_authority.require_active()
 
 
+def test_generator_and_checker_own_distinct_cleaned_remnant_measurement_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled as compiled_module
+    from yieldforge.oracle.checker import (
+        _check_prepared_action_proofs,
+        _prepare_m8_checker_context,
+    )
+    from yieldforge.oracle.sparse import (
+        _prepare_m8_generator_context,
+        _score_prepared_certificate_actions,
+    )
+
+    request = _request()
+    original = compiled_module.prepare_translation_rejection_remnant
+    preparation_count = 0
+
+    def counted(remnant):  # type: ignore[no-untyped-def]
+        nonlocal preparation_count
+        preparation_count += 1
+        return original(remnant)
+
+    monkeypatch.setattr(
+        compiled_module,
+        "prepare_translation_rejection_remnant",
+        counted,
+    )
+    with _prepare_m8_generator_context(request) as generator:
+        generator_capability_id = id(generator._prepared_layouts)  # noqa: SLF001
+        generator_record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            generator_capability_id
+        ]
+        assert not generator_record.remnant_measurements
+        action_results = _score_prepared_certificate_actions(generator)
+        generator_preparation_count = preparation_count
+        generator_cache = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            generator_capability_id
+        ].remnant_measurements
+        assert generator_preparation_count == len(generator_cache) > 0
+    assert (
+        generator_capability_id
+        not in compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+    )
+
+    proofs = tuple(item.proof for item in action_results)
+    with _prepare_m8_checker_context(request) as checker:
+        checker_capability_id = id(checker._prepared_layouts)  # noqa: SLF001
+        checker_record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            checker_capability_id
+        ]
+        assert not checker_record.remnant_measurements
+        assert checker_record.remnant_measurements is not generator_cache
+        checks = _check_prepared_action_proofs(checker, proofs)
+        checker_preparation_count = preparation_count - generator_preparation_count
+        checker_cache = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            checker_capability_id
+        ].remnant_measurements
+        assert (
+            checker_preparation_count
+            == len(checker_cache)
+            == generator_preparation_count
+        )
+    assert (
+        checker_capability_id
+        not in compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+    )
+    assert all(result.valid for result in checks)
+
+
 def test_prepared_apis_reject_crossed_reconstructed_and_copied_contexts() -> None:
     from yieldforge.oracle.checker import (
         _check_prepared_action_proofs,

@@ -9,10 +9,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from yieldforge.baseline.geometry import (
-    PreparedLayoutFootprint,
+    PreparedTranslationRejectionLayout,
+    PreparedTranslationRejectionRemnant,
     TranslationRejectionCertificate,
+    certify_prepared_translation_impossible,
     certify_translation_impossible,
     prepare_layout_footprint,
+    prepare_translation_rejection_layout,
+    prepare_translation_rejection_remnant,
 )
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
@@ -22,6 +26,8 @@ from yieldforge.baseline.replay import (
 )
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.replay.contracts import InventoryItem, ReplayCostLedger
+from yieldforge.reuse.contracts import RemnantStock
+from yieldforge.reuse.geometry import material_key
 
 _MAX_PREPARED_LAYOUT_CACHE_PROBLEMS = 2
 
@@ -57,8 +63,29 @@ class _PreparedTranslationLayoutBatch:
 
 
 _PreparedTranslationLayouts = tuple[
-    tuple[tuple[str, str], tuple[PreparedLayoutFootprint, ...]], ...
+    tuple[tuple[str, str], tuple[PreparedTranslationRejectionLayout, ...]], ...
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRemnantSemanticKey:
+    """All immutable remnant evidence relevant to a rejection certificate."""
+
+    remnant_id: str
+    geometry_schema_version: str
+    geometry_wkb_hex: str
+    geometry_sha256: str
+    geometry_area: float
+    lineage_schema_version: str
+    lineage_root_stock_id: str
+    lineage_parent_remnant_id: str | None
+    lineage_ancestor_remnant_ids: tuple[str, ...]
+    lineage_generation: int
+    lineage_source_candidate_id: str
+    lineage_source_component_sha256: str
+    material_schema_version: str
+    material_key: tuple[str, str, str, str, str]
+    material_provenance: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +96,13 @@ class _PreparedTranslationLayoutRecord:
     owner_pid: int
     runtime_id: int
     layouts: _PreparedTranslationLayouts
-    fingerprint: str
+    remnant_measurements: dict[
+        _PreparedRemnantSemanticKey,
+        PreparedTranslationRejectionRemnant,
+    ]
+    remnant_commitments: dict[_PreparedRemnantSemanticKey, str]
+    remnant_snapshots: dict[str, tuple[tuple[object, ...], tuple[object, ...]]]
+    layout_fingerprint: str
 
 
 _PREPARED_TRANSLATION_LAYOUT_REGISTRY: dict[
@@ -93,11 +126,7 @@ def _prepared_translation_layout_fingerprint(
                 "values": tuple(
                     {
                         "candidate_id": layout.candidate_id,
-                        "geometry_wkb": layout.geometry.wkb_hex,
-                        "part_polygon_wkb": tuple(
-                            item.wkb_hex for item in layout.part_polygons
-                        ),
-                        "vertices": layout.vertices,
+                        "area": layout.area,
                         "bounds": layout.bounds,
                     }
                     for layout in candidate_layouts
@@ -107,6 +136,77 @@ def _prepared_translation_layout_fingerprint(
         ),
     }
     return f"sha256:{semantic_sha256(payload)}"
+
+
+def _prepared_remnant_key_values(
+    key: _PreparedRemnantSemanticKey,
+) -> tuple[object, ...]:
+    return (
+        key.remnant_id,
+        key.geometry_schema_version,
+        key.geometry_wkb_hex,
+        key.geometry_sha256,
+        key.geometry_area,
+        key.lineage_schema_version,
+        key.lineage_root_stock_id,
+        key.lineage_parent_remnant_id,
+        key.lineage_ancestor_remnant_ids,
+        key.lineage_generation,
+        key.lineage_source_candidate_id,
+        key.lineage_source_component_sha256,
+        key.material_schema_version,
+        key.material_key,
+        key.material_provenance,
+    )
+
+
+def _prepared_remnant_measurement_values(
+    measurement: PreparedTranslationRejectionRemnant,
+) -> tuple[object, ...]:
+    return (
+        measurement.remnant_id,
+        measurement.material_key,
+        measurement.area,
+        measurement.bounds,
+    )
+
+
+def _prepared_remnant_measurement_commitment(
+    key: _PreparedRemnantSemanticKey,
+    measurement: PreparedTranslationRejectionRemnant,
+) -> str:
+    payload = {
+        "schema_version": "yieldforge.m8-prepared-remnant-rejection.v1",
+        "semantic_key": _prepared_remnant_key_values(key),
+        "measurement": _prepared_remnant_measurement_values(measurement),
+    }
+    return f"sha256:{semantic_sha256(payload)}"
+
+
+def _validate_prepared_remnant_measurements(
+    registered: _PreparedTranslationLayoutRecord,
+    *,
+    deep: bool,
+) -> None:
+    if (
+        registered.remnant_measurements.keys()
+        != registered.remnant_commitments.keys()
+        or len(registered.remnant_measurements) != len(registered.remnant_snapshots)
+    ):
+        raise ValueError("M8 prepared translation layout batch integrity differs")
+    for key, measurement in registered.remnant_measurements.items():
+        commitment = registered.remnant_commitments[key]
+        expected_snapshot = (
+            _prepared_remnant_key_values(key),
+            _prepared_remnant_measurement_values(measurement),
+        )
+        if registered.remnant_snapshots.get(commitment) != expected_snapshot:
+            raise ValueError("M8 prepared translation layout batch integrity differs")
+        if deep and commitment != _prepared_remnant_measurement_commitment(
+            key,
+            measurement,
+        ):
+            raise ValueError("M8 prepared translation layout batch integrity differs")
 
 
 def _require_prepared_translation_layout_record(
@@ -125,21 +225,82 @@ def _require_prepared_translation_layout_record(
         or prepared._runtime_id != id(runtime)  # noqa: SLF001
     ):
         raise ValueError("M8 prepared translation layout batch is invalid or inactive")
-    if deep and registered.fingerprint != _prepared_translation_layout_fingerprint(
-        prepared,
-        registered.layouts,
-    ):
-        raise ValueError("M8 prepared translation layout batch integrity differs")
+    if deep:
+        if registered.layout_fingerprint != _prepared_translation_layout_fingerprint(
+            prepared,
+            registered.layouts,
+        ):
+            raise ValueError("M8 prepared translation layout batch integrity differs")
+        _validate_prepared_remnant_measurements(registered, deep=True)
     return registered
 
 
-def _registered_prepared_translation_layouts(
+def _registered_prepared_translation_layout_record(
     prepared: _PreparedTranslationLayoutBatch,
     runtime: M7ReplayRuntime,
-) -> _PreparedTranslationLayouts:
-    """Return only canonical registry-owned layouts for an active capability."""
+) -> _PreparedTranslationLayoutRecord:
+    """Return only canonical registry-owned state for an active capability."""
 
-    return _require_prepared_translation_layout_record(prepared, runtime).layouts
+    return _require_prepared_translation_layout_record(prepared, runtime)
+
+
+def _prepared_remnant_semantic_key(
+    remnant: RemnantStock,
+) -> _PreparedRemnantSemanticKey:
+    geometry = remnant.geometry
+    lineage = remnant.lineage
+    return _PreparedRemnantSemanticKey(
+        remnant_id=remnant.remnant_id,
+        geometry_schema_version=geometry.schema_version,
+        geometry_wkb_hex=geometry.wkb_hex,
+        geometry_sha256=geometry.polygon_sha256,
+        geometry_area=geometry.area,
+        lineage_schema_version=lineage.schema_version,
+        lineage_root_stock_id=lineage.root_stock_id,
+        lineage_parent_remnant_id=lineage.parent_remnant_id,
+        lineage_ancestor_remnant_ids=lineage.ancestor_remnant_ids,
+        lineage_generation=lineage.generation,
+        lineage_source_candidate_id=lineage.source_candidate_id,
+        lineage_source_component_sha256=lineage.source_component_sha256,
+        material_schema_version=remnant.material.schema_version,
+        material_key=material_key(remnant.material),
+        material_provenance=str(remnant.material.provenance),
+    )
+
+
+def _registered_prepared_remnant_measurement(
+    prepared: _PreparedTranslationLayoutBatch,
+    runtime: M7ReplayRuntime,
+    remnant: RemnantStock,
+) -> PreparedTranslationRejectionRemnant:
+    """Use O(1) hits; validate prior snapshots only before one scalar-only miss."""
+
+    registered = _require_prepared_translation_layout_record(prepared, runtime)
+    semantic_key = _prepared_remnant_semantic_key(remnant)
+    cached = registered.remnant_measurements.get(semantic_key)
+    if cached is not None:
+        return cached
+    _validate_prepared_remnant_measurements(registered, deep=False)
+    measured = prepare_translation_rejection_remnant(remnant)
+    if (
+        measured.remnant_id != semantic_key.remnant_id
+        or measured.material_key != semantic_key.material_key
+        or measured.area != semantic_key.geometry_area
+    ):
+        raise ValueError("M8 prepared remnant measurements differ from semantic evidence")
+    commitment = _prepared_remnant_measurement_commitment(
+        semantic_key,
+        measured,
+    )
+    if _PREPARED_TRANSLATION_LAYOUT_REGISTRY.get(id(prepared)) is not registered:
+        raise ValueError("M8 prepared translation layout batch is invalid or inactive")
+    registered.remnant_measurements[semantic_key] = measured
+    registered.remnant_commitments[semantic_key] = commitment
+    registered.remnant_snapshots[commitment] = (
+        _prepared_remnant_key_values(semantic_key),
+        _prepared_remnant_measurement_values(measured),
+    )
+    return measured
 
 
 def _prepared_key_and_inputs(
@@ -174,7 +335,10 @@ def _prepare_translation_layout_batch(
 
     if event_positions != tuple(sorted(set(event_positions))):
         raise ValueError("M8 prepared translation event positions must be sorted unique")
-    layouts_by_key: dict[tuple[str, str], tuple[PreparedLayoutFootprint, ...]] = {}
+    layouts_by_key: dict[
+        tuple[str, str],
+        tuple[PreparedTranslationRejectionLayout, ...],
+    ] = {}
     for event_position in event_positions:
         key, _binding, problem, verified = _prepared_key_and_inputs(
             runtime,
@@ -182,10 +346,12 @@ def _prepare_translation_layout_batch(
         )
         if key not in layouts_by_key:
             layouts_by_key[key] = tuple(
-                prepare_layout_footprint(
-                    problem.problem,
-                    candidate,
-                    runtime.replay_input.fit_config,
+                prepare_translation_rejection_layout(
+                    prepare_layout_footprint(
+                        problem.problem,
+                        candidate,
+                        runtime.replay_input.fit_config,
+                    )
                 )
                 for candidate in verified.candidates
             )
@@ -204,7 +370,10 @@ def _prepare_translation_layout_batch(
         owner_pid=os.getpid(),
         runtime_id=id(runtime),
         layouts=layouts,
-        fingerprint=_prepared_translation_layout_fingerprint(prepared, layouts),
+        remnant_measurements={},
+        remnant_commitments={},
+        remnant_snapshots={},
+        layout_fingerprint=_prepared_translation_layout_fingerprint(prepared, layouts),
     )
     try:
         yield prepared
@@ -226,8 +395,8 @@ def _compile_rejections_from_layouts(
     *,
     binding,  # type: ignore[no-untyped-def]
     verified,  # type: ignore[no-untyped-def]
-    layouts: tuple[PreparedLayoutFootprint, ...],
-    item: InventoryItem,
+    layouts: tuple[PreparedTranslationRejectionLayout, ...],
+    remnant: PreparedTranslationRejectionRemnant,
 ) -> tuple[CompiledTranslationRejection, ...]:
     if tuple(layout.candidate_id for layout in layouts) != tuple(
         candidate.candidate_id for candidate in verified.candidates
@@ -236,9 +405,9 @@ def _compile_rejections_from_layouts(
     return tuple(
         CompiledTranslationRejection(
             candidate_id=candidate.candidate_id,
-            certificate=certify_translation_impossible(
+            certificate=certify_prepared_translation_impossible(
                 layout,
-                item.remnant,
+                remnant,
                 material=binding.material,
                 fit_config=runtime.replay_input.fit_config,
             ),
@@ -256,22 +425,27 @@ def _compile_prepared_translation_rejections(
 ) -> tuple[CompiledTranslationRejection, ...]:
     """Use one already-validated layout set without reconstructing geometry."""
 
-    prepared_layouts = _registered_prepared_translation_layouts(prepared, runtime)
+    registered = _registered_prepared_translation_layout_record(prepared, runtime)
     key, binding, _problem, verified = _prepared_key_and_inputs(
         runtime,
         event_position=event_position,
     )
     matching = tuple(
-        layouts for candidate_key, layouts in prepared_layouts if candidate_key == key
+        layouts for candidate_key, layouts in registered.layouts if candidate_key == key
     )
     if len(matching) != 1:
         raise ValueError("M8 prepared translation layouts do not cover the event problem")
+    remnant = _registered_prepared_remnant_measurement(
+        prepared,
+        runtime,
+        item.remnant,
+    )
     return _compile_rejections_from_layouts(
         runtime,
         binding=binding,
         verified=verified,
         layouts=matching[0],
-        item=item,
+        remnant=remnant,
     )
 
 
