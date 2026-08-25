@@ -137,6 +137,11 @@ def test_certificate_gate_passes_only_complete_exact_fast_result() -> None:
     assert result.checker_failure_count == 0
     assert result.sampled_checker_failure_count == 0
     assert result.sampled_speedup == 25.0
+    assert result.missing_full_run_witness_classifications == ()
+    assert result.missing_audit_witness_classifications == ()
+    assert result.certified_event_count > 0
+    assert result.exact_escape_count > 0
+    assert result.state_rejoin_count > 0
     assert result.projected_held_out_calendar_days <= 7.0
     assert result.configured_worker_count == 8
     assert result.measured_process_count == 1
@@ -190,6 +195,87 @@ def test_certificate_gate_redesigns_when_present_witness_stratum_is_not_audited(
     result = _finalize(bindings=bindings)
 
     assert result.uncovered_witness_classifications == ("state_rejoin",)
+    assert result.technical_decision == "redesign_certificate_proof"
+
+
+def test_certificate_gate_rejects_exact_only_full_run_and_audit() -> None:
+    bindings = tuple(
+        item.model_copy(update={"witness_classifications": ("exact_transition",)})
+        for item in _bindings()
+    )
+    cells = tuple(
+        item.model_copy(
+            update={
+                "witness_classifications": ("exact_transition",),
+                "certified_event_count": 0,
+                "state_rejoin_count": 0,
+            }
+        )
+        for item in _cells(bindings=bindings)
+    )
+
+    result = _finalize(cells=cells, bindings=bindings)
+
+    assert result.missing_full_run_witness_classifications == (
+        "no_fit",
+        "policy_dominated",
+        "state_rejoin",
+    )
+    assert result.missing_audit_witness_classifications == (
+        "no_fit",
+        "policy_dominated",
+        "state_rejoin",
+    )
+    assert result.technical_decision == "redesign_certificate_proof"
+
+
+def test_certificate_gate_rejects_exact_only_frozen_audit_boundary() -> None:
+    bindings = tuple(
+        item.model_copy(update={"witness_classifications": ("exact_transition",)})
+        for item in _bindings()
+    )
+
+    result = _finalize(bindings=bindings)
+
+    assert result.missing_full_run_witness_classifications == ()
+    assert result.missing_audit_witness_classifications == (
+        "no_fit",
+        "policy_dominated",
+        "state_rejoin",
+    )
+    assert result.technical_decision == "redesign_certificate_proof"
+
+
+def test_certificate_gate_rejects_no_positive_state_rejoin_evidence() -> None:
+    cells = tuple(
+        item.model_copy(update={"state_rejoin_count": 0}) for item in _cells()
+    )
+
+    result = _finalize(cells=cells)
+
+    assert result.state_rejoin_count == 0
+    assert result.technical_decision == "redesign_certificate_proof"
+
+
+def test_certificate_gate_rejects_no_positive_exact_escape_evidence() -> None:
+    cells = tuple(
+        item.model_copy(update={"exact_escape_count": 0}) for item in _cells()
+    )
+
+    result = _finalize(cells=cells)
+
+    assert result.exact_escape_count == 0
+    assert result.technical_decision == "redesign_certificate_proof"
+
+
+def test_certificate_gate_rejects_no_positive_passive_certificate_evidence() -> None:
+    cells = tuple(
+        item.model_copy(update={"certified_event_count": 0}) for item in _cells()
+    )
+
+    result = _finalize(cells=cells)
+
+    assert result.certified_event_count == 0
     assert result.technical_decision == "redesign_certificate_proof"
 
 
@@ -298,10 +384,11 @@ def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
             preflight,
         )
     )
-    counts = {"full": 0, "sample": 0, "checker": []}
+    counts = {"full": 0, "sample": 0, "reference": 0, "checker": []}
     original_full = experiment.score_sparse_event
     original_sample = experiment.score_certificate_actions
     original_checker = experiment.check_action_proofs
+    original_reference = experiment.score_reference_actions
 
     def counted_full(request):  # type: ignore[no-untyped-def]
         counts["full"] += 1
@@ -315,9 +402,15 @@ def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
         counts["checker"].append(len(proofs))
         return original_checker(request, proofs)
 
+    def counted_reference(request, *, action_ids):  # type: ignore[no-untyped-def]
+        counts["reference"] += 1
+        assert action_ids == tuple(item.catalog_action_id for item in audit)
+        return original_reference(request, action_ids=action_ids)
+
     monkeypatch.setattr(experiment, "score_sparse_event", counted_full)
     monkeypatch.setattr(experiment, "score_certificate_actions", counted_sample)
     monkeypatch.setattr(experiment, "check_action_proofs", counted_checker)
+    monkeypatch.setattr(experiment, "score_reference_actions", counted_reference)
     monkeypatch.setattr(experiment, "_request_for_cell", lambda *args, **kwargs: request)
     cell = SimpleNamespace(stream=runtime.replay_input.instances)
 
@@ -332,6 +425,7 @@ def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
     assert counts == {
         "full": 1,
         "sample": 1,
+        "reference": 1,
         "checker": [result.current_action_count, len(audit)],
     }
     assert result.sampled_certificate_elapsed_seconds > 0

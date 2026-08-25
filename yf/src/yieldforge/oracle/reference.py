@@ -61,15 +61,15 @@ def _visible_stop(request: M8OracleRequest, *, event_position: int) -> int:
     return event_position + 1 + len(visible)
 
 
-def _score_reference_action(
+def _score_reference_action_from_catalog(
     request: M8OracleRequest,
     *,
+    catalog,  # type: ignore[no-untyped-def]
     action_id: str,
-    stop_event_position: int | None = None,
+    stop_event_position: int,
 ) -> M8ActionScore:
     """Score one catalog action through the unchanged exact M7 continuation."""
 
-    catalog = enumerate_m7_action_catalog(request.runtime, cursor=request.cursor)
     descriptors = tuple(item for item in catalog.actions if item.action_id == action_id)
     if len(descriptors) != 1:
         raise ValueError("M8 reference action is absent from the exact current catalog")
@@ -88,11 +88,7 @@ def _score_reference_action(
             prepared_layout_cache=request.runtime.prepared_layout_cache or OrderedDict(),
         ),
         cursor=step.cursor,
-        stop_event_position=(
-            _visible_stop(request, event_position=catalog.event_position)
-            if stop_event_position is None
-            else stop_event_position
-        ),
+        stop_event_position=stop_event_position,
     )
     return M8ActionScore(
         action_id=action_id,
@@ -107,13 +103,41 @@ def score_reference_action(
 ) -> M8ActionScore:
     """Score one action in a fresh cache-free stable semantic snapshot."""
 
+    return score_reference_actions(request, action_ids=(action_id,))[0]
+
+
+def score_reference_actions(
+    request: M8OracleRequest,
+    *,
+    action_ids: tuple[str, ...],
+) -> tuple[M8ActionScore, ...]:
+    """Brute-score one ordered selected-action batch in a single stable snapshot."""
+
+    if not action_ids or action_ids != tuple(dict.fromkeys(action_ids)):
+        raise ValueError("M8 selected reference action IDs must be nonempty and unique")
     with authoritative_m7_proof_runtime(request.runtime) as authority:
         captured = M8OracleRequest(
             runtime=authority.runtime,
             cursor=request.cursor,
             visibility=request.visibility,
         )
-        return _score_reference_action(captured, action_id=action_id)
+        catalog = enumerate_m7_action_catalog(
+            captured.runtime,
+            cursor=captured.cursor,
+        )
+        present = {item.action_id for item in catalog.actions}
+        if any(action_id not in present for action_id in action_ids):
+            raise ValueError("M8 selected reference action is absent from the exact catalog")
+        stop = _visible_stop(captured, event_position=catalog.event_position)
+        return tuple(
+            _score_reference_action_from_catalog(
+                captured,
+                catalog=catalog,
+                action_id=action_id,
+                stop_event_position=stop,
+            )
+            for action_id in action_ids
+        )
 
 
 def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
@@ -135,8 +159,9 @@ def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
         )
         stop = _visible_stop(captured, event_position=catalog.event_position)
         action_scores = tuple(
-            _score_reference_action(
+            _score_reference_action_from_catalog(
                 captured,
+                catalog=catalog,
                 action_id=descriptor.action_id,
                 stop_event_position=stop,
             )
@@ -159,5 +184,6 @@ __all__ = [
     "M8OracleRequest",
     "M8ReferenceResult",
     "score_reference_action",
+    "score_reference_actions",
     "score_reference_event",
 ]

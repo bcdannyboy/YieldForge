@@ -33,7 +33,7 @@ from yieldforge.baseline.replay import (
 from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
 from yieldforge.oracle.checker import check_action_proofs
 from yieldforge.oracle.proofs import M8ActionProof, M8EventClassification
-from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
+from yieldforge.oracle.reference import M8OracleRequest, score_reference_actions
 from yieldforge.oracle.sparse import (
     M8SparseResult,
     score_certificate_actions,
@@ -226,10 +226,15 @@ class M8CertificateProofResult(BaselineContractModel):
     audit_action_count: StrictInt = Field(ge=1)
     audit_mismatch_count: StrictInt = Field(ge=0)
     witness_classifications: tuple[M8EventClassification, ...] = Field(min_length=1)
+    missing_full_run_witness_classifications: tuple[M8EventClassification, ...]
+    missing_audit_witness_classifications: tuple[M8EventClassification, ...]
     uncovered_witness_classifications: tuple[M8EventClassification, ...]
     uncovered_action_kinds: tuple[M8ActionKind, ...]
     uncovered_future_event_counts: tuple[StrictInt, ...]
     uncovered_regimes: tuple[TemporalRegime, ...]
+    certified_event_count: StrictInt = Field(ge=0)
+    exact_escape_count: StrictInt = Field(ge=0)
+    state_rejoin_count: StrictInt = Field(ge=0)
     certificate_elapsed_seconds: StrictFloat = Field(gt=0)
     checker_elapsed_seconds: StrictFloat = Field(gt=0)
     certificate_pipeline_elapsed_seconds: StrictFloat = Field(gt=0)
@@ -275,6 +280,9 @@ class M8CertificateProofResult(BaselineContractModel):
             checker_failure_count=self.checker_failure_count,
             sampled_checker_failure_count=self.sampled_checker_failure_count,
             audit_mismatch_count=self.audit_mismatch_count,
+            certified_event_count=self.certified_event_count,
+            exact_escape_count=self.exact_escape_count,
+            state_rejoin_count=self.state_rejoin_count,
             uncovered_witness_classifications=self.uncovered_witness_classifications,
             uncovered_action_kinds=self.uncovered_action_kinds,
             uncovered_future_event_counts=self.uncovered_future_event_counts,
@@ -344,12 +352,14 @@ def _coverage_gaps(
     audit_bindings: tuple[M8AuditActionBinding, ...],
 ) -> tuple[
     tuple[M8EventClassification, ...],
+    tuple[M8EventClassification, ...],
+    tuple[M8EventClassification, ...],
     tuple[M8ActionKind, ...],
     tuple[int, ...],
     tuple[TemporalRegime, ...],
 ]:
     by_cell = _audit_by_cell(audit_bindings)
-    missing_witnesses: set[M8EventClassification] = set()
+    per_cell_missing_witnesses: set[M8EventClassification] = set()
     missing_kinds: set[M8ActionKind] = set()
     for cell in cells:
         bindings = by_cell[cell.regime]
@@ -359,7 +369,9 @@ def _coverage_gaps(
             for classification in item.witness_classifications
         }
         audited_kinds = {item.action_kind for item in bindings}
-        missing_witnesses.update(set(cell.witness_classifications) - audited_witnesses)
+        per_cell_missing_witnesses.update(
+            set(cell.witness_classifications) - audited_witnesses
+        )
         missing_kinds.update(set(cell.current_action_kinds) - audited_kinds)
     present_horizons = sorted({item.future_event_count for item in cells})
     if present_horizons:
@@ -374,8 +386,25 @@ def _coverage_gaps(
     missing_horizons = tuple(sorted(horizon_targets - audited_horizons))
     audited_regimes = {item.regime for item in audit_bindings}
     missing_regimes = tuple(item for item in TemporalRegime if item not in audited_regimes)
+    required_witnesses = set(_WITNESS_ORDER)
+    full_witnesses = {
+        classification
+        for cell in cells
+        for classification in cell.witness_classifications
+    }
+    audit_witnesses = {
+        classification
+        for binding in audit_bindings
+        for classification in binding.witness_classifications
+    }
+    missing_full = required_witnesses - full_witnesses
+    missing_audit = required_witnesses - audit_witnesses
     return (
-        _classification_tuple(missing_witnesses),
+        _classification_tuple(
+            per_cell_missing_witnesses | missing_full | missing_audit
+        ),
+        _classification_tuple(missing_full),
+        _classification_tuple(missing_audit),
         tuple(sorted(missing_kinds)),
         missing_horizons,
         missing_regimes,
@@ -429,6 +458,9 @@ def _aggregate_certificate_metrics(
             for classification in item.witness_classifications
         }
     )
+    certified_event_count = sum(item.certified_event_count for item in cells)
+    exact_escape_count = sum(item.exact_escape_count for item in cells)
+    state_rejoin_count = sum(item.state_rejoin_count for item in cells)
     gaps = _coverage_gaps(cells, audit_bindings)
     return {
         "current_action_count": current,
@@ -439,10 +471,15 @@ def _aggregate_certificate_metrics(
         "audit_action_count": len(audit_bindings),
         "audit_mismatch_count": mismatches,
         "witness_classifications": witness_classifications,
+        "missing_full_run_witness_classifications": gaps[1],
+        "missing_audit_witness_classifications": gaps[2],
         "uncovered_witness_classifications": gaps[0],
-        "uncovered_action_kinds": gaps[1],
-        "uncovered_future_event_counts": gaps[2],
-        "uncovered_regimes": gaps[3],
+        "uncovered_action_kinds": gaps[3],
+        "uncovered_future_event_counts": gaps[4],
+        "uncovered_regimes": gaps[5],
+        "certified_event_count": certified_event_count,
+        "exact_escape_count": exact_escape_count,
+        "state_rejoin_count": state_rejoin_count,
         "certificate_elapsed_seconds": certificate_seconds,
         "checker_elapsed_seconds": checker_seconds,
         "certificate_pipeline_elapsed_seconds": pipeline_seconds,
@@ -464,6 +501,9 @@ def _gate_decision(
     checker_failure_count: int,
     sampled_checker_failure_count: int,
     audit_mismatch_count: int,
+    certified_event_count: int,
+    exact_escape_count: int,
+    state_rejoin_count: int,
     uncovered_witness_classifications: tuple[M8EventClassification, ...],
     uncovered_action_kinds: tuple[M8ActionKind, ...],
     uncovered_future_event_counts: tuple[int, ...],
@@ -477,6 +517,9 @@ def _gate_decision(
         or checker_failure_count
         or sampled_checker_failure_count
         or audit_mismatch_count
+        or not certified_event_count
+        or not exact_escape_count
+        or not state_rejoin_count
         or uncovered_witness_classifications
         or uncovered_action_kinds
         or uncovered_future_event_counts
@@ -527,6 +570,9 @@ def finalize_certificate_proof(
             aggregates["sampled_checker_failure_count"]
         ),
         audit_mismatch_count=int(aggregates["audit_mismatch_count"]),
+        certified_event_count=int(aggregates["certified_event_count"]),
+        exact_escape_count=int(aggregates["exact_escape_count"]),
+        state_rejoin_count=int(aggregates["state_rejoin_count"]),
         uncovered_witness_classifications=aggregates[
             "uncovered_witness_classifications"
         ],  # type: ignore[arg-type]
@@ -850,9 +896,9 @@ def _execute_timed_cell(
             raise ValueError("M8 matched certificate differs from its pre-timing audit freeze")
 
     started = perf_counter()
-    reference_scores = tuple(
-        score_reference_action(request, action_id=item.catalog_action_id)
-        for item in audit_bindings
+    reference_scores = score_reference_actions(
+        request,
+        action_ids=audit_action_ids,
     )
     reference_seconds = max(0.000001, round(perf_counter() - started, 6))
     audit_mismatches = sum(
