@@ -70,6 +70,56 @@ def _unsafe_rehash(proof: M8ActionProof, **changes: object) -> M8ActionProof:
     )
 
 
+def test_checker_passive_advance_applies_once_and_hashes_two_cursors(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import certificates, checker
+    from yieldforge.oracle.certificates import (
+        build_validated_m8_common_transition_in_context,
+    )
+
+    request = _request()
+    proof = next(
+        item
+        for item in score_sparse_event(request).proofs
+        if item.catalog_action_id == "m7-standard:candidate-two"
+    )
+    witness = proof.witnesses[0]
+    assert witness.classification in {"no_fit", "policy_dominated"}
+    counts = {"apply": 0, "hash": 0}
+    original_apply = certificates.apply_m7_frozen_action_evidence
+    original_hash = certificates.m7_cursor_sha256
+
+    def counted_apply(*args, **kwargs):  # type: ignore[no-untyped-def]
+        counts["apply"] += 1
+        return original_apply(*args, **kwargs)
+
+    def counted_hash(*args, **kwargs):  # type: ignore[no-untyped-def]
+        counts["hash"] += 1
+        return original_hash(*args, **kwargs)
+
+    with checker._prepare_m8_checker_context(request) as context:  # noqa: SLF001
+        branch = checker._initialize_branch(context, proof)  # noqa: SLF001
+        common = build_validated_m8_common_transition_in_context(
+            context._authority,  # noqa: SLF001
+            cursor=context._fallback_step.cursor,  # noqa: SLF001
+        )
+        monkeypatch.setattr(certificates, "apply_m7_frozen_action_evidence", counted_apply)
+        monkeypatch.setattr(certificates, "m7_cursor_sha256", counted_hash)
+        monkeypatch.setattr(checker, "apply_m7_frozen_action_evidence", counted_apply)
+        monkeypatch.setattr(checker, "m7_cursor_sha256", counted_hash)
+
+        checker._check_event(  # noqa: SLF001
+            context,
+            branch,
+            witness=witness,
+            common=common,
+        )
+
+    assert branch.checked == 1
+    assert counts == {"apply": 1, "hash": 2}
+
+
 @pytest.mark.parametrize("source_classification", ["state_rejoin", "no_fit"])
 def test_checker_rejects_rehashed_noncanonical_exact_transition(
     source_classification: str,
@@ -540,6 +590,117 @@ def test_event_major_batches_own_one_snapshot_and_one_common_capability(
     assert authority_fingerprint_count == 10
     assert generator_fingerprint_count == 4
     assert checker_fingerprint_count == 4
+
+
+def test_prepared_common_fact_deep_validation_scales_with_events_not_branches(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import certificates, checker, sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0, event_count=4)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    original_validate = certificates._validate_portable_common_transition_fact  # noqa: SLF001
+    validation_count = 0
+
+    def counted_validate(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal validation_count
+        validation_count += 1
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        certificates,
+        "_validate_portable_common_transition_fact",
+        counted_validate,
+    )
+    result = sparse.score_sparse_event(request)
+    assert validation_count == 3
+
+    validation_count = 0
+    checks = checker.check_action_proofs(request, result.proofs)
+    assert all(item.valid for item in checks)
+    assert validation_count == 3
+
+
+def test_prepared_common_fact_clones_once_per_event_and_releases_on_failure(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import certificates, sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0, event_count=4)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    clone_count = 0
+    original_deepcopy = certificates.deepcopy
+
+    def counted_deepcopy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal clone_count
+        clone_count += 1
+        return original_deepcopy(*args, **kwargs)
+
+    monkeypatch.setattr(certificates, "deepcopy", counted_deepcopy)
+    sparse.score_sparse_event(request)
+    assert clone_count == 3
+
+    initial_registry_size = len(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+
+    def fail_advance(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("forced common-event failure")
+
+    monkeypatch.setattr(sparse, "_advance_branch", fail_advance)
+    with pytest.raises(RuntimeError, match="forced common-event failure"):
+        sparse.score_sparse_event(request)
+    assert len(certificates._VALIDATED_COMMON_REGISTRY) == initial_registry_size  # noqa: SLF001
+
+def test_mutating_exposed_common_fact_cannot_change_generator_or_checker(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import checker, sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    expected = score_sparse_event(request)
+    original_generator_common = sparse.build_validated_m8_common_transition_in_context
+    original_checker_common = checker.build_validated_m8_common_transition_in_context
+
+    def mutate_exposed(builder, *args, **kwargs):  # type: ignore[no-untyped-def]
+        capability = builder(*args, **kwargs)
+        exposed = capability.fact
+        object.__setattr__(exposed, "content_sha256", "sha256:" + "f" * 64)
+        return capability
+
+    monkeypatch.setattr(
+        sparse,
+        "build_validated_m8_common_transition_in_context",
+        lambda *args, **kwargs: mutate_exposed(
+            original_generator_common,
+            *args,
+            **kwargs,
+        ),
+    )
+    actual = sparse.score_sparse_event(request)
+    assert actual == expected
+
+    monkeypatch.setattr(
+        checker,
+        "build_validated_m8_common_transition_in_context",
+        lambda *args, **kwargs: mutate_exposed(
+            original_checker_common,
+            *args,
+            **kwargs,
+        ),
+    )
+    assert all(item.valid for item in checker.check_action_proofs(request, actual.proofs))
 
 
 def test_jagua_batch_materializes_one_bound_copy_and_one_lease(

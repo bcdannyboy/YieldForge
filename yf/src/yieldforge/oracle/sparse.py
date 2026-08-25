@@ -24,6 +24,8 @@ from yieldforge.baseline.replay import (
     select_m7_fallback,
 )
 from yieldforge.oracle.certificates import (
+    _release_validated_common_transition,
+    _validated_common_transition_fact,
     build_validated_m8_common_transition_in_context,
     certify_event_passivity,
 )
@@ -253,9 +255,9 @@ def _advance_branch(
     common,  # type: ignore[no-untyped-def]
 ) -> None:
     runtime = context._request.runtime  # noqa: SLF001
-    fact = common.fact
-    state_before = m7_cursor_sha256(branch.cursor)
+    fact = _validated_common_transition_fact(runtime, common)
     if branch.cursor == fact.cursor_before:
+        state_before = m7_cursor_sha256(branch.cursor)
         branch.cursor = apply_m7_frozen_action_evidence(
             runtime,
             cursor=branch.cursor,
@@ -280,20 +282,14 @@ def _advance_branch(
         )
         branch.survivor_count += passivity.exact_search_count
         if passivity.passive:
-            if passivity.witness is None:
-                raise ValueError("M8 passive result lacks its event witness")
-            branch.cursor = apply_m7_frozen_action_evidence(
-                runtime,
-                cursor=branch.cursor,
-                event_position=fact.event_position,
-                action=fact.step.event.action,
-            )
+            if passivity.witness is None or passivity.branch_after is None:
+                raise ValueError("M8 passive result lacks its event witness or cursor")
+            branch.cursor = passivity.branch_after
             witness = passivity.witness
-            if witness.state_after_sha256 != m7_cursor_sha256(branch.cursor):
-                raise ValueError("M8 generated certificate state differs after application")
             branch.skipped_count += 1
             branch.rejection_count += len(witness.influences)
         else:
+            state_before = m7_cursor_sha256(branch.cursor)
             branch_catalog = enumerate_m7_action_catalog(
                 runtime,
                 cursor=branch.cursor,
@@ -355,10 +351,16 @@ def _score_prepared_certificate_actions(
             context._authority,  # noqa: SLF001
             cursor=common_cursor,
         )
-        for branch in branches:
-            _advance_branch(context, branch, common=common)
-        common_cursor = common.step.cursor
-        del common
+        try:
+            fact = _validated_common_transition_fact(
+                context._request.runtime,  # noqa: SLF001
+                common,
+            )
+            for branch in branches:
+                _advance_branch(context, branch, common=common)
+            common_cursor = fact.step.cursor
+        finally:
+            _release_validated_common_transition(common)
 
     results = []
     for branch in branches:

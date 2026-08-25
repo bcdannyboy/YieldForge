@@ -6,7 +6,7 @@ import os
 import pickle
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import timedelta
 from inspect import signature
 
@@ -26,6 +26,7 @@ from yieldforge.baseline.replay import (
     M7ReplayCursor,
     apply_m7_action_descriptor,
     apply_m7_frozen_action_evidence,
+    authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
     initial_m7_cursor,
@@ -38,9 +39,11 @@ from yieldforge.oracle import certificates as certificate_module
 from yieldforge.oracle import compiled as compiled_module
 from yieldforge.oracle.certificates import (
     BranchInventoryDelta,
+    EventPassivityResult,
     ValidatedCommonTransition,
     build_m8_common_transition_fact,
     build_validated_m8_common_transition,
+    build_validated_m8_common_transition_in_context,
     certify_event_passivity,
     validate_m8_common_transition_fact,
 )
@@ -191,7 +194,7 @@ def _write_collision_jagua(path, *, collision: bool) -> None:  # type: ignore[no
 
 def _private_jagua_path(common):  # type: ignore[no-untyped-def]
     registered = certificate_module._VALIDATED_COMMON_REGISTRY[id(common)]  # noqa: SLF001
-    path = registered[5].runtime.jagua_executable
+    path = registered.snapshot.runtime.jagua_executable
     assert path is not None
     return path
 
@@ -1120,6 +1123,27 @@ def test_copied_or_manually_constructed_validated_capability_fails_closed() -> N
             certify_event_passivity(runtime, common=invalid, branch_cursor=branch)
 
 
+def test_private_common_fact_registry_tamper_is_caught_on_release() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    with authoritative_m7_proof_runtime(runtime) as authority:
+        common = build_validated_m8_common_transition_in_context(
+            authority,
+            cursor=cursor,
+        )
+        registered = certificate_module._VALIDATED_COMMON_REGISTRY[id(common)]  # noqa: SLF001
+        object.__setattr__(
+            registered.canonical_fact,
+            "content_sha256",
+            "sha256:" + "f" * 64,
+        )
+
+        with pytest.raises(ValueError, match="common transition registry integrity"):
+            certificate_module._release_validated_common_transition(common)  # noqa: SLF001
+
+    assert id(common) not in certificate_module._VALIDATED_COMMON_REGISTRY  # noqa: SLF001
+
+
 def test_certificate_fails_closed_on_runtime_mutation_after_capability_entry(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -1740,10 +1764,207 @@ def test_certifier_derives_complete_delta_and_state_hashes_from_branch_cursor() 
         action=fact.step.event.action,
     )
     assert result.witness.state_after_sha256 == m7_cursor_sha256(expected_after)
+    assert result.branch_after == expected_after
     assert result.witness.common_action_id == fact.step.event.action.action_id
     assert result.witness.branch_action_id == fact.step.event.action.action_id
     assert "delta" not in signature(certify_event_passivity).parameters
     assert "state_before_sha256" not in signature(certify_event_passivity).parameters
+
+    with pytest.raises(ValueError, match="resulting-cursor provenance"):
+        EventPassivityResult(
+            passive=True,
+            witness=result.witness,
+            branch_after=result.branch_after,
+            exact_search_count=result.exact_search_count,
+        )
+    with pytest.raises(ValueError, match="resulting-cursor provenance"):
+        replace(result, branch_after=branch)
+
+
+def test_influence_evidence_uses_independent_v2_commitment_graph(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="v2-commitment",
+    )
+    branch = _branch_cursor(cursor, added=(item,))
+    expected_after = apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=branch,
+        event_position=common.event_position,
+        action=common.step.event.action,
+    )
+    rejections = compile_translation_rejections(runtime, event_position=0, item=item)
+    captured = []
+    original_sha256 = certificate_module.semantic_sha256
+
+    def capture_payload(value, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if (
+            isinstance(value, dict)
+            and value.get("schema_version")
+            == "yieldforge.m8-event-influence-evidence.v2"
+        ):
+            captured.append(value)
+        return original_sha256(value, *args, **kwargs)
+
+    monkeypatch.setattr(certificate_module, "semantic_sha256", capture_payload)
+    result = certify_event_passivity(runtime, common=common, branch_cursor=branch)
+
+    assert result.witness is not None
+    expected_payload = {
+        "schema_version": "yieldforge.m8-event-influence-evidence.v2",
+        "commitments": {
+            "common_transition_fact_sha256": common.content_sha256,
+            "state_before_sha256": m7_cursor_sha256(branch),
+            "state_after_sha256": m7_cursor_sha256(expected_after),
+        },
+        "event_position": common.event_position,
+        "direction": "added",
+        "remnant_id": item.remnant.remnant_id,
+        "classification": "no_fit",
+        "delta_added_ids": (item.remnant.remnant_id,),
+        "delta_removed_ids": (),
+        "common": {
+            "catalog_action_id": common.step.action_binding.catalog_action_id,
+            "materialized_action_id": common.step.action_binding.materialized_action_id,
+            "decision_key": common.policy_rank.decision_key,
+        },
+        "branch_action_id": common.step.event.action.action_id,
+        "cheap_rejections": tuple(
+            {
+                "candidate_id": rejection.candidate_id,
+                "certificate": asdict(rejection.certificate),
+            }
+            for rejection in rejections
+        ),
+        "exact_searches": (),
+        "competitor": None,
+    }
+    assert captured == [expected_payload]
+    assert result.witness.influences[0].evidence_sha256 == (
+        f"sha256:{original_sha256(expected_payload)}"
+    )
+    assert not {
+        "engine",
+        "binding",
+        "problem",
+        "candidate_set",
+        "candidates",
+        "fit_config",
+        "search_config",
+        "policy",
+        "inventory_item",
+        "remnant",
+    } & expected_payload.keys()
+    variants = (
+        expected_payload | {"event_position": 1},
+        expected_payload | {"direction": "removed"},
+        expected_payload | {"remnant_id": _sha(1)},
+        expected_payload | {"classification": "policy_dominated"},
+        expected_payload | {"delta_added_ids": ()},
+        expected_payload | {"delta_removed_ids": (item.remnant.remnant_id,)},
+        expected_payload | {"branch_action_id": "yfm7a-" + "f" * 24},
+        expected_payload | {"cheap_rejections": ()},
+        expected_payload | {"exact_searches": ({"changed": True},)},
+        expected_payload | {"competitor": {"changed": True}},
+        expected_payload
+        | {
+            "commitments": expected_payload["commitments"]
+            | {"common_transition_fact_sha256": _sha(2)}
+        },
+        expected_payload
+        | {
+            "commitments": expected_payload["commitments"]
+            | {"state_before_sha256": _sha(3)}
+        },
+        expected_payload
+        | {
+            "commitments": expected_payload["commitments"]
+            | {"state_after_sha256": _sha(4)}
+        },
+        expected_payload
+        | {
+            "common": expected_payload["common"]
+            | {"catalog_action_id": "m7-standard:changed"}
+        },
+        expected_payload
+        | {
+            "common": expected_payload["common"]
+            | {"materialized_action_id": "yfm7a-" + "e" * 24}
+        },
+        expected_payload
+        | {
+            "common": expected_payload["common"]
+            | {"decision_key": ("changed=true",)}
+        },
+    )
+    baseline_digest = original_sha256(expected_payload)
+    assert all(original_sha256(variant) != baseline_digest for variant in variants)
+
+
+def test_prepared_influence_hashing_does_not_dump_problem_or_candidates(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    with authoritative_m7_proof_runtime(runtime) as authority:
+        common = build_validated_m8_common_transition_in_context(
+            authority,
+            cursor=cursor,
+        )
+        item = inventory_item(
+            box(0, 0, 3, 20),
+            material=authority.runtime.replay_input.instances[0].material,
+            token="prepared-v2-dump-count",
+        )
+        branch = _branch_cursor(cursor, added=(item,))
+        with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+            authority.runtime,
+            event_positions=(0,),
+        ) as prepared_layouts:
+            problem_type = type(authority.runtime.replay_input.problems[0])
+            candidate_type = type(
+                next(iter(authority.runtime.runtime_candidates.values())).candidates[0]
+            )
+            original_problem_dump = problem_type.model_dump
+            original_candidate_dump = candidate_type.model_dump
+            original_evidence_sha256 = certificate_module._evidence_sha256  # noqa: SLF001
+            counts = {"problem": 0, "candidate": 0}
+            measuring_evidence = False
+
+            def count_problem(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                if measuring_evidence:
+                    counts["problem"] += 1
+                return original_problem_dump(self, *args, **kwargs)
+
+            def count_candidate(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                if measuring_evidence:
+                    counts["candidate"] += 1
+                return original_candidate_dump(self, *args, **kwargs)
+
+            def measure_evidence(*args, **kwargs):  # type: ignore[no-untyped-def]
+                nonlocal measuring_evidence
+                measuring_evidence = True
+                try:
+                    return original_evidence_sha256(*args, **kwargs)
+                finally:
+                    measuring_evidence = False
+
+            monkeypatch.setattr(problem_type, "model_dump", count_problem)
+            monkeypatch.setattr(candidate_type, "model_dump", count_candidate)
+            monkeypatch.setattr(certificate_module, "_evidence_sha256", measure_evidence)
+
+            result = certify_event_passivity(
+                authority.runtime,
+                common=common,
+                branch_cursor=branch,
+                prepared_layouts=prepared_layouts,
+            )
+
+    assert result.passive
+    assert counts == {"problem": 0, "candidate": 0}
 
 
 def test_certifier_rejects_changed_shared_remnant_record() -> None:

@@ -44,6 +44,54 @@ def test_sparse_passive_remnant_matches_reference_without_branch_replay() -> Non
     )
 
 
+def test_generator_passive_advance_applies_once_and_hashes_two_cursors(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import certificates, sparse
+    from yieldforge.oracle.certificates import (
+        build_validated_m8_common_transition_in_context,
+    )
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    counts = {"apply": 0, "hash": 0}
+    original_apply = certificates.apply_m7_frozen_action_evidence
+    original_hash = certificates.m7_cursor_sha256
+
+    def counted_apply(*args, **kwargs):  # type: ignore[no-untyped-def]
+        counts["apply"] += 1
+        return original_apply(*args, **kwargs)
+
+    def counted_hash(*args, **kwargs):  # type: ignore[no-untyped-def]
+        counts["hash"] += 1
+        return original_hash(*args, **kwargs)
+
+    with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+        descriptor = next(
+            item
+            for item in context._catalog.actions  # noqa: SLF001
+            if item.action_id == "m7-standard:candidate-two"
+        )
+        branch = sparse._initial_branch(context, descriptor)  # noqa: SLF001
+        common = build_validated_m8_common_transition_in_context(
+            context._authority,  # noqa: SLF001
+            cursor=context._fallback_step.cursor,  # noqa: SLF001
+        )
+        monkeypatch.setattr(certificates, "apply_m7_frozen_action_evidence", counted_apply)
+        monkeypatch.setattr(certificates, "m7_cursor_sha256", counted_hash)
+        monkeypatch.setattr(sparse, "apply_m7_frozen_action_evidence", counted_apply)
+        monkeypatch.setattr(sparse, "m7_cursor_sha256", counted_hash)
+
+        sparse._advance_branch(context, branch, common=common)  # noqa: SLF001
+
+    assert branch.skipped_count == 1
+    assert counts == {"apply": 1, "hash": 2}
+
+
 def test_sparse_surviving_future_fit_falls_back_to_exact_and_matches_reference() -> None:
     from yieldforge.oracle.sparse import score_sparse_event
 

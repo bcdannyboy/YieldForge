@@ -26,6 +26,8 @@ from yieldforge.baseline.replay import (
     select_m7_fallback,
 )
 from yieldforge.oracle.certificates import (
+    _release_validated_common_transition,
+    _validated_common_transition_fact,
     build_validated_m8_common_transition_in_context,
     certify_event_passivity,
 )
@@ -321,15 +323,16 @@ def _check_event(
     common,  # type: ignore[no-untyped-def]
 ) -> None:
     runtime = context._request.runtime  # noqa: SLF001
-    fact = common.fact
+    fact = _validated_common_transition_fact(runtime, common)
     if (
         witness.event_position != branch.cursor.next_event_position
         or witness.event_position != fact.event_position
         or witness.common_action_id != fact.step.event.action.action_id
-        or witness.state_before_sha256 != m7_cursor_sha256(branch.cursor)
     ):
         raise _ProofFailure("witness_mismatch")
     if branch.cursor == fact.cursor_before:
+        if witness.state_before_sha256 != m7_cursor_sha256(branch.cursor):
+            raise _ProofFailure("witness_mismatch")
         branch.cursor = apply_m7_frozen_action_evidence(
             runtime,
             cursor=branch.cursor,
@@ -352,17 +355,14 @@ def _check_event(
             prepared_layouts=context._prepared_layouts,  # noqa: SLF001
         )
         if passivity.passive:
-            if passivity.witness is None:
+            if passivity.witness is None or passivity.branch_after is None:
                 raise _ProofFailure("witness_mismatch")
             expected = passivity.witness
-            branch.cursor = apply_m7_frozen_action_evidence(
-                runtime,
-                cursor=branch.cursor,
-                event_position=fact.event_position,
-                action=fact.step.event.action,
-            )
+            branch.cursor = passivity.branch_after
             branch.certificates += len(expected.influences)
         else:
+            if witness.state_before_sha256 != m7_cursor_sha256(branch.cursor):
+                raise _ProofFailure("witness_mismatch")
             catalog = enumerate_m7_action_catalog(
                 runtime,
                 cursor=branch.cursor,
@@ -423,23 +423,29 @@ def _check_prepared_action_proofs(
             context._authority,  # noqa: SLF001
             cursor=common_cursor,
         )
-        for index, branch in enumerate(branches):
-            if branch is None:
-                continue
-            try:
-                _check_event(
-                    context,
-                    branch,
-                    witness=branch.proof.witnesses[event_index],
-                    common=common,
-                )
-            except (IndexError, _ProofFailure) as error:
-                code = error.code if isinstance(error, _ProofFailure) else "invalid_proof"
-                results[index] = _failed(code, branch)
-                branches[index] = None
-        common_cursor = common.step.cursor
-        event_index += 1
-        del common
+        try:
+            fact = _validated_common_transition_fact(
+                context._request.runtime,  # noqa: SLF001
+                common,
+            )
+            for index, branch in enumerate(branches):
+                if branch is None:
+                    continue
+                try:
+                    _check_event(
+                        context,
+                        branch,
+                        witness=branch.proof.witnesses[event_index],
+                        common=common,
+                    )
+                except (IndexError, _ProofFailure) as error:
+                    code = error.code if isinstance(error, _ProofFailure) else "invalid_proof"
+                    results[index] = _failed(code, branch)
+                    branches[index] = None
+            common_cursor = fact.step.cursor
+            event_index += 1
+        finally:
+            _release_validated_common_transition(common)
 
     for index, branch in enumerate(branches):
         if branch is None:

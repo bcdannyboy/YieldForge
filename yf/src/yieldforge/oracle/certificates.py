@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 
 from yieldforge.baseline.contracts import LayoutFitSearchResult
@@ -66,13 +68,60 @@ class BranchInventoryDelta:
 class EventPassivityResult:
     passive: bool
     witness: M8EventWitness | None
+    branch_after: M7ReplayCursor | None
     exact_search_count: int
+    _branch_after_sha256: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _provenance_token: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.exact_search_count < 0:
             raise ValueError("M8 exact search count cannot be negative")
-        if self.passive != (self.witness is not None):
-            raise ValueError("M8 passive result must carry exactly one event witness")
+        if self.passive != (self.witness is not None and self.branch_after is not None):
+            raise ValueError(
+                "M8 passive result must carry exactly one event witness and resulting cursor"
+            )
+        if not self.passive and (self.witness is not None or self.branch_after is not None):
+            raise ValueError("M8 nonpassive result cannot carry event evidence")
+        if self.passive and (
+            self._provenance_token is not _EVENT_PASSIVITY_PROVENANCE
+            or self._branch_after_sha256 != self.witness.state_after_sha256
+        ):
+            raise ValueError("M8 passive result lacks trusted resulting-cursor provenance")
+        if not self.passive and (
+            self._branch_after_sha256 is not None or self._provenance_token is not None
+        ):
+            raise ValueError("M8 nonpassive result cannot carry resulting-cursor provenance")
+
+
+_EVENT_PASSIVITY_PROVENANCE = object()
+
+
+def _trusted_passive_result(
+    *,
+    witness: M8EventWitness,
+    branch_after: M7ReplayCursor,
+    exact_search_count: int,
+    branch_after_sha256: str,
+) -> EventPassivityResult:
+    result = object.__new__(EventPassivityResult)
+    object.__setattr__(result, "passive", True)
+    object.__setattr__(result, "witness", witness)
+    object.__setattr__(result, "branch_after", branch_after)
+    object.__setattr__(result, "exact_search_count", exact_search_count)
+    object.__setattr__(result, "_branch_after_sha256", branch_after_sha256)
+    object.__setattr__(result, "_provenance_token", _EVENT_PASSIVITY_PROVENANCE)
+    result.__post_init__()
+    return result
 
 
 @dataclass(frozen=True)
@@ -92,12 +141,30 @@ class M8CommonTransitionFact:
     content_sha256: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class ValidatedCommonTransition:
-    """Process-local capability proving one portable common fact was reconstructed."""
+    """Opaque process-local identity for one privately registered common fact."""
 
-    fact: M8CommonTransitionFact
+    _binding_token: object = field(repr=False, compare=False)
     _provenance_token: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        fact: M8CommonTransitionFact | None = None,
+        _provenance_token: object | None = None,
+        _binding_token: object | None = None,
+    ) -> None:
+        # ``fact`` remains an accepted constructor argument so reconstructed
+        # lookalikes fail at the registry boundary instead of at construction.
+        del fact
+        object.__setattr__(self, "_binding_token", _binding_token or object())
+        object.__setattr__(self, "_provenance_token", _provenance_token)
+
+    @property
+    def fact(self) -> M8CommonTransitionFact:
+        """Return an untrusted copy for portable serialization and inspection."""
+
+        return deepcopy(_registered_common_entry(self).canonical_fact)
 
     @property
     def step(self) -> M7StepResult:
@@ -128,18 +195,23 @@ class ValidatedCommonTransition:
 
 
 _VALIDATED_COMMON_PROVENANCE = object()
+
+
+@dataclass
+class _ValidatedCommonEntry:
+    reference: weakref.ReferenceType[ValidatedCommonTransition]
+    binding_token: object
+    owner_pid: int
+    snapshot: M7SemanticRuntimeSnapshot
+    authority: M7AuthoritativeProofRuntime | None
+    owns_snapshot: bool
+    canonical_fact: M8CommonTransitionFact
+    integrity_sha256: str
+
+
 _VALIDATED_COMMON_REGISTRY: dict[
     int,
-    tuple[
-        weakref.ReferenceType[ValidatedCommonTransition],
-        int,
-        str,
-        str,
-        int,
-        M7SemanticRuntimeSnapshot,
-        M7AuthoritativeProofRuntime | None,
-        bool,
-    ],
+    _ValidatedCommonEntry,
 ] = {}
 
 
@@ -380,6 +452,58 @@ def _validate_portable_common_transition_fact(
         raise ValueError("M8 common transition fact content hash differs")
 
 
+def _common_registry_integrity_sha256(
+    runtime: M7ReplayRuntime,
+    fact: M8CommonTransitionFact,
+) -> str:
+    """Commit every registry-owned fact field for one exit-boundary deep check."""
+
+    payload = {
+        "schema_version": "yieldforge.m8-common-transition-registry.v1",
+        "portable_fields": {
+            "replay_input_id": fact.replay_input_id,
+            "replay_input_sha256": fact.replay_input_sha256,
+            "event_position": fact.event_position,
+            "cursor_before_sha256": fact.cursor_before_sha256,
+            "cursor_after_sha256": fact.cursor_after_sha256,
+            "event_id": fact.event_id,
+            "semantic_runtime_sha256": fact.semantic_runtime_sha256,
+            "content_sha256": fact.content_sha256,
+        },
+        "semantic_fact": _common_fact_payload(
+            runtime,
+            event_position=fact.event_position,
+            cursor_before=fact.cursor_before,
+            step=fact.step,
+            policy_rank=fact.policy_rank,
+            semantic_runtime_sha256=fact.semantic_runtime_sha256,
+        ),
+    }
+    return f"sha256:{semantic_sha256(payload)}"
+
+
+def _registered_common_entry(
+    common: ValidatedCommonTransition,
+) -> _ValidatedCommonEntry:
+    if type(common) is not ValidatedCommonTransition:
+        raise ValueError("M8 certifier requires a validated common transition capability")
+    registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
+    if (
+        common._provenance_token is not _VALIDATED_COMMON_PROVENANCE
+        or registered is None
+        or registered.reference() is not common
+        or registered.binding_token is not common._binding_token
+        or registered.owner_pid != os.getpid()
+        or registered.snapshot._owner_pid != registered.owner_pid  # noqa: SLF001
+        or registered.snapshot.semantic_sha256
+        != registered.canonical_fact.semantic_runtime_sha256
+    ):
+        raise ValueError("M8 certifier requires a validated common transition capability")
+    if registered.authority is not None:
+        registered.authority._require_active_identity()  # noqa: SLF001
+    return registered
+
+
 def _register_validated_common_transition(
     fact: M8CommonTransitionFact,
     snapshot: M7SemanticRuntimeSnapshot,
@@ -387,33 +511,64 @@ def _register_validated_common_transition(
     authority: M7AuthoritativeProofRuntime | None = None,
     owns_snapshot: bool = True,
 ) -> ValidatedCommonTransition:
+    canonical_fact = deepcopy(fact)
+    binding_token = object()
     validated = ValidatedCommonTransition(
-        fact=fact,
         _provenance_token=_VALIDATED_COMMON_PROVENANCE,
+        _binding_token=binding_token,
     )
     key = id(validated)
 
     def discard(reference: weakref.ReferenceType[ValidatedCommonTransition]) -> None:
         registered = _VALIDATED_COMMON_REGISTRY.get(key)
-        if registered is not None and registered[0] is reference:
-            if os.getpid() != registered[4]:
+        if registered is not None and registered.reference is reference:
+            if os.getpid() != registered.owner_pid:
                 return
             _VALIDATED_COMMON_REGISTRY.pop(key, None)
-            if registered[7]:
-                registered[5].close()
+            if registered.owns_snapshot:
+                registered.snapshot.close()
 
     reference = weakref.ref(validated, discard)
-    _VALIDATED_COMMON_REGISTRY[key] = (
-        reference,
-        id(fact),
-        fact.content_sha256,
-        fact.semantic_runtime_sha256,
-        os.getpid(),
-        snapshot,
-        authority,
-        owns_snapshot,
+    _VALIDATED_COMMON_REGISTRY[key] = _ValidatedCommonEntry(
+        reference=reference,
+        binding_token=binding_token,
+        owner_pid=os.getpid(),
+        snapshot=snapshot,
+        authority=authority,
+        owns_snapshot=owns_snapshot,
+        canonical_fact=canonical_fact,
+        integrity_sha256=_common_registry_integrity_sha256(
+            snapshot.runtime,
+            canonical_fact,
+        ),
     )
     return validated
+
+
+def _release_validated_common_transition(common: ValidatedCommonTransition) -> None:
+    """Deep-check and retire one event-scoped private common fact."""
+
+    registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
+    integrity_error = None
+    try:
+        if registered is None or _registered_common_entry(common) is not registered:
+            raise ValueError("M8 certifier requires a validated common transition capability")
+        if registered.integrity_sha256 != _common_registry_integrity_sha256(
+            registered.snapshot.runtime,
+            registered.canonical_fact,
+        ):
+            integrity_error = ValueError("M8 common transition registry integrity differs")
+    except (AttributeError, TypeError, ValueError) as error:
+        integrity_error = ValueError("M8 common transition registry integrity differs")
+        integrity_error.__cause__ = error
+    finally:
+        current = _VALIDATED_COMMON_REGISTRY.get(id(common))
+        if registered is not None and current is registered:
+            _VALIDATED_COMMON_REGISTRY.pop(id(common), None)
+        if registered is not None and registered.owns_snapshot:
+            registered.snapshot.close()
+    if integrity_error is not None:
+        raise integrity_error
 
 
 def build_validated_m8_common_transition(
@@ -532,45 +687,33 @@ def _require_validated_common_transition(
     M7SemanticRuntimeSnapshot,
     M7AuthoritativeProofRuntime | None,
 ]:
-    if type(common) is not ValidatedCommonTransition:
-        raise ValueError("M8 certifier requires a validated common transition capability")
-    registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
-    if (
-        common._provenance_token is not _VALIDATED_COMMON_PROVENANCE
-        or registered is None
-        or registered[0]() is not common
-        or registered[1] != id(common.fact)
-        or registered[2] != common.fact.content_sha256
-        or registered[3] != common.fact.semantic_runtime_sha256
-        or registered[4] != os.getpid()
-        or registered[5]._owner_pid != registered[4]  # noqa: SLF001
-        or registered[5].semantic_sha256 != common.fact.semantic_runtime_sha256
-    ):
-        raise ValueError("M8 certifier requires a validated common transition capability")
-    authority = registered[6]
+    registered = _registered_common_entry(common)
+    fact = registered.canonical_fact
+    authority = registered.authority
     if authority is None:
         _require_caller_runtime_stable(
             runtime,
-            expected_sha256=common.fact.semantic_runtime_sha256,
+            expected_sha256=fact.semantic_runtime_sha256,
             operation="M8 certificate capability entry",
         )
     else:
         authority._require_active_identity(runtime)  # noqa: SLF001
-    snapshot = registered[5]
-    _validate_portable_common_transition_fact(
-        snapshot.runtime,
-        common.fact,
-        semantic_runtime_sha256=snapshot.semantic_sha256,
-    )
-    return common.fact, snapshot, authority
+    return fact, registered.snapshot, authority
+
+
+def _validated_common_transition_fact(
+    runtime: M7ReplayRuntime,
+    common: ValidatedCommonTransition,
+) -> M8CommonTransitionFact:
+    """Retrieve only the private canonical fact after O(1) capability checks."""
+
+    return _require_validated_common_transition(runtime, common)[0]
 
 
 def _derive_branch_inventory_delta(
     common: M7ReplayCursor,
     branch: M7ReplayCursor,
 ) -> BranchInventoryDelta:
-    m7_cursor_sha256(common)
-    m7_cursor_sha256(branch)
     if (
         branch.next_event_position != common.next_event_position
         or branch.current_time != common.current_time
@@ -802,16 +945,15 @@ def _authoritative_competitor(
 
 
 def _evidence_sha256(
-    runtime: M7ReplayRuntime,
     *,
     event_position: int,
-    item: InventoryItem,
+    remnant_id: str,
+    classification: str,
     direction: str,
     delta: BranchInventoryDelta,
     common: M7PolicyActionBinding,
-    common_rank: PolicyRank,
+    common_decision_key: tuple[str, ...],
     common_fact_sha256: str,
-    common_action_id: str,
     branch_action_id: str,
     state_before_sha256: str,
     state_after_sha256: str,
@@ -820,53 +962,46 @@ def _evidence_sha256(
     competitor: M7ActionDescriptor | None,
     competitor_rank: PolicyRank | None,
 ) -> str:
-    replay_input = runtime.replay_input
-    binding = replay_input.instances[event_position]
-    problem = next(
-        problem for problem in replay_input.problems if problem.problem_id == binding.problem_id
-    )
-    verified = runtime.runtime_candidates[binding.problem_id]
+    """Commit one influence through already-validated parent commitments.
+
+    The common fact commits the semantic runtime, replay input, common cursor,
+    transition, action binding, event and rank.  The two state commitments bind
+    the complete branch states.  This v2 node therefore hashes only their
+    content addresses plus the small influence-specific evidence.  Its security
+    relies on SHA-256 collision and second-preimage resistance.
+    """
+
     competitor_evidence = None
     if competitor is not None:
         if competitor.evidence is None:
             raise ValueError("M8 remnant competitor lacks exact materialized evidence")
         competitor_evidence = {
             "catalog_action_id": competitor.action_id,
+            "candidate_id": competitor.candidate_id,
+            "selected_remnant_id": competitor.selected_remnant_id,
             "materialized_action_id": competitor.evidence.action_id,
-            "action": competitor.evidence.model_dump(mode="json"),
+            "materialized_content_sha256": competitor.evidence.content_sha256,
             "rank": _rank_payload(competitor_rank) if competitor_rank is not None else None,
         }
     payload = {
-        "schema_version": "yieldforge.m8-event-influence-evidence.v1",
-        "replay_input_id": replay_input.input_id,
-        "replay_input_sha256": replay_input.content_sha256,
-        "engine": replay_input.engine.model_dump(mode="json"),
-        "collision_backend": replay_input.collision_backend,
-        "jagua_container_guard": replay_input.jagua_container_guard,
+        "schema_version": "yieldforge.m8-event-influence-evidence.v2",
+        "commitments": {
+            "common_transition_fact_sha256": common_fact_sha256,
+            "state_before_sha256": state_before_sha256,
+            "state_after_sha256": state_after_sha256,
+        },
         "event_position": event_position,
-        "binding": binding.model_dump(mode="json"),
-        "problem": problem.model_dump(mode="json"),
-        "candidate_set": verified.evidence.model_dump(mode="json"),
-        "candidates": tuple(candidate.model_dump(mode="json") for candidate in verified.candidates),
-        "fit_config": replay_input.fit_config.model_dump(mode="json"),
-        "search_config": replay_input.search_config.model_dump(mode="json"),
-        "policy": replay_input.policy.model_dump(mode="json"),
         "direction": direction,
+        "remnant_id": remnant_id,
+        "classification": classification,
         "delta_added_ids": _item_ids(delta.added),
         "delta_removed_ids": _item_ids(delta.removed),
-        "inventory_item": item.model_dump(mode="json"),
-        "remnant": item.remnant.model_dump(mode="json"),
         "common": {
-            "transition_fact_sha256": common_fact_sha256,
             "catalog_action_id": common.catalog_action_id,
             "materialized_action_id": common.materialized_action_id,
-            "context": asdict(common.context),
-            "rank": _rank_payload(common_rank),
+            "decision_key": common_decision_key,
         },
-        "common_action_id": common_action_id,
         "branch_action_id": branch_action_id,
-        "state_before_sha256": state_before_sha256,
-        "state_after_sha256": state_after_sha256,
         "cheap_rejections": _rejection_payload(rejections),
         "exact_searches": searches,
         "competitor": competitor_evidence,
@@ -907,15 +1042,14 @@ def _influence(
     )
     if rejections and all(entry.certificate.impossible for entry in rejections):
         digest = _evidence_sha256(
-            runtime,
             event_position=event_position,
-            item=item,
+            remnant_id=item.remnant.remnant_id,
+            classification="no_fit",
             direction=direction,
             delta=delta,
             common=common,
-            common_rank=common_rank,
+            common_decision_key=common_rank.decision_key,
             common_fact_sha256=common_fact_sha256,
-            common_action_id=common_action_id,
             branch_action_id=branch_action_id,
             state_before_sha256=state_before_sha256,
             state_after_sha256=state_after_sha256,
@@ -947,15 +1081,14 @@ def _influence(
         if competitor is not None or context is not None:
             raise ValueError("M8 exact competitor descriptor and context must appear together")
         digest = _evidence_sha256(
-            runtime,
             event_position=event_position,
-            item=item,
+            remnant_id=item.remnant.remnant_id,
+            classification="no_fit",
             direction=direction,
             delta=delta,
             common=common,
-            common_rank=common_rank,
+            common_decision_key=common_rank.decision_key,
             common_fact_sha256=common_fact_sha256,
-            common_action_id=common_action_id,
             branch_action_id=branch_action_id,
             state_before_sha256=state_before_sha256,
             state_after_sha256=state_after_sha256,
@@ -982,15 +1115,14 @@ def _influence(
     if competitor.evidence is None:
         raise ValueError("M8 exact remnant competitor lacks materialized evidence")
     digest = _evidence_sha256(
-        runtime,
         event_position=event_position,
-        item=item,
+        remnant_id=item.remnant.remnant_id,
+        classification="policy_dominated",
         direction=direction,
         delta=delta,
         common=common,
-        common_rank=common_rank,
+        common_decision_key=common_rank.decision_key,
         common_fact_sha256=common_fact_sha256,
-        common_action_id=common_action_id,
         branch_action_id=branch_action_id,
         state_before_sha256=state_before_sha256,
         state_after_sha256=state_after_sha256,
@@ -1016,6 +1148,50 @@ def _influence(
     )
 
 
+def _build_passive_event_result(
+    *,
+    branch_after: M7ReplayCursor,
+    state_before_sha256: str,
+    event_position: int,
+    common_action_id: str,
+    branch_action_id: str,
+    build_influences: Callable[
+        [str], tuple[tuple[M8InfluenceWitness, ...] | None, int]
+    ],
+) -> EventPassivityResult:
+    """Bind one authoritative resulting cursor to both its witness and result."""
+
+    state_after_sha256 = m7_cursor_sha256(branch_after)
+    influences, exact_search_count = build_influences(state_after_sha256)
+    if influences is None:
+        return EventPassivityResult(
+            passive=False,
+            witness=None,
+            branch_after=None,
+            exact_search_count=exact_search_count,
+        )
+    classification = (
+        "no_fit"
+        if all(item.classification == "no_fit" for item in influences)
+        else "policy_dominated"
+    )
+    witness = M8EventWitness(
+        event_position=event_position,
+        classification=classification,
+        common_action_id=common_action_id,
+        branch_action_id=branch_action_id,
+        state_before_sha256=state_before_sha256,
+        state_after_sha256=state_after_sha256,
+        influences=influences,
+    )
+    return _trusted_passive_result(
+        witness=witness,
+        branch_after=branch_after,
+        exact_search_count=exact_search_count,
+        branch_after_sha256=state_after_sha256,
+    )
+
+
 def certify_event_passivity(
     runtime: M7ReplayRuntime,
     *,
@@ -1035,12 +1211,22 @@ def certify_event_passivity(
         try:
             delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
             if not delta.added and not delta.removed:
-                return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
+                return EventPassivityResult(
+                    passive=False,
+                    witness=None,
+                    branch_after=None,
+                    exact_search_count=0,
+                )
             binding = fact.step.action_binding
             common_action_id = fact.step.event.action.action_id
             branch_action_id = common_action_id
             if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
-                return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
+                return EventPassivityResult(
+                    passive=False,
+                    witness=None,
+                    branch_after=None,
+                    exact_search_count=0,
+                )
 
             branch_after = apply_m7_frozen_action_evidence(
                 proof_runtime,
@@ -1049,54 +1235,47 @@ def certify_event_passivity(
                 action=fact.step.event.action,
             )
             state_before_sha256 = m7_cursor_sha256(branch_cursor)
-            state_after_sha256 = m7_cursor_sha256(branch_after)
             common_rank = fact.policy_rank
-            influences = []
-            exact_search_count = 0
-            for direction, items in (("added", delta.added), ("removed", delta.removed)):
-                for item in items:
-                    influence, searches = _influence(
-                        proof_runtime,
-                        cursor_template=fact.cursor_before,
-                        event_position=fact.event_position,
-                        item=item,
-                        direction=direction,
-                        delta=delta,
-                        common=binding,
-                        common_rank=common_rank,
-                        common_fact_sha256=fact.content_sha256,
-                        common_action_id=common_action_id,
-                        branch_action_id=branch_action_id,
-                        state_before_sha256=state_before_sha256,
-                        state_after_sha256=state_after_sha256,
-                        prepared_layouts=prepared_layouts,
-                    )
-                    exact_search_count += searches
-                    if influence is None:
-                        return EventPassivityResult(
-                            passive=False,
-                            witness=None,
-                            exact_search_count=exact_search_count,
-                        )
-                    influences.append(influence)
 
-            classification = (
-                "no_fit"
-                if all(item.classification == "no_fit" for item in influences)
-                else "policy_dominated"
-            )
-            return EventPassivityResult(
-                passive=True,
-                witness=M8EventWitness(
-                    event_position=fact.event_position,
-                    classification=classification,
-                    common_action_id=common_action_id,
-                    branch_action_id=branch_action_id,
-                    state_before_sha256=state_before_sha256,
-                    state_after_sha256=state_after_sha256,
-                    influences=tuple(influences),
-                ),
-                exact_search_count=exact_search_count,
+            def build_influences(
+                state_after_sha256: str,
+            ) -> tuple[tuple[M8InfluenceWitness, ...] | None, int]:
+                influences = []
+                exact_search_count = 0
+                for direction, items in (
+                    ("added", delta.added),
+                    ("removed", delta.removed),
+                ):
+                    for item in items:
+                        influence, searches = _influence(
+                            proof_runtime,
+                            cursor_template=fact.cursor_before,
+                            event_position=fact.event_position,
+                            item=item,
+                            direction=direction,
+                            delta=delta,
+                            common=binding,
+                            common_rank=common_rank,
+                            common_fact_sha256=fact.content_sha256,
+                            common_action_id=common_action_id,
+                            branch_action_id=branch_action_id,
+                            state_before_sha256=state_before_sha256,
+                            state_after_sha256=state_after_sha256,
+                            prepared_layouts=prepared_layouts,
+                        )
+                        exact_search_count += searches
+                        if influence is None:
+                            return None, exact_search_count
+                        influences.append(influence)
+                return tuple(influences), exact_search_count
+
+            return _build_passive_event_result(
+                branch_after=branch_after,
+                state_before_sha256=state_before_sha256,
+                event_position=fact.event_position,
+                common_action_id=common_action_id,
+                branch_action_id=branch_action_id,
+                build_influences=build_influences,
             )
         finally:
             if authority is None:
