@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import weakref
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 
 from yieldforge.baseline.contracts import LayoutFitSearchResult
 from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_policy_action
 from yieldforge.baseline.replay import (
     M7ActionDescriptor,
+    M7AuthoritativeProofRuntime,
     M7PolicyActionBinding,
     M7ReplayCursor,
     M7ReplayEvent,
@@ -133,6 +135,8 @@ _VALIDATED_COMMON_REGISTRY: dict[
         str,
         int,
         M7SemanticRuntimeSnapshot,
+        M7AuthoritativeProofRuntime | None,
+        bool,
     ],
 ] = {}
 
@@ -377,6 +381,9 @@ def _validate_portable_common_transition_fact(
 def _register_validated_common_transition(
     fact: M8CommonTransitionFact,
     snapshot: M7SemanticRuntimeSnapshot,
+    *,
+    authority: M7AuthoritativeProofRuntime | None = None,
+    owns_snapshot: bool = True,
 ) -> ValidatedCommonTransition:
     validated = ValidatedCommonTransition(
         fact=fact,
@@ -390,7 +397,8 @@ def _register_validated_common_transition(
             if os.getpid() != registered[4]:
                 return
             _VALIDATED_COMMON_REGISTRY.pop(key, None)
-            registered[5].close()
+            if registered[7]:
+                registered[5].close()
 
     reference = weakref.ref(validated, discard)
     _VALIDATED_COMMON_REGISTRY[key] = (
@@ -400,6 +408,8 @@ def _register_validated_common_transition(
         fact.semantic_runtime_sha256,
         os.getpid(),
         snapshot,
+        authority,
+        owns_snapshot,
     )
     return validated
 
@@ -436,6 +446,33 @@ def build_validated_m8_common_transition(
     finally:
         if not registered:
             snapshot.close()
+
+
+def build_validated_m8_common_transition_in_context(
+    authority: M7AuthoritativeProofRuntime,
+    *,
+    cursor: M7ReplayCursor,
+) -> ValidatedCommonTransition:
+    """Derive one common capability inside an active shared proof runtime."""
+
+    authority.require_active()
+    fact = _derive_m8_common_transition_fact(
+        authority.runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=authority.semantic_sha256,
+    )
+    _validate_portable_common_transition_fact(
+        authority.runtime,
+        fact,
+        semantic_runtime_sha256=authority.semantic_sha256,
+    )
+    authority.require_active()
+    return _register_validated_common_transition(
+        fact,
+        authority._snapshot,  # noqa: SLF001 - capability shares the authority lifetime.
+        authority=authority,
+        owns_snapshot=False,
+    )
 
 
 def validate_m8_common_transition_fact(
@@ -488,7 +525,11 @@ def _require_caller_runtime_stable(
 def _require_validated_common_transition(
     runtime: M7ReplayRuntime,
     common: ValidatedCommonTransition,
-) -> tuple[M8CommonTransitionFact, M7SemanticRuntimeSnapshot]:
+) -> tuple[
+    M8CommonTransitionFact,
+    M7SemanticRuntimeSnapshot,
+    M7AuthoritativeProofRuntime | None,
+]:
     if type(common) is not ValidatedCommonTransition:
         raise ValueError("M8 certifier requires a validated common transition capability")
     registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
@@ -504,18 +545,22 @@ def _require_validated_common_transition(
         or registered[5].semantic_sha256 != common.fact.semantic_runtime_sha256
     ):
         raise ValueError("M8 certifier requires a validated common transition capability")
-    _require_caller_runtime_stable(
-        runtime,
-        expected_sha256=common.fact.semantic_runtime_sha256,
-        operation="M8 certificate capability entry",
-    )
+    authority = registered[6]
+    if authority is None:
+        _require_caller_runtime_stable(
+            runtime,
+            expected_sha256=common.fact.semantic_runtime_sha256,
+            operation="M8 certificate capability entry",
+        )
+    else:
+        authority.require_active(runtime)
     snapshot = registered[5]
     _validate_portable_common_transition_fact(
         snapshot.runtime,
         common.fact,
         semantic_runtime_sha256=snapshot.semantic_sha256,
     )
-    return common.fact, snapshot
+    return common.fact, snapshot, authority
 
 
 def _derive_branch_inventory_delta(
@@ -967,8 +1012,13 @@ def certify_event_passivity(
 ) -> EventPassivityResult:
     """Prove one branch event selects the exact common M7 action, or fail closed."""
 
-    fact, snapshot = _require_validated_common_transition(runtime, common)
-    with snapshot.runtime_for_proof() as proof_runtime:
+    fact, snapshot, authority = _require_validated_common_transition(runtime, common)
+    proof_context = (
+        nullcontext(authority.runtime)
+        if authority is not None
+        else snapshot.runtime_for_proof()
+    )
+    with proof_context as proof_runtime:
         try:
             delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
             if not delta.added and not delta.removed:
@@ -1035,11 +1085,14 @@ def certify_event_passivity(
                 exact_search_count=exact_search_count,
             )
         finally:
-            _require_caller_runtime_stable(
-                runtime,
-                expected_sha256=snapshot.semantic_sha256,
-                operation="M8 certificate operation",
-            )
+            if authority is None:
+                _require_caller_runtime_stable(
+                    runtime,
+                    expected_sha256=snapshot.semantic_sha256,
+                    operation="M8 certificate operation",
+                )
+            else:
+                authority.require_active(runtime)
 
 
 __all__ = [
@@ -1049,6 +1102,7 @@ __all__ = [
     "ValidatedCommonTransition",
     "build_m8_common_transition_fact",
     "build_validated_m8_common_transition",
+    "build_validated_m8_common_transition_in_context",
     "certify_event_passivity",
     "validate_m8_common_transition_fact",
 ]

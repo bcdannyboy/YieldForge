@@ -9,6 +9,7 @@ import os
 import secrets
 import stat
 import tempfile
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from concurrent.futures import Executor
@@ -745,6 +746,36 @@ class M7SemanticRuntimeSnapshot:
 
     def __reduce__(self) -> object:
         raise TypeError("M7 semantic runtime snapshots cannot be serialized")
+
+
+@dataclass(frozen=True)
+class M7AuthoritativeProofRuntime:
+    """One active cache-free semantic runtime owned by a bounded proof operation."""
+
+    runtime: M7ReplayRuntime
+    semantic_sha256: str
+    _snapshot: M7SemanticRuntimeSnapshot
+
+    def require_active(self, runtime: M7ReplayRuntime | None = None) -> None:
+        registered = _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.get(id(self))
+        if (
+            registered is None
+            or registered[0]() is not self
+            or registered[1] != os.getpid()
+            or os.getpid() != self._snapshot._owner_pid
+        ):
+            raise ValueError("M7 authoritative proof runtime is no longer active")
+        if runtime is not None and runtime is not self.runtime:
+            raise ValueError("M7 proof operation used a different authoritative runtime")
+
+    def __reduce__(self) -> object:
+        raise TypeError("M7 authoritative proof runtimes cannot be serialized")
+
+
+_AUTHORITATIVE_PROOF_RUNTIME_REGISTRY: dict[
+    int,
+    tuple[weakref.ReferenceType[M7AuthoritativeProofRuntime], int],
+] = {}
 
 
 def _build_standard_profile(
@@ -1973,6 +2004,7 @@ def snapshot_m7_replay_runtime(
     runtime: M7ReplayRuntime,
     *,
     maximum_capture_attempts: int = 3,
+    copy_operational_caches: bool = True,
 ) -> M7SemanticRuntimeSnapshot:
     """Deep-capture one stable semantic runtime with isolated caches and Jagua bytes."""
 
@@ -1985,10 +2017,16 @@ def snapshot_m7_replay_runtime(
             replay_input = copy.deepcopy(runtime.replay_input)
             rules = copy.deepcopy(runtime.rules)
             runtime_candidates = copy.deepcopy(runtime.runtime_candidates)
-            standard_profile_cache = copy.deepcopy(runtime.standard_profile_cache)
-            fit_search_cache = copy.deepcopy(runtime.fit_search_cache)
-            shared_fit_search_cache = copy.deepcopy(runtime.shared_fit_search_cache)
-            prepared_layout_cache = copy.deepcopy(runtime.prepared_layout_cache)
+            if copy_operational_caches:
+                standard_profile_cache = copy.deepcopy(runtime.standard_profile_cache)
+                fit_search_cache = copy.deepcopy(runtime.fit_search_cache)
+                shared_fit_search_cache = copy.deepcopy(runtime.shared_fit_search_cache)
+                prepared_layout_cache = copy.deepcopy(runtime.prepared_layout_cache)
+            else:
+                standard_profile_cache = {}
+                fit_search_cache = {}
+                shared_fit_search_cache = {}
+                prepared_layout_cache = OrderedDict()
             jagua_capture = _capture_jagua_executable(runtime.jagua_executable)
             jagua_differential_audit = runtime.jagua_differential_audit
             comparison_runtime = M7ReplayRuntime(
@@ -2060,6 +2098,44 @@ def snapshot_m7_replay_runtime(
             last_error = error
             continue
     raise ValueError("M7 semantic runtime could not be captured consistently") from last_error
+
+
+@contextmanager
+def authoritative_m7_proof_runtime(
+    runtime: M7ReplayRuntime,
+) -> Iterator[M7AuthoritativeProofRuntime]:
+    """Capture one stable semantic runtime with fresh proof-owned operational caches."""
+
+    snapshot = snapshot_m7_replay_runtime(
+        runtime,
+        copy_operational_caches=False,
+    )
+    authority: M7AuthoritativeProofRuntime | None = None
+    try:
+        with snapshot.runtime_for_proof() as proof_runtime:
+            authority = M7AuthoritativeProofRuntime(
+                runtime=proof_runtime,
+                semantic_sha256=snapshot.semantic_sha256,
+                _snapshot=snapshot,
+            )
+            key = id(authority)
+
+            def discard(
+                reference: weakref.ReferenceType[M7AuthoritativeProofRuntime],
+            ) -> None:
+                registered = _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.get(key)
+                if registered is not None and registered[0] is reference:
+                    _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.pop(key, None)
+
+            reference = weakref.ref(authority, discard)
+            _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY[key] = (reference, os.getpid())
+            yield authority
+    finally:
+        if authority is not None:
+            registered = _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.get(id(authority))
+            if registered is not None and registered[0]() is authority:
+                _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.pop(id(authority), None)
+        snapshot.close()
 
 
 def _canonical_cursor_payload(cursor: M7ReplayCursor) -> dict[str, object]:
@@ -2852,6 +2928,7 @@ def run_m7_replay(
 __all__ = [
     "M7ActionCatalog",
     "M7ActionDescriptor",
+    "M7AuthoritativeProofRuntime",
     "M7ContinuationResult",
     "M7PolicyActionBinding",
     "M7ReplayEvent",
@@ -2868,6 +2945,7 @@ __all__ = [
     "M7PreparedLayoutCache",
     "apply_m7_action_descriptor",
     "apply_m7_frozen_action_evidence",
+    "authoritative_m7_proof_runtime",
     "build_m7_replay_input",
     "cursor_after_event",
     "enumerate_m7_action_catalog",

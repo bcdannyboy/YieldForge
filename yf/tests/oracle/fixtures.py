@@ -34,7 +34,10 @@ def two_problem_runtime(
     ] = "shapely_authoritative",
     jagua_executable: Path | None = None,
     jagua_differential_audit: bool = False,
+    event_count: int = 2,
 ) -> M7ReplayRuntime:
+    if event_count < 2:
+        raise ValueError("M8 two-problem fixture requires at least two events")
     first = _problem(part_width=first_width)
     second = _problem(part_width=second_width)
     first_verified = _verified(first, candidate_ids=("candidate-one", "candidate-two"))
@@ -77,9 +80,16 @@ def two_problem_runtime(
         candidate_sets=candidate_sets,
         instances=(
             _binding(first, sequence=0, released_at=started),
-            _binding(second, sequence=1, released_at=started + timedelta(hours=1)),
+            *(
+                _binding(
+                    second,
+                    sequence=sequence,
+                    released_at=started + timedelta(hours=sequence),
+                )
+                for sequence in range(1, event_count)
+            ),
         ),
-        horizon_end=started + timedelta(hours=2),
+        horizon_end=started + timedelta(hours=event_count),
         collision_backend=collision_backend,
         jagua_container_guard=(
             1.0

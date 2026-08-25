@@ -9,6 +9,7 @@ from yieldforge.baseline.replay import (
     M7ReplayCursor,
     M7ReplayRuntime,
     apply_m7_action_descriptor,
+    authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
     run_m7_continuation,
     select_m7_fallback,
@@ -60,10 +61,11 @@ def _visible_stop(request: M8OracleRequest, *, event_position: int) -> int:
     return event_position + 1 + len(visible)
 
 
-def score_reference_action(
+def _score_reference_action(
     request: M8OracleRequest,
     *,
     action_id: str,
+    stop_event_position: int | None = None,
 ) -> M8ActionScore:
     """Score one catalog action through the unchanged exact M7 continuation."""
 
@@ -86,7 +88,11 @@ def score_reference_action(
             prepared_layout_cache=request.runtime.prepared_layout_cache or OrderedDict(),
         ),
         cursor=step.cursor,
-        stop_event_position=_visible_stop(request, event_position=catalog.event_position),
+        stop_event_position=(
+            _visible_stop(request, event_position=catalog.event_position)
+            if stop_event_position is None
+            else stop_event_position
+        ),
     )
     return M8ActionScore(
         action_id=action_id,
@@ -94,27 +100,59 @@ def score_reference_action(
     )
 
 
+def score_reference_action(
+    request: M8OracleRequest,
+    *,
+    action_id: str,
+) -> M8ActionScore:
+    """Score one action in a fresh cache-free stable semantic snapshot."""
+
+    with authoritative_m7_proof_runtime(request.runtime) as authority:
+        captured = M8OracleRequest(
+            runtime=authority.runtime,
+            cursor=request.cursor,
+            visibility=request.visibility,
+        )
+        return _score_reference_action(captured, action_id=action_id)
+
+
 def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
     """Score every exact current action by isolated suffix replay."""
 
-    catalog = enumerate_m7_action_catalog(request.runtime, cursor=request.cursor)
-    fallback = select_m7_fallback(catalog, policy=request.runtime.replay_input.policy)
-    stop = _visible_stop(request, event_position=catalog.event_position)
-    action_scores = tuple(
-        score_reference_action(request, action_id=descriptor.action_id)
-        for descriptor in catalog.actions
-    )
-    decision = build_oracle_decision(
-        baseline_action_id=fallback.action_id,
-        expected_action_ids=tuple(item.action_id for item in catalog.actions),
-        scores=tuple((item.action_id, item.final_net_cost) for item in action_scores),
-    )
-    return M8ReferenceResult(
-        decision=decision,
-        continuation_event_executions=(
-            len(catalog.actions) * (stop - catalog.event_position - 1)
-        ),
-    )
+    with authoritative_m7_proof_runtime(request.runtime) as authority:
+        captured = M8OracleRequest(
+            runtime=authority.runtime,
+            cursor=request.cursor,
+            visibility=request.visibility,
+        )
+        catalog = enumerate_m7_action_catalog(
+            captured.runtime,
+            cursor=captured.cursor,
+        )
+        fallback = select_m7_fallback(
+            catalog,
+            policy=captured.runtime.replay_input.policy,
+        )
+        stop = _visible_stop(captured, event_position=catalog.event_position)
+        action_scores = tuple(
+            _score_reference_action(
+                captured,
+                action_id=descriptor.action_id,
+                stop_event_position=stop,
+            )
+            for descriptor in catalog.actions
+        )
+        decision = build_oracle_decision(
+            baseline_action_id=fallback.action_id,
+            expected_action_ids=tuple(item.action_id for item in catalog.actions),
+            scores=tuple((item.action_id, item.final_net_cost) for item in action_scores),
+        )
+        return M8ReferenceResult(
+            decision=decision,
+            continuation_event_executions=(
+                len(catalog.actions) * (stop - catalog.event_position - 1)
+            ),
+        )
 
 
 __all__ = [

@@ -197,3 +197,144 @@ def test_checker_validates_exact_transition_and_final_state() -> None:
 
     tampered = _rebuild(proof, final_state_sha256="sha256:" + "f" * 64)
     assert not check_action_proof(request, tampered).valid
+
+
+def test_batch_checker_matches_standalone_results() -> None:
+    from yieldforge.oracle.checker import check_action_proof, check_action_proofs
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+
+    assert check_action_proofs(request, proofs) == tuple(
+        check_action_proof(request, proof) for proof in proofs
+    )
+
+
+def test_generator_and_checker_are_separate_scoped_authorities() -> None:
+    from yieldforge.oracle.checker import prepare_m8_checker_context
+    from yieldforge.oracle.sparse import prepare_m8_generator_context
+
+    request = _request()
+    with prepare_m8_generator_context(request) as generator:
+        generator_authority = generator._authority  # noqa: SLF001
+        with prepare_m8_checker_context(request) as checker:
+            checker_authority = checker._authority  # noqa: SLF001
+            assert generator_authority is not checker_authority
+            assert generator_authority.runtime is not checker_authority.runtime
+        with pytest.raises(ValueError, match="no longer active"):
+            checker_authority.require_active()
+        generator_authority.require_active()
+    with pytest.raises(ValueError, match="no longer active"):
+        generator_authority.require_active()
+
+
+def test_generator_authority_cleans_up_when_scoring_raises() -> None:
+    from yieldforge.oracle.sparse import prepare_m8_generator_context
+
+    request = _request()
+    authority = None
+    with pytest.raises(RuntimeError, match="forced scoring failure"):
+        with prepare_m8_generator_context(request) as generator:
+            authority = generator._authority  # noqa: SLF001
+            raise RuntimeError("forced scoring failure")
+
+    assert authority is not None
+    with pytest.raises(ValueError, match="no longer active"):
+        authority.require_active()
+
+
+def test_event_major_batches_own_one_snapshot_and_one_common_capability(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.baseline import replay
+    from yieldforge.oracle import certificates, checker, sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0, event_count=4)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    snapshot_count = 0
+    common_count = 0
+    initial_registry_size = len(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+    maximum_live_common_count = 0
+    original_snapshot = replay.snapshot_m7_replay_runtime
+    original_common = certificates.build_validated_m8_common_transition_in_context
+
+    def counted_snapshot(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal snapshot_count
+        snapshot_count += 1
+        return original_snapshot(*args, **kwargs)
+
+    def counted_common(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal common_count, maximum_live_common_count
+        common_count += 1
+        result = original_common(*args, **kwargs)
+        maximum_live_common_count = max(
+            maximum_live_common_count,
+            len(certificates._VALIDATED_COMMON_REGISTRY) - initial_registry_size,  # noqa: SLF001
+        )
+        return result
+
+    monkeypatch.setattr(replay, "snapshot_m7_replay_runtime", counted_snapshot)
+    monkeypatch.setattr(sparse, "build_validated_m8_common_transition_in_context", counted_common)
+    monkeypatch.setattr(checker, "build_validated_m8_common_transition_in_context", counted_common)
+
+    result = sparse.score_sparse_event(request)
+    assert snapshot_count == 1
+    assert common_count == 3
+    assert maximum_live_common_count == 1
+
+    checks = checker.check_action_proofs(request, result.proofs)
+    assert all(item.valid for item in checks)
+    assert snapshot_count == 2
+    assert common_count == 6
+    assert maximum_live_common_count == 1
+
+
+def test_jagua_batch_materializes_one_bound_copy_and_one_lease(
+    monkeypatch,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    from tests.oracle.test_certificates import _write_collision_jagua
+    from yieldforge.baseline import replay
+    from yieldforge.oracle.checker import check_action_proofs
+
+    executable = tmp_path / "fake-jagua"
+    _write_collision_jagua(executable, collision=False)
+    runtime = two_problem_runtime(
+        first_width=9.0,
+        second_width=4.0,
+        event_count=4,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+        jagua_differential_audit=True,
+    )
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    original_materialize = replay._materialize_private_jagua_file  # noqa: SLF001
+    materialized = []
+
+    def counted_materialize(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = original_materialize(*args, **kwargs)
+        materialized.append((kwargs["prefix"], result.path))
+        return result
+
+    monkeypatch.setattr(
+        replay,
+        "_materialize_private_jagua_file",
+        counted_materialize,
+    )
+
+    sparse = score_sparse_event(request)
+    assert [prefix for prefix, _path in materialized] == ["bound", "proof"]
+    assert all(not path.exists() for _prefix, path in materialized)
+
+    materialized.clear()
+    assert all(result.valid for result in check_action_proofs(request, sparse.proofs))
+    assert [prefix for prefix, _path in materialized] == ["bound", "proof"]
+    assert all(not path.exists() for _prefix, path in materialized)
