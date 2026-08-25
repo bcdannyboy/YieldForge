@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 from shapely import box
@@ -12,6 +12,7 @@ from yieldforge.baseline import geometry as geometry_module
 from yieldforge.baseline.contracts import LayoutFitSearchStatus
 from yieldforge.baseline.geometry import (
     PreparedLayoutFootprint,
+    TranslationRejectionCertificate,
     certify_translation_impossible,
     generate_layout_translations,
     prepare_layout_footprint,
@@ -23,7 +24,13 @@ from yieldforge.baseline.replay import (
     enumerate_m7_action_catalog,
     initial_m7_cursor,
 )
-from yieldforge.reuse.contracts import MaterialIdentity
+from yieldforge.reuse.contracts import (
+    MaterialIdentity,
+    RemnantFitConfig,
+    RemnantStock,
+    polygon_from_record,
+)
+from yieldforge.reuse.geometry import material_key
 
 
 def _returned_remnant():  # type: ignore[no-untyped-def]
@@ -39,6 +46,52 @@ def _returned_remnant():  # type: ignore[no-untyped-def]
         decision_key=("geometry_fixture",),
     )
     return runtime, step.event.action.returned_remnants[0]
+
+
+def _pre_2eb28fe_translation_rejection(
+    layout: PreparedLayoutFootprint,
+    remnant: RemnantStock,
+    *,
+    material: MaterialIdentity,
+    fit_config: RemnantFitConfig,
+) -> TranslationRejectionCertificate:
+    """Reconstruct the pre-scalar certificate formula without prepared helpers."""
+
+    parent = polygon_from_record(remnant.geometry)
+    foot_min_x, foot_min_y, foot_max_x, foot_max_y = layout.bounds
+    rem_min_x, rem_min_y, rem_max_x, rem_max_y = parent.bounds
+    layout_width = foot_max_x - foot_min_x
+    layout_height = foot_max_y - foot_min_y
+    remnant_width = rem_max_x - rem_min_x
+    remnant_height = rem_max_y - rem_min_y
+    area_tolerance = max(
+        fit_config.coordinate_tolerance,
+        parent.area * fit_config.relative_area_tolerance,
+    )
+    reason = None
+    if material_key(material) != material_key(remnant.material):
+        reason = "material_mismatch"
+    elif layout.geometry.area > parent.area + area_tolerance:
+        reason = "footprint_area_exceeds_remnant"
+    elif layout_width > remnant_width + fit_config.coordinate_tolerance:
+        reason = "footprint_width_exceeds_remnant"
+    elif layout_height > remnant_height + fit_config.coordinate_tolerance:
+        reason = "footprint_height_exceeds_remnant"
+    return TranslationRejectionCertificate(
+        impossible=reason is not None,
+        reason=reason,
+        layout_area=float(layout.geometry.area),
+        remnant_area=float(parent.area),
+        layout_width=float(layout_width),
+        remnant_width=float(remnant_width),
+        layout_height=float(layout_height),
+        remnant_height=float(remnant_height),
+        area_tolerance=float(area_tolerance),
+    )
+
+
+def _certificate_json(certificate: TranslationRejectionCertificate) -> str:
+    return json.dumps(asdict(certificate), sort_keys=True, separators=(",", ":"))
 
 
 def test_safe_certificate_never_rejects_registered_known_fit() -> None:
@@ -131,7 +184,7 @@ def test_safe_width_rejection_produces_empty_registered_translation_sequence() -
         ("pass", (0.0, 0.0, 5.0, 5.0), False, None),
     ],
 )
-def test_prepared_rejection_measurements_are_byte_and_value_identical_to_legacy(
+def test_legacy_and_prepared_rejections_match_pre_optimization_formula(
     case: str,
     layout_bounds: tuple[float, float, float, float],
     material_mismatch: bool,
@@ -161,6 +214,12 @@ def test_prepared_rejection_measurements_are_byte_and_value_identical_to_legacy(
             )
         )
 
+    expected = _pre_2eb28fe_translation_rejection(
+        layout,
+        item.remnant,
+        material=material,
+        fit_config=runtime.replay_input.fit_config,
+    )
     legacy = certify_translation_impossible(
         layout,
         item.remnant,
@@ -174,10 +233,22 @@ def test_prepared_rejection_measurements_are_byte_and_value_identical_to_legacy(
         fit_config=runtime.replay_input.fit_config,
     )
 
-    assert prepared == legacy
-    assert prepared.reason == expected_reason
-    assert json.dumps(asdict(prepared), sort_keys=True, separators=(",", ":")) == json.dumps(
-        asdict(legacy),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    assert expected.reason == expected_reason
+    assert legacy == expected
+    assert prepared == expected
+    assert _certificate_json(legacy) == _certificate_json(expected)
+    assert _certificate_json(prepared) == _certificate_json(expected)
+    for field_name in (
+        "area_tolerance",
+        "layout_area",
+        "remnant_width",
+        "remnant_height",
+    ):
+        drifted = replace(
+            expected,
+            **{field_name: getattr(expected, field_name) + 1.0},
+        )
+        assert legacy != drifted
+        assert prepared != drifted
+        assert _certificate_json(legacy) != _certificate_json(drifted)
+        assert _certificate_json(prepared) != _certificate_json(drifted)
