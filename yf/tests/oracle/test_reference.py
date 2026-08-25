@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import pytest
 
 from tests.baseline.test_replay import _two_event_runtime
+from tests.oracle.fixtures import exhaustive_certificate_cases
 
 
 def test_reference_scores_every_current_action_and_prefers_exact_m7_tie() -> None:
@@ -136,7 +137,7 @@ def test_selected_reference_batch_owns_one_snapshot_and_catalog(
         cursor=initial_m7_cursor(runtime.replay_input),
         visibility=FullRealizedVisibility(runtime.replay_input.instances),
     )
-    counts = {"snapshots": 0, "catalogs": 0}
+    counts = {"snapshots": 0, "current_catalogs": 0, "continuation_catalogs": 0}
     original_authority = reference.authoritative_m7_proof_runtime
     original_catalog = reference.enumerate_m7_action_catalog
 
@@ -147,7 +148,8 @@ def test_selected_reference_batch_owns_one_snapshot_and_catalog(
             yield authority
 
     def counted_catalog(*args, **kwargs):  # type: ignore[no-untyped-def]
-        counts["catalogs"] += 1
+        key = "current_catalogs" if kwargs.get("complete", True) else "continuation_catalogs"
+        counts[key] += 1
         return original_catalog(*args, **kwargs)
 
     monkeypatch.setattr(reference, "authoritative_m7_proof_runtime", counted_authority)
@@ -158,4 +160,66 @@ def test_selected_reference_batch_owns_one_snapshot_and_catalog(
         action_ids=("m7-standard:candidate-two", "m7-standard:candidate-one"),
     )
 
-    assert counts == {"snapshots": 1, "catalogs": 1}
+    assert counts == {
+        "snapshots": 1,
+        "current_catalogs": 1,
+        "continuation_catalogs": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    exhaustive_certificate_cases(),
+    ids=lambda case: case.case_id,
+)
+def test_selected_reference_batch_matches_repeated_single_action_replay(case) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.baseline.replay import enumerate_m7_action_catalog
+    from yieldforge.oracle.reference import (
+        score_reference_action,
+        score_reference_actions,
+    )
+
+    catalog = enumerate_m7_action_catalog(
+        case.request.runtime,
+        cursor=case.request.cursor,
+    )
+    action_ids = tuple(item.action_id for item in reversed(catalog.actions))
+
+    assert score_reference_actions(case.request, action_ids=action_ids) == tuple(
+        score_reference_action(case.request, action_id=action_id)
+        for action_id in action_ids
+    )
+
+
+def test_selected_reference_batch_advances_branches_event_major(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import reference
+
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if len(item.request.runtime.replay_input.instances) == 4
+    )
+    original_catalog = reference.enumerate_m7_action_catalog
+    event_positions: list[int] = []
+
+    def observed_catalog(runtime, *, cursor, **kwargs):  # type: ignore[no-untyped-def]
+        event_positions.append(cursor.next_event_position)
+        return original_catalog(runtime, cursor=cursor, **kwargs)
+
+    monkeypatch.setattr(reference, "enumerate_m7_action_catalog", observed_catalog)
+    initial = original_catalog(case.request.runtime, cursor=case.request.cursor)
+    action_ids = tuple(item.action_id for item in initial.actions)
+
+    reference.score_reference_actions(case.request, action_ids=action_ids)
+
+    expected_continuation_positions = tuple(
+        position
+        for position in range(case.request.cursor.next_event_position + 1, 4)
+        for _action_id in action_ids
+    )
+    assert tuple(event_positions) == (
+        case.request.cursor.next_event_position,
+        *expected_continuation_positions,
+    )

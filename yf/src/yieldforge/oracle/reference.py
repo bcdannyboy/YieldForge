@@ -96,6 +96,85 @@ def _score_reference_action_from_catalog(
     )
 
 
+def _score_reference_actions_event_major(
+    request: M8OracleRequest,
+    *,
+    catalog,  # type: ignore[no-untyped-def]
+    action_ids: tuple[str, ...],
+    stop_event_position: int,
+) -> tuple[M8ActionScore, ...]:
+    """Replay independent exact branches one frozen M7 event at a time."""
+
+    by_id = {item.action_id: item for item in catalog.actions}
+    standard_profile_cache = request.runtime.standard_profile_cache
+    shared_fit_search_cache = request.runtime.shared_fit_search_cache or {}
+    prepared_layout_cache = request.runtime.prepared_layout_cache or OrderedDict()
+    branches = []
+    for action_id in action_ids:
+        descriptor = by_id[action_id]
+        step = apply_m7_action_descriptor(
+            request.runtime,
+            cursor=request.cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+            decision_key=(f"m8_hypothetical_action_id={action_id}",),
+        )
+        branches.append(
+            (
+                action_id,
+                _isolated_runtime(
+                    request.runtime,
+                    standard_profile_cache=standard_profile_cache,
+                    shared_fit_search_cache=shared_fit_search_cache,
+                    prepared_layout_cache=prepared_layout_cache,
+                ),
+                step.cursor,
+            )
+        )
+
+    while branches[0][2].next_event_position < stop_event_position:
+        event_positions = {branch[2].next_event_position for branch in branches}
+        if len(event_positions) != 1:
+            raise ValueError("M8 reference branches lost event-major alignment")
+        advanced = []
+        for action_id, runtime, cursor in branches:
+            branch_catalog = enumerate_m7_action_catalog(
+                runtime,
+                cursor=cursor,
+                complete=False,
+            )
+            selection = select_m7_fallback(
+                branch_catalog,
+                policy=runtime.replay_input.policy,
+            )
+            descriptor = next(
+                item
+                for item in branch_catalog.actions
+                if item.action_id == selection.action_id
+            )
+            step = apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=branch_catalog,
+                descriptor=descriptor,
+                decision_key=selection.decision_key,
+            )
+            advanced.append((action_id, runtime, step.cursor))
+        branches = advanced
+
+    return tuple(
+        M8ActionScore(
+            action_id=action_id,
+            final_net_cost=run_m7_continuation(
+                runtime,
+                cursor=cursor,
+                stop_event_position=stop_event_position,
+            ).final_costs.net_cost,
+        )
+        for action_id, runtime, cursor in branches
+    )
+
+
 def score_reference_action(
     request: M8OracleRequest,
     *,
@@ -129,14 +208,11 @@ def score_reference_actions(
         if any(action_id not in present for action_id in action_ids):
             raise ValueError("M8 selected reference action is absent from the exact catalog")
         stop = _visible_stop(captured, event_position=catalog.event_position)
-        return tuple(
-            _score_reference_action_from_catalog(
-                captured,
-                catalog=catalog,
-                action_id=action_id,
-                stop_event_position=stop,
-            )
-            for action_id in action_ids
+        return _score_reference_actions_event_major(
+            captured,
+            catalog=catalog,
+            action_ids=action_ids,
+            stop_event_position=stop,
         )
 
 
@@ -158,14 +234,11 @@ def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
             policy=captured.runtime.replay_input.policy,
         )
         stop = _visible_stop(captured, event_position=catalog.event_position)
-        action_scores = tuple(
-            _score_reference_action_from_catalog(
-                captured,
-                catalog=catalog,
-                action_id=descriptor.action_id,
-                stop_event_position=stop,
-            )
-            for descriptor in catalog.actions
+        action_scores = _score_reference_actions_event_major(
+            captured,
+            catalog=catalog,
+            action_ids=tuple(descriptor.action_id for descriptor in catalog.actions),
+            stop_event_position=stop,
         )
         decision = build_oracle_decision(
             baseline_action_id=fallback.action_id,

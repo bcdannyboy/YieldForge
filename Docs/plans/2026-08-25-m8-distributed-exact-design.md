@@ -62,6 +62,22 @@ any action. A third run then showed that action isolation itself duplicated enou
 for one task to exceed the unchanged bound. The selected per-regime batch topology is the measured
 correction: it matches all three methods, shares setup, and lowers simultaneous CPU load.
 
+The first matched per-regime execution cleared certificate generation and checking but localized a
+remaining reference-only limit. Full generation completed in `1623.227121` seconds and full checking
+in `1534.10437` seconds. The 12-action audit generator completed in `1400.985884` seconds and its
+fresh checker in `1485.550346` seconds. The brute reference then reached one worker's unchanged
+1,800-second limit; four heavy regime workers were still active at about 29 minutes, so no artifact
+was published. This validates the six-batch topology while rejecting sequential whole-suffix replay
+inside a heavy reference batch.
+
+The selected exact correction advances the two independent reference branches event-major within
+each regime batch. Every branch retains its own cursor, exact frozen-policy decision, branch-local
+fit cache, and terminal accounting. Only prepared geometry and content-keyed caches are shared at
+the same event before the bounded prepared-layout cache can evict them. The independent reference
+does not consume certificate witnesses or checker conclusions, the six frozen batches and process
+pressure are unchanged, and repeated single-branch replay remains the semantic oracle in the finite
+differential suite.
+
 ## Isolation and claim boundary
 
 Generator and checker pools never share mutable runtimes or private proof capabilities. Each worker

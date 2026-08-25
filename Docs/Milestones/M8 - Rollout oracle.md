@@ -1,6 +1,6 @@
 # M8 — Rollout oracle
 
-**Status:** Implemented — distributed generator/checker passed; split exact audit rerun is next
+**Status:** Implemented — matched audit generator/checker passed; event-major reference rerun is next
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -95,3 +95,16 @@ isolation duplicated the expensive regime common path and increased eight-proces
 it does not indicate a proof mismatch. No artifact was published. The matched audit now uses one
 batch per regime for certificate, checker, and reference, sharing common geometry and exercising six
 processes. Evaluation remains sealed and no M8 advantage or savings result exists.
+
+The matched per-regime rerun generated all 3,469 proofs in `1623.227121` wall seconds and checked all
+3,469 in `1534.10437` seconds without a reported failure. It reproduced the same 12-action audit
+hash. The per-regime audit generator then completed all 12 actions in `1400.985884` seconds and its
+fresh checker completed them in `1485.550346` seconds, clearing the phase that previously failed.
+The final brute reference reached one worker's unchanged 1,800-second limit while four heavy regime
+workers were still active near 29 minutes. Cleanup completed, and no partial artifact was published.
+
+The remaining runtime boundary is therefore reference ordering, not certificate generation,
+checking, frozen sample identity, or process supervision. The reference batch now advances its two
+independent exact branches event-major so same-event prepared geometry remains reusable, while each
+branch retains its own cursor and frozen M7 decisions. The finite differential suite must remain
+equal to repeated isolated single-action replay. Evaluation remains sealed.

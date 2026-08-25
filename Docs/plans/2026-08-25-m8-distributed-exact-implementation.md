@@ -87,3 +87,11 @@ The slow-first action-level rerun established that task queuing was not the only
 certificate action itself exceeded 1,800 seconds under eight-process contention. The matched audit
 therefore uses six per-regime batches for generator, checker, and reference alike. This shares each
 regime's common geometry, keeps timing topology comparable, and reduces simultaneous CPU pressure.
+
+The matched per-regime rerun cleared its generator (`1400.985884` seconds) and checker
+(`1485.550346` seconds), but the sequential two-action brute reference reached one worker's
+unchanged 1,800-second limit. Keep the six frozen regime batches and exact reference semantics, but
+advance each batch's independent action cursors one frozen M7 event at a time. This event-major
+ordering permits same-event prepared-geometry reuse without consulting certificate evidence.
+Differential tests must prove equality with repeated isolated single-action replay before another
+canonical calibration attempt.

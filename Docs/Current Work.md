@@ -12,10 +12,10 @@ independent proof checking, and the sealed evaluation boundary.
 
 ## Next step
 
-Rerun the distributed-exact calibration gate with the audit split into matched per-regime
-certificate, checker, and brute-force reference batches. Reassemble one deterministic artifact; keep
-evaluation sealed until exactness, coverage, 20x sampled speedup, and the seven-day projection gate
-all resolve.
+Verify the event-major exact reference optimization, then rerun the distributed-exact calibration
+gate with the same matched per-regime certificate, checker, and reference batches. Reassemble one
+deterministic artifact; keep evaluation sealed until exactness, coverage, 20x sampled speedup, and
+the seven-day projection gate all resolve.
 
 ## Evidence bridge completed
 
@@ -79,6 +79,12 @@ all resolve.
   1,800-second window. This measured duplicated common geometry and excess eight-process contention,
   not a proof mismatch. The matched audit now shares common setup within six per-regime batches for
   all three methods. No artifact was published; evaluation remains sealed.
+- The matched per-regime rerun completed all 3,469 generators (`1623.227121` wall seconds), all 3,469
+  fresh checks (`1534.10437` wall seconds), the 12-action audit generator (`1400.985884` wall
+  seconds), and its fresh checker (`1485.550346` wall seconds). The final sequential two-action
+  reference batch reached one worker's unchanged 1,800-second limit. Cleanup completed and no
+  artifact was published. The reference now advances independent branches event-major to reuse
+  same-event prepared geometry without changing exact frozen-M7 decisions or the six-batch topology.
 
 ## Experiment status
 
