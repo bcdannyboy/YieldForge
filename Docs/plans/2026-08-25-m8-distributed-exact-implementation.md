@@ -6,8 +6,8 @@
 deterministic, fail-closed proof reassembly.
 
 **Architecture:** Execute one complete cell per CPU process, close the generator pool, verify all
-proofs in a fresh process pool, then run matched action-level certificate, checker, and reference
-audit phases over the identical frozen keys. Preserve the existing proof semantics and use measured
+proofs in a fresh process pool, then run matched per-regime certificate, checker, and reference audit
+phases over identical frozen action batches. Preserve the existing proof semantics and use measured
 distributed wall time for the held-out projection.
 
 **Tech Stack:** Python 3.12, owned `multiprocessing` workers, Pydantic v2, pytest, uv, Ruff.
@@ -73,7 +73,7 @@ distributed wall time for the held-out projection.
 
 The six-cell generator and fresh checker phases both completed, but the combined audit worker phase
 reached its 1,800-second deadline. The authorized refinement splits the audit into three independently
-bounded action-level phases. All three phases use the same frozen action keys and process budget;
+bounded per-regime phases. All three phases use the same frozen action batches and process budget;
 missing or duplicate results fail closed before per-cell assembly. Full generator/checker work
 remains cell-sharded because it completed and action sharding would duplicate expensive common paths.
 
@@ -82,3 +82,8 @@ timer shortchanged actions queued behind the first eight workers. The supervisor
 started task 1,800 seconds from its confirmed start handshake, while retaining fail-closed process
 group cleanup. Audit actions are scheduled by descending observed full-generator regime time only
 after sample membership is frozen, so slow actions start first without changing evidence selection.
+
+The slow-first action-level rerun established that task queuing was not the only cost: one isolated
+certificate action itself exceeded 1,800 seconds under eight-process contention. The matched audit
+therefore uses six per-regime batches for generator, checker, and reference alike. This shares each
+regime's common geometry, keeps timing topology comparable, and reduces simultaneous CPU pressure.

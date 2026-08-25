@@ -164,7 +164,7 @@ def _finalize(  # type: ignore[no-untyped-def]
         calibration_view_sha256="sha256:" + "c" * 64,
         cells=_cells(bindings=selected) if cells is None else cells,
         audit_bindings=selected,
-        measured_process_count=8,
+        measured_process_count=6,
         generator_wall_seconds=generator_wall_seconds,
         checker_wall_seconds=checker_wall_seconds,
         audit_wall_seconds=audit_wall_seconds,
@@ -190,7 +190,7 @@ def test_certificate_gate_passes_only_complete_exact_fast_result() -> None:
     assert result.state_rejoin_count > 0
     assert result.projected_held_out_calendar_days <= 7.0
     assert result.configured_worker_count == 8
-    assert result.measured_process_count == 8
+    assert result.measured_process_count == 6
     assert result.generator_wall_seconds == 0.2
     assert result.checker_wall_seconds == 0.3
     assert result.certificate_pipeline_wall_seconds == 0.5
@@ -412,7 +412,7 @@ def test_distributed_result_rejects_unmeasured_worker_claim() -> None:
         type(result).model_validate(
             {
                 **result.model_dump(mode="python"),
-                "measured_process_count": 6,
+                "measured_process_count": 8,
             },
             strict=True,
         )
@@ -766,50 +766,46 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
         ),
         process_count=1,
     )
-    sampled = experiment._run_process_phase(  # noqa: SLF001
+    (sampled,) = experiment._run_process_phase(  # noqa: SLF001
         experiment._sample_audit_generator_worker,  # noqa: SLF001
-        tuple(
+        (
             (
                 cell,
                 runtime.rules,
                 runtime.jagua_executable,
-                binding.catalog_action_id,
-            )
-            for binding in audit_bindings
+                audit_bindings,
+            ),
         ),
         process_count=1,
     )
-    sampled_checked = experiment._run_process_phase(  # noqa: SLF001
+    (sampled_checked,) = experiment._run_process_phase(  # noqa: SLF001
         experiment._sample_audit_checker_worker,  # noqa: SLF001
-        tuple(
+        (
             (
                 cell,
                 runtime.rules,
                 runtime.jagua_executable,
-                item.action_id,
-                item.sampled.proof,
-            )
-            for item in sampled
+                tuple(item.proof for item in sampled.sampled),
+            ),
         ),
         process_count=1,
     )
-    references = experiment._run_process_phase(  # noqa: SLF001
-        experiment._reference_audit_action_worker,  # noqa: SLF001
-        tuple(
+    (references,) = experiment._run_process_phase(  # noqa: SLF001
+        experiment._reference_audit_cell_worker,  # noqa: SLF001
+        (
             (
                 cell,
                 runtime.rules,
                 runtime.jagua_executable,
-                binding.catalog_action_id,
-            )
-            for binding in audit_bindings
+                tuple(binding.catalog_action_id for binding in audit_bindings),
+            ),
         ),
         process_count=1,
     )
     audited = experiment._assemble_audit_results(  # noqa: SLF001
-        sampled=sampled,
-        checked=sampled_checked,
-        references=references,
+        sampled=(sampled,),
+        checked=(sampled_checked,),
+        references=(references,),
         audit_by_cell={generated.regime: audit_bindings},
     )[0]
     result = experiment._assemble_timed_cell(  # noqa: SLF001
@@ -890,31 +886,28 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         for regime in TemporalRegime
         for offset in range(2)
     )
-    audit_schedule = tuple(
-        (regime, action_id)
-        for regime in reversed(tuple(TemporalRegime))
-        for bound_regime, action_id in audit_action_ids
-        if bound_regime is regime
-    )
+    audit_schedule = tuple(reversed(tuple(TemporalRegime)))
     sampled = tuple(
         SimpleNamespace(
             regime=regime,
-            action_id=action_id,
-            sampled=SimpleNamespace(proof=action_id),
+            sampled=tuple(
+                SimpleNamespace(proof=action_id)
+                for bound_regime, action_id in audit_action_ids
+                if bound_regime is regime
+            ),
         )
-        for regime, action_id in audit_schedule
+        for regime in audit_schedule
     )
     sampled_checked = tuple(
-        SimpleNamespace(regime=regime, action_id=action_id)
-        for regime, action_id in audit_schedule
+        SimpleNamespace(regime=regime)
+        for regime in audit_schedule
     )
     references = tuple(
         SimpleNamespace(
             regime=regime,
-            action_id=action_id,
             elapsed_seconds=0.1,
         )
-        for regime, action_id in audit_schedule
+        for regime in audit_schedule
     )
     audited = tuple(
         SimpleNamespace(regime=regime) for regime in TemporalRegime
@@ -923,17 +916,18 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         (generated, checked, sampled, sampled_checked, references)
     )
     operations = []
-    phase_action_ids = []
+    phase_regimes = []
 
     def run_phase(operation, tasks, *, process_count):  # type: ignore[no-untyped-def]
         operations.append((operation.__name__, len(tasks), process_count))
-        if operation.__name__ == "_sample_audit_checker_worker":
-            phase_action_ids.append(tuple(task[-2] for task in tasks))
-        elif operation.__name__ in {
+        if operation.__name__ in {
             "_sample_audit_generator_worker",
-            "_reference_audit_action_worker",
+            "_sample_audit_checker_worker",
+            "_reference_audit_cell_worker",
         }:
-            phase_action_ids.append(tuple(task[-1] for task in tasks))
+            phase_regimes.append(
+                tuple(task[0].stream[0].regime for task in tasks)
+            )
         return next(phase_results)
 
     audit = tuple(
@@ -975,19 +969,17 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
     assert operations == [
         ("_generate_cell_worker", 6, 8),
         ("_check_cell_worker", 6, 8),
-        ("_sample_audit_generator_worker", 12, 8),
-        ("_sample_audit_checker_worker", 12, 8),
-        ("_reference_audit_action_worker", 12, 8),
+        ("_sample_audit_generator_worker", 6, 8),
+        ("_sample_audit_checker_worker", 6, 8),
+        ("_reference_audit_cell_worker", 6, 8),
     ]
-    assert phase_action_ids == [
-        tuple(action_id for _regime, action_id in audit_schedule),
-    ] * 3
+    assert phase_regimes == [audit_schedule] * 3
     assert tuple(item.regime for item in result.cells) == tuple(TemporalRegime)
     assert result.generator_wall_seconds == 2.0
     assert result.checker_wall_seconds == 3.0
     assert result.audit_wall_seconds == 7.0
     assert result.total_wall_seconds == 13.0
-    assert result.measured_process_count == 8
+    assert result.measured_process_count == 6
 
 
 @pytest.mark.parametrize("failure", ["missing", "duplicate"])
@@ -1008,11 +1000,12 @@ def test_distributed_audit_assembly_rejects_incomplete_reference_actions(
     sampled = tuple(
         SimpleNamespace(
             regime=regime,
-            action_id=audit_by_cell[regime][0].catalog_action_id,
-            sampled=SimpleNamespace(
-                score=SimpleNamespace(
-                    action_id=audit_by_cell[regime][0].catalog_action_id
-                )
+            sampled=(
+                SimpleNamespace(
+                    score=SimpleNamespace(
+                        action_id=audit_by_cell[regime][0].catalog_action_id
+                    )
+                ),
             ),
             elapsed_seconds=0.1,
         )
@@ -1021,8 +1014,7 @@ def test_distributed_audit_assembly_rejects_incomplete_reference_actions(
     checked = tuple(
         SimpleNamespace(
             regime=regime,
-            action_id=audit_by_cell[regime][0].catalog_action_id,
-            check=object(),
+            checks=(object(),),
             elapsed_seconds=0.1,
         )
         for regime in TemporalRegime
@@ -1030,9 +1022,10 @@ def test_distributed_audit_assembly_rejects_incomplete_reference_actions(
     references = [
         SimpleNamespace(
             regime=regime,
-            action_id=audit_by_cell[regime][0].catalog_action_id,
-            score=SimpleNamespace(
-                action_id=audit_by_cell[regime][0].catalog_action_id
+            scores=(
+                SimpleNamespace(
+                    action_id=audit_by_cell[regime][0].catalog_action_id
+                ),
             ),
             elapsed_seconds=0.1,
         )

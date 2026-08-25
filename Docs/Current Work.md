@@ -12,8 +12,8 @@ independent proof checking, and the sealed evaluation boundary.
 
 ## Next step
 
-Rerun the distributed-exact calibration gate with the audit split into matched per-action
-certificate, checker, and brute-force reference phases. Reassemble one deterministic artifact; keep
+Rerun the distributed-exact calibration gate with the audit split into matched per-regime
+certificate, checker, and brute-force reference batches. Reassemble one deterministic artifact; keep
 evaluation sealed until exactness, coverage, 20x sampled speedup, and the seven-day projection gate
 all resolve.
 
@@ -74,6 +74,11 @@ all resolve.
   audit timed out because the 1,800-second timer covered the whole 12-task/eight-slot queue rather
   than each started action. The supervisor now gives every confirmed task the full unchanged window
   and launches slow regimes first. No artifact was published; another canonical rerun is pending.
+- The slow-first per-task rerun completed all generators (`1590.819549` wall seconds) and fresh
+  checks (`1561.136582` wall seconds), then one isolated certificate action exceeded its own
+  1,800-second window. This measured duplicated common geometry and excess eight-process contention,
+  not a proof mismatch. The matched audit now shares common setup within six per-regime batches for
+  all three methods. No artifact was published; evaluation remains sealed.
 
 ## Experiment status
 

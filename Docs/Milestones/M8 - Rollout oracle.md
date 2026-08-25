@@ -87,3 +87,11 @@ because its timer covered the entire 12-task queue on eight slots, shortchanging
 actions. No artifact was published. The supervisor now applies the unchanged 1,800-second limit to
 each task from its confirmed start and schedules the measured slow regimes first. This is a process
 scheduling correction, not a semantic or threshold change.
+
+The slow-first per-task rerun completed generation in `1590.819549` wall seconds and all 3,469 fresh
+checks in `1561.136582` wall seconds, again reproducing the identical audit sample. One isolated
+certificate action then exceeded its own 1,800-second window. This demonstrates that action
+isolation duplicated the expensive regime common path and increased eight-process CPU contention;
+it does not indicate a proof mismatch. No artifact was published. The matched audit now uses one
+batch per regime for certificate, checker, and reference, sharing common geometry and exercising six
+processes. Evaluation remains sealed and no M8 advantage or savings result exists.
