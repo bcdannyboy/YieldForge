@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+import pickle
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import timedelta
 from inspect import signature
@@ -8,6 +12,7 @@ import pytest
 from shapely import Polygon, box
 
 from tests.oracle.fixtures import inventory_item, two_problem_runtime
+from yieldforge.baseline.archives import VerifiedProblemCandidates
 from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
 from yieldforge.baseline.policies import M7PolicyName, select_policy_action
 from yieldforge.baseline.replay import (
@@ -18,6 +23,7 @@ from yieldforge.baseline.replay import (
     enumerate_m7_single_remnant_competitor,
     initial_m7_cursor,
     m7_cursor_sha256,
+    m7_semantic_runtime_sha256,
     select_m7_fallback,
 )
 from yieldforge.oracle.certificates import (
@@ -543,6 +549,166 @@ def test_common_transition_fact_rejects_tampered_winner_search_cache() -> None:
         build_m8_common_transition_fact(runtime, cursor=cursor)
 
 
+def test_common_transition_fact_rejects_residual_rule_runtime_drift() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="runtime-rule-drift",
+    )
+    primary = runtime.rules.primary.model_copy(
+        update={
+            "minimum_area_sheet_fraction": 1.0,
+            "minimum_effective_width_short_side_fraction": 1.0,
+            "minimum_exterior_access_short_side_fraction": 1.0,
+        }
+    )
+    runtime.rules = runtime.rules.model_copy(update={"primary": primary})
+    independently_recomputed = build_m8_common_transition_fact(runtime, cursor=cursor)
+
+    assert independently_recomputed.step.event.action.action_id != (
+        fact.step.event.action.action_id
+    )
+    with pytest.raises(ValueError, match="semantic runtime fingerprint"):
+        certify_event_passivity(
+            runtime,
+            common=fact,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_common_transition_fact_rejects_concrete_candidate_runtime_drift() -> None:
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        policy=M7PolicyName.MYOPIC_GEOMETRY,
+    )
+    cursor, fact = _common_fact(runtime)
+    problem_id = runtime.replay_input.instances[0].problem_id
+    verified = runtime.runtime_candidates[problem_id]
+    candidates = tuple(
+        candidate.model_copy(update={"width": 1.0})
+        if candidate.candidate_id == "candidate-two"
+        else candidate
+        for candidate in verified.candidates
+    )
+    runtime.runtime_candidates[problem_id] = VerifiedProblemCandidates(
+        evidence=verified.evidence,
+        candidates=candidates,
+    )
+    independently_recomputed = build_m8_common_transition_fact(runtime, cursor=cursor)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="runtime-candidate-drift",
+    )
+
+    assert fact.step.descriptor.action_id == "m7-standard:candidate-one"
+    assert independently_recomputed.step.descriptor.action_id == "m7-standard:candidate-two"
+    with pytest.raises(ValueError, match="semantic runtime fingerprint"):
+        certify_event_passivity(
+            runtime,
+            common=fact,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_common_transition_fact_rejects_outcome_flag_runtime_drift() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    runtime.jagua_differential_audit = True
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="runtime-flag-drift",
+    )
+
+    with pytest.raises(ValueError, match="semantic runtime fingerprint"):
+        certify_event_passivity(
+            runtime,
+            common=fact,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_common_transition_fact_binds_jagua_executable_content(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "fake-jagua"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+    )
+    cursor, fact = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="runtime-executable-drift",
+    )
+    executable.write_text("#!/bin/sh\nexit 1\n")
+    executable.chmod(0o700)
+
+    assert m7_semantic_runtime_sha256(runtime) != fact.semantic_runtime_sha256
+    with pytest.raises(ValueError, match="semantic runtime fingerprint"):
+        certify_event_passivity(
+            runtime,
+            common=fact,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_semantic_runtime_requires_regular_jagua_executable(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="regular file"):
+        m7_semantic_runtime_sha256(runtime)
+
+
+def test_common_transition_fact_is_deterministic_and_valid_across_spawn_process() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="spawn-fact",
+    )
+    branch = _branch_cursor(cursor, added=(item,))
+    second_runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    _, second_fact = _common_fact(second_runtime)
+
+    assert fact.content_sha256 == second_fact.content_sha256
+    assert "_auth_sha256" not in fact.__dataclass_fields__
+    encoded = base64.b64encode(pickle.dumps((fact, branch)))
+    script = """
+import base64
+import pickle
+import sys
+from tests.oracle.fixtures import two_problem_runtime
+from yieldforge.oracle.certificates import certify_event_passivity
+
+fact, branch = pickle.loads(base64.b64decode(sys.stdin.buffer.read()))
+runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+print(certify_event_passivity(runtime, common=fact, branch_cursor=branch).passive)
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        input=encoded,
+        capture_output=True,
+        check=True,
+    )
+
+    assert completed.stdout.strip() == b"True"
+
+
 def test_common_transition_fact_rejects_nonwinner_action() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     cursor, fact = _common_fact(runtime)
@@ -578,7 +744,7 @@ def test_common_transition_fact_rejects_nonwinner_action() -> None:
         )
 
 
-@pytest.mark.parametrize("mutation", ["digest", "event", "cursor"])
+@pytest.mark.parametrize("mutation", ["digest", "event", "cursor", "runtime_fingerprint"])
 def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     cursor, fact = _common_fact(runtime)
@@ -587,7 +753,7 @@ def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) ->
     elif mutation == "event":
         event = fact.step.event.model_copy(update={"event_id": "yfm7e-" + "0" * 24})
         forged = replace(fact, step=replace(fact.step, event=event))
-    else:
+    elif mutation == "cursor":
         forged = replace(
             fact,
             cursor_before=replace(
@@ -595,13 +761,15 @@ def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) ->
                 current_time=fact.cursor_before.current_time + timedelta(seconds=1),
             ),
         )
+    else:
+        forged = replace(fact, semantic_runtime_sha256=_sha(98))
     item = inventory_item(
         box(0, 0, 3, 20),
         material=runtime.replay_input.instances[0].material,
         token=f"fact-{mutation}",
     )
 
-    with pytest.raises(ValueError, match="common transition fact|replay event"):
+    with pytest.raises(ValueError, match="common transition fact|common fact|replay event"):
         certify_event_passivity(
             runtime,
             common=forged,

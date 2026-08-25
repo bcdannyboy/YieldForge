@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+import stat
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import Executor
@@ -1506,6 +1508,111 @@ def _validate_runtime(runtime: M7ReplayRuntime) -> None:
         raise ValueError("M7 replay collision backend differs from runtime extension")
 
 
+def _jagua_executable_payload(path: Path | None) -> dict[str, object] | None:
+    if path is None:
+        return None
+    executable = Path(path)
+    try:
+        resolved = executable.resolve(strict=True)
+        before = resolved.stat()
+    except OSError as error:
+        raise ValueError("M7 Jagua executable cannot be read for semantic binding") from error
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("M7 Jagua executable must resolve to one regular file")
+    try:
+        content = resolved.read_bytes()
+        after = resolved.stat()
+    except OSError as error:
+        raise ValueError("M7 Jagua executable cannot be read for semantic binding") from error
+    if not stat.S_ISREG(after.st_mode):
+        raise ValueError("M7 Jagua executable must resolve to one regular file")
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise ValueError("M7 Jagua executable changed during semantic binding")
+    executable_mode = stat.S_IMODE(after.st_mode) & 0o111
+    if executable_mode == 0:
+        raise ValueError("M7 Jagua executable has no executable permission bits")
+    return {
+        "resolved_path": str(resolved),
+        "content_sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        "size_bytes": len(content),
+        "regular_file": True,
+        "executable_mode_bits": executable_mode,
+    }
+
+
+def _semantic_runtime_payload(runtime: M7ReplayRuntime) -> dict[str, object]:
+    _validate_runtime(runtime)
+    try:
+        replay_input = M7ReplayInput.model_validate(
+            runtime.replay_input.model_dump(mode="python"),
+            strict=True,
+        )
+        rules = ResidualRuleSet.model_validate(
+            runtime.rules.model_dump(mode="python"),
+            strict=True,
+        )
+    except (AttributeError, ValueError) as error:
+        raise ValueError("M7 semantic runtime contains noncanonical frozen input") from error
+    if replay_input != runtime.replay_input or rules != runtime.rules:
+        raise ValueError("M7 semantic runtime differs from canonical frozen input")
+
+    candidate_mapping = []
+    for problem_id in sorted(runtime.runtime_candidates):
+        verified = runtime.runtime_candidates[problem_id]
+        try:
+            evidence = M7CandidateSetEvidence.model_validate(
+                verified.evidence.model_dump(mode="python"),
+                strict=True,
+            )
+            candidates = tuple(
+                Candidate.model_validate(candidate.model_dump(mode="python"), strict=True)
+                for candidate in verified.candidates
+            )
+        except (AttributeError, ValueError) as error:
+            raise ValueError("M7 semantic runtime contains noncanonical candidates") from error
+        candidate_ids = tuple(candidate.candidate_id for candidate in candidates)
+        if (
+            evidence != verified.evidence
+            or candidates != verified.candidates
+            or evidence.problem_id != problem_id
+            or candidate_ids != tuple(sorted(set(candidate_ids)))
+            or candidate_ids != evidence.candidate_ids
+        ):
+            raise ValueError("M7 semantic runtime candidate mapping is inconsistent")
+        candidate_mapping.append(
+            {
+                "problem_id": problem_id,
+                "verified_evidence": evidence.model_dump(mode="json"),
+                "candidates": tuple(
+                    candidate.model_dump(mode="json") for candidate in candidates
+                ),
+            }
+        )
+    return {
+        "schema_version": "yieldforge.m7-semantic-runtime.v1",
+        "replay_input_id": replay_input.input_id,
+        "replay_input_sha256": replay_input.content_sha256,
+        "replay_input": replay_input.model_dump(mode="json"),
+        "residual_rules": rules.model_dump(mode="json"),
+        "runtime_candidates": tuple(candidate_mapping),
+        "collision_backend": replay_input.collision_backend,
+        "jagua_container_guard": replay_input.jagua_container_guard,
+        "jagua_executable": _jagua_executable_payload(runtime.jagua_executable),
+        "jagua_differential_audit": runtime.jagua_differential_audit,
+    }
+
+
+def m7_semantic_runtime_sha256(runtime: M7ReplayRuntime) -> str:
+    """Hash every outcome-affecting value in one exact M7 replay runtime."""
+
+    return f"sha256:{semantic_sha256(_semantic_runtime_payload(runtime))}"
+
+
 def _canonical_cursor_payload(cursor: M7ReplayCursor) -> dict[str, object]:
     if not isinstance(cursor, M7ReplayCursor):
         raise ValueError("M7 cursor must use the exact runtime cursor type")
@@ -2317,6 +2424,7 @@ __all__ = [
     "enumerate_m7_single_remnant_competitor",
     "initial_m7_cursor",
     "m7_cursor_sha256",
+    "m7_semantic_runtime_sha256",
     "m7_shared_fit_search_cache_key",
     "run_m7_replay",
     "run_m7_continuation",

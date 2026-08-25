@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import secrets
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 
@@ -22,6 +19,7 @@ from yieldforge.baseline.replay import (
     enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
     m7_cursor_sha256,
+    m7_semantic_runtime_sha256,
     m7_shared_fit_search_cache_key,
     select_m7_fallback,
 )
@@ -32,8 +30,6 @@ from yieldforge.oracle.compiled import (
 )
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
 from yieldforge.replay.contracts import InventoryItem
-
-_COMMON_FACT_AUTH_KEY = secrets.token_bytes(32)
 
 
 def _item_ids(items: tuple[InventoryItem, ...]) -> tuple[str, ...]:
@@ -73,7 +69,7 @@ class EventPassivityResult:
 
 @dataclass(frozen=True)
 class M8CommonTransitionFact:
-    """Factory-sealed exact M7 winner and transition for one common event."""
+    """Content-addressed exact M7 winner and transition for one common event."""
 
     replay_input_id: str
     replay_input_sha256: str
@@ -84,8 +80,8 @@ class M8CommonTransitionFact:
     cursor_after_sha256: str
     event_id: str
     policy_rank: PolicyRank
+    semantic_runtime_sha256: str
     content_sha256: str
-    _auth_sha256: str
 
 
 def _rank_payload(rank: PolicyRank) -> dict[str, object]:
@@ -117,11 +113,13 @@ def _common_fact_payload(
     cursor_before: M7ReplayCursor,
     step: M7StepResult,
     policy_rank: PolicyRank,
+    semantic_runtime_sha256: str,
 ) -> dict[str, object]:
     return {
         "schema_version": "yieldforge.m8-common-transition-fact.v1",
         "replay_input_id": runtime.replay_input.input_id,
         "replay_input_sha256": runtime.replay_input.content_sha256,
+        "semantic_runtime_sha256": semantic_runtime_sha256,
         "event_position": event_position,
         "cursor_before_sha256": m7_cursor_sha256(cursor_before),
         "descriptor": {
@@ -148,22 +146,15 @@ def _common_fact_payload(
     }
 
 
-def _seal_common_fact(content_sha256: str) -> str:
-    return "sha256:" + hmac.new(
-        _COMMON_FACT_AUTH_KEY,
-        content_sha256.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-
 def build_m8_common_transition_fact(
     runtime: M7ReplayRuntime,
     *,
     cursor: M7ReplayCursor,
 ) -> M8CommonTransitionFact:
-    """Build one reusable authenticated exact common winner and transition fact."""
+    """Build one deterministic runtime-bound common winner and transition fact."""
 
     event_position = cursor.next_event_position
+    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
     for item in cursor.inventory:
         compile_translation_rejections(
             runtime,
@@ -200,6 +191,7 @@ def build_m8_common_transition_fact(
         cursor_before=cursor,
         step=step,
         policy_rank=rank,
+        semantic_runtime_sha256=semantic_runtime_sha256,
     )
     content_sha256 = f"sha256:{semantic_sha256(payload)}"
     return M8CommonTransitionFact(
@@ -212,8 +204,8 @@ def build_m8_common_transition_fact(
         cursor_after_sha256=m7_cursor_sha256(step.cursor),
         event_id=step.event.event_id,
         policy_rank=rank,
+        semantic_runtime_sha256=semantic_runtime_sha256,
         content_sha256=content_sha256,
-        _auth_sha256=_seal_common_fact(content_sha256),
     )
 
 
@@ -223,6 +215,9 @@ def _validate_common_transition_fact(
 ) -> None:
     if not isinstance(fact, M8CommonTransitionFact):
         raise ValueError("M8 common transition fact has the wrong runtime type")
+    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    if fact.semantic_runtime_sha256 != semantic_runtime_sha256:
+        raise ValueError("M8 common fact semantic runtime fingerprint differs")
     if (
         fact.replay_input_id != runtime.replay_input.input_id
         or fact.replay_input_sha256 != runtime.replay_input.content_sha256
@@ -295,13 +290,11 @@ def _validate_common_transition_fact(
         cursor_before=fact.cursor_before,
         step=step,
         policy_rank=fact.policy_rank,
+        semantic_runtime_sha256=semantic_runtime_sha256,
     )
     expected_content = f"sha256:{semantic_sha256(payload)}"
-    if fact.content_sha256 != expected_content or not hmac.compare_digest(
-        fact._auth_sha256,
-        _seal_common_fact(expected_content),
-    ):
-        raise ValueError("M8 common transition fact content authentication failed")
+    if fact.content_sha256 != expected_content:
+        raise ValueError("M8 common transition fact content hash differs")
 
 
 def _derive_branch_inventory_delta(

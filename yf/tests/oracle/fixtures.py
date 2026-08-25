@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Literal
 
 from shapely import Polygon
 
@@ -26,6 +28,12 @@ def two_problem_runtime(
     second_width: float,
     policy: M7PolicyName = M7PolicyName.AGE_REGULARITY,
     rates: FeasibilityRateManifest | None = None,
+    collision_backend: Literal[
+        "shapely_authoritative",
+        "jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+    ] = "shapely_authoritative",
+    jagua_executable: Path | None = None,
+    jagua_differential_audit: bool = False,
 ) -> M7ReplayRuntime:
     first = _problem(part_width=first_width)
     second = _problem(part_width=second_width)
@@ -72,11 +80,19 @@ def two_problem_runtime(
             _binding(second, sequence=1, released_at=started + timedelta(hours=1)),
         ),
         horizon_end=started + timedelta(hours=2),
+        collision_backend=collision_backend,
+        jagua_container_guard=(
+            1.0
+            if collision_backend == "jagua_rs_0_7_0_guarded_prefilter_shapely_witness"
+            else None
+        ),
     )
     return M7ReplayRuntime(
         replay_input=replay_input,
         runtime_candidates=runtime_candidates,
         rules=rule_set_from_m0(_m0().remnant_eligibility),
+        jagua_executable=jagua_executable,
+        jagua_differential_audit=jagua_differential_audit,
     )
 
 
