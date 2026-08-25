@@ -546,7 +546,7 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
     )
 
     def progress(message: str) -> None:
-        print(f"M8 sparse proof: {message}")
+        print(f"M8 certificate proof: {message}")
 
     result = execute_sparse_prefix_proof(
         index=index,
@@ -558,10 +558,12 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
     )
     result_path = publish_sparse_proof(args.output, result)
     print(
-        "Published M8 sparse proof: "
+        "Published M8 certificate proof: "
         f"proof={result.proof_id} cells={result.completed_cell_count}/6 "
-        f"mismatches={result.semantic_mismatch_count} "
-        f"speedup={result.end_to_end_speedup} "
+        f"valid_proofs={result.valid_proof_count}/{result.current_action_count} "
+        f"checker_failures={result.checker_failure_count} "
+        f"audit_mismatches={result.audit_mismatch_count} "
+        f"sampled_speedup={result.sampled_speedup} "
         f"projected_days={result.projected_held_out_calendar_days} "
         f"decision={result.technical_decision} output={result_path}"
     )
@@ -816,7 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     prove_m8 = benchmark_commands.add_parser(
         "m8-sparse-proof",
-        help="run the six-cell calibration-only sparse exact M8 go/no-go",
+        help="run the six-cell calibration-only certificate exact M8 go/no-go",
     )
     prove_m8.add_argument("--m0", type=Path, required=True)
     prove_m8.add_argument("--frozen-baseline", type=Path, required=True)

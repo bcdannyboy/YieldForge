@@ -203,6 +203,31 @@ def test_m8_sparse_proof_command_is_registered() -> None:
         ]
     )
     assert args.handler.__name__ == "_prove_m8_sparse_oracle"
+    assert "worker_count" not in vars(args)
+
+
+def test_m8_sparse_proof_does_not_expose_the_internal_worker_override() -> None:
+    from yieldforge.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "benchmark",
+                "m8-sparse-proof",
+                "--m0",
+                "m0.json",
+                "--frozen-baseline",
+                "freeze.json",
+                "--archive-root",
+                "archives",
+                "--jagua-binary",
+                "jagua",
+                "--output",
+                "results",
+                "--worker-count",
+                "1",
+            ]
+        )
 
 
 def test_datasets_audit_check_validates_passive_report(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
