@@ -242,3 +242,17 @@ def test_known_order_lookahead_is_explicitly_zero_and_matches_net_cost() -> None
 def test_policy_fails_closed_when_no_action_exists() -> None:
     with pytest.raises(ValueError, match="no action"):
         select_policy_action(M7PolicyName.NET_COST, ())
+
+
+def test_policy_ranks_fail_closed_when_compared_across_policy_domains() -> None:
+    choice = _choice(
+        "shared",
+        kind=M7ActionKind.OPEN_STANDARD_SHEET,
+        width=4.0,
+        cost=5.0,
+    )
+    myopic = rank_policy_action(M7PolicyName.MYOPIC_GEOMETRY, choice)
+    net_cost = rank_policy_action(M7PolicyName.NET_COST, choice)
+
+    with pytest.raises(ValueError, match="same M7 policy"):
+        _ = myopic < net_cost

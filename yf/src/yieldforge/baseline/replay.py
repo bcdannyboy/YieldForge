@@ -527,19 +527,61 @@ class M7ActionCatalog:
 
 
 @dataclass(frozen=True)
+class M7PolicyActionBinding:
+    """Runtime binding from a policy catalog identity to executed action evidence."""
+
+    catalog_action_id: str
+    materialized_action_id: str
+    context: ActionPolicyContext
+
+    def __post_init__(self) -> None:
+        if not self.catalog_action_id or not self.materialized_action_id:
+            raise ValueError("M7 action binding identities must be nonempty")
+        if self.context.action_id != self.catalog_action_id:
+            raise ValueError("M7 binding context action ID differs from catalog action ID")
+
+
+@dataclass(frozen=True)
 class M7StepResult:
     descriptor: M7ActionDescriptor
     selected_context: ActionPolicyContext
+    action_binding: M7PolicyActionBinding
     event: M7ReplayEvent
     cursor: M7ReplayCursor
+
+    def __post_init__(self) -> None:
+        if self.action_binding.catalog_action_id != self.descriptor.action_id:
+            raise ValueError("M7 step binding catalog action ID differs from descriptor action ID")
+        if self.action_binding.materialized_action_id != self.event.action.action_id:
+            raise ValueError("M7 step binding materialized action ID differs from event action ID")
+        if self.action_binding.context != self.selected_context:
+            raise ValueError("M7 step binding context differs from selected context")
 
 
 @dataclass(frozen=True)
 class M7ContinuationResult:
     events: tuple[M7ReplayEvent, ...]
     selected_contexts: tuple[ActionPolicyContext, ...]
+    action_bindings: tuple[M7PolicyActionBinding, ...]
     terminal: ReplayTerminalRecord
     final_costs: ReplayCostLedger
+
+    def __post_init__(self) -> None:
+        if not (
+            len(self.events) == len(self.selected_contexts) == len(self.action_bindings)
+        ):
+            raise ValueError("M7 continuation action bindings must remain event-aligned")
+        if any(
+            binding.context != context
+            or binding.materialized_action_id != event.action.action_id
+            for binding, context, event in zip(
+                self.action_bindings,
+                self.selected_contexts,
+                self.events,
+                strict=True,
+            )
+        ):
+            raise ValueError("M7 continuation action bindings must remain event-aligned")
 
 
 @dataclass
@@ -1669,6 +1711,11 @@ def apply_m7_action_descriptor(
     return M7StepResult(
         descriptor=descriptor,
         selected_context=selected_context,
+        action_binding=M7PolicyActionBinding(
+            catalog_action_id=descriptor.action_id,
+            materialized_action_id=event.action.action_id,
+            context=selected_context,
+        ),
         event=event,
         cursor=next_cursor,
     )
@@ -1691,6 +1738,7 @@ def run_m7_continuation(
         raise ValueError("M7 continuation stop position is outside the remaining stream")
     events = []
     selected_contexts = []
+    action_bindings = []
     while cursor.next_event_position < stop:
         catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=False)
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
@@ -1706,6 +1754,7 @@ def run_m7_continuation(
         )
         events.append(step.event)
         selected_contexts.append(step.selected_context)
+        action_bindings.append(step.action_binding)
         cursor = step.cursor
     terminal_storage = _storage_cost(
         cursor.inventory,
@@ -1733,6 +1782,7 @@ def run_m7_continuation(
     return M7ContinuationResult(
         events=tuple(events),
         selected_contexts=tuple(selected_contexts),
+        action_bindings=tuple(action_bindings),
         terminal=terminal,
         final_costs=cumulative,
     )
@@ -1947,6 +1997,7 @@ __all__ = [
     "M7ActionCatalog",
     "M7ActionDescriptor",
     "M7ContinuationResult",
+    "M7PolicyActionBinding",
     "M7ReplayEvent",
     "M7ReplayInput",
     "M7ReplayResult",

@@ -836,6 +836,7 @@ def test_public_nonzero_continuation_matches_complete_replay() -> None:
     assert continued.terminal == complete.terminal
     assert continued.final_costs == complete.terminal.cumulative_costs
     assert len(continued.selected_contexts) == len(continued.events)
+    assert len(continued.action_bindings) == len(continued.events)
     assert all(
         f"action_id={context.action_id}" in event.policy_decision_key
         for context, event in zip(
@@ -844,6 +845,27 @@ def test_public_nonzero_continuation_matches_complete_replay() -> None:
             strict=True,
         )
     )
+    assert all(
+        binding.context == context
+        and binding.materialized_action_id == event.action.action_id
+        for binding, context, event in zip(
+            continued.action_bindings,
+            continued.selected_contexts,
+            continued.events,
+            strict=True,
+        )
+    )
+
+    with pytest.raises(ValueError, match="event-aligned"):
+        replace(
+            continued,
+            action_bindings=(
+                replace(
+                    continued.action_bindings[0],
+                    materialized_action_id="yfm7a-" + "0" * 24,
+                ),
+            ),
+        )
 
 
 def test_public_step_exposes_exact_selected_policy_context() -> None:
@@ -871,6 +893,105 @@ def test_public_step_exposes_exact_selected_policy_context() -> None:
     )
     assert step.selected_context.action_id == step.descriptor.action_id
     assert f"action_id={step.selected_context.action_id}" in step.event.policy_decision_key
+    assert step.action_binding.context == step.selected_context
+    assert step.action_binding.catalog_action_id == step.descriptor.action_id
+    assert step.action_binding.materialized_action_id == step.event.action.action_id
+    assert step.action_binding.catalog_action_id != step.action_binding.materialized_action_id
+
+
+def test_public_remnant_step_binds_equal_catalog_and_materialized_action_ids() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    first_catalog = replay_module.enumerate_m7_action_catalog(runtime, cursor=cursor)
+    first_fallback = replay_module.select_m7_fallback(
+        first_catalog,
+        policy=runtime.replay_input.policy,
+    )
+    first_descriptor = next(
+        item for item in first_catalog.actions if item.action_id == first_fallback.action_id
+    )
+    first_step = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=first_catalog,
+        descriptor=first_descriptor,
+        decision_key=first_fallback.decision_key,
+    )
+    remnant_catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=first_step.cursor,
+    )
+    remnant_fallback = replay_module.select_m7_fallback(
+        remnant_catalog,
+        policy=runtime.replay_input.policy,
+    )
+    remnant_descriptor = next(
+        item
+        for item in remnant_catalog.actions
+        if item.action_id == remnant_fallback.action_id
+    )
+
+    remnant_step = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=first_step.cursor,
+        catalog=remnant_catalog,
+        descriptor=remnant_descriptor,
+        decision_key=remnant_fallback.decision_key,
+    )
+
+    assert remnant_step.descriptor.kind.value == "consume_remnant"
+    assert remnant_step.action_binding.context == remnant_step.selected_context
+    assert remnant_step.action_binding.catalog_action_id == remnant_step.descriptor.action_id
+    assert remnant_step.action_binding.materialized_action_id == (
+        remnant_step.event.action.action_id
+    )
+    assert (
+        remnant_step.action_binding.catalog_action_id
+        == remnant_step.action_binding.materialized_action_id
+    )
+
+
+def test_public_step_binding_fails_closed_on_identity_mismatch() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(runtime, cursor=cursor)
+    fallback = replay_module.select_m7_fallback(
+        catalog,
+        policy=runtime.replay_input.policy,
+    )
+    descriptor = next(
+        item for item in catalog.actions if item.action_id == fallback.action_id
+    )
+    step = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=catalog,
+        descriptor=descriptor,
+        decision_key=fallback.decision_key,
+    )
+
+    with pytest.raises(ValueError, match="context action ID"):
+        replace(
+            step.action_binding,
+            catalog_action_id="m7-standard:other-candidate",
+        )
+    mismatched_context = replace(
+        step.selected_context,
+        action_id="m7-standard:other-candidate",
+    )
+    mismatched_catalog_binding = replace(
+        step.action_binding,
+        catalog_action_id=mismatched_context.action_id,
+        context=mismatched_context,
+    )
+    with pytest.raises(ValueError, match="descriptor action ID"):
+        replace(step, action_binding=mismatched_catalog_binding)
+    mismatched_materialized_binding = replace(
+        step.action_binding,
+        materialized_action_id="yfm7a-" + "0" * 24,
+    )
+    with pytest.raises(ValueError, match="materialized action ID"):
+        replace(step, action_binding=mismatched_materialized_binding)
 
 
 @pytest.mark.parametrize("context_variant", ["missing", "duplicate"])

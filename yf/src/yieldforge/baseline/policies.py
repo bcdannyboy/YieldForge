@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import StrEnum
+from functools import total_ordering
 from typing import Literal, Self
 
 from pydantic import Field, StrictStr, model_validator
@@ -85,10 +86,21 @@ class PolicySelection(BaselineContractModel):
     decision_key: tuple[StrictStr, ...] = Field(min_length=1)
 
 
-@dataclass(frozen=True, order=True)
+@total_ordering
+@dataclass(frozen=True)
 class PolicyRank:
+    """One action rank, orderable only against ranks from the same M7 policy."""
+
+    policy: M7PolicyName
     comparison_key: tuple[object, ...]
     decision_key: tuple[str, ...] = dataclass_field(compare=False)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, PolicyRank):
+            return NotImplemented
+        if self.policy is not other.policy:
+            raise ValueError("PolicyRank ordering requires the same M7 policy")
+        return self.comparison_key < other.comparison_key
 
 
 def policy_identity(name: M7PolicyName) -> M7PolicyIdentity:
@@ -179,7 +191,7 @@ def rank_policy_action(
         )
     else:  # pragma: no cover - StrEnum validation closes this branch.
         raise ValueError("unregistered M7 policy")
-    return PolicyRank(comparison_key=key, decision_key=evidence)
+    return PolicyRank(policy=policy, comparison_key=key, decision_key=evidence)
 
 
 def select_policy_action(
