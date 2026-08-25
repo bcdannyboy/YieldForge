@@ -258,3 +258,82 @@ def test_proof_rejects_unknown_evidence_and_nonfinite_cost() -> None:
     nonfinite["final_net_cost"] = float("inf")
     with pytest.raises(ValidationError):
         _revalidate(nonfinite)
+
+    nan_cost = _build_proof().model_dump(mode="python")
+    nan_cost["final_net_cost"] = float("nan")
+    with pytest.raises(ValidationError):
+        _revalidate(nan_cost)
+
+
+def test_zero_future_proof_is_valid_with_empty_witnesses() -> None:
+    proof = build_m8_action_proof(
+        action_id=_action(1),
+        baseline_action_id=_action(2),
+        start_event_position=8,
+        stop_event_position=9,
+        suffix_sha256=_sha(50),
+        witnesses=(),
+        final_net_cost=125.5,
+    )
+
+    assert proof.witnesses == ()
+    assert proof.stop_event_position == proof.start_event_position + 1
+
+
+def test_event_revalidation_rejects_tampered_nested_influence_instance() -> None:
+    invalid_influence = _no_fit_influence().model_copy(update={"remnant_id": "bad"})
+    event = _event_witnesses()[1].model_copy(
+        update={"influences": (invalid_influence,)}
+    )
+
+    with pytest.raises(ValidationError, match="remnant_id"):
+        M8EventWitness.model_validate(event, strict=True)
+
+
+def test_proof_revalidation_rejects_tampered_nested_event_instance() -> None:
+    invalid_event = _event_witnesses()[1].model_copy(update={"event_position": -1})
+    proof = _build_proof().model_copy(
+        update={
+            "witnesses": (
+                _event_witnesses()[0],
+                invalid_event,
+                *_event_witnesses()[2:],
+            )
+        }
+    )
+
+    with pytest.raises(ValidationError, match="event_position"):
+        M8ActionProof.model_validate(proof, strict=True)
+
+
+def test_proof_revalidation_rejects_tampered_outer_instance() -> None:
+    proof = _build_proof().model_copy(update={"action_id": "bad"})
+
+    with pytest.raises(ValidationError, match="action_id"):
+        M8ActionProof.model_validate(proof, strict=True)
+
+
+@pytest.mark.parametrize("tamper", ["influence", "event"])
+def test_public_builder_revalidates_nested_instances_before_hashing(tamper: str) -> None:
+    witnesses = _event_witnesses()
+    if tamper == "influence":
+        invalid_influence = witnesses[1].influences[0].model_copy(
+            update={"remnant_id": "bad"}
+        )
+        invalid_event = witnesses[1].model_copy(
+            update={"influences": (invalid_influence,)}
+        )
+    else:
+        invalid_event = witnesses[1].model_copy(update={"event_position": -1})
+    invalid_witnesses = (witnesses[0], invalid_event, *witnesses[2:])
+
+    with pytest.raises(ValidationError):
+        build_m8_action_proof(
+            action_id=_action(1),
+            baseline_action_id=_action(2),
+            start_event_position=2,
+            stop_event_position=7,
+            suffix_sha256=_sha(50),
+            witnesses=invalid_witnesses,
+            final_net_cost=125.5,
+        )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import Field, StrictFloat, StrictInt, StrictStr, model_validator
+from pydantic import ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
 from yieldforge.baseline.contracts import BaselineContractModel
 from yieldforge.experiments.contracts import semantic_sha256
@@ -24,6 +24,8 @@ _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 
 class M8InfluenceWitness(BaselineContractModel):
     """Evidence that one branch-only remnant cannot alter one M7 decision."""
+
+    model_config = ConfigDict(revalidate_instances="always")
 
     remnant_id: StrictStr = Field(pattern=_REMNANT_ID_PATTERN)
     candidate_id: StrictStr | None = Field(default=None, min_length=1)
@@ -59,6 +61,8 @@ class M8InfluenceWitness(BaselineContractModel):
 
 class M8EventWitness(BaselineContractModel):
     """One ordered exact or certified transition in an M8 action proof."""
+
+    model_config = ConfigDict(revalidate_instances="always")
 
     event_position: StrictInt = Field(ge=0)
     classification: M8EventClassification
@@ -105,6 +109,8 @@ class M8EventWitness(BaselineContractModel):
 class M8ActionProof(BaselineContractModel):
     """Complete stop-exclusive proof of one current M8 action's terminal cost."""
 
+    model_config = ConfigDict(revalidate_instances="always")
+
     schema_version: Literal["yieldforge.m8-action-proof.v1"] = (
         "yieldforge.m8-action-proof.v1"
     )
@@ -148,6 +154,10 @@ def build_m8_action_proof(
 ) -> M8ActionProof:
     """Build and validate one content-addressed exact action proof."""
 
+    canonical_witnesses = tuple(
+        M8EventWitness.model_validate(item.model_dump(mode="python"), strict=True)
+        for item in witnesses
+    )
     semantic = {
         "schema_version": "yieldforge.m8-action-proof.v1",
         "action_id": action_id,
@@ -155,7 +165,7 @@ def build_m8_action_proof(
         "start_event_position": start_event_position,
         "stop_event_position": stop_event_position,
         "suffix_sha256": suffix_sha256,
-        "witnesses": [item.model_dump(mode="json") for item in witnesses],
+        "witnesses": [item.model_dump(mode="json") for item in canonical_witnesses],
         "final_net_cost": final_net_cost,
     }
     digest = semantic_sha256(semantic)
@@ -167,7 +177,7 @@ def build_m8_action_proof(
         start_event_position=start_event_position,
         stop_event_position=stop_event_position,
         suffix_sha256=suffix_sha256,
-        witnesses=witnesses,
+        witnesses=canonical_witnesses,
         final_net_cost=final_net_cost,
     )
 
