@@ -455,7 +455,7 @@ def build_validated_m8_common_transition_in_context(
 ) -> ValidatedCommonTransition:
     """Derive one common capability inside an active shared proof runtime."""
 
-    authority.require_active()
+    authority._require_active_identity()  # noqa: SLF001 - bounded prepared operation.
     fact = _derive_m8_common_transition_fact(
         authority.runtime,
         cursor=cursor,
@@ -466,7 +466,7 @@ def build_validated_m8_common_transition_in_context(
         fact,
         semantic_runtime_sha256=authority.semantic_sha256,
     )
-    authority.require_active()
+    authority._require_active_identity()  # noqa: SLF001 - bounded prepared operation.
     return _register_validated_common_transition(
         fact,
         authority._snapshot,  # noqa: SLF001 - capability shares the authority lifetime.
@@ -553,7 +553,7 @@ def _require_validated_common_transition(
             operation="M8 certificate capability entry",
         )
     else:
-        authority.require_active(runtime)
+        authority._require_active_identity(runtime)  # noqa: SLF001
     snapshot = registered[5]
     _validate_portable_common_transition_fact(
         snapshot.runtime,
@@ -1092,7 +1092,7 @@ def certify_event_passivity(
                     operation="M8 certificate operation",
                 )
             else:
-                authority.require_active(runtime)
+                authority._require_active_identity(runtime)  # noqa: SLF001
 
 
 __all__ = [

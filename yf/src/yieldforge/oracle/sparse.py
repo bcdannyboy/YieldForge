@@ -28,6 +28,7 @@ from yieldforge.oracle.certificates import (
     certify_event_passivity,
 )
 from yieldforge.oracle.contracts import M8ActionScore, M8OracleDecision, build_oracle_decision
+from yieldforge.oracle.prepared import prepared_context_fingerprint
 from yieldforge.oracle.proofs import (
     M8ActionProof,
     M8EventWitness,
@@ -65,8 +66,8 @@ class M8CertificateActionResult:
     state_rejoin_count: int
 
 
-@dataclass(frozen=True)
-class M8PreparedGeneratorContext:
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class _M8PreparedGeneratorContext:
     """Scoped cache-free generator state; invalid immediately after context exit."""
 
     _authority: M7AuthoritativeProofRuntime
@@ -79,12 +80,17 @@ class M8PreparedGeneratorContext:
 
     def require_active(self) -> None:
         registered = _PREPARED_GENERATOR_REGISTRY.get(id(self))
+        try:
+            fingerprint = _generator_context_fingerprint(self)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("M8 prepared generator capability integrity differs") from error
         if (
-            type(self) is not M8PreparedGeneratorContext
+            type(self) is not _M8PreparedGeneratorContext
             or registered is None
             or registered[0]() is not self
             or registered[1] != os.getpid()
             or registered[2] != id(self._authority)
+            or registered[3] != fingerprint
         ):
             raise ValueError("M8 prepared generator capability is invalid or inactive")
         self._authority.require_active(self._request.runtime)
@@ -95,8 +101,22 @@ class M8PreparedGeneratorContext:
 
 _PREPARED_GENERATOR_REGISTRY: dict[
     int,
-    tuple[weakref.ReferenceType[M8PreparedGeneratorContext], int, int],
+    tuple[weakref.ReferenceType[_M8PreparedGeneratorContext], int, int, str],
 ] = {}
+
+
+def _generator_context_fingerprint(context: _M8PreparedGeneratorContext) -> str:
+    return prepared_context_fingerprint(
+        kind="generator",
+        context_id=id(context),
+        authority=context._authority,
+        request=context._request,
+        catalog=context._catalog,
+        fallback_step=context._fallback_step,
+        visible=context._visible,
+        stop_event_position=context._stop_event_position,
+        suffix_sha256=context._suffix_sha256,
+    )
 
 
 @dataclass
@@ -113,9 +133,9 @@ class _BranchState:
 
 
 @contextmanager
-def prepare_m8_generator_context(
+def _prepare_m8_generator_context(
     request: M8OracleRequest,
-) -> Iterator[M8PreparedGeneratorContext]:
+) -> Iterator[_M8PreparedGeneratorContext]:
     """Own one stable semantic snapshot for an event-major generator batch."""
 
     with authoritative_m7_proof_runtime(request.runtime) as authority:
@@ -152,7 +172,7 @@ def prepare_m8_generator_context(
         if visible != expected:
             raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
         stop = catalog.event_position + 1 + len(visible)
-        context = M8PreparedGeneratorContext(
+        context = _M8PreparedGeneratorContext(
             _authority=authority,
             _request=captured,
             _catalog=catalog,
@@ -169,7 +189,7 @@ def prepare_m8_generator_context(
         key = id(context)
 
         def discard(
-            reference: weakref.ReferenceType[M8PreparedGeneratorContext],
+            reference: weakref.ReferenceType[_M8PreparedGeneratorContext],
         ) -> None:
             registered = _PREPARED_GENERATOR_REGISTRY.get(key)
             if registered is not None and registered[0] is reference:
@@ -180,17 +200,25 @@ def prepare_m8_generator_context(
             reference,
             os.getpid(),
             id(authority),
+            _generator_context_fingerprint(context),
         )
         try:
             yield context
         finally:
+            integrity_error = None
+            try:
+                context.require_active()
+            except ValueError as error:
+                integrity_error = error
             registered = _PREPARED_GENERATOR_REGISTRY.get(key)
             if registered is not None and registered[0]() is context:
                 _PREPARED_GENERATOR_REGISTRY.pop(key, None)
+            if integrity_error is not None:
+                raise integrity_error
 
 
 def _initial_branch(
-    context: M8PreparedGeneratorContext,
+    context: _M8PreparedGeneratorContext,
     descriptor: M7ActionDescriptor,
 ) -> _BranchState:
     initial = apply_m7_action_descriptor(
@@ -208,7 +236,7 @@ def _initial_branch(
 
 
 def _advance_branch(
-    context: M8PreparedGeneratorContext,
+    context: _M8PreparedGeneratorContext,
     branch: _BranchState,
     *,
     common,  # type: ignore[no-untyped-def]
@@ -288,14 +316,14 @@ def _advance_branch(
     branch.witnesses.append(witness)
 
 
-def score_prepared_certificate_actions(
-    context: M8PreparedGeneratorContext,
+def _score_prepared_certificate_actions(
+    context: _M8PreparedGeneratorContext,
     *,
     action_ids: tuple[str, ...] | None = None,
 ) -> tuple[M8CertificateActionResult, ...]:
     """Score a prepared action subset event-major with one common capability at a time."""
 
-    if type(context) is not M8PreparedGeneratorContext:
+    if type(context) is not _M8PreparedGeneratorContext:
         raise ValueError("M8 prepared generator capability has the wrong type")
     context.require_active()
     requested = (
@@ -366,15 +394,15 @@ def score_certificate_action(
 ) -> M8CertificateActionResult:
     """Generate one exact score and proof in one owned authoritative context."""
 
-    with prepare_m8_generator_context(request) as context:
-        return score_prepared_certificate_actions(context, action_ids=(action_id,))[0]
+    with _prepare_m8_generator_context(request) as context:
+        return _score_prepared_certificate_actions(context, action_ids=(action_id,))[0]
 
 
 def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
     """Score every current action event-major and emit one exact proof per action."""
 
-    with prepare_m8_generator_context(request) as context:
-        action_results = score_prepared_certificate_actions(context)
+    with _prepare_m8_generator_context(request) as context:
+        action_results = _score_prepared_certificate_actions(context)
         decision = build_oracle_decision(
             baseline_action_id=context._fallback_step.descriptor.action_id,  # noqa: SLF001
             expected_action_ids=tuple(
@@ -411,11 +439,8 @@ def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
 
 __all__ = [
     "M8CertificateActionResult",
-    "M8PreparedGeneratorContext",
     "M8SparseMetrics",
     "M8SparseResult",
-    "prepare_m8_generator_context",
     "score_certificate_action",
-    "score_prepared_certificate_actions",
     "score_sparse_event",
 ]

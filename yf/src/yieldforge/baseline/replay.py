@@ -748,7 +748,7 @@ class M7SemanticRuntimeSnapshot:
         raise TypeError("M7 semantic runtime snapshots cannot be serialized")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class M7AuthoritativeProofRuntime:
     """One active cache-free semantic runtime owned by a bounded proof operation."""
 
@@ -756,7 +756,7 @@ class M7AuthoritativeProofRuntime:
     semantic_sha256: str
     _snapshot: M7SemanticRuntimeSnapshot
 
-    def require_active(self, runtime: M7ReplayRuntime | None = None) -> None:
+    def _require_active_identity(self, runtime: M7ReplayRuntime | None = None) -> None:
         registered = _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.get(id(self))
         if (
             registered is None
@@ -768,14 +768,65 @@ class M7AuthoritativeProofRuntime:
         if runtime is not None and runtime is not self.runtime:
             raise ValueError("M7 proof operation used a different authoritative runtime")
 
+    def require_active(self, runtime: M7ReplayRuntime | None = None) -> None:
+        """Deep-check this capability at a prepared operation boundary."""
+
+        self._require_active_identity(runtime)
+        registered = _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY[id(self)]
+        try:
+            fingerprint = _authoritative_proof_runtime_fingerprint(self)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("M7 authoritative proof runtime integrity differs") from error
+        if registered[2] != fingerprint:
+            raise ValueError("M7 authoritative proof runtime integrity differs")
+
     def __reduce__(self) -> object:
         raise TypeError("M7 authoritative proof runtimes cannot be serialized")
 
 
 _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY: dict[
     int,
-    tuple[weakref.ReferenceType[M7AuthoritativeProofRuntime], int],
+    tuple[weakref.ReferenceType[M7AuthoritativeProofRuntime], int, str],
 ] = {}
+
+
+def _authoritative_proof_runtime_fingerprint(
+    authority: M7AuthoritativeProofRuntime,
+) -> str:
+    runtime = authority.runtime
+    snapshot = authority._snapshot
+    candidate_mapping = tuple(
+        {
+            "problem_id": problem_id,
+            "verified_evidence": verified.evidence.model_dump(mode="json"),
+            "candidates": tuple(
+                candidate.model_dump(mode="json") for candidate in verified.candidates
+            ),
+        }
+        for problem_id, verified in sorted(runtime.runtime_candidates.items())
+    )
+    payload = {
+        "schema_version": "yieldforge.m7-authoritative-proof-runtime-capability.v1",
+        "authority_id": id(authority),
+        "runtime_id": id(runtime),
+        "snapshot_id": id(snapshot),
+        "snapshot_runtime_id": id(snapshot.runtime),
+        "semantic_sha256": authority.semantic_sha256,
+        "snapshot_semantic_sha256": snapshot.semantic_sha256,
+        "owner_pid": snapshot._owner_pid,
+        "replay_input_id": id(runtime.replay_input),
+        "replay_input": runtime.replay_input.model_dump(mode="json"),
+        "rules_id": id(runtime.rules),
+        "rules": runtime.rules.model_dump(mode="json"),
+        "runtime_candidates_id": id(runtime.runtime_candidates),
+        "runtime_candidates": candidate_mapping,
+        "standard_profile_executor_is_none": runtime.standard_profile_executor is None,
+        "jagua_executable": (
+            str(runtime.jagua_executable) if runtime.jagua_executable is not None else None
+        ),
+        "jagua_differential_audit": runtime.jagua_differential_audit,
+    }
+    return f"sha256:{semantic_sha256(payload)}"
 
 
 def _build_standard_profile(
@@ -2128,14 +2179,25 @@ def authoritative_m7_proof_runtime(
                     _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.pop(key, None)
 
             reference = weakref.ref(authority, discard)
-            _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY[key] = (reference, os.getpid())
+            _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY[key] = (
+                reference,
+                os.getpid(),
+                _authoritative_proof_runtime_fingerprint(authority),
+            )
             yield authority
     finally:
+        integrity_error = None
         if authority is not None:
+            try:
+                authority.require_active()
+            except ValueError as error:
+                integrity_error = error
             registered = _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.get(id(authority))
             if registered is not None and registered[0]() is authority:
                 _AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.pop(id(authority), None)
         snapshot.close()
+        if integrity_error is not None:
+            raise integrity_error
 
 
 def _canonical_cursor_payload(cursor: M7ReplayCursor) -> dict[str, object]:

@@ -29,6 +29,7 @@ from yieldforge.oracle.certificates import (
     build_validated_m8_common_transition_in_context,
     certify_event_passivity,
 )
+from yieldforge.oracle.prepared import prepared_context_fingerprint
 from yieldforge.oracle.proofs import M8ActionProof, M8EventWitness, m8_suffix_sha256
 
 if TYPE_CHECKING:
@@ -68,8 +69,8 @@ class M8ProofCheckResult(BaselineContractModel):
         return self
 
 
-@dataclass(frozen=True)
-class M8PreparedCheckerContext:
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class _M8PreparedCheckerContext:
     """Independent scoped checker state for one event-major proof batch."""
 
     _authority: M7AuthoritativeProofRuntime
@@ -82,12 +83,17 @@ class M8PreparedCheckerContext:
 
     def require_active(self) -> None:
         registered = _PREPARED_CHECKER_REGISTRY.get(id(self))
+        try:
+            fingerprint = _checker_context_fingerprint(self)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("M8 prepared checker capability integrity differs") from error
         if (
-            type(self) is not M8PreparedCheckerContext
+            type(self) is not _M8PreparedCheckerContext
             or registered is None
             or registered[0]() is not self
             or registered[1] != os.getpid()
             or registered[2] != id(self._authority)
+            or registered[3] != fingerprint
         ):
             raise ValueError("M8 prepared checker capability is invalid or inactive")
         self._authority.require_active(self._request.runtime)
@@ -98,8 +104,22 @@ class M8PreparedCheckerContext:
 
 _PREPARED_CHECKER_REGISTRY: dict[
     int,
-    tuple[weakref.ReferenceType[M8PreparedCheckerContext], int, int],
+    tuple[weakref.ReferenceType[_M8PreparedCheckerContext], int, int, str],
 ] = {}
+
+
+def _checker_context_fingerprint(context: _M8PreparedCheckerContext) -> str:
+    return prepared_context_fingerprint(
+        kind="checker",
+        context_id=id(context),
+        authority=context._authority,
+        request=context._request,
+        catalog=context._catalog,
+        fallback_step=context._fallback_step,
+        visible=context._visible,
+        stop_event_position=context._stop_event_position,
+        suffix_sha256=context._suffix_sha256,
+    )
 
 
 @dataclass
@@ -148,9 +168,9 @@ def _failed(
 
 
 @contextmanager
-def prepare_m8_checker_context(
+def _prepare_m8_checker_context(
     request: M8OracleRequest,
-) -> Iterator[M8PreparedCheckerContext]:
+) -> Iterator[_M8PreparedCheckerContext]:
     """Own a checker-only stable snapshot and exact common-path prefix."""
 
     with authoritative_m7_proof_runtime(request.runtime) as authority:
@@ -189,7 +209,7 @@ def prepare_m8_checker_context(
         if visible != expected:
             raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
         stop = catalog.event_position + 1 + len(visible)
-        context = M8PreparedCheckerContext(
+        context = _M8PreparedCheckerContext(
             _authority=authority,
             _request=captured,
             _catalog=catalog,
@@ -206,7 +226,7 @@ def prepare_m8_checker_context(
         key = id(context)
 
         def discard(
-            reference: weakref.ReferenceType[M8PreparedCheckerContext],
+            reference: weakref.ReferenceType[_M8PreparedCheckerContext],
         ) -> None:
             registered = _PREPARED_CHECKER_REGISTRY.get(key)
             if registered is not None and registered[0] is reference:
@@ -217,17 +237,25 @@ def prepare_m8_checker_context(
             reference,
             os.getpid(),
             id(authority),
+            _checker_context_fingerprint(context),
         )
         try:
             yield context
         finally:
+            integrity_error = None
+            try:
+                context.require_active()
+            except ValueError as error:
+                integrity_error = error
             registered = _PREPARED_CHECKER_REGISTRY.get(key)
             if registered is not None and registered[0]() is context:
                 _PREPARED_CHECKER_REGISTRY.pop(key, None)
+            if integrity_error is not None:
+                raise integrity_error
 
 
 def _initialize_branch(
-    context: M8PreparedCheckerContext,
+    context: _M8PreparedCheckerContext,
     proof: M8ActionProof,
 ) -> _CheckedBranch:
     try:
@@ -275,7 +303,7 @@ def _initialize_branch(
 
 
 def _check_event(
-    context: M8PreparedCheckerContext,
+    context: _M8PreparedCheckerContext,
     branch: _CheckedBranch,
     *,
     witness: M8EventWitness,
@@ -357,13 +385,13 @@ def _check_event(
     branch.checked += 1
 
 
-def check_prepared_action_proofs(
-    context: M8PreparedCheckerContext,
+def _check_prepared_action_proofs(
+    context: _M8PreparedCheckerContext,
     proofs: tuple[M8ActionProof, ...],
 ) -> tuple[M8ProofCheckResult, ...]:
     """Check a proof batch event-major against one independent common path."""
 
-    if type(context) is not M8PreparedCheckerContext:
+    if type(context) is not _M8PreparedCheckerContext:
         raise ValueError("M8 prepared checker capability has the wrong type")
     context.require_active()
     branches: list[_CheckedBranch | None] = []
@@ -437,8 +465,8 @@ def check_action_proofs(
     """Check a batch in one owned checker-only authoritative context."""
 
     try:
-        with prepare_m8_checker_context(request) as context:
-            return check_prepared_action_proofs(context, proofs)
+        with _prepare_m8_checker_context(request) as context:
+            return _check_prepared_action_proofs(context, proofs)
     except Exception:
         return tuple(_failed("invalid_proof") for _proof in proofs)
 
@@ -453,11 +481,8 @@ def check_action_proof(
 
 
 __all__ = [
-    "M8PreparedCheckerContext",
     "M8ProofCheckResult",
     "M8ProofFailureCode",
     "check_action_proof",
     "check_action_proofs",
-    "check_prepared_action_proofs",
-    "prepare_m8_checker_context",
 ]

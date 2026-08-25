@@ -214,13 +214,13 @@ def test_batch_checker_matches_standalone_results() -> None:
 
 
 def test_generator_and_checker_are_separate_scoped_authorities() -> None:
-    from yieldforge.oracle.checker import prepare_m8_checker_context
-    from yieldforge.oracle.sparse import prepare_m8_generator_context
+    from yieldforge.oracle.checker import _prepare_m8_checker_context
+    from yieldforge.oracle.sparse import _prepare_m8_generator_context
 
     request = _request()
-    with prepare_m8_generator_context(request) as generator:
+    with _prepare_m8_generator_context(request) as generator:
         generator_authority = generator._authority  # noqa: SLF001
-        with prepare_m8_checker_context(request) as checker:
+        with _prepare_m8_checker_context(request) as checker:
             checker_authority = checker._authority  # noqa: SLF001
             assert generator_authority is not checker_authority
             assert generator_authority.runtime is not checker_authority.runtime
@@ -233,29 +233,29 @@ def test_generator_and_checker_are_separate_scoped_authorities() -> None:
 
 def test_prepared_apis_reject_crossed_reconstructed_and_copied_contexts() -> None:
     from yieldforge.oracle.checker import (
-        check_prepared_action_proofs,
-        prepare_m8_checker_context,
+        _check_prepared_action_proofs,
+        _prepare_m8_checker_context,
     )
     from yieldforge.oracle.sparse import (
-        prepare_m8_generator_context,
-        score_prepared_certificate_actions,
+        _prepare_m8_generator_context,
+        _score_prepared_certificate_actions,
     )
 
     request = _request()
     proofs = score_sparse_event(request).proofs
-    with prepare_m8_generator_context(request) as generator:
-        with prepare_m8_checker_context(request) as checker:
+    with _prepare_m8_generator_context(request) as generator:
+        with _prepare_m8_checker_context(request) as checker:
             with pytest.raises(ValueError, match="prepared checker capability"):
-                check_prepared_action_proofs(generator, proofs)  # type: ignore[arg-type]
+                _check_prepared_action_proofs(generator, proofs)  # type: ignore[arg-type]
             with pytest.raises(ValueError, match="prepared generator capability"):
-                score_prepared_certificate_actions(checker)  # type: ignore[arg-type]
+                _score_prepared_certificate_actions(checker)  # type: ignore[arg-type]
 
             reconstructed_generator = replace(generator)
             reconstructed_checker = replace(checker)
             with pytest.raises(ValueError, match="prepared generator capability"):
-                score_prepared_certificate_actions(reconstructed_generator)
+                _score_prepared_certificate_actions(reconstructed_generator)
             with pytest.raises(ValueError, match="prepared checker capability"):
-                check_prepared_action_proofs(reconstructed_checker, proofs)
+                _check_prepared_action_proofs(reconstructed_checker, proofs)
 
             with pytest.raises(TypeError, match="cannot be serialized"):
                 copy.copy(generator)
@@ -263,13 +263,124 @@ def test_prepared_apis_reject_crossed_reconstructed_and_copied_contexts() -> Non
                 copy.copy(checker)
 
 
+def test_checker_context_mutation_cannot_authorize_rehashed_suffix() -> None:
+    from yieldforge.oracle.checker import (
+        _check_prepared_action_proofs,
+        _prepare_m8_checker_context,
+    )
+
+    request = _request()
+    proof = score_sparse_event(request).proofs[0]
+    forged_suffix = "sha256:" + "f" * 64
+    forged = _rebuild(proof, suffix_sha256=forged_suffix)
+    with _prepare_m8_checker_context(request) as context:
+        original = context._suffix_sha256  # noqa: SLF001
+        object.__setattr__(context, "_suffix_sha256", forged_suffix)
+        try:
+            with pytest.raises(ValueError, match="prepared checker capability"):
+                _check_prepared_action_proofs(context, (forged,))
+        finally:
+            object.__setattr__(context, "_suffix_sha256", original)
+
+
+def test_generator_context_fingerprint_rejects_low_level_mutation() -> None:
+    from yieldforge.oracle.sparse import (
+        _prepare_m8_generator_context,
+        _score_prepared_certificate_actions,
+    )
+
+    request = _request()
+    with _prepare_m8_generator_context(request) as context:
+        original = context._fallback_step  # noqa: SLF001
+        altered = replace(
+            original,
+            cursor=replace(
+                original.cursor,
+                timestamp_subsequence=original.cursor.timestamp_subsequence + 1,
+            ),
+        )
+        object.__setattr__(context, "_fallback_step", altered)
+        try:
+            with pytest.raises(ValueError, match="prepared generator capability"):
+                _score_prepared_certificate_actions(context)
+        finally:
+            object.__setattr__(context, "_fallback_step", original)
+
+
+@pytest.mark.parametrize("mutation", ["stop", "catalog", "request"])
+def test_prepared_checker_fingerprint_detects_low_level_field_mutation(
+    mutation: str,
+) -> None:
+    from yieldforge.oracle.checker import _prepare_m8_checker_context
+
+    request = _request()
+    with _prepare_m8_checker_context(request) as context:
+        if mutation == "stop":
+            field_name = "_stop_event_position"
+            original = context._stop_event_position  # noqa: SLF001
+            altered = original + 1
+        elif mutation == "catalog":
+            field_name = "_catalog"
+            original = context._catalog  # noqa: SLF001
+            altered = replace(original, event_position=original.event_position + 1)
+        elif mutation == "request":
+            field_name = "_request"
+            original = context._request  # noqa: SLF001
+            altered = replace(
+                original,
+                cursor=replace(
+                    original.cursor,
+                    timestamp_subsequence=original.cursor.timestamp_subsequence + 1,
+                ),
+            )
+        else:  # pragma: no cover - parametrization is exhaustive.
+            raise AssertionError(mutation)
+        object.__setattr__(context, field_name, altered)
+        try:
+            with pytest.raises(ValueError, match="prepared checker capability"):
+                context.require_active()
+        finally:
+            object.__setattr__(context, field_name, original)
+
+
+@pytest.mark.parametrize("mutation", ["semantic_hash", "runtime_rules"])
+def test_authoritative_runtime_fingerprint_detects_low_level_mutation(
+    mutation: str,
+) -> None:
+    from yieldforge.baseline.replay import authoritative_m7_proof_runtime
+
+    request = _request()
+    with authoritative_m7_proof_runtime(request.runtime) as authority:
+        if mutation == "semantic_hash":
+            target = authority
+            field_name = "semantic_sha256"
+            original = authority.semantic_sha256
+            altered = "sha256:" + "f" * 64
+        else:
+            target = authority.runtime
+            field_name = "rules"
+            original = authority.runtime.rules
+            altered = original.model_copy(
+                update={
+                    "rule_set_id": "yfrules-" + "f" * 24,
+                    "content_sha256": "sha256:" + "f" * 64,
+                }
+            )
+        object.__setattr__(target, field_name, altered)
+        try:
+            with pytest.raises(ValueError, match="authoritative proof runtime"):
+                authority.require_active()
+        finally:
+            object.__setattr__(target, field_name, original)
+
+
 def test_generator_authority_cleans_up_when_scoring_raises() -> None:
-    from yieldforge.oracle.sparse import prepare_m8_generator_context
+    from yieldforge.oracle.sparse import _prepare_m8_generator_context
 
     request = _request()
     authority = None
     with pytest.raises(RuntimeError, match="forced scoring failure"):
-        with prepare_m8_generator_context(request) as generator:
+        with _prepare_m8_generator_context(request) as generator:
             authority = generator._authority  # noqa: SLF001
             raise RuntimeError("forced scoring failure")
 
@@ -292,10 +403,16 @@ def test_event_major_batches_own_one_snapshot_and_one_common_capability(
     )
     snapshot_count = 0
     common_count = 0
+    authority_fingerprint_count = 0
+    generator_fingerprint_count = 0
+    checker_fingerprint_count = 0
     initial_registry_size = len(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
     maximum_live_common_count = 0
     original_snapshot = replay.snapshot_m7_replay_runtime
     original_common = certificates.build_validated_m8_common_transition_in_context
+    original_authority_fingerprint = replay._authoritative_proof_runtime_fingerprint  # noqa: SLF001
+    original_generator_fingerprint = sparse._generator_context_fingerprint  # noqa: SLF001
+    original_checker_fingerprint = checker._checker_context_fingerprint  # noqa: SLF001
 
     def counted_snapshot(*args, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal snapshot_count
@@ -312,7 +429,29 @@ def test_event_major_batches_own_one_snapshot_and_one_common_capability(
         )
         return result
 
+    def counted_authority_fingerprint(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal authority_fingerprint_count
+        authority_fingerprint_count += 1
+        return original_authority_fingerprint(*args, **kwargs)
+
+    def counted_generator_fingerprint(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal generator_fingerprint_count
+        generator_fingerprint_count += 1
+        return original_generator_fingerprint(*args, **kwargs)
+
+    def counted_checker_fingerprint(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal checker_fingerprint_count
+        checker_fingerprint_count += 1
+        return original_checker_fingerprint(*args, **kwargs)
+
     monkeypatch.setattr(replay, "snapshot_m7_replay_runtime", counted_snapshot)
+    monkeypatch.setattr(
+        replay,
+        "_authoritative_proof_runtime_fingerprint",
+        counted_authority_fingerprint,
+    )
+    monkeypatch.setattr(sparse, "_generator_context_fingerprint", counted_generator_fingerprint)
+    monkeypatch.setattr(checker, "_checker_context_fingerprint", counted_checker_fingerprint)
     monkeypatch.setattr(sparse, "build_validated_m8_common_transition_in_context", counted_common)
     monkeypatch.setattr(checker, "build_validated_m8_common_transition_in_context", counted_common)
 
@@ -320,12 +459,18 @@ def test_event_major_batches_own_one_snapshot_and_one_common_capability(
     assert snapshot_count == 1
     assert common_count == 3
     assert maximum_live_common_count == 1
+    assert authority_fingerprint_count == 5
+    assert generator_fingerprint_count == 4
+    assert checker_fingerprint_count == 0
 
     checks = checker.check_action_proofs(request, result.proofs)
     assert all(item.valid for item in checks)
     assert snapshot_count == 2
     assert common_count == 6
     assert maximum_live_common_count == 1
+    assert authority_fingerprint_count == 10
+    assert generator_fingerprint_count == 4
+    assert checker_fingerprint_count == 4
 
 
 def test_jagua_batch_materializes_one_bound_copy_and_one_lease(
