@@ -8,6 +8,7 @@ import json
 import multiprocessing
 import os
 import secrets
+import signal
 import stat
 import traceback
 from collections.abc import Callable
@@ -789,6 +790,7 @@ def _run_process_phase(
     pending = iter(enumerate(tasks))
     active: dict[Connection, tuple[int, multiprocessing.Process]] = {}
     owned_processes: list[multiprocessing.Process] = []
+    owned_receivers: list[Connection] = []
 
     def start_next() -> bool:
         try:
@@ -796,21 +798,24 @@ def _run_process_phase(
         except StopIteration:
             return False
         receiver, sender = context.Pipe(duplex=False)
+        owned_receivers.append(receiver)
         process = context.Process(
             target=_process_phase_entry,
             args=(operation, task, sender),
         )
-        process.start()
-        sender.close()
-        active[receiver] = (index, process)
         owned_processes.append(process)
+        try:
+            process.start()
+        finally:
+            sender.close()
+        active[receiver] = (index, process)
         return True
 
-    for _ in range(min(process_count, len(tasks))):
-        start_next()
-    deadline = monotonic() + timeout_seconds
     completed = 0
     try:
+        for _ in range(min(process_count, len(tasks))):
+            start_next()
+        deadline = monotonic() + timeout_seconds
         while completed < len(tasks):
             remaining = deadline - monotonic()
             if remaining <= 0:
@@ -844,7 +849,7 @@ def _run_process_phase(
         _terminate_owned_processes(owned_processes)
         raise
     finally:
-        for receiver in tuple(active):
+        for receiver in owned_receivers:
             receiver.close()
     _terminate_owned_processes(owned_processes)
     if any(item is None for item in results):
@@ -860,6 +865,9 @@ def _process_phase_entry(
     """Execute one task and return only serialized evidence or serialized failure."""
 
     try:
+        if not hasattr(os, "setsid"):
+            raise RuntimeError("M8 distributed workers require POSIX process groups")
+        os.setsid()
         sender.send(("ok", operation(*task), ""))
     except BaseException as error:
         try:
@@ -881,16 +889,37 @@ def _terminate_owned_processes(
 ) -> None:
     """Join completed workers and terminate or kill every remaining owned worker."""
 
+    owned_groups: set[int] = set()
     for process in processes:
-        if process.is_alive():
+        pid = process.pid
+        if pid is None:
+            continue
+        try:
+            group_id = os.getpgid(pid)
+        except ProcessLookupError:
+            group_id = pid
+        if group_id == pid:
+            owned_groups.add(pid)
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        elif process.is_alive():
             process.terminate()
     for process in processes:
-        process.join(timeout=1.0)
+        if process.pid is not None:
+            process.join(timeout=1.0)
+    for group_id in owned_groups:
+        try:
+            os.killpg(group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     for process in processes:
-        if process.is_alive():
+        if process.pid is not None and process.is_alive():
             process.kill()
     for process in processes:
-        process.join(timeout=1.0)
+        if process.pid is not None:
+            process.join(timeout=1.0)
 
 
 def _generate_cell_worker(

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +21,14 @@ def _phase_test_operation(mode: str, value: int):  # type: ignore[no-untyped-def
     if mode == "sleep":
         time.sleep(value)
     return value, os.getpid()
+
+
+def _phase_spawn_descendant(pid_path: str) -> None:
+    child = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+    )
+    Path(pid_path).write_text(str(child.pid))
+    time.sleep(30)
 
 
 def _bindings():  # type: ignore[no-untyped-def]
@@ -578,6 +590,63 @@ def test_distributed_phase_terminates_workers_at_deadline() -> None:
         )
 
     assert time.monotonic() - started < 2.0
+
+
+def test_distributed_phase_cleans_started_workers_when_later_start_fails() -> None:
+    from yieldforge.oracle import experiment
+
+    before = {child.pid for child in multiprocessing.active_children()}
+    unpicklable = lambda: None  # noqa: E731
+    try:
+        with pytest.raises(Exception):  # noqa: B017
+            experiment._run_process_phase(  # noqa: SLF001
+                _phase_test_operation,
+                (("sleep", 5), ("return", unpicklable)),
+                process_count=2,
+                timeout_seconds=10.0,
+            )
+        orphans = [
+            child
+            for child in multiprocessing.active_children()
+            if child.pid not in before
+        ]
+        assert orphans == []
+    finally:
+        for child in multiprocessing.active_children():
+            if child.pid not in before:
+                child.terminate()
+                child.join(timeout=1.0)
+
+
+def test_distributed_phase_timeout_terminates_worker_descendants(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    pid_path = tmp_path / "descendant.pid"
+    with pytest.raises(TimeoutError, match="exceeded"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_spawn_descendant,
+            ((str(pid_path),),),
+            process_count=1,
+            timeout_seconds=1.0,
+        )
+    assert pid_path.exists()
+    descendant_pid = int(pid_path.read_text())
+    try:
+        for _ in range(30):
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("M8 worker descendant survived phase timeout")
+    finally:
+        try:
+            os.kill(descendant_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def test_distributed_generator_worker_round_trips_one_real_cell() -> None:
