@@ -362,6 +362,7 @@ def _score_prepared_certificate_actions(
         finally:
             _release_validated_common_transition(common)
 
+    start_state_sha256 = m7_cursor_sha256(context._request.cursor)  # noqa: SLF001
     results = []
     for branch in branches:
         terminal = run_m7_continuation(
@@ -378,7 +379,7 @@ def _score_prepared_certificate_actions(
             stop_event_position=context._stop_event_position,  # noqa: SLF001
             suffix_sha256=context._suffix_sha256,  # noqa: SLF001
             semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
-            start_state_sha256=m7_cursor_sha256(context._request.cursor),  # noqa: SLF001
+            start_state_sha256=start_state_sha256,
             witnesses=tuple(branch.witnesses),
             final_net_cost=terminal.final_costs.net_cost,
             final_state_sha256=m7_cursor_sha256(branch.cursor),

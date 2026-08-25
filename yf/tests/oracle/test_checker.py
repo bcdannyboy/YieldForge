@@ -73,6 +73,7 @@ def _unsafe_rehash(proof: M8ActionProof, **changes: object) -> M8ActionProof:
 def test_checker_passive_advance_applies_once_and_hashes_two_cursors(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.baseline import replay as replay_module
     from yieldforge.oracle import certificates, checker
     from yieldforge.oracle.certificates import (
         build_validated_m8_common_transition_in_context,
@@ -87,8 +88,8 @@ def test_checker_passive_advance_applies_once_and_hashes_two_cursors(
     witness = proof.witnesses[0]
     assert witness.classification in {"no_fit", "policy_dominated"}
     counts = {"apply": 0, "hash": 0}
-    original_apply = certificates.apply_m7_frozen_action_evidence
-    original_hash = certificates.m7_cursor_sha256
+    original_apply = certificates.apply_m7_frozen_action_evidence_with_commitments
+    original_hash = replay_module.m7_cursor_sha256
 
     def counted_apply(*args, **kwargs):  # type: ignore[no-untyped-def]
         counts["apply"] += 1
@@ -104,10 +105,12 @@ def test_checker_passive_advance_applies_once_and_hashes_two_cursors(
             context._authority,  # noqa: SLF001
             cursor=context._fallback_step.cursor,  # noqa: SLF001
         )
-        monkeypatch.setattr(certificates, "apply_m7_frozen_action_evidence", counted_apply)
-        monkeypatch.setattr(certificates, "m7_cursor_sha256", counted_hash)
-        monkeypatch.setattr(checker, "apply_m7_frozen_action_evidence", counted_apply)
-        monkeypatch.setattr(checker, "m7_cursor_sha256", counted_hash)
+        monkeypatch.setattr(
+            certificates,
+            "apply_m7_frozen_action_evidence_with_commitments",
+            counted_apply,
+        )
+        monkeypatch.setattr(replay_module, "m7_cursor_sha256", counted_hash)
 
         checker._check_event(  # noqa: SLF001
             context,
@@ -118,6 +121,28 @@ def test_checker_passive_advance_applies_once_and_hashes_two_cursors(
 
     assert branch.checked == 1
     assert counts == {"apply": 1, "hash": 2}
+
+
+def test_checker_hashes_the_shared_start_state_once_per_batch(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import checker
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+    original_hash = checker.m7_cursor_sha256
+    start_hash_count = 0
+
+    with checker._prepare_m8_checker_context(request) as context:  # noqa: SLF001
+
+        def counted_hash(cursor):  # type: ignore[no-untyped-def]
+            nonlocal start_hash_count
+            if cursor is context._request.cursor:  # noqa: SLF001
+                start_hash_count += 1
+            return original_hash(cursor)
+
+        monkeypatch.setattr(checker, "m7_cursor_sha256", counted_hash)
+        checker._check_prepared_action_proofs(context, proofs)  # noqa: SLF001
+
+    assert start_hash_count == 1
 
 
 @pytest.mark.parametrize("source_classification", ["state_rejoin", "no_fit"])

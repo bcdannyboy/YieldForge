@@ -899,6 +899,57 @@ def test_public_step_exposes_exact_selected_policy_context() -> None:
     assert step.action_binding.catalog_action_id != step.action_binding.materialized_action_id
 
 
+def test_frozen_action_transition_reuses_its_authoritative_cursor_commitments() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(runtime, cursor=cursor)
+    fallback = replay_module.select_m7_fallback(
+        catalog,
+        policy=runtime.replay_input.policy,
+    )
+    descriptor = next(
+        item for item in catalog.actions if item.action_id == fallback.action_id
+    )
+    step = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=catalog,
+        descriptor=descriptor,
+        decision_key=fallback.decision_key,
+    )
+
+    transition = replay_module.apply_m7_frozen_action_evidence_with_commitments(
+        runtime,
+        cursor=cursor,
+        event_position=0,
+        action=step.event.action,
+    )
+
+    assert transition.cursor == step.cursor
+    assert transition.cursor_before_sha256 == replay_module.m7_cursor_sha256(cursor)
+    assert transition.cursor_after_sha256 == replay_module.m7_cursor_sha256(step.cursor)
+    with pytest.raises(ValueError, match="authoritative apply provenance"):
+        replay_module.M7CursorTransition(
+            cursor=transition.cursor,
+            cursor_before_sha256=transition.cursor_before_sha256,
+            cursor_after_sha256=transition.cursor_after_sha256,
+        )
+    with pytest.raises(ValueError, match="authoritative apply provenance"):
+        replace(
+            transition,
+            cursor_after_sha256="sha256:" + "f" * 64,
+        )
+    assert (
+        replay_module.apply_m7_frozen_action_evidence(
+            runtime,
+            cursor=cursor,
+            event_position=0,
+            action=step.event.action,
+        )
+        == transition.cursor
+    )
+
+
 def test_public_remnant_step_binds_equal_catalog_and_materialized_action_ids() -> None:
     runtime = _two_event_runtime()
     cursor = replay_module.initial_m7_cursor(runtime.replay_input)

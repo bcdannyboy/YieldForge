@@ -270,6 +270,8 @@ def _prepare_m8_checker_context(
 def _initialize_branch(
     context: _M8PreparedCheckerContext,
     proof: M8ActionProof,
+    *,
+    start_state_sha256: str | None = None,
 ) -> _CheckedBranch:
     try:
         canonical = M8ActionProof.model_validate(
@@ -283,7 +285,12 @@ def _initialize_branch(
     if canonical.semantic_runtime_sha256 != context._authority.semantic_sha256:  # noqa: SLF001
         raise _ProofFailure("runtime_binding_mismatch")
     request = context._request  # noqa: SLF001
-    if canonical.start_state_sha256 != m7_cursor_sha256(request.cursor):
+    expected_start_state_sha256 = (
+        m7_cursor_sha256(request.cursor)
+        if start_state_sha256 is None
+        else start_state_sha256
+    )
+    if canonical.start_state_sha256 != expected_start_state_sha256:
         raise _ProofFailure("start_state_mismatch")
     if (
         canonical.start_event_position != context._catalog.event_position  # noqa: SLF001
@@ -408,9 +415,16 @@ def _check_prepared_action_proofs(
     context.require_active()
     branches: list[_CheckedBranch | None] = []
     results: list[M8ProofCheckResult | None] = []
+    start_state_sha256 = m7_cursor_sha256(context._request.cursor)  # noqa: SLF001
     for proof in proofs:
         try:
-            branches.append(_initialize_branch(context, proof))
+            branches.append(
+                _initialize_branch(
+                    context,
+                    proof,
+                    start_state_sha256=start_state_sha256,
+                )
+            )
             results.append(None)
         except _ProofFailure as error:
             branches.append(None)

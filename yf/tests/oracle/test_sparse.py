@@ -47,6 +47,7 @@ def test_sparse_passive_remnant_matches_reference_without_branch_replay() -> Non
 def test_generator_passive_advance_applies_once_and_hashes_two_cursors(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.baseline import replay as replay_module
     from yieldforge.oracle import certificates, sparse
     from yieldforge.oracle.certificates import (
         build_validated_m8_common_transition_in_context,
@@ -59,8 +60,8 @@ def test_generator_passive_advance_applies_once_and_hashes_two_cursors(
         visibility=FullRealizedVisibility(runtime.replay_input.instances),
     )
     counts = {"apply": 0, "hash": 0}
-    original_apply = certificates.apply_m7_frozen_action_evidence
-    original_hash = certificates.m7_cursor_sha256
+    original_apply = certificates.apply_m7_frozen_action_evidence_with_commitments
+    original_hash = replay_module.m7_cursor_sha256
 
     def counted_apply(*args, **kwargs):  # type: ignore[no-untyped-def]
         counts["apply"] += 1
@@ -81,15 +82,43 @@ def test_generator_passive_advance_applies_once_and_hashes_two_cursors(
             context._authority,  # noqa: SLF001
             cursor=context._fallback_step.cursor,  # noqa: SLF001
         )
-        monkeypatch.setattr(certificates, "apply_m7_frozen_action_evidence", counted_apply)
-        monkeypatch.setattr(certificates, "m7_cursor_sha256", counted_hash)
-        monkeypatch.setattr(sparse, "apply_m7_frozen_action_evidence", counted_apply)
-        monkeypatch.setattr(sparse, "m7_cursor_sha256", counted_hash)
+        monkeypatch.setattr(
+            certificates,
+            "apply_m7_frozen_action_evidence_with_commitments",
+            counted_apply,
+        )
+        monkeypatch.setattr(replay_module, "m7_cursor_sha256", counted_hash)
 
         sparse._advance_branch(context, branch, common=common)  # noqa: SLF001
 
     assert branch.skipped_count == 1
     assert counts == {"apply": 1, "hash": 2}
+
+
+def test_generator_hashes_the_shared_start_state_once_per_batch(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    original_hash = sparse.m7_cursor_sha256
+    start_hash_count = 0
+
+    with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+
+        def counted_hash(cursor):  # type: ignore[no-untyped-def]
+            nonlocal start_hash_count
+            if cursor is context._request.cursor:  # noqa: SLF001
+                start_hash_count += 1
+            return original_hash(cursor)
+
+        monkeypatch.setattr(sparse, "m7_cursor_sha256", counted_hash)
+        sparse._score_prepared_certificate_actions(context)  # noqa: SLF001
+
+    assert start_hash_count == 1
 
 
 def test_sparse_surviving_future_fit_falls_back_to_exact_and_matches_reference() -> None:

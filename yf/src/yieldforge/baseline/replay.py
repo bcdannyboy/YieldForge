@@ -538,6 +538,52 @@ class M7ReplayCursor:
 
 
 @dataclass(frozen=True)
+class M7CursorTransition:
+    """One applied cursor plus the commitments computed during exact validation."""
+
+    cursor: M7ReplayCursor
+    cursor_before_sha256: str
+    cursor_after_sha256: str
+    _provenance_token: object | None = dataclass_field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self._provenance_token is not _M7_CURSOR_TRANSITION_PROVENANCE:
+            raise ValueError("M7 cursor transition lacks authoritative apply provenance")
+
+
+_M7_CURSOR_TRANSITION_PROVENANCE = object()
+
+
+def _trusted_m7_cursor_transition(
+    applied: _M7AppliedAction,
+) -> M7CursorTransition:
+    transition = object.__new__(M7CursorTransition)
+    object.__setattr__(transition, "cursor", applied.cursor)
+    object.__setattr__(
+        transition,
+        "cursor_before_sha256",
+        applied.cursor_before_sha256,
+    )
+    object.__setattr__(
+        transition,
+        "cursor_after_sha256",
+        applied.cursor_after_sha256,
+    )
+    object.__setattr__(
+        transition,
+        "_provenance_token",
+        _M7_CURSOR_TRANSITION_PROVENANCE,
+    )
+    transition.__post_init__()
+    return transition
+
+
+@dataclass(frozen=True)
 class M7ActionDescriptor:
     """Lazy standard action or exact feasible remnant action at one M7 event."""
 
@@ -2472,6 +2518,8 @@ class _M7AppliedAction:
     delta_costs: ReplayCostLedger
     cumulative_costs: ReplayCostLedger
     cursor: M7ReplayCursor
+    cursor_before_sha256: str
+    cursor_after_sha256: str
 
 
 def _canonical_materialized_action(
@@ -2534,7 +2582,7 @@ def _apply_m7_materialized_action(
     action: M7LayoutActionEvidence,
 ) -> _M7AppliedAction:
     _validate_runtime(runtime)
-    m7_cursor_sha256(cursor)
+    cursor_before_sha256 = m7_cursor_sha256(cursor)
     if event_position != cursor.next_event_position:
         raise ValueError("M7 frozen action position differs from cursor")
     canonical = _canonical_materialized_action(
@@ -2588,7 +2636,7 @@ def _apply_m7_materialized_action(
         timestamp_subsequence=group_subsequence,
         previous_release=binding.released_at,
     )
-    m7_cursor_sha256(next_cursor)
+    cursor_after_sha256 = m7_cursor_sha256(next_cursor)
     return _M7AppliedAction(
         storage_cost=storage,
         timestamp_group_sequence=group_sequence,
@@ -2597,6 +2645,8 @@ def _apply_m7_materialized_action(
         delta_costs=delta,
         cumulative_costs=cumulative,
         cursor=next_cursor,
+        cursor_before_sha256=cursor_before_sha256,
+        cursor_after_sha256=cursor_after_sha256,
     )
 
 
@@ -2609,12 +2659,30 @@ def apply_m7_frozen_action_evidence(
 ) -> M7ReplayCursor:
     """Apply one validated materialized action without enumerating losing actions."""
 
-    return _apply_m7_materialized_action(
+    return apply_m7_frozen_action_evidence_with_commitments(
         runtime,
         cursor=cursor,
         event_position=event_position,
         action=action,
     ).cursor
+
+
+def apply_m7_frozen_action_evidence_with_commitments(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    event_position: int,
+    action: M7LayoutActionEvidence,
+) -> M7CursorTransition:
+    """Apply frozen evidence and retain the exact cursor hashes already validated."""
+
+    applied = _apply_m7_materialized_action(
+        runtime,
+        cursor=cursor,
+        event_position=event_position,
+        action=action,
+    )
+    return _trusted_m7_cursor_transition(applied)
 
 
 def apply_m7_action_descriptor(
@@ -2992,6 +3060,7 @@ __all__ = [
     "M7ActionDescriptor",
     "M7AuthoritativeProofRuntime",
     "M7ContinuationResult",
+    "M7CursorTransition",
     "M7PolicyActionBinding",
     "M7ReplayEvent",
     "M7ReplayInput",
@@ -3007,6 +3076,7 @@ __all__ = [
     "M7PreparedLayoutCache",
     "apply_m7_action_descriptor",
     "apply_m7_frozen_action_evidence",
+    "apply_m7_frozen_action_evidence_with_commitments",
     "authoritative_m7_proof_runtime",
     "build_m7_replay_input",
     "cursor_after_event",

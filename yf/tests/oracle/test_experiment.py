@@ -361,6 +361,85 @@ def test_certificate_gate_runtime_does_not_install_an_unmeasured_executor() -> N
     assert measured.standard_profile_executor is None
 
 
+def test_measured_proof_phase_suspends_gc_and_includes_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    events = []
+    times = iter((10.0, 13.5))
+
+    monkeypatch.setattr(experiment.gc, "isenabled", lambda: True)
+    monkeypatch.setattr(experiment.gc, "collect", lambda: events.append("collect"))
+    monkeypatch.setattr(experiment.gc, "disable", lambda: events.append("disable"))
+    monkeypatch.setattr(experiment.gc, "enable", lambda: events.append("enable"))
+
+    def clock() -> float:
+        events.append("clock")
+        return next(times)
+
+    monkeypatch.setattr(experiment, "perf_counter", clock)
+    result, elapsed = experiment._measure_proof_phase(  # noqa: SLF001
+        lambda: events.append("operation") or "result"
+    )
+
+    assert result == "result"
+    assert elapsed == 3.5
+    assert events == [
+        "collect",
+        "disable",
+        "clock",
+        "operation",
+        "enable",
+        "collect",
+        "clock",
+    ]
+
+
+def test_measured_proof_phase_preserves_prior_gc_disable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    events = []
+    monkeypatch.setattr(experiment.gc, "isenabled", lambda: False)
+    monkeypatch.setattr(experiment.gc, "collect", lambda: events.append("collect"))
+    monkeypatch.setattr(experiment.gc, "disable", lambda: events.append("disable"))
+    monkeypatch.setattr(experiment.gc, "enable", lambda: events.append("enable"))
+    monkeypatch.setattr(experiment, "perf_counter", lambda: 1.0)
+
+    def fail() -> None:
+        events.append("operation")
+        raise RuntimeError("forced proof failure")
+
+    with pytest.raises(RuntimeError, match="forced proof failure"):
+        experiment._measure_proof_phase(fail)  # noqa: SLF001
+
+    assert events == ["operation"]
+
+
+def test_measured_proof_phase_restores_gc_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    events = []
+    monkeypatch.setattr(experiment.gc, "isenabled", lambda: True)
+    monkeypatch.setattr(experiment.gc, "collect", lambda: events.append("collect"))
+    monkeypatch.setattr(experiment.gc, "disable", lambda: events.append("disable"))
+    monkeypatch.setattr(experiment.gc, "enable", lambda: events.append("enable"))
+    monkeypatch.setattr(experiment, "perf_counter", lambda: 1.0)
+
+    def fail() -> None:
+        events.append("operation")
+        raise RuntimeError("forced proof failure")
+
+    with pytest.raises(RuntimeError, match="forced proof failure"):
+        experiment._measure_proof_phase(fail)  # noqa: SLF001
+
+    assert events == ["collect", "disable", "operation", "enable", "collect"]
+
+
 def test_timed_cell_reuses_preflight_full_batch_and_checks_it_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

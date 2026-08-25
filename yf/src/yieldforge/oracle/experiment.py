@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -58,6 +60,26 @@ _WITNESS_ORDER: tuple[M8EventClassification, ...] = (
     "policy_dominated",
     "state_rejoin",
 )
+
+
+def _measure_proof_phase[ResultT](
+    operation: Callable[[], ResultT],
+) -> tuple[ResultT, float]:
+    """Measure one proof phase with cyclic GC suspended and cleanup included."""
+
+    restore_gc = gc.isenabled()
+    if restore_gc:
+        gc.collect()
+        gc.disable()
+    started = perf_counter()
+    try:
+        result = operation()
+    finally:
+        if restore_gc:
+            gc.enable()
+            gc.collect()
+    return result, perf_counter() - started
+
 
 M8ActionKind = Literal["standard", "remnant"]
 
@@ -863,9 +885,10 @@ def _execute_timed_cell(
     certificate_seconds = max(0.000001, round(full_certificate_seconds, 6))
     if progress is not None:
         progress(f"phase_start regime={regime} phase=full_checker")
-    started = perf_counter()
-    checks = check_action_proofs(request, sparse.proofs)
-    checker_seconds = max(0.000001, round(perf_counter() - started, 6))
+    checks, checker_elapsed = _measure_proof_phase(
+        lambda: check_action_proofs(request, sparse.proofs)
+    )
+    checker_seconds = max(0.000001, round(checker_elapsed, 6))
     if progress is not None:
         progress(
             f"phase_complete regime={regime} phase=full_checker "
@@ -901,10 +924,11 @@ def _execute_timed_cell(
     audit_action_ids = tuple(item.catalog_action_id for item in audit_bindings)
     if progress is not None:
         progress(f"phase_start regime={regime} phase=sampled_generator")
-    started = perf_counter()
-    sampled = score_certificate_actions(request, action_ids=audit_action_ids)
+    sampled, sampled_certificate_elapsed = _measure_proof_phase(
+        lambda: score_certificate_actions(request, action_ids=audit_action_ids)
+    )
     sampled_certificate_seconds = max(
-        0.000001, round(perf_counter() - started, 6)
+        0.000001, round(sampled_certificate_elapsed, 6)
     )
     if progress is not None:
         progress(
@@ -914,9 +938,10 @@ def _execute_timed_cell(
     sampled_proofs = tuple(item.proof for item in sampled)
     if progress is not None:
         progress(f"phase_start regime={regime} phase=sampled_checker")
-    started = perf_counter()
-    sampled_checks = check_action_proofs(request, sampled_proofs)
-    sampled_checker_seconds = max(0.000001, round(perf_counter() - started, 6))
+    sampled_checks, sampled_checker_elapsed = _measure_proof_phase(
+        lambda: check_action_proofs(request, sampled_proofs)
+    )
+    sampled_checker_seconds = max(0.000001, round(sampled_checker_elapsed, 6))
     if progress is not None:
         progress(
             f"phase_complete regime={regime} phase=sampled_checker "
@@ -943,12 +968,13 @@ def _execute_timed_cell(
 
     if progress is not None:
         progress(f"phase_start regime={regime} phase=sampled_reference")
-    started = perf_counter()
-    reference_scores = score_reference_actions(
-        request,
-        action_ids=audit_action_ids,
+    reference_scores, reference_elapsed = _measure_proof_phase(
+        lambda: score_reference_actions(
+            request,
+            action_ids=audit_action_ids,
+        )
     )
-    reference_seconds = max(0.000001, round(perf_counter() - started, 6))
+    reference_seconds = max(0.000001, round(reference_elapsed, 6))
     audit_mismatches = sum(
         (
             item.final_net_cost
@@ -1124,9 +1150,10 @@ def execute_sparse_prefix_proof(
         regime = cell.stream[0].regime.value
         if progress is not None:
             progress(f"phase_start regime={regime} phase=preflight_generator")
-        started = perf_counter()
-        sparse = score_sparse_event(request)
-        elapsed = max(0.000001, round(perf_counter() - started, 6))
+        sparse, sparse_elapsed = _measure_proof_phase(
+            lambda request=request: score_sparse_event(request)
+        )
+        elapsed = max(0.000001, round(sparse_elapsed, 6))
         preflights.append(
             _SparsePreflightResult(
                 cell=cell,

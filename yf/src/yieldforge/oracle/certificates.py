@@ -15,6 +15,7 @@ from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_p
 from yieldforge.baseline.replay import (
     M7ActionDescriptor,
     M7AuthoritativeProofRuntime,
+    M7CursorTransition,
     M7PolicyActionBinding,
     M7ReplayCursor,
     M7ReplayEvent,
@@ -22,7 +23,7 @@ from yieldforge.baseline.replay import (
     M7SemanticRuntimeSnapshot,
     M7StepResult,
     apply_m7_action_descriptor,
-    apply_m7_frozen_action_evidence,
+    apply_m7_frozen_action_evidence_with_commitments,
     enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
     m7_cursor_sha256,
@@ -1150,8 +1151,7 @@ def _influence(
 
 def _build_passive_event_result(
     *,
-    branch_after: M7ReplayCursor,
-    state_before_sha256: str,
+    transition: M7CursorTransition,
     event_position: int,
     common_action_id: str,
     branch_action_id: str,
@@ -1159,9 +1159,10 @@ def _build_passive_event_result(
         [str], tuple[tuple[M8InfluenceWitness, ...] | None, int]
     ],
 ) -> EventPassivityResult:
-    """Bind one authoritative resulting cursor to both its witness and result."""
+    """Bind one authoritative applied transition to both witness and result."""
 
-    state_after_sha256 = m7_cursor_sha256(branch_after)
+    state_before_sha256 = transition.cursor_before_sha256
+    state_after_sha256 = transition.cursor_after_sha256
     influences, exact_search_count = build_influences(state_after_sha256)
     if influences is None:
         return EventPassivityResult(
@@ -1186,7 +1187,7 @@ def _build_passive_event_result(
     )
     return _trusted_passive_result(
         witness=witness,
-        branch_after=branch_after,
+        branch_after=transition.cursor,
         exact_search_count=exact_search_count,
         branch_after_sha256=state_after_sha256,
     )
@@ -1228,13 +1229,13 @@ def certify_event_passivity(
                     exact_search_count=0,
                 )
 
-            branch_after = apply_m7_frozen_action_evidence(
+            transition = apply_m7_frozen_action_evidence_with_commitments(
                 proof_runtime,
                 cursor=branch_cursor,
                 event_position=fact.event_position,
                 action=fact.step.event.action,
             )
-            state_before_sha256 = m7_cursor_sha256(branch_cursor)
+            state_before_sha256 = transition.cursor_before_sha256
             common_rank = fact.policy_rank
 
             def build_influences(
@@ -1270,8 +1271,7 @@ def certify_event_passivity(
                 return tuple(influences), exact_search_count
 
             return _build_passive_event_result(
-                branch_after=branch_after,
-                state_before_sha256=state_before_sha256,
+                transition=transition,
                 event_position=fact.event_position,
                 common_action_id=common_action_id,
                 branch_action_id=branch_action_id,
