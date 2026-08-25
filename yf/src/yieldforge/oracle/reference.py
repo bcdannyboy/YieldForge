@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from yieldforge.baseline.replay import (
@@ -29,12 +30,21 @@ class M8ReferenceResult:
     continuation_event_executions: int
 
 
-def _isolated_runtime(source: M7ReplayRuntime) -> M7ReplayRuntime:
+def _isolated_runtime(
+    source: M7ReplayRuntime,
+    *,
+    standard_profile_cache,  # type: ignore[no-untyped-def]
+    shared_fit_search_cache,  # type: ignore[no-untyped-def]
+    prepared_layout_cache,  # type: ignore[no-untyped-def]
+) -> M7ReplayRuntime:
     return M7ReplayRuntime(
         replay_input=source.replay_input,
         runtime_candidates=source.runtime_candidates,
         rules=source.rules,
         runtime_metrics=source.runtime_metrics,
+        standard_profile_cache=standard_profile_cache,
+        shared_fit_search_cache=shared_fit_search_cache,
+        prepared_layout_cache=prepared_layout_cache,
         standard_profile_executor=source.standard_profile_executor,
         jagua_executable=source.jagua_executable,
         jagua_differential_audit=source.jagua_differential_audit,
@@ -56,6 +66,9 @@ def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
     stop = catalog.event_position + 1 + len(visible)
     scores = []
     event_executions = 0
+    standard_profile_cache = request.runtime.standard_profile_cache
+    shared_fit_search_cache = request.runtime.shared_fit_search_cache or {}
+    prepared_layout_cache = request.runtime.prepared_layout_cache or OrderedDict()
     for descriptor in catalog.actions:
         step = apply_m7_action_descriptor(
             request.runtime,
@@ -65,7 +78,12 @@ def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
             decision_key=(f"m8_hypothetical_action_id={descriptor.action_id}",),
         )
         continuation = run_m7_continuation(
-            _isolated_runtime(request.runtime),
+            _isolated_runtime(
+                request.runtime,
+                standard_profile_cache=standard_profile_cache,
+                shared_fit_search_cache=shared_fit_search_cache,
+                prepared_layout_cache=prepared_layout_cache,
+            ),
             cursor=step.cursor,
             stop_event_position=stop,
         )

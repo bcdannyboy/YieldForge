@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from yieldforge.baseline.geometry import (
@@ -38,12 +39,21 @@ class M8SparseResult:
     metrics: M8SparseMetrics
 
 
-def _isolated_runtime(source: M7ReplayRuntime) -> M7ReplayRuntime:
+def _isolated_runtime(
+    source: M7ReplayRuntime,
+    *,
+    standard_profile_cache,  # type: ignore[no-untyped-def]
+    shared_fit_search_cache,  # type: ignore[no-untyped-def]
+    prepared_layout_cache,  # type: ignore[no-untyped-def]
+) -> M7ReplayRuntime:
     return M7ReplayRuntime(
         replay_input=source.replay_input,
         runtime_candidates=source.runtime_candidates,
         rules=source.rules,
         runtime_metrics=source.runtime_metrics,
+        standard_profile_cache=standard_profile_cache,
+        shared_fit_search_cache=shared_fit_search_cache,
+        prepared_layout_cache=prepared_layout_cache,
         standard_profile_executor=source.standard_profile_executor,
         jagua_executable=source.jagua_executable,
         jagua_differential_audit=source.jagua_differential_audit,
@@ -217,8 +227,16 @@ def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
     if visible != expected:
         raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
     stop = catalog.event_position + 1 + len(visible)
+    standard_profile_cache = request.runtime.standard_profile_cache
+    shared_fit_search_cache = request.runtime.shared_fit_search_cache or {}
+    prepared_layout_cache = request.runtime.prepared_layout_cache or OrderedDict()
     common = run_m7_continuation(
-        _isolated_runtime(request.runtime),
+        _isolated_runtime(
+            request.runtime,
+            standard_profile_cache=standard_profile_cache,
+            shared_fit_search_cache=shared_fit_search_cache,
+            prepared_layout_cache=prepared_layout_cache,
+        ),
         cursor=fallback_step.cursor,
         stop_event_position=stop,
     )
@@ -259,7 +277,12 @@ def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
                     skipped_events += len(visible)
                 else:
                     continuation = run_m7_continuation(
-                        _isolated_runtime(request.runtime),
+                        _isolated_runtime(
+                            request.runtime,
+                            standard_profile_cache=standard_profile_cache,
+                            shared_fit_search_cache=shared_fit_search_cache,
+                            prepared_layout_cache=prepared_layout_cache,
+                        ),
                         cursor=step.cursor,
                         stop_event_position=stop,
                     )

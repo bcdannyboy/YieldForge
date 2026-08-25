@@ -70,6 +70,7 @@ from yieldforge.experiments.residual_geometry import (
     publish_m3_input_pack,
     publish_m3_result,
 )
+from yieldforge.oracle.experiment import execute_sparse_prefix_proof, publish_sparse_proof
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 from yieldforge.temporal_benchmark.catalog import load_registered_catalog
 from yieldforge.temporal_benchmark.contracts import build_registered_contract
@@ -537,6 +538,36 @@ def _evaluate_m7_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
+    index = build_registered_problem_index()
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    frozen = M7FrozenBaseline.model_validate_json(
+        args.frozen_baseline.read_bytes(), strict=True
+    )
+
+    def progress(message: str) -> None:
+        print(f"M8 sparse proof: {message}")
+
+    result = execute_sparse_prefix_proof(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        progress=progress,
+    )
+    result_path = publish_sparse_proof(args.output, result)
+    print(
+        "Published M8 sparse proof: "
+        f"proof={result.proof_id} cells={result.completed_cell_count}/6 "
+        f"mismatches={result.semantic_mismatch_count} "
+        f"speedup={result.end_to_end_speedup} "
+        f"projected_days={result.projected_held_out_calendar_days} "
+        f"decision={result.technical_decision} output={result_path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -782,6 +813,23 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_m7.add_argument("--jagua-binary", type=Path, required=True)
     evaluate_m7.add_argument("--output", type=Path, required=True)
     evaluate_m7.set_defaults(handler=_evaluate_m7_baseline)
+
+    prove_m8 = benchmark_commands.add_parser(
+        "m8-sparse-proof",
+        help="run the six-cell calibration-only sparse exact M8 go/no-go",
+    )
+    prove_m8.add_argument("--m0", type=Path, required=True)
+    prove_m8.add_argument("--frozen-baseline", type=Path, required=True)
+    prove_m8.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    prove_m8.add_argument("--jagua-binary", type=Path, required=True)
+    prove_m8.add_argument("--output", type=Path, required=True)
+    prove_m8.set_defaults(handler=_prove_m8_sparse_oracle)
     return parser
 
 

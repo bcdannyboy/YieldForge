@@ -1459,6 +1459,7 @@ def enumerate_m7_action_catalog(
     *,
     cursor: M7ReplayCursor,
     event_position: int | None = None,
+    complete: bool = True,
 ) -> M7ActionCatalog:
     """Enumerate every exact feasible action at one arbitrary M7 cursor."""
 
@@ -1504,7 +1505,7 @@ def enumerate_m7_action_catalog(
         fit_search_cache=runtime.fit_search_cache,
         shared_fit_search_cache=runtime.shared_fit_search_cache,
         prepared_layout_cache=runtime.prepared_layout_cache,
-        retain_all_remnant_actions=True,
+        retain_all_remnant_actions=complete,
     )
     contexts = _policy_contexts(
         generated,
@@ -1531,7 +1532,9 @@ def enumerate_m7_action_catalog(
         )
         for action in generated.remnant_actions
     )
-    if len(actions) != len(generated.standard_profiles) + generated.remnant_action_count:
+    if complete and len(actions) != (
+        len(generated.standard_profiles) + generated.remnant_action_count
+    ):
         raise ValueError("M7 complete action catalog count does not reconcile")
     return M7ActionCatalog(
         event_position=position,
@@ -1675,7 +1678,7 @@ def run_m7_continuation(
         raise ValueError("M7 continuation stop position is outside the remaining stream")
     events = []
     while cursor.next_event_position < stop:
-        catalog = enumerate_m7_action_catalog(runtime, cursor=cursor)
+        catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=False)
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
         descriptor = next(
             item for item in catalog.actions if item.action_id == selection.action_id

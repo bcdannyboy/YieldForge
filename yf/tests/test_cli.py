@@ -183,6 +183,28 @@ def test_datasets_fetch_downloads_each_manifest_file(tmp_path: Path, capsys) -> 
     ]
 
 
+def test_m8_sparse_proof_command_is_registered() -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "m8-sparse-proof",
+            "--m0",
+            "m0.json",
+            "--frozen-baseline",
+            "freeze.json",
+            "--archive-root",
+            "archives",
+            "--jagua-binary",
+            "jagua",
+            "--output",
+            "results",
+        ]
+    )
+    assert args.handler.__name__ == "_prove_m8_sparse_oracle"
+
+
 def test_datasets_audit_check_validates_passive_report(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     report_path, manifest_path = write_audit_inputs(tmp_path)
 
