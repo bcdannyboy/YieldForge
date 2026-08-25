@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -834,3 +835,73 @@ def test_public_nonzero_continuation_matches_complete_replay() -> None:
     assert continued.events == complete.events[1:]
     assert continued.terminal == complete.terminal
     assert continued.final_costs == complete.terminal.cumulative_costs
+    assert len(continued.selected_contexts) == len(continued.events)
+    assert all(
+        f"action_id={context.action_id}" in event.policy_decision_key
+        for context, event in zip(
+            continued.selected_contexts,
+            continued.events,
+            strict=True,
+        )
+    )
+
+
+def test_public_step_exposes_exact_selected_policy_context() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(runtime, cursor=cursor)
+    fallback = replay_module.select_m7_fallback(
+        catalog,
+        policy=runtime.replay_input.policy,
+    )
+    descriptor = next(
+        item for item in catalog.actions if item.action_id == fallback.action_id
+    )
+
+    step = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=catalog,
+        descriptor=descriptor,
+        decision_key=fallback.decision_key,
+    )
+
+    assert step.selected_context == next(
+        item for item in catalog.contexts if item.action_id == fallback.action_id
+    )
+    assert step.selected_context.action_id == step.descriptor.action_id
+    assert f"action_id={step.selected_context.action_id}" in step.event.policy_decision_key
+
+
+@pytest.mark.parametrize("context_variant", ["missing", "duplicate"])
+def test_public_step_fails_closed_when_selected_context_is_not_unique(
+    context_variant: str,
+) -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(runtime, cursor=cursor)
+    fallback = replay_module.select_m7_fallback(
+        catalog,
+        policy=runtime.replay_input.policy,
+    )
+    descriptor = next(
+        item for item in catalog.actions if item.action_id == fallback.action_id
+    )
+    selected_context = next(
+        item for item in catalog.contexts if item.action_id == fallback.action_id
+    )
+    if context_variant == "missing":
+        contexts = tuple(
+            item for item in catalog.contexts if item.action_id != fallback.action_id
+        )
+    else:
+        contexts = catalog.contexts + (selected_context,)
+
+    with pytest.raises(ValueError, match="exactly one policy context"):
+        replay_module.apply_m7_action_descriptor(
+            runtime,
+            cursor=cursor,
+            catalog=replace(catalog, contexts=contexts),
+            descriptor=descriptor,
+            decision_key=fallback.decision_key,
+        )

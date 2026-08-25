@@ -529,6 +529,7 @@ class M7ActionCatalog:
 @dataclass(frozen=True)
 class M7StepResult:
     descriptor: M7ActionDescriptor
+    selected_context: ActionPolicyContext
     event: M7ReplayEvent
     cursor: M7ReplayCursor
 
@@ -536,6 +537,7 @@ class M7StepResult:
 @dataclass(frozen=True)
 class M7ContinuationResult:
     events: tuple[M7ReplayEvent, ...]
+    selected_contexts: tuple[ActionPolicyContext, ...]
     terminal: ReplayTerminalRecord
     final_costs: ReplayCostLedger
 
@@ -1578,6 +1580,12 @@ def apply_m7_action_descriptor(
     registered = {item.action_id: item for item in catalog.actions}
     if registered.get(descriptor.action_id) != descriptor:
         raise ValueError("M7 action descriptor is absent from the catalog")
+    selected_contexts = tuple(
+        item for item in catalog.contexts if item.action_id == descriptor.action_id
+    )
+    if len(selected_contexts) != 1:
+        raise ValueError("M7 action descriptor must have exactly one policy context")
+    selected_context = selected_contexts[0]
     replay_input = runtime.replay_input
     binding = replay_input.instances[catalog.event_position]
     problem = next(
@@ -1658,7 +1666,12 @@ def apply_m7_action_descriptor(
         timestamp_subsequence=catalog.timestamp_subsequence,
         previous_release=binding.released_at,
     )
-    return M7StepResult(descriptor=descriptor, event=event, cursor=next_cursor)
+    return M7StepResult(
+        descriptor=descriptor,
+        selected_context=selected_context,
+        event=event,
+        cursor=next_cursor,
+    )
 
 
 def run_m7_continuation(
@@ -1677,6 +1690,7 @@ def run_m7_continuation(
     if stop < cursor.next_event_position or stop > len(runtime.replay_input.instances):
         raise ValueError("M7 continuation stop position is outside the remaining stream")
     events = []
+    selected_contexts = []
     while cursor.next_event_position < stop:
         catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=False)
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
@@ -1691,6 +1705,7 @@ def run_m7_continuation(
             decision_key=selection.decision_key,
         )
         events.append(step.event)
+        selected_contexts.append(step.selected_context)
         cursor = step.cursor
     terminal_storage = _storage_cost(
         cursor.inventory,
@@ -1717,6 +1732,7 @@ def run_m7_continuation(
     )
     return M7ContinuationResult(
         events=tuple(events),
+        selected_contexts=tuple(selected_contexts),
         terminal=terminal,
         final_costs=cumulative,
     )

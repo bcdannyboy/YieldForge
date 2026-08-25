@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import StrEnum
 from typing import Literal, Self
 
@@ -84,6 +85,12 @@ class PolicySelection(BaselineContractModel):
     decision_key: tuple[StrictStr, ...] = Field(min_length=1)
 
 
+@dataclass(frozen=True, order=True)
+class PolicyRank:
+    comparison_key: tuple[object, ...]
+    decision_key: tuple[str, ...] = dataclass_field(compare=False)
+
+
 def policy_identity(name: M7PolicyName) -> M7PolicyIdentity:
     if name is M7PolicyName.KNOWN_ORDER_LOOKAHEAD:
         return M7PolicyIdentity(
@@ -112,6 +119,69 @@ def _stable_tail(item: ActionPolicyContext) -> tuple[str, str, str]:
     return item.candidate_id, item.selected_stock_id, item.action_id
 
 
+def rank_policy_action(
+    policy: M7PolicyName,
+    item: ActionPolicyContext,
+) -> PolicyRank:
+    """Return the exact frozen comparison and decision evidence for one action."""
+
+    tail = _stable_tail(item)
+    if policy is M7PolicyName.MYOPIC_GEOMETRY:
+        key = (item.candidate_width, *tail)
+        evidence = (
+            f"candidate_width={_number(item.candidate_width)}",
+            f"candidate_id={item.candidate_id}",
+            f"selected_stock_id={item.selected_stock_id}",
+            f"action_id={item.action_id}",
+        )
+    elif policy is M7PolicyName.REMNANT_FIRST:
+        kind_rank = 0 if item.kind is M7ActionKind.CONSUME_REMNANT else 1
+        key = (kind_rank, item.immediate_net_cost, *tail)
+        evidence = (
+            f"remnant_first_rank={kind_rank}",
+            f"immediate_net_cost={_number(item.immediate_net_cost)}",
+            f"candidate_id={item.candidate_id}",
+            f"selected_stock_id={item.selected_stock_id}",
+            f"action_id={item.action_id}",
+        )
+    elif policy is M7PolicyName.NET_COST:
+        key = (item.immediate_net_cost, *tail)
+        evidence = (
+            f"immediate_net_cost={_number(item.immediate_net_cost)}",
+            f"candidate_id={item.candidate_id}",
+            f"selected_stock_id={item.selected_stock_id}",
+            f"action_id={item.action_id}",
+        )
+    elif policy is M7PolicyName.AGE_REGULARITY:
+        key = (
+            item.immediate_net_cost,
+            -item.selected_remnant_age_hours,
+            -item.returned_regularity,
+            *tail,
+        )
+        evidence = (
+            f"immediate_net_cost={_number(item.immediate_net_cost)}",
+            f"selected_remnant_age_hours={_number(item.selected_remnant_age_hours)}",
+            f"returned_regularity={_number(item.returned_regularity)}",
+            f"candidate_id={item.candidate_id}",
+            f"selected_stock_id={item.selected_stock_id}",
+            f"action_id={item.action_id}",
+        )
+    elif policy is M7PolicyName.KNOWN_ORDER_LOOKAHEAD:
+        combined = item.immediate_net_cost + item.known_order_lookahead_term
+        key = (combined, item.known_order_lookahead_term, *tail)
+        evidence = (
+            f"combined_known_cost={_number(combined)}",
+            "known_order_lookahead_term=0",
+            f"candidate_id={item.candidate_id}",
+            f"selected_stock_id={item.selected_stock_id}",
+            f"action_id={item.action_id}",
+        )
+    else:  # pragma: no cover - StrEnum validation closes this branch.
+        raise ValueError("unregistered M7 policy")
+    return PolicyRank(comparison_key=key, decision_key=evidence)
+
+
 def select_policy_action(
     policy: M7PolicyName,
     choices: tuple[ActionPolicyContext, ...],
@@ -121,78 +191,22 @@ def select_policy_action(
     if not choices:
         raise ValueError("M7 policy has no action to select")
 
-    def ranked(item: ActionPolicyContext) -> tuple[tuple[object, ...], tuple[str, ...]]:
-        tail = _stable_tail(item)
-        if policy is M7PolicyName.MYOPIC_GEOMETRY:
-            key = (item.candidate_width, *tail)
-            evidence = (
-                f"candidate_width={_number(item.candidate_width)}",
-                f"candidate_id={item.candidate_id}",
-                f"selected_stock_id={item.selected_stock_id}",
-                f"action_id={item.action_id}",
-            )
-        elif policy is M7PolicyName.REMNANT_FIRST:
-            kind_rank = 0 if item.kind is M7ActionKind.CONSUME_REMNANT else 1
-            key = (kind_rank, item.immediate_net_cost, *tail)
-            evidence = (
-                f"remnant_first_rank={kind_rank}",
-                f"immediate_net_cost={_number(item.immediate_net_cost)}",
-                f"candidate_id={item.candidate_id}",
-                f"selected_stock_id={item.selected_stock_id}",
-                f"action_id={item.action_id}",
-            )
-        elif policy is M7PolicyName.NET_COST:
-            key = (item.immediate_net_cost, *tail)
-            evidence = (
-                f"immediate_net_cost={_number(item.immediate_net_cost)}",
-                f"candidate_id={item.candidate_id}",
-                f"selected_stock_id={item.selected_stock_id}",
-                f"action_id={item.action_id}",
-            )
-        elif policy is M7PolicyName.AGE_REGULARITY:
-            key = (
-                item.immediate_net_cost,
-                -item.selected_remnant_age_hours,
-                -item.returned_regularity,
-                *tail,
-            )
-            evidence = (
-                f"immediate_net_cost={_number(item.immediate_net_cost)}",
-                f"selected_remnant_age_hours={_number(item.selected_remnant_age_hours)}",
-                f"returned_regularity={_number(item.returned_regularity)}",
-                f"candidate_id={item.candidate_id}",
-                f"selected_stock_id={item.selected_stock_id}",
-                f"action_id={item.action_id}",
-            )
-        elif policy is M7PolicyName.KNOWN_ORDER_LOOKAHEAD:
-            combined = item.immediate_net_cost + item.known_order_lookahead_term
-            key = (combined, item.known_order_lookahead_term, *tail)
-            evidence = (
-                f"combined_known_cost={_number(combined)}",
-                "known_order_lookahead_term=0",
-                f"candidate_id={item.candidate_id}",
-                f"selected_stock_id={item.selected_stock_id}",
-                f"action_id={item.action_id}",
-            )
-        else:  # pragma: no cover - StrEnum validation closes this branch.
-            raise ValueError("unregistered M7 policy")
-        return key, evidence
-
-    ranked_choices = tuple((ranked(item), item) for item in choices)
-    (comparison_key, decision_key), selected = min(
+    ranked_choices = tuple((rank_policy_action(policy, item), item) for item in choices)
+    rank, selected = min(
         ranked_choices,
-        key=lambda pair: pair[0][0],
+        key=lambda pair: pair[0].comparison_key,
     )
-    del comparison_key
-    return PolicySelection(action_id=selected.action_id, decision_key=decision_key)
+    return PolicySelection(action_id=selected.action_id, decision_key=rank.decision_key)
 
 
 __all__ = [
     "ActionPolicyContext",
     "M7PolicyIdentity",
     "M7PolicyName",
+    "PolicyRank",
     "PolicySelection",
     "policy_identity",
+    "rank_policy_action",
     "registered_policy_identities",
     "select_policy_action",
 ]
