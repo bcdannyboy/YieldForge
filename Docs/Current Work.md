@@ -69,6 +69,11 @@ all resolve.
   checker failure. It froze a 12-action audit, then the combined audit phase reached its 1,800-second
   deadline. No artifact was published. The audit is now split into three matched action-level phases
   over the identical keys and an eight-process maximum; the canonical rerun remains pending.
+- The first split-audit rerun again completed all 3,469 generators (`1573.015449` wall seconds) and
+  checks (`1578.396955` wall seconds), reproducing the same 12-action audit hash. Its certificate
+  audit timed out because the 1,800-second timer covered the whole 12-task/eight-slot queue rather
+  than each started action. The supervisor now gives every confirmed task the full unchanged window
+  and launches slow regimes first. No artifact was published; another canonical rerun is pending.
 
 ## Experiment status
 

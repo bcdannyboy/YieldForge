@@ -602,6 +602,21 @@ def test_distributed_phase_terminates_workers_at_deadline() -> None:
     assert time.monotonic() - started < 2.0
 
 
+def test_distributed_phase_gives_each_queued_task_a_full_timeout_window() -> None:
+    from yieldforge.oracle import experiment
+
+    started = time.monotonic()
+    results = experiment._run_process_phase(  # noqa: SLF001
+        _phase_test_operation,
+        (("sleep", 0.5), ("sleep", 0.5)),
+        process_count=1,
+        timeout_seconds=0.8,
+    )
+
+    assert tuple(value for value, _pid in results) == (0.5, 0.5)
+    assert time.monotonic() - started > 0.8
+
+
 def test_distributed_phase_cleans_started_workers_when_later_start_fails() -> None:
     from yieldforge.oracle import experiment
 
@@ -861,8 +876,11 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
             regime=regime,
             cell=cell,
             sparse=SimpleNamespace(proofs=(regime.value,)),
+            elapsed_seconds=float(offset + 1),
         )
-        for regime, cell in zip(TemporalRegime, cells, strict=True)
+        for offset, (regime, cell) in enumerate(
+            zip(TemporalRegime, cells, strict=True)
+        )
     )
     checked = tuple(
         SimpleNamespace(regime=regime) for regime in TemporalRegime
@@ -872,17 +890,23 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         for regime in TemporalRegime
         for offset in range(2)
     )
+    audit_schedule = tuple(
+        (regime, action_id)
+        for regime in reversed(tuple(TemporalRegime))
+        for bound_regime, action_id in audit_action_ids
+        if bound_regime is regime
+    )
     sampled = tuple(
         SimpleNamespace(
             regime=regime,
             action_id=action_id,
             sampled=SimpleNamespace(proof=action_id),
         )
-        for regime, action_id in audit_action_ids
+        for regime, action_id in audit_schedule
     )
     sampled_checked = tuple(
         SimpleNamespace(regime=regime, action_id=action_id)
-        for regime, action_id in audit_action_ids
+        for regime, action_id in audit_schedule
     )
     references = tuple(
         SimpleNamespace(
@@ -890,7 +914,7 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
             action_id=action_id,
             elapsed_seconds=0.1,
         )
-        for regime, action_id in audit_action_ids
+        for regime, action_id in audit_schedule
     )
     audited = tuple(
         SimpleNamespace(regime=regime) for regime in TemporalRegime
@@ -899,9 +923,17 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         (generated, checked, sampled, sampled_checked, references)
     )
     operations = []
+    phase_action_ids = []
 
     def run_phase(operation, tasks, *, process_count):  # type: ignore[no-untyped-def]
         operations.append((operation.__name__, len(tasks), process_count))
+        if operation.__name__ == "_sample_audit_checker_worker":
+            phase_action_ids.append(tuple(task[-2] for task in tasks))
+        elif operation.__name__ in {
+            "_sample_audit_generator_worker",
+            "_reference_audit_action_worker",
+        }:
+            phase_action_ids.append(tuple(task[-1] for task in tasks))
         return next(phase_results)
 
     audit = tuple(
@@ -947,6 +979,9 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         ("_sample_audit_checker_worker", 12, 8),
         ("_reference_audit_action_worker", 12, 8),
     ]
+    assert phase_action_ids == [
+        tuple(action_id for _regime, action_id in audit_schedule),
+    ] * 3
     assert tuple(item.regime for item in result.cells) == tuple(TemporalRegime)
     assert result.generator_wall_seconds == 2.0
     assert result.checker_wall_seconds == 3.0

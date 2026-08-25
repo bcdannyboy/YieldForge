@@ -76,3 +76,9 @@ reached its 1,800-second deadline. The authorized refinement splits the audit in
 bounded action-level phases. All three phases use the same frozen action keys and process budget;
 missing or duplicate results fail closed before per-cell assembly. Full generator/checker work
 remains cell-sharded because it completed and action sharding would duplicate expensive common paths.
+
+The first split-audit execution exposed a second scheduling boundary: a phase-global 1,800-second
+timer shortchanged actions queued behind the first eight workers. The supervisor now grants each
+started task 1,800 seconds from its confirmed start handshake, while retaining fail-closed process
+group cleanup. Audit actions are scheduled by descending observed full-generator regime time only
+after sample membership is frozen, so slow actions start first without changing evidence selection.

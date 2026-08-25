@@ -43,10 +43,19 @@ checker, and audit wall time combined.
 Every cell must still contain the exact sorted current action vector and the exact sorted proof
 action vector. Reassembly rejects missing cells, missing or duplicate actions, mismatched proof
 runtime identities, invalid proofs, or sampled-reference mismatches. A worker exception cancels the
-gate and publishes no artifact. Each distributed phase has a frozen 30-minute deadline; failure,
-timeout, or interruption terminates every process owned by that phase before control returns. This
-split was selected after the first distributed run completed all six generators and all six fresh
-checkers but the former combined audit phase reached its 1,800-second bound.
+gate and publishes no artifact. Every started worker task receives a frozen 30-minute execution
+window beginning only after its process-group handshake; queued tasks do not lose runtime merely
+because all eight slots are occupied. Failure, timeout, or interruption terminates every process
+owned by that phase before control returns. Audit tasks are launched longest-regime-first using the
+already observed full-generator worker times, after the audit action set is frozen. Scheduling can
+reduce wall time but cannot change membership, per-action evidence, or work-time comparisons.
+
+The split was selected after the first distributed run completed all six generators and all six
+fresh checkers but the former combined audit phase reached its 1,800-second bound. A subsequent run
+showed that a single phase-level deadline was incorrect for 12 tasks on eight slots: generation and
+checking again completed, then the queued second audit wave lost part of its execution window. The
+per-started-task deadline fixes that scheduling artifact without relaxing the 30-minute bound for
+any action.
 
 ## Isolation and claim boundary
 

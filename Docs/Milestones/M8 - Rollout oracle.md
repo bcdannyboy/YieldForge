@@ -79,3 +79,11 @@ actions through separate certificate, checker, and brute-force reference phases;
 the same action keys and up to eight processes, and deterministic assembly rejects any missing or
 duplicate action. The next action is a canonical calibration rerun. Evaluation remains sealed, so
 there is still no M8 oracle-advantage or savings result.
+
+The first split-audit rerun again completed all 3,469 generators and all 3,469 fresh checks. Generator
+wall time was `1573.015449` seconds and checker wall time was `1578.396955` seconds; the same 12-action
+audit sample and SHA-256 reproduced. The action-level certificate phase then reached 1,800 seconds
+because its timer covered the entire 12-task queue on eight slots, shortchanging the four queued
+actions. No artifact was published. The supervisor now applies the unchanged 1,800-second limit to
+each task from its confirmed start and schedules the measured slow regimes first. This is a process
+scheduling correction, not a semantic or threshold change.

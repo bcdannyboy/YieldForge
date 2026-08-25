@@ -825,7 +825,11 @@ def _run_process_phase(
             target=_process_phase_entry,
             args=(operation, task, sender),
         )
-        owned = _OwnedPhaseProcess(process=process, connection=receiver)
+        owned = _OwnedPhaseProcess(
+            process=process,
+            connection=receiver,
+            deadline=monotonic() + timeout_seconds,
+        )
         owned_processes.append(owned)
         try:
             process.start()
@@ -838,15 +842,20 @@ def _run_process_phase(
     try:
         for _ in range(min(process_count, len(tasks))):
             start_next()
-        deadline = monotonic() + timeout_seconds
         while completed < len(tasks):
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"M8 distributed phase exceeded {timeout_seconds} seconds"
-                )
-            ready = wait(tuple(active), timeout=min(1.0, remaining))
+            remaining = min(
+                owned.deadline for _index, owned in active.values()
+            ) - monotonic()
+            ready = wait(
+                tuple(active),
+                timeout=max(0.0, min(1.0, remaining)),
+            )
             if not ready:
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "M8 distributed task exceeded "
+                        f"{timeout_seconds} seconds"
+                    )
                 continue
             for receiver in ready:
                 index, owned = active[receiver]
@@ -866,6 +875,7 @@ def _run_process_phase(
                         )
                     owned.group_id = payload
                     receiver.send("start")
+                    owned.deadline = monotonic() + timeout_seconds
                     continue
                 active.pop(receiver)
                 receiver.close()
@@ -928,6 +938,7 @@ def _process_phase_entry(
 class _OwnedPhaseProcess:
     process: multiprocessing.Process
     connection: Connection
+    deadline: float
     group_id: int | None = None
     resolved: bool = False
 
@@ -1542,6 +1553,15 @@ def _execute_distributed_cells(
         )
     audit_by_cell = _audit_by_cell(frozen_audit)
     generated_by_regime = {item.regime: item for item in generated}
+    audit_regime_schedule = tuple(
+        sorted(
+            TemporalRegime,
+            key=lambda regime: (
+                -generated_by_regime[regime].elapsed_seconds,
+                tuple(TemporalRegime).index(regime),
+            ),
+        )
+    )
     audit_action_tasks = tuple(
         (
             generated_by_regime[regime].cell,
@@ -1549,7 +1569,7 @@ def _execute_distributed_cells(
             jagua_executable,
             binding.catalog_action_id,
         )
-        for regime in TemporalRegime
+        for regime in audit_regime_schedule
         for binding in audit_by_cell[regime]
     )
     audit_process_count = min(process_count, len(audit_action_tasks))
