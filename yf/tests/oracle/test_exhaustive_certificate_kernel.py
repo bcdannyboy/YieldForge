@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from dataclasses import replace
+
 import pytest
 
 from tests.oracle.fixtures import (
@@ -13,7 +16,7 @@ from yieldforge.baseline.replay import (
     run_m7_continuation,
     select_m7_fallback,
 )
-from yieldforge.oracle.checker import check_action_proof
+from yieldforge.oracle.checker import check_action_proofs
 from yieldforge.oracle.reference import score_reference_event
 from yieldforge.oracle.sparse import score_sparse_event
 
@@ -157,6 +160,29 @@ def test_exhaustive_matrix_covers_all_witness_kinds_and_rejoin_order() -> None:
     }
     assert exact_escape_then_rejoin
 
+
+@pytest.mark.parametrize("mutation", ["empty", "duplicate"])
+def test_differential_rejects_incomplete_or_duplicate_proofs(
+    monkeypatch,  # type: ignore[no-untyped-def]
+    mutation: str,
+) -> None:
+    case = CASES[0]
+    sparse = score_sparse_event(case.request)
+    proofs = (
+        ()
+        if mutation == "empty"
+        else tuple(sparse.proofs[0] for _ in sparse.proofs)
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "score_sparse_event",
+        lambda request: replace(sparse, proofs=proofs),
+    )
+
+    with pytest.raises(AssertionError):
+        test_certificate_kernel_matches_full_reference(case)
+
+
 @pytest.mark.parametrize("case", CASES, ids=_case_id)
 def test_certificate_kernel_matches_full_reference(
     case: ExhaustiveCertificateCase,
@@ -165,4 +191,18 @@ def test_certificate_kernel_matches_full_reference(
     reference = score_reference_event(case.request)
 
     assert sparse.decision == reference.decision
-    assert all(check_action_proof(case.request, proof).valid for proof in sparse.proofs)
+    assert len(sparse.proofs) == sparse.decision.scored_action_count
+    proof_catalog_action_ids = tuple(
+        proof.catalog_action_id for proof in sparse.proofs
+    )
+    proof_materialized_action_ids = tuple(proof.action_id for proof in sparse.proofs)
+    assert len(set(proof_catalog_action_ids)) == len(proof_catalog_action_ids)
+    assert len(set(proof_materialized_action_ids)) == len(proof_materialized_action_ids)
+    assert tuple(sorted(proof_catalog_action_ids)) == sparse.decision.action_ids
+    assert proof_catalog_action_ids == tuple(
+        score.action_id for score in sparse.decision.scores
+    )
+
+    checks = check_action_proofs(case.request, sparse.proofs)
+    assert len(checks) == sparse.decision.scored_action_count
+    assert all(result.valid for result in checks)
