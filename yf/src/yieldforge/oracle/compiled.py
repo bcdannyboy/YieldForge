@@ -45,39 +45,42 @@ class CompiledTranslationRejection:
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class _PreparedTranslationLayoutBatch:
-    """Process-local immutable layouts owned by one proof batch."""
+    """Process-local capability for one registry-owned proof batch."""
 
     _runtime_id: int
-    _layouts: tuple[
-        tuple[tuple[str, str], tuple[PreparedLayoutFootprint, ...]], ...
-    ]
 
     def require_active(self, runtime: M7ReplayRuntime, *, deep: bool = False) -> None:
-        registered = _PREPARED_TRANSLATION_LAYOUT_REGISTRY.get(id(self))
-        if (
-            type(self) is not _PreparedTranslationLayoutBatch
-            or registered is None
-            or registered[0]() is not self
-            or registered[1] != os.getpid()
-            or registered[2] != id(runtime)
-            or self._runtime_id != id(runtime)
-        ):
-            raise ValueError("M8 prepared translation layout batch is invalid or inactive")
-        if deep and registered[3] != _prepared_translation_layout_fingerprint(self):
-            raise ValueError("M8 prepared translation layout batch integrity differs")
+        _require_prepared_translation_layout_record(self, runtime, deep=deep)
 
     def __reduce__(self) -> object:
         raise TypeError("M8 prepared translation layout batches cannot be serialized")
 
 
+_PreparedTranslationLayouts = tuple[
+    tuple[tuple[str, str], tuple[PreparedLayoutFootprint, ...]], ...
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedTranslationLayoutRecord:
+    """Private canonical storage that is never exposed through the capability."""
+
+    reference: weakref.ReferenceType[_PreparedTranslationLayoutBatch]
+    owner_pid: int
+    runtime_id: int
+    layouts: _PreparedTranslationLayouts
+    fingerprint: str
+
+
 _PREPARED_TRANSLATION_LAYOUT_REGISTRY: dict[
     int,
-    tuple[weakref.ReferenceType[_PreparedTranslationLayoutBatch], int, int, str],
+    _PreparedTranslationLayoutRecord,
 ] = {}
 
 
 def _prepared_translation_layout_fingerprint(
     prepared: _PreparedTranslationLayoutBatch,
+    layouts: _PreparedTranslationLayouts,
 ) -> str:
     payload = {
         "schema_version": "yieldforge.m8-prepared-translation-layout-batch.v1",
@@ -97,13 +100,46 @@ def _prepared_translation_layout_fingerprint(
                         "vertices": layout.vertices,
                         "bounds": layout.bounds,
                     }
-                    for layout in layouts
+                    for layout in candidate_layouts
                 ),
             }
-            for key, layouts in prepared._layouts  # noqa: SLF001
+            for key, candidate_layouts in layouts
         ),
     }
     return f"sha256:{semantic_sha256(payload)}"
+
+
+def _require_prepared_translation_layout_record(
+    prepared: _PreparedTranslationLayoutBatch,
+    runtime: M7ReplayRuntime,
+    *,
+    deep: bool = False,
+) -> _PreparedTranslationLayoutRecord:
+    registered = _PREPARED_TRANSLATION_LAYOUT_REGISTRY.get(id(prepared))
+    if (
+        type(prepared) is not _PreparedTranslationLayoutBatch
+        or registered is None
+        or registered.reference() is not prepared
+        or registered.owner_pid != os.getpid()
+        or registered.runtime_id != id(runtime)
+        or prepared._runtime_id != id(runtime)  # noqa: SLF001
+    ):
+        raise ValueError("M8 prepared translation layout batch is invalid or inactive")
+    if deep and registered.fingerprint != _prepared_translation_layout_fingerprint(
+        prepared,
+        registered.layouts,
+    ):
+        raise ValueError("M8 prepared translation layout batch integrity differs")
+    return registered
+
+
+def _registered_prepared_translation_layouts(
+    prepared: _PreparedTranslationLayoutBatch,
+    runtime: M7ReplayRuntime,
+) -> _PreparedTranslationLayouts:
+    """Return only canonical registry-owned layouts for an active capability."""
+
+    return _require_prepared_translation_layout_record(prepared, runtime).layouts
 
 
 def _prepared_key_and_inputs(
@@ -153,23 +189,22 @@ def _prepare_translation_layout_batch(
                 )
                 for candidate in verified.candidates
             )
-    prepared = _PreparedTranslationLayoutBatch(
-        _runtime_id=id(runtime),
-        _layouts=tuple(sorted(layouts_by_key.items())),
-    )
+    layouts = tuple(sorted(layouts_by_key.items()))
+    prepared = _PreparedTranslationLayoutBatch(_runtime_id=id(runtime))
     key = id(prepared)
 
     def discard(reference: weakref.ReferenceType[_PreparedTranslationLayoutBatch]) -> None:
         registered = _PREPARED_TRANSLATION_LAYOUT_REGISTRY.get(key)
-        if registered is not None and registered[0] is reference:
+        if registered is not None and registered.reference is reference:
             _PREPARED_TRANSLATION_LAYOUT_REGISTRY.pop(key, None)
 
     reference = weakref.ref(prepared, discard)
-    _PREPARED_TRANSLATION_LAYOUT_REGISTRY[key] = (
-        reference,
-        os.getpid(),
-        id(runtime),
-        _prepared_translation_layout_fingerprint(prepared),
+    _PREPARED_TRANSLATION_LAYOUT_REGISTRY[key] = _PreparedTranslationLayoutRecord(
+        reference=reference,
+        owner_pid=os.getpid(),
+        runtime_id=id(runtime),
+        layouts=layouts,
+        fingerprint=_prepared_translation_layout_fingerprint(prepared, layouts),
     )
     try:
         yield prepared
@@ -180,7 +215,7 @@ def _prepare_translation_layout_batch(
         except ValueError as error:
             integrity_error = error
         registered = _PREPARED_TRANSLATION_LAYOUT_REGISTRY.get(key)
-        if registered is not None and registered[0]() is prepared:
+        if registered is not None and registered.reference() is prepared:
             _PREPARED_TRANSLATION_LAYOUT_REGISTRY.pop(key, None)
         if integrity_error is not None:
             raise integrity_error
@@ -221,13 +256,13 @@ def _compile_prepared_translation_rejections(
 ) -> tuple[CompiledTranslationRejection, ...]:
     """Use one already-validated layout set without reconstructing geometry."""
 
-    prepared.require_active(runtime)
+    prepared_layouts = _registered_prepared_translation_layouts(prepared, runtime)
     key, binding, _problem, verified = _prepared_key_and_inputs(
         runtime,
         event_position=event_position,
     )
     matching = tuple(
-        layouts for candidate_key, layouts in prepared._layouts if candidate_key == key
+        layouts for candidate_key, layouts in prepared_layouts if candidate_key == key
     )
     if len(matching) != 1:
         raise ValueError("M8 prepared translation layouts do not cover the event problem")

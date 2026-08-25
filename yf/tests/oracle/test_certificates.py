@@ -282,6 +282,114 @@ def test_private_prepared_layout_batch_constructs_each_layout_once(
     assert first == second
 
 
+def test_prepared_layout_capability_transient_substitution_cannot_change_result() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="transient-prepared-layout-substitution",
+    )
+
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        canonical = compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+        assert not hasattr(prepared, "_layouts")
+        with pytest.raises(AttributeError):
+            object.__setattr__(prepared, "_layouts", ())
+        attacked = compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+
+    assert attacked == canonical
+
+
+def test_prepared_layout_capability_rejects_wrong_runtime_expiry_and_copies() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    other = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-layout-lifecycle",
+    )
+
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        copied = replace(prepared)
+        reconstructed = object.__new__(type(prepared))
+        object.__setattr__(reconstructed, "_runtime_id", id(runtime))
+        for invalid_runtime, invalid in (
+            (other, prepared),
+            (runtime, copied),
+            (runtime, reconstructed),
+        ):
+            with pytest.raises(ValueError, match="invalid or inactive"):
+                compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                    invalid_runtime,
+                    prepared=invalid,
+                    event_position=0,
+                    item=item,
+                )
+
+    with pytest.raises(ValueError, match="invalid or inactive"):
+        compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork lifecycle semantics")
+def test_forked_child_cannot_use_parent_prepared_layout_capability() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-layout-fork",
+    )
+    read_fd, write_fd = os.pipe()
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        child_pid = os.fork()
+        if child_pid == 0:  # pragma: no cover - asserted through parent pipe.
+            os.close(read_fd)
+            try:
+                compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+                    runtime,
+                    prepared=prepared,
+                    event_position=0,
+                    item=item,
+                )
+            except ValueError:
+                outcome = b"rejected"
+            else:
+                outcome = b"accepted"
+            os.write(write_fd, outcome)
+            os.close(write_fd)
+            os._exit(0)
+        os.close(write_fd)
+        outcome = os.read(read_fd, 32)
+        os.close(read_fd)
+        _waited_pid, status = os.waitpid(child_pid, 0)
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert outcome == b"rejected"
+
+
 def test_cheap_rejection_fails_closed_on_tampered_prepared_layout_identity() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     item = inventory_item(

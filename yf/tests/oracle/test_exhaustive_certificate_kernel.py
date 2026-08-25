@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -16,6 +17,7 @@ from yieldforge.baseline.replay import (
     run_m7_continuation,
     select_m7_fallback,
 )
+from yieldforge.oracle import sparse as sparse_module
 from yieldforge.oracle.checker import check_action_proofs
 from yieldforge.oracle.reference import score_reference_event
 from yieldforge.oracle.sparse import score_sparse_event
@@ -159,6 +161,43 @@ def test_exhaustive_matrix_covers_all_witness_kinds_and_rejoin_order() -> None:
         "exact_transition",
     }
     assert exact_escape_then_rejoin
+
+
+def test_active_generator_rejects_layout_substitution_and_stays_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = next(
+        item
+        for item in CASES
+        if item.case_id.endswith("zero-no-fit-equal-separated-two")
+    )
+    original = sparse_module._prepare_translation_layout_batch  # noqa: SLF001
+    substitution_attempts = 0
+
+    @contextmanager
+    def attacked_batch(runtime, *, event_positions):  # type: ignore[no-untyped-def]
+        nonlocal substitution_attempts
+        with original(runtime, event_positions=event_positions) as prepared:
+            substitution_attempts += 1
+            assert not hasattr(prepared, "_layouts")
+            with pytest.raises(AttributeError):
+                object.__setattr__(prepared, "_layouts", ())
+            yield prepared
+
+    monkeypatch.setattr(
+        sparse_module,
+        "_prepare_translation_layout_batch",
+        attacked_batch,
+    )
+
+    sparse = sparse_module.score_sparse_event(case.request)
+    reference = score_reference_event(case.request)
+    checks = check_action_proofs(case.request, sparse.proofs)
+
+    assert substitution_attempts == 1
+    assert sparse.metrics.rejection_certificate_count > 0
+    assert sparse.decision == reference.decision
+    assert all(result.valid for result in checks)
 
 
 @pytest.mark.parametrize("mutation", ["empty", "duplicate"])
