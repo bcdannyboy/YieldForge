@@ -269,8 +269,10 @@ def test_m8_command_builds_only_the_calibration_problem_view(
         checker_failure_count=0,
         audit_mismatch_count=0,
         sampled_speedup=20.0,
-        measured_process_count=1,
+        measured_process_count=6,
         configured_worker_count=8,
+        certificate_pipeline_wall_seconds=12.5,
+        total_wall_seconds=15.0,
         projected_held_out_calendar_days=1.0,
         technical_decision="pass_certificate_exact",
     )
@@ -309,7 +311,11 @@ def test_m8_command_builds_only_the_calibration_problem_view(
         "full_problem_index_sha256": frozen.problem_index_sha256,
     }
     assert progress_flushes == [True]
-    assert "Published M8 certificate proof" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Published M8 certificate proof" in output
+    assert "measured_processes=6" in output
+    assert "pipeline_wall_seconds=12.5" in output
+    assert "total_wall_seconds=15.0" in output
 
 
 def test_datasets_audit_check_validates_passive_report(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]

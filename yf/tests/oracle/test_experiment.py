@@ -480,90 +480,6 @@ def test_measured_proof_phase_restores_gc_on_failure(
     assert events == ["collect", "disable", "operation", "enable", "collect"]
 
 
-def test_timed_cell_reuses_preflight_full_batch_and_checks_it_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from tests.oracle.fixtures import two_problem_runtime
-    from yieldforge.baseline.replay import initial_m7_cursor
-    from yieldforge.oracle import experiment
-    from yieldforge.oracle.reference import M8OracleRequest
-    from yieldforge.oracle.visibility import FullRealizedVisibility
-
-    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    request = M8OracleRequest(
-        runtime=runtime,
-        cursor=initial_m7_cursor(runtime.replay_input),
-        visibility=FullRealizedVisibility(runtime.replay_input.instances),
-    )
-    preflight = experiment.score_sparse_event(request)
-    audit = experiment._freeze_audit_bindings(  # noqa: SLF001
-        experiment._audit_candidates_for_cell(  # noqa: SLF001
-            runtime.replay_input.instances,
-            preflight,
-        )
-    )
-    counts = {"full": 0, "sample": 0, "reference": 0, "checker": []}
-    original_sample = experiment.score_certificate_actions
-    original_checker = experiment.check_action_proofs
-    original_reference = experiment.score_reference_actions
-
-    def counted_full(request):  # type: ignore[no-untyped-def]
-        counts["full"] += 1
-        return preflight
-
-    def counted_sample(request, *, action_ids):  # type: ignore[no-untyped-def]
-        counts["sample"] += 1
-        return original_sample(request, action_ids=action_ids)
-
-    def counted_checker(request, proofs):  # type: ignore[no-untyped-def]
-        counts["checker"].append(len(proofs))
-        return original_checker(request, proofs)
-
-    def counted_reference(request, *, action_ids):  # type: ignore[no-untyped-def]
-        counts["reference"] += 1
-        assert action_ids == tuple(item.catalog_action_id for item in audit)
-        return original_reference(request, action_ids=action_ids)
-
-    monkeypatch.setattr(experiment, "score_sparse_event", counted_full)
-    monkeypatch.setattr(experiment, "score_certificate_actions", counted_sample)
-    monkeypatch.setattr(experiment, "check_action_proofs", counted_checker)
-    monkeypatch.setattr(experiment, "score_reference_actions", counted_reference)
-    monkeypatch.setattr(experiment, "_request_for_cell", lambda *args, **kwargs: request)
-    cell = SimpleNamespace(stream=runtime.replay_input.instances)
-    progress: list[str] = []
-
-    result = experiment._execute_timed_cell(  # noqa: SLF001
-        cell,
-        rules=None,
-        jagua_executable=tmp_path / "unused",
-        audit_bindings=audit,
-        full_sparse=preflight,
-        full_certificate_seconds=0.125,
-        progress=progress.append,
-    )
-
-    assert counts == {
-        "full": 0,
-        "sample": 1,
-        "reference": 1,
-        "checker": [result.current_action_count, len(audit)],
-    }
-    assert result.certificate_elapsed_seconds == 0.125
-    assert result.sampled_certificate_elapsed_seconds > 0
-    assert result.sampled_checker_elapsed_seconds > 0
-    assert [item.split()[0] for item in progress] == [
-        "phase_start",
-        "phase_complete",
-        "phase_start",
-        "phase_complete",
-        "phase_start",
-        "phase_complete",
-        "phase_start",
-        "phase_complete",
-    ]
-
-
 def test_audit_freeze_is_independent_of_preflight_elapsed_time() -> None:
     from tests.oracle.fixtures import two_problem_runtime
     from yieldforge.baseline.replay import initial_m7_cursor
@@ -593,6 +509,254 @@ def test_audit_freeze_is_independent_of_preflight_elapsed_time() -> None:
     assert experiment._freeze_preflight_audit((fast,)) == (  # noqa: SLF001
         experiment._freeze_preflight_audit((slow,))  # noqa: SLF001
     )
+
+
+def test_distributed_phase_reassembly_is_regime_ordered_and_complete() -> None:
+    from yieldforge.oracle import experiment
+
+    results = tuple(
+        SimpleNamespace(regime=regime, value=regime.value)
+        for regime in reversed(tuple(TemporalRegime))
+    )
+
+    ordered = experiment._order_worker_results(results)  # noqa: SLF001
+
+    assert tuple(item.regime for item in ordered) == tuple(TemporalRegime)
+    with pytest.raises(ValueError, match="exactly one result"):
+        experiment._order_worker_results((*results[:-1], results[0]))  # noqa: SLF001
+
+
+def test_distributed_phase_uses_a_fresh_bounded_executor_each_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    constructed = []
+
+    class ImmediateFuture:
+        def __init__(self, value):  # type: ignore[no-untyped-def]
+            self.value = value
+
+        def result(self):  # type: ignore[no-untyped-def]
+            return self.value
+
+    class RecordingExecutor:
+        def __init__(self, *, max_workers):  # type: ignore[no-untyped-def]
+            self.max_workers = max_workers
+            constructed.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return False
+
+        def submit(self, operation, *args):  # type: ignore[no-untyped-def]
+            return ImmediateFuture(operation(*args))
+
+    monkeypatch.setattr(experiment, "ProcessPoolExecutor", RecordingExecutor)
+
+    first = experiment._run_process_phase(  # noqa: SLF001
+        str,
+        ((1,), (2,)),
+        process_count=6,
+    )
+    second = experiment._run_process_phase(  # noqa: SLF001
+        str,
+        ((3,),),
+        process_count=6,
+    )
+
+    assert first == ("1", "2")
+    assert second == ("3",)
+    assert len(constructed) == 2
+    assert [item.max_workers for item in constructed] == [2, 1]
+
+
+def test_distributed_generator_worker_round_trips_one_real_cell() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+
+    (result,) = experiment._run_process_phase(  # noqa: SLF001
+        experiment._generate_cell_worker,  # noqa: SLF001
+        ((cell, runtime.rules, runtime.jagua_executable),),
+        process_count=1,
+    )
+
+    assert result.cell.stream == cell.stream
+    assert result.sparse.proofs
+    assert result.elapsed_seconds > 0
+
+
+def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    generated = experiment._generate_cell_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+    )
+    audit_bindings = experiment._freeze_audit_bindings(  # noqa: SLF001
+        experiment._audit_candidates_for_cell(  # noqa: SLF001
+            cell.stream,
+            generated.sparse,
+        )
+    )
+
+    (checked,) = experiment._run_process_phase(  # noqa: SLF001
+        experiment._check_cell_worker,  # noqa: SLF001
+        (
+            (
+                cell,
+                runtime.rules,
+                runtime.jagua_executable,
+                generated.sparse.proofs,
+            ),
+        ),
+        process_count=1,
+    )
+    (audited,) = experiment._run_process_phase(  # noqa: SLF001
+        experiment._audit_cell_worker,  # noqa: SLF001
+        (
+            (
+                cell,
+                runtime.rules,
+                runtime.jagua_executable,
+                audit_bindings,
+            ),
+        ),
+        process_count=1,
+    )
+    result = experiment._assemble_timed_cell(  # noqa: SLF001
+        generated,
+        checked=checked,
+        audited=audited,
+        audit_bindings=audit_bindings,
+    )
+
+    assert result.current_action_count == len(generated.sparse.proofs)
+    assert result.checked_action_count == result.current_action_count
+    assert result.valid_proof_count == result.current_action_count
+    assert result.checker_failure_count == 0
+    assert result.sampled_checker_failure_count == 0
+    assert result.audit_mismatch_count == 0
+
+
+def test_distributed_cell_assembly_rejects_cross_regime_worker_result() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    generated = experiment._generate_cell_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+    )
+    wrong_regime = next(
+        regime for regime in TemporalRegime if regime is not generated.regime
+    )
+    checked = SimpleNamespace(
+        regime=wrong_regime,
+        checks=(),
+        elapsed_seconds=0.1,
+    )
+    audited = SimpleNamespace(regime=generated.regime)
+
+    with pytest.raises(ValueError, match="regime identities"):
+        experiment._assemble_timed_cell(  # noqa: SLF001
+            generated,
+            checked=checked,
+            audited=audited,
+            audit_bindings=(),
+        )
+
+
+def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    cells = tuple(
+        SimpleNamespace(stream=(SimpleNamespace(regime=regime),))
+        for regime in TemporalRegime
+    )
+    generated = tuple(
+        SimpleNamespace(
+            regime=regime,
+            cell=cell,
+            sparse=SimpleNamespace(proofs=(regime.value,)),
+        )
+        for regime, cell in zip(TemporalRegime, cells, strict=True)
+    )
+    checked = tuple(
+        SimpleNamespace(regime=regime) for regime in TemporalRegime
+    )
+    audited = tuple(
+        SimpleNamespace(regime=regime) for regime in TemporalRegime
+    )
+    phase_results = iter((generated, checked, audited))
+    operations = []
+
+    def run_phase(operation, tasks, *, process_count):  # type: ignore[no-untyped-def]
+        operations.append((operation.__name__, len(tasks), process_count))
+        return next(phase_results)
+
+    audit = tuple(SimpleNamespace(regime=regime) for regime in TemporalRegime)
+    monkeypatch.setattr(experiment, "_run_process_phase", run_phase)
+    monkeypatch.setattr(experiment, "_freeze_preflight_audit", lambda values: audit)
+    monkeypatch.setattr(
+        experiment,
+        "_audit_by_cell",
+        lambda values: {regime: (values[offset],) for offset, regime in enumerate(TemporalRegime)},
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_assemble_timed_cell",
+        lambda value, **kwargs: SimpleNamespace(regime=value.regime),
+    )
+    times = iter((0.0, 0.0, 2.0, 2.0, 5.0, 5.0, 9.0, 10.0))
+    monkeypatch.setattr(experiment, "perf_counter", lambda: next(times))
+
+    result = experiment._execute_distributed_cells(  # noqa: SLF001
+        cells,
+        rules=object(),
+        jagua_executable=Path("jagua"),
+        process_count=6,
+    )
+
+    assert operations == [
+        ("_generate_cell_worker", 6, 6),
+        ("_check_cell_worker", 6, 6),
+        ("_audit_cell_worker", 6, 6),
+    ]
+    assert tuple(item.regime for item in result.cells) == tuple(TemporalRegime)
+    assert result.generator_wall_seconds == 2.0
+    assert result.checker_wall_seconds == 3.0
+    assert result.audit_wall_seconds == 4.0
+    assert result.total_wall_seconds == 10.0
+    assert result.measured_process_count == 6
 
 
 def test_certificate_result_rejects_missing_registered_regime() -> None:

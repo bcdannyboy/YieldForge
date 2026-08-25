@@ -572,6 +572,8 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
         f"sampled_speedup={result.sampled_speedup} "
         f"measured_processes={result.measured_process_count} "
         f"configured_workers={result.configured_worker_count} "
+        f"pipeline_wall_seconds={result.certificate_pipeline_wall_seconds} "
+        f"total_wall_seconds={result.total_wall_seconds} "
         f"projected_days={result.projected_held_out_calendar_days} "
         f"decision={result.technical_decision} output={result_path}"
     )

@@ -9,6 +9,7 @@ import os
 import secrets
 import stat
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -33,10 +34,12 @@ from yieldforge.baseline.replay import (
     initial_m7_cursor,
 )
 from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
-from yieldforge.oracle.checker import check_action_proofs
+from yieldforge.oracle.checker import M8ProofCheckResult, check_action_proofs
+from yieldforge.oracle.contracts import M8ActionScore
 from yieldforge.oracle.proofs import M8ActionProof, M8EventClassification
 from yieldforge.oracle.reference import M8OracleRequest, score_reference_actions
 from yieldforge.oracle.sparse import (
+    M8CertificateActionResult,
     M8SparseResult,
     score_certificate_actions,
     score_sparse_event,
@@ -719,11 +722,153 @@ class _SparsePreflightResult:
     sparse: M8SparseResult
     elapsed_seconds: float
 
+    @property
+    def regime(self) -> TemporalRegime:
+        return self.cell.stream[0].regime
+
+
+@dataclass(frozen=True)
+class _FullCheckerResult:
+    regime: TemporalRegime
+    checks: tuple[M8ProofCheckResult, ...]
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class _AuditPhaseResult:
+    regime: TemporalRegime
+    sampled: tuple[M8CertificateActionResult, ...]
+    sampled_checks: tuple[M8ProofCheckResult, ...]
+    reference_scores: tuple[M8ActionScore, ...]
+    sampled_certificate_elapsed_seconds: float
+    sampled_checker_elapsed_seconds: float
+    sampled_reference_elapsed_seconds: float
+
 
 @dataclass(frozen=True)
 class _AuditCandidate:
     binding: M8AuditActionBinding
     labels: frozenset[tuple[str, str, str]]
+
+
+def _order_worker_results(results):  # type: ignore[no-untyped-def]
+    """Require one worker result per registered regime and return canonical order."""
+
+    by_regime = {item.regime: item for item in results}
+    if len(results) != len(TemporalRegime) or len(by_regime) != len(TemporalRegime):
+        raise ValueError("M8 distributed phase requires exactly one result per regime")
+    try:
+        return tuple(by_regime[regime] for regime in TemporalRegime)
+    except KeyError as error:
+        raise ValueError(
+            "M8 distributed phase requires exactly one result per regime"
+        ) from error
+
+
+def _run_process_phase(
+    operation,  # type: ignore[no-untyped-def]
+    tasks: tuple[tuple[object, ...], ...],
+    *,
+    process_count: int,
+):
+    """Run one bounded fail-closed process phase in input order."""
+
+    if not tasks:
+        raise ValueError("M8 distributed phase requires at least one task")
+    if not 1 <= process_count <= _WORKER_COUNT:
+        raise ValueError("M8 distributed process count is outside the frozen boundary")
+    with ProcessPoolExecutor(max_workers=min(process_count, len(tasks))) as executor:
+        futures = tuple(executor.submit(operation, *task) for task in tasks)
+        return tuple(future.result() for future in futures)
+
+
+def _generate_cell_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+) -> _SparsePreflightResult:
+    """Generate one complete cell proof batch in an owned worker process."""
+
+    request = _request_for_cell(
+        cell,
+        rules=rules,
+        jagua_executable=jagua_executable,
+    )
+    sparse, sparse_elapsed = _measure_proof_phase(
+        lambda: score_sparse_event(request)
+    )
+    return _SparsePreflightResult(
+        cell=cell,
+        sparse=sparse,
+        elapsed_seconds=max(0.000001, round(sparse_elapsed, 6)),
+    )
+
+
+def _check_cell_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+    proofs: tuple[M8ActionProof, ...],
+) -> _FullCheckerResult:
+    """Check one complete proof batch in a fresh owned worker process."""
+
+    request = _request_for_cell(
+        cell,
+        rules=rules,
+        jagua_executable=jagua_executable,
+    )
+    checks, elapsed = _measure_proof_phase(
+        lambda: check_action_proofs(request, proofs)
+    )
+    return _FullCheckerResult(
+        regime=cell.stream[0].regime,
+        checks=checks,
+        elapsed_seconds=max(0.000001, round(elapsed, 6)),
+    )
+
+
+def _audit_cell_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+    audit_bindings: tuple[M8AuditActionBinding, ...],
+) -> _AuditPhaseResult:
+    """Run one frozen matched audit in a third owned worker process."""
+
+    request = _request_for_cell(
+        cell,
+        rules=rules,
+        jagua_executable=jagua_executable,
+    )
+    action_ids = tuple(item.catalog_action_id for item in audit_bindings)
+    sampled, certificate_elapsed = _measure_proof_phase(
+        lambda: score_certificate_actions(request, action_ids=action_ids)
+    )
+    sampled_proofs = tuple(item.proof for item in sampled)
+    sampled_checks, checker_elapsed = _measure_proof_phase(
+        lambda: check_action_proofs(request, sampled_proofs)
+    )
+    reference_scores, reference_elapsed = _measure_proof_phase(
+        lambda: score_reference_actions(request, action_ids=action_ids)
+    )
+    return _AuditPhaseResult(
+        regime=cell.stream[0].regime,
+        sampled=sampled,
+        sampled_checks=sampled_checks,
+        reference_scores=reference_scores,
+        sampled_certificate_elapsed_seconds=max(
+            0.000001,
+            round(certificate_elapsed, 6),
+        ),
+        sampled_checker_elapsed_seconds=max(
+            0.000001,
+            round(checker_elapsed, 6),
+        ),
+        sampled_reference_elapsed_seconds=max(
+            0.000001,
+            round(reference_elapsed, 6),
+        ),
+    )
 
 
 def _proof_classifications(
@@ -907,36 +1052,22 @@ def _build_execution_cells(
     return tuple(cells)
 
 
-def _execute_timed_cell(
-    cell: _ExecutionCell,
+def _assemble_timed_cell(
+    generated: _SparsePreflightResult,
     *,
-    rules,  # type: ignore[no-untyped-def]
-    jagua_executable: Path,
+    checked: _FullCheckerResult,
+    audited: _AuditPhaseResult,
     audit_bindings: tuple[M8AuditActionBinding, ...],
-    full_sparse: M8SparseResult,
-    full_certificate_seconds: float,
-    progress,  # type: ignore[no-untyped-def]
 ) -> M8CertificateProofCell:
-    request = _request_for_cell(
-        cell,
-        rules=rules,
-        jagua_executable=jagua_executable,
-    )
-    regime = cell.stream[0].regime.value
-    sparse = full_sparse
-    certificate_seconds = max(0.000001, round(full_certificate_seconds, 6))
-    if progress is not None:
-        progress(f"phase_start regime={regime} phase=full_checker")
-    checks, checker_elapsed = _measure_proof_phase(
-        lambda: check_action_proofs(request, sparse.proofs)
-    )
-    checker_seconds = max(0.000001, round(checker_elapsed, 6))
-    if progress is not None:
-        progress(
-            f"phase_complete regime={regime} phase=full_checker "
-            f"actions={len(sparse.proofs)} elapsed_seconds={checker_seconds}"
-        )
+    """Reconcile independently generated, checked, and audited cell evidence."""
 
+    if not (
+        generated.regime is checked.regime
+        and generated.regime is audited.regime
+    ):
+        raise ValueError("M8 distributed worker regime identities do not reconcile")
+    sparse = generated.sparse
+    checks = checked.checks
     current_action_ids = tuple(item.action_id for item in sparse.decision.scores)
     proof_ids = tuple(item.catalog_action_id for item in sparse.proofs)
     if (
@@ -946,6 +1077,7 @@ def _execute_timed_cell(
         or len(checks) != len(sparse.proofs)
     ):
         raise ValueError("M8 certificate batch does not cover its exact current catalog")
+
     timed_by_id = {item.catalog_action_id: item for item in sparse.proofs}
     for binding in audit_bindings:
         proof = timed_by_id.get(binding.catalog_action_id)
@@ -960,40 +1092,16 @@ def _execute_timed_cell(
         ):
             raise ValueError("M8 timed certificate differs from its pre-timing audit freeze")
 
-    full_scores = {
-        item.action_id: item.final_net_cost for item in sparse.decision.scores
-    }
     audit_action_ids = tuple(item.catalog_action_id for item in audit_bindings)
-    if progress is not None:
-        progress(f"phase_start regime={regime} phase=sampled_generator")
-    sampled, sampled_certificate_elapsed = _measure_proof_phase(
-        lambda: score_certificate_actions(request, action_ids=audit_action_ids)
-    )
-    sampled_certificate_seconds = max(
-        0.000001, round(sampled_certificate_elapsed, 6)
-    )
-    if progress is not None:
-        progress(
-            f"phase_complete regime={regime} phase=sampled_generator "
-            f"actions={len(sampled)} elapsed_seconds={sampled_certificate_seconds}"
-        )
-    sampled_proofs = tuple(item.proof for item in sampled)
-    if progress is not None:
-        progress(f"phase_start regime={regime} phase=sampled_checker")
-    sampled_checks, sampled_checker_elapsed = _measure_proof_phase(
-        lambda: check_action_proofs(request, sampled_proofs)
-    )
-    sampled_checker_seconds = max(0.000001, round(sampled_checker_elapsed, 6))
-    if progress is not None:
-        progress(
-            f"phase_complete regime={regime} phase=sampled_checker "
-            f"actions={len(sampled_checks)} elapsed_seconds={sampled_checker_seconds}"
-        )
+    sampled = audited.sampled
+    sampled_checks = audited.sampled_checks
+    reference_scores = audited.reference_scores
     if (
         tuple(item.score.action_id for item in sampled) != audit_action_ids
         or len(sampled_checks) != len(audit_bindings)
+        or tuple(item.action_id for item in reference_scores) != audit_action_ids
     ):
-        raise ValueError("M8 matched certificate batch differs from its frozen audit IDs")
+        raise ValueError("M8 matched audit batch differs from its frozen audit IDs")
     sampled_by_id = {item.score.action_id: item for item in sampled}
     for binding in audit_bindings:
         sampled_item = sampled_by_id[binding.catalog_action_id]
@@ -1008,15 +1116,9 @@ def _execute_timed_cell(
         ):
             raise ValueError("M8 matched certificate differs from its pre-timing audit freeze")
 
-    if progress is not None:
-        progress(f"phase_start regime={regime} phase=sampled_reference")
-    reference_scores, reference_elapsed = _measure_proof_phase(
-        lambda: score_reference_actions(
-            request,
-            action_ids=audit_action_ids,
-        )
-    )
-    reference_seconds = max(0.000001, round(reference_elapsed, 6))
+    full_scores = {
+        item.action_id: item.final_net_cost for item in sparse.decision.scores
+    }
     audit_mismatches = sum(
         (
             item.final_net_cost
@@ -1025,12 +1127,6 @@ def _execute_timed_cell(
         )
         for item in reference_scores
     )
-    if progress is not None:
-        progress(
-            f"phase_complete regime={regime} phase=sampled_reference "
-            f"actions={len(reference_scores)} mismatches={audit_mismatches} "
-            f"elapsed_seconds={reference_seconds}"
-        )
     witness_classifications = _classification_tuple(
         {
             classification
@@ -1038,28 +1134,27 @@ def _execute_timed_cell(
             for classification in _proof_classifications(proof)
         }
     )
-    current_kinds = tuple(sorted({_action_kind(item) for item in current_action_ids}))
     valid = sum(item.valid for item in checks)
-    failures = len(checks) - valid
-    sampled_failures = sum(not item.valid for item in sampled_checks)
     proof_runtime_hashes = {item.semantic_runtime_sha256 for item in sparse.proofs}
     if len(proof_runtime_hashes) != 1:
         raise ValueError("M8 timed certificate proof runtime bindings differ")
     return M8CertificateProofCell(
-        regime=cell.stream[0].regime,
-        temporal_seed=cell.stream[0].temporal_seed,
-        stream_id=cell.stream[0].stream_id,
+        regime=generated.regime,
+        temporal_seed=generated.cell.stream[0].temporal_seed,
+        stream_id=generated.cell.stream[0].stream_id,
         future_event_count=next(iter(audit_bindings)).future_event_count,
         semantic_runtime_sha256=next(iter(proof_runtime_hashes)),
-        audit_action_ids=tuple(item.catalog_action_id for item in audit_bindings),
+        audit_action_ids=audit_action_ids,
         audit_sample_sha256=audit_sample_sha256(audit_bindings),
-        current_action_kinds=current_kinds,
+        current_action_kinds=tuple(
+            sorted({_action_kind(item) for item in current_action_ids})
+        ),
         current_action_ids=tuple(sorted(current_action_ids)),
         proof_catalog_action_ids=tuple(sorted(proof_ids)),
         current_action_count=len(current_action_ids),
         checked_action_count=len(checks),
         valid_proof_count=valid,
-        checker_failure_count=failures,
+        checker_failure_count=len(checks) - valid,
         audit_mismatch_count=audit_mismatches,
         witness_classifications=witness_classifications,
         certified_event_count=sum(
@@ -1077,12 +1172,191 @@ def _execute_timed_cell(
             for proof in sparse.proofs
             for witness in proof.witnesses
         ),
-        certificate_elapsed_seconds=certificate_seconds,
-        checker_elapsed_seconds=checker_seconds,
-        sampled_certificate_elapsed_seconds=sampled_certificate_seconds,
-        sampled_checker_elapsed_seconds=sampled_checker_seconds,
-        sampled_checker_failure_count=sampled_failures,
-        sampled_reference_elapsed_seconds=reference_seconds,
+        certificate_elapsed_seconds=generated.elapsed_seconds,
+        checker_elapsed_seconds=checked.elapsed_seconds,
+        sampled_certificate_elapsed_seconds=(
+            audited.sampled_certificate_elapsed_seconds
+        ),
+        sampled_checker_elapsed_seconds=audited.sampled_checker_elapsed_seconds,
+        sampled_checker_failure_count=sum(not item.valid for item in sampled_checks),
+        sampled_reference_elapsed_seconds=(
+            audited.sampled_reference_elapsed_seconds
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _DistributedCellExecution:
+    cells: tuple[M8CertificateProofCell, ...]
+    audit_bindings: tuple[M8AuditActionBinding, ...]
+    measured_process_count: int
+    generator_wall_seconds: float
+    checker_wall_seconds: float
+    audit_wall_seconds: float
+    total_wall_seconds: float
+
+
+def _execute_distributed_cells(
+    execution_cells: tuple[_ExecutionCell, ...],
+    *,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+    process_count: int,
+    progress=None,  # type: ignore[no-untyped-def]
+) -> _DistributedCellExecution:
+    """Run generation, independent checking, and audit in three fresh pools."""
+
+    if len(execution_cells) != len(TemporalRegime):
+        raise ValueError("M8 distributed execution requires all six regime cells")
+    measured_process_count = min(process_count, len(execution_cells))
+    total_started = perf_counter()
+
+    if progress is not None:
+        progress(
+            "phase_start regime=all phase=distributed_generator "
+            f"processes={measured_process_count}"
+        )
+    phase_started = perf_counter()
+    generated = _order_worker_results(
+        _run_process_phase(
+            _generate_cell_worker,
+            tuple(
+                (cell, rules, jagua_executable) for cell in execution_cells
+            ),
+            process_count=process_count,
+        )
+    )
+    generator_wall_seconds = max(
+        0.000001,
+        round(perf_counter() - phase_started, 6),
+    )
+    if progress is not None:
+        for item in generated:
+            progress(
+                f"phase_complete regime={item.regime.value} "
+                "phase=distributed_generator "
+                f"actions={len(item.sparse.proofs)} "
+                f"worker_seconds={item.elapsed_seconds}"
+            )
+        progress(
+            "phase_complete regime=all phase=distributed_generator "
+            f"wall_seconds={generator_wall_seconds}"
+        )
+
+    if progress is not None:
+        progress("phase_start regime=all phase=audit_freeze")
+    frozen_audit = _freeze_preflight_audit(generated)
+    if progress is not None:
+        progress(
+            f"phase_complete regime=all phase=audit_freeze actions={len(frozen_audit)} "
+            f"sample={audit_sample_sha256(frozen_audit)}"
+        )
+    audit_by_cell = _audit_by_cell(frozen_audit)
+
+    if progress is not None:
+        progress(
+            "phase_start regime=all phase=distributed_checker "
+            f"processes={measured_process_count}"
+        )
+    phase_started = perf_counter()
+    checked = _order_worker_results(
+        _run_process_phase(
+            _check_cell_worker,
+            tuple(
+                (
+                    item.cell,
+                    rules,
+                    jagua_executable,
+                    item.sparse.proofs,
+                )
+                for item in generated
+            ),
+            process_count=process_count,
+        )
+    )
+    checker_wall_seconds = max(
+        0.000001,
+        round(perf_counter() - phase_started, 6),
+    )
+    if progress is not None:
+        for item in checked:
+            progress(
+                f"phase_complete regime={item.regime.value} "
+                "phase=distributed_checker "
+                f"actions={len(item.checks)} worker_seconds={item.elapsed_seconds}"
+            )
+        progress(
+            "phase_complete regime=all phase=distributed_checker "
+            f"wall_seconds={checker_wall_seconds}"
+        )
+
+    if progress is not None:
+        progress(
+            "phase_start regime=all phase=distributed_audit "
+            f"processes={measured_process_count}"
+        )
+    phase_started = perf_counter()
+    audited = _order_worker_results(
+        _run_process_phase(
+            _audit_cell_worker,
+            tuple(
+                (
+                    item.cell,
+                    rules,
+                    jagua_executable,
+                    audit_by_cell[item.regime],
+                )
+                for item in generated
+            ),
+            process_count=process_count,
+        )
+    )
+    audit_wall_seconds = max(
+        0.000001,
+        round(perf_counter() - phase_started, 6),
+    )
+    if progress is not None:
+        for item in audited:
+            progress(
+                f"phase_complete regime={item.regime.value} "
+                "phase=distributed_audit "
+                f"actions={len(item.reference_scores)}"
+            )
+        progress(
+            "phase_complete regime=all phase=distributed_audit "
+            f"wall_seconds={audit_wall_seconds}"
+        )
+
+    cells = tuple(
+        _assemble_timed_cell(
+            generated_item,
+            checked=checked_item,
+            audited=audited_item,
+            audit_bindings=audit_by_cell[generated_item.regime],
+        )
+        for generated_item, checked_item, audited_item in zip(
+            generated,
+            checked,
+            audited,
+            strict=True,
+        )
+    )
+    phase_sum = round(
+        generator_wall_seconds + checker_wall_seconds + audit_wall_seconds,
+        6,
+    )
+    total_wall_seconds = max(
+        phase_sum,
+        max(0.000001, round(perf_counter() - total_started, 6)),
+    )
+    return _DistributedCellExecution(
+        cells=cells,
+        audit_bindings=frozen_audit,
+        measured_process_count=measured_process_count,
+        generator_wall_seconds=generator_wall_seconds,
+        checker_wall_seconds=checker_wall_seconds,
+        audit_wall_seconds=audit_wall_seconds,
+        total_wall_seconds=total_wall_seconds,
     )
 
 
@@ -1097,6 +1371,7 @@ def execute_sparse_prefix_proof(
 ) -> M8CertificateProofResult:
     """Run the revised calibration-only gate without loading evaluation streams."""
 
+    gate_started = perf_counter()
     contract = build_registered_contract()
     if (
         (index.full_problem_index_id, index.full_problem_index_sha256)
@@ -1182,54 +1457,16 @@ def execute_sparse_prefix_proof(
         selected_streams=selected_streams,
     )
     rules = rule_set_from_m0(m0.remnant_eligibility)
-    preflights = []
-    for cell in execution_cells:
-        request = _request_for_cell(
-            cell,
-            rules=rules,
-            jagua_executable=executable,
-        )
-        regime = cell.stream[0].regime.value
-        if progress is not None:
-            progress(f"phase_start regime={regime} phase=preflight_generator")
-        sparse, sparse_elapsed = _measure_proof_phase(
-            lambda request=request: score_sparse_event(request)
-        )
-        elapsed = max(0.000001, round(sparse_elapsed, 6))
-        preflights.append(
-            _SparsePreflightResult(
-                cell=cell,
-                sparse=sparse,
-                elapsed_seconds=elapsed,
-            )
-        )
-        if progress is not None:
-            progress(
-                f"phase_complete regime={regime} phase=preflight_generator "
-                f"actions={len(sparse.proofs)} elapsed_seconds={elapsed}"
-            )
-    if progress is not None:
-        progress("phase_start regime=all phase=audit_freeze")
-    preflight_tuple = tuple(preflights)
-    frozen_audit = _freeze_preflight_audit(preflight_tuple)
-    if progress is not None:
-        progress(
-            f"phase_complete regime=all phase=audit_freeze actions={len(frozen_audit)} "
-            f"sample={audit_sample_sha256(frozen_audit)}"
-        )
-
-    audit_by_cell = _audit_by_cell(frozen_audit)
-    cells = tuple(
-        _execute_timed_cell(
-            preflight.cell,
-            rules=rules,
-            jagua_executable=executable,
-            audit_bindings=audit_by_cell[preflight.cell.stream[0].regime],
-            full_sparse=preflight.sparse,
-            full_certificate_seconds=preflight.elapsed_seconds,
-            progress=progress,
-        )
-        for preflight in preflight_tuple
+    distributed = _execute_distributed_cells(
+        execution_cells,
+        rules=rules,
+        jagua_executable=executable,
+        process_count=_WORKER_COUNT,
+        progress=progress,
+    )
+    measured_total_wall = max(
+        distributed.total_wall_seconds,
+        round(perf_counter() - gate_started, 6),
     )
     return finalize_certificate_proof(
         m0_contract_id=m0.contract_id,
@@ -1244,8 +1481,13 @@ def execute_sparse_prefix_proof(
         freeze_sha256=frozen.content_sha256,
         calibration_view_id=index.view_id,
         calibration_view_sha256=index.content_sha256,
-        cells=cells,
-        audit_bindings=frozen_audit,
+        cells=distributed.cells,
+        audit_bindings=distributed.audit_bindings,
+        measured_process_count=distributed.measured_process_count,
+        generator_wall_seconds=distributed.generator_wall_seconds,
+        checker_wall_seconds=distributed.checker_wall_seconds,
+        audit_wall_seconds=distributed.audit_wall_seconds,
+        total_wall_seconds=measured_total_wall,
     )
 
 
