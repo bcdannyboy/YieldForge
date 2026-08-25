@@ -41,3 +41,26 @@ def test_reference_known_only_scores_current_action_then_terminal() -> None:
     )
     assert result.continuation_event_executions == 0
     assert result.decision.selected_action_id == result.decision.baseline_action_id
+
+
+def test_reference_all_action_scoring_delegates_to_exact_single_action_scores() -> None:
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.reference import (
+        M8OracleRequest,
+        score_reference_action,
+        score_reference_event,
+    )
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = _two_event_runtime()
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    result = score_reference_event(request)
+
+    assert tuple(
+        score_reference_action(request, action_id=item.action_id)
+        for item in result.decision.scores
+    ) == result.decision.scores

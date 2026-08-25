@@ -91,12 +91,17 @@ def _event_witnesses() -> tuple[M8EventWitness, ...]:
 def _build_proof() -> M8ActionProof:
     return build_m8_action_proof(
         action_id=_action(1),
+        catalog_action_id="m7-standard:candidate-one",
         baseline_action_id=_action(2),
+        baseline_catalog_action_id="m7-standard:candidate-two",
         start_event_position=2,
         stop_event_position=7,
         suffix_sha256=_sha(50),
+        semantic_runtime_sha256=_sha(51),
+        start_state_sha256=_sha(53),
         witnesses=_event_witnesses(),
         final_net_cost=125.5,
+        final_state_sha256=_sha(52),
     )
 
 
@@ -129,7 +134,12 @@ def test_builder_constructs_content_addressed_proof_and_binds_final_result() -> 
     assert proof.proof_id == f"yfm8ap-{digest[:24]}"
     assert proof.content_sha256 == f"sha256:{digest}"
     assert proof.action_id == _action(1)
+    assert proof.catalog_action_id == "m7-standard:candidate-one"
     assert proof.baseline_action_id == _action(2)
+    assert proof.baseline_catalog_action_id == "m7-standard:candidate-two"
+    assert proof.semantic_runtime_sha256 == _sha(51)
+    assert proof.start_state_sha256 == _sha(53)
+    assert proof.final_state_sha256 == _sha(52)
     assert proof.final_net_cost == 125.5
 
 
@@ -333,12 +343,17 @@ def test_proof_rejects_unknown_evidence_and_nonfinite_cost() -> None:
 def test_zero_future_proof_is_valid_with_empty_witnesses() -> None:
     proof = build_m8_action_proof(
         action_id=_action(1),
+        catalog_action_id="m7-standard:candidate-one",
         baseline_action_id=_action(2),
+        baseline_catalog_action_id="m7-standard:candidate-two",
         start_event_position=8,
         stop_event_position=9,
         suffix_sha256=_sha(50),
+        semantic_runtime_sha256=_sha(51),
+        start_state_sha256=_sha(53),
         witnesses=(),
         final_net_cost=125.5,
+        final_state_sha256=_sha(52),
     )
 
     assert proof.witnesses == ()
@@ -395,10 +410,15 @@ def test_public_builder_revalidates_nested_instances_before_hashing(tamper: str)
     with pytest.raises(ValidationError):
         build_m8_action_proof(
             action_id=_action(1),
+            catalog_action_id="m7-standard:candidate-one",
             baseline_action_id=_action(2),
+            baseline_catalog_action_id="m7-standard:candidate-two",
             start_event_position=2,
             stop_event_position=7,
             suffix_sha256=_sha(50),
+            semantic_runtime_sha256=_sha(51),
+            start_state_sha256=_sha(53),
             witnesses=invalid_witnesses,
             final_net_cost=125.5,
+            final_state_sha256=_sha(52),
         )

@@ -22,6 +22,16 @@ def test_sparse_passive_remnant_matches_reference_without_branch_replay() -> Non
     assert sparse.metrics.skipped_passive_event_count > 0
     assert sparse.metrics.exact_branch_event_count == 0
     assert sparse.metrics.rejection_certificate_count > 0
+    assert len(sparse.proofs) == sparse.decision.scored_action_count
+
+    from yieldforge.oracle.checker import check_action_proof
+
+    assert all(check_action_proof(request, proof).valid for proof in sparse.proofs)
+    assert any(
+        witness.classification in {"no_fit", "policy_dominated"}
+        for proof in sparse.proofs
+        for witness in proof.witnesses
+    )
 
 
 def test_sparse_surviving_future_fit_falls_back_to_exact_and_matches_reference() -> None:
@@ -38,3 +48,12 @@ def test_sparse_surviving_future_fit_falls_back_to_exact_and_matches_reference()
 
     assert sparse.decision == reference.decision
     assert sparse.metrics.exact_branch_event_count > 0
+    assert any(
+        witness.classification == "exact_transition"
+        for proof in sparse.proofs
+        for witness in proof.witnesses
+    )
+
+    from yieldforge.oracle.checker import check_action_proof
+
+    assert all(check_action_proof(request, proof).valid for proof in sparse.proofs)

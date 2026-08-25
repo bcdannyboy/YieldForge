@@ -1,5 +1,6 @@
 """M8 exact full-horizon rollout oracle."""
 
+from yieldforge.oracle.checker import M8ProofCheckResult, check_action_proof
 from yieldforge.oracle.contracts import M8ActionScore, M8OracleDecision
 from yieldforge.oracle.proofs import (
     M8ActionProof,
@@ -9,7 +10,12 @@ from yieldforge.oracle.proofs import (
     M8InfluenceWitness,
     build_m8_action_proof,
 )
-from yieldforge.oracle.reference import M8OracleRequest, M8ReferenceResult, score_reference_event
+from yieldforge.oracle.reference import (
+    M8OracleRequest,
+    M8ReferenceResult,
+    score_reference_action,
+    score_reference_event,
+)
 from yieldforge.oracle.visibility import FullRealizedVisibility, KnownOnlyVisibility
 
 __all__ = [
@@ -23,7 +29,10 @@ __all__ = [
     "M8InfluenceWitness",
     "M8OracleDecision",
     "M8OracleRequest",
+    "M8ProofCheckResult",
     "M8ReferenceResult",
     "build_m8_action_proof",
+    "check_action_proof",
+    "score_reference_action",
     "score_reference_event",
 ]

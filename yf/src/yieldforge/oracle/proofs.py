@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
-from yieldforge.baseline.contracts import BaselineContractModel
+from yieldforge.baseline.contracts import BaselineContractModel, TemporalInstanceBinding
 from yieldforge.experiments.contracts import semantic_sha256
 
 M8InfluenceClassification = Literal["no_fit", "policy_dominated"]
@@ -148,12 +148,17 @@ class M8ActionProof(BaselineContractModel):
     proof_id: StrictStr = Field(pattern=r"^yfm8ap-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
     action_id: StrictStr = Field(pattern=_ACTION_ID_PATTERN)
+    catalog_action_id: StrictStr = Field(min_length=1)
     baseline_action_id: StrictStr = Field(pattern=_ACTION_ID_PATTERN)
+    baseline_catalog_action_id: StrictStr = Field(min_length=1)
     start_event_position: StrictInt = Field(ge=0)
     stop_event_position: StrictInt = Field(ge=1)
     suffix_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
+    semantic_runtime_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
+    start_state_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
     witnesses: tuple[M8EventWitness, ...]
     final_net_cost: StrictFloat
+    final_state_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def require_complete_suffix_and_content_identity(self) -> Self:
@@ -176,12 +181,17 @@ class M8ActionProof(BaselineContractModel):
 def build_m8_action_proof(
     *,
     action_id: str,
+    catalog_action_id: str,
     baseline_action_id: str,
+    baseline_catalog_action_id: str,
     start_event_position: int,
     stop_event_position: int,
     suffix_sha256: str,
+    semantic_runtime_sha256: str,
+    start_state_sha256: str,
     witnesses: tuple[M8EventWitness, ...],
     final_net_cost: float,
+    final_state_sha256: str,
 ) -> M8ActionProof:
     """Build and validate one content-addressed exact action proof."""
 
@@ -192,25 +202,54 @@ def build_m8_action_proof(
     semantic = {
         "schema_version": "yieldforge.m8-action-proof.v1",
         "action_id": action_id,
+        "catalog_action_id": catalog_action_id,
         "baseline_action_id": baseline_action_id,
+        "baseline_catalog_action_id": baseline_catalog_action_id,
         "start_event_position": start_event_position,
         "stop_event_position": stop_event_position,
         "suffix_sha256": suffix_sha256,
+        "semantic_runtime_sha256": semantic_runtime_sha256,
+        "start_state_sha256": start_state_sha256,
         "witnesses": [item.model_dump(mode="json") for item in canonical_witnesses],
         "final_net_cost": final_net_cost,
+        "final_state_sha256": final_state_sha256,
     }
     digest = semantic_sha256(semantic)
     return M8ActionProof(
         proof_id=f"yfm8ap-{digest[:24]}",
         content_sha256=f"sha256:{digest}",
         action_id=action_id,
+        catalog_action_id=catalog_action_id,
         baseline_action_id=baseline_action_id,
+        baseline_catalog_action_id=baseline_catalog_action_id,
         start_event_position=start_event_position,
         stop_event_position=stop_event_position,
         suffix_sha256=suffix_sha256,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        start_state_sha256=start_state_sha256,
         witnesses=canonical_witnesses,
         final_net_cost=final_net_cost,
+        final_state_sha256=final_state_sha256,
     )
+
+
+def m8_suffix_sha256(
+    *,
+    semantic_runtime_sha256: str,
+    start_event_position: int,
+    stop_event_position: int,
+    bindings: tuple[TemporalInstanceBinding, ...],
+) -> str:
+    """Bind one proof to the exact frozen runtime and visible ordered suffix."""
+
+    payload = {
+        "schema_version": "yieldforge.m8-visible-suffix.v1",
+        "semantic_runtime_sha256": semantic_runtime_sha256,
+        "start_event_position": start_event_position,
+        "stop_event_position": stop_event_position,
+        "bindings": tuple(item.model_dump(mode="json") for item in bindings),
+    }
+    return f"sha256:{semantic_sha256(payload)}"
 
 
 __all__ = [
@@ -220,4 +259,5 @@ __all__ = [
     "M8InfluenceClassification",
     "M8InfluenceWitness",
     "build_m8_action_proof",
+    "m8_suffix_sha256",
 ]
