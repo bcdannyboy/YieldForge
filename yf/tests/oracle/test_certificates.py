@@ -151,6 +151,17 @@ def _forge_and_rehash_common_context(runtime, fact):  # type: ignore[no-untyped-
     return replace(forged, content_sha256=f"sha256:{semantic_sha256(payload)}")
 
 
+def _strict_primary_rules(runtime):  # type: ignore[no-untyped-def]
+    primary = runtime.rules.primary.model_copy(
+        update={
+            "minimum_area_sheet_fraction": 1.0,
+            "minimum_effective_width_short_side_fraction": 1.0,
+            "minimum_exterior_access_short_side_fraction": 1.0,
+        }
+    )
+    return runtime.rules.model_copy(update={"primary": primary})
+
+
 @pytest.mark.parametrize(
     ("case", "polygon", "expected_reason"),
     [
@@ -618,6 +629,87 @@ def test_copied_or_manually_constructed_validated_capability_fails_closed() -> N
     for invalid in (copied, manually_constructed):
         with pytest.raises(ValueError, match="validated common transition capability"):
             certify_event_passivity(runtime, common=invalid, branch_cursor=branch)
+
+
+def test_certificate_fails_closed_on_runtime_mutation_after_capability_entry(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="post-validation-interleave",
+    )
+    branch = _branch_cursor(cursor, added=(item,))
+    original_delta = certificate_module._derive_branch_inventory_delta  # noqa: SLF001
+
+    def mutate_after_validation(common_cursor, branch_cursor):  # type: ignore[no-untyped-def]
+        runtime.rules = _strict_primary_rules(runtime)
+        return original_delta(common_cursor, branch_cursor)
+
+    monkeypatch.setattr(
+        certificate_module,
+        "_derive_branch_inventory_delta",
+        mutate_after_validation,
+    )
+
+    with pytest.raises(ValueError, match="changed during M8 certificate operation"):
+        certify_event_passivity(runtime, common=common, branch_cursor=branch)
+
+
+def test_transient_runtime_mutation_after_capability_entry_uses_snapshot(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="transient-post-validation-interleave",
+    )
+    branch = _branch_cursor(cursor, added=(item,))
+    expected = certify_event_passivity(runtime, common=common, branch_cursor=branch)
+    original_influence = certificate_module._influence  # noqa: SLF001
+    original_rules = runtime.rules
+
+    def mutate_then_restore(runtime_argument, **kwargs):  # type: ignore[no-untyped-def]
+        assert runtime_argument is not runtime
+        runtime.rules = _strict_primary_rules(runtime)
+        try:
+            return original_influence(runtime_argument, **kwargs)
+        finally:
+            runtime.rules = original_rules
+
+    monkeypatch.setattr(certificate_module, "_influence", mutate_then_restore)
+
+    assert certify_event_passivity(runtime, common=common, branch_cursor=branch) == expected
+
+
+def test_transient_runtime_mutation_during_derivation_cannot_stamp_mixed_fact(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    expected = build_m8_common_transition_fact(runtime, cursor=cursor)
+    original_rules = runtime.rules
+    original_fresh_runtime = certificate_module._fresh_runtime  # noqa: SLF001
+
+    def mutate_then_restore(runtime_argument):  # type: ignore[no-untyped-def]
+        with pytest.raises(AttributeError, match="dependency bindings are immutable"):
+            runtime_argument.rules = _strict_primary_rules(runtime)
+        runtime.rules = _strict_primary_rules(runtime)
+        try:
+            return original_fresh_runtime(runtime_argument)
+        finally:
+            runtime.rules = original_rules
+
+    monkeypatch.setattr(certificate_module, "_fresh_runtime", mutate_then_restore)
+
+    common = build_validated_m8_common_transition(runtime, cursor=cursor)
+
+    assert common.step == expected.step
+    assert common.fact == expected
 
 
 def test_common_transition_fact_rejects_tampered_winner_search_cache() -> None:

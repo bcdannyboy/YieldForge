@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
 import stat
+import tempfile
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import Executor
@@ -13,6 +15,7 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from types import MappingProxyType
 from typing import Literal, Self
 
 import shapely
@@ -633,6 +636,42 @@ class M7ReplayRuntime:
     standard_profile_executor: Executor | None = None
     jagua_executable: Path | None = None
     jagua_differential_audit: bool = False
+
+
+class _M7SnapshotReplayRuntime(M7ReplayRuntime):
+    """Private runtime whose dependency bindings cannot drift after construction."""
+
+    _snapshot_sealed = False
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if self._snapshot_sealed:
+            raise AttributeError("M7 snapshot runtime dependency bindings are immutable")
+        super().__setattr__(name, value)
+
+    def seal(self) -> None:
+        object.__setattr__(self, "_snapshot_sealed", True)
+
+
+@dataclass(frozen=True)
+class M7SemanticRuntimeSnapshot:
+    """Owned immutable semantic inputs plus private caches for one M8 proof worker."""
+
+    runtime: M7ReplayRuntime
+    semantic_sha256: str
+    _jagua_private_directory: Path | None = None
+
+    def close(self) -> None:
+        """Release the optional private Jagua executable copy."""
+
+        directory = self._jagua_private_directory
+        if directory is None or not directory.exists():
+            return
+        for child in directory.iterdir():
+            child.unlink()
+        directory.rmdir()
+
+    def __reduce__(self) -> object:
+        raise TypeError("M7 semantic runtime snapshots cannot be serialized")
 
 
 def _build_standard_profile(
@@ -1508,7 +1547,13 @@ def _validate_runtime(runtime: M7ReplayRuntime) -> None:
         raise ValueError("M7 replay collision backend differs from runtime extension")
 
 
-def _jagua_executable_payload(path: Path | None) -> dict[str, object] | None:
+@dataclass(frozen=True)
+class _JaguaExecutableCapture:
+    payload: dict[str, object]
+    content: bytes
+
+
+def _capture_jagua_executable(path: Path | None) -> _JaguaExecutableCapture | None:
     if path is None:
         return None
     executable = Path(path)
@@ -1536,16 +1581,29 @@ def _jagua_executable_payload(path: Path | None) -> dict[str, object] | None:
     executable_mode = stat.S_IMODE(after.st_mode) & 0o111
     if executable_mode == 0:
         raise ValueError("M7 Jagua executable has no executable permission bits")
-    return {
-        "resolved_path": str(resolved),
-        "content_sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
-        "size_bytes": len(content),
-        "regular_file": True,
-        "executable_mode_bits": executable_mode,
-    }
+    return _JaguaExecutableCapture(
+        payload={
+            "resolved_path": str(resolved),
+            "content_sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "size_bytes": len(content),
+            "regular_file": True,
+            "executable_mode_bits": executable_mode,
+        },
+        content=content,
+    )
 
 
-def _semantic_runtime_payload(runtime: M7ReplayRuntime) -> dict[str, object]:
+def _jagua_executable_payload(path: Path | None) -> dict[str, object] | None:
+    capture = _capture_jagua_executable(path)
+    return capture.payload if capture is not None else None
+
+
+def _semantic_runtime_payload(
+    runtime: M7ReplayRuntime,
+    *,
+    jagua_executable_payload: dict[str, object] | None = None,
+    use_jagua_payload_override: bool = False,
+) -> dict[str, object]:
     _validate_runtime(runtime)
     try:
         replay_input = M7ReplayInput.model_validate(
@@ -1602,7 +1660,11 @@ def _semantic_runtime_payload(runtime: M7ReplayRuntime) -> dict[str, object]:
         "runtime_candidates": tuple(candidate_mapping),
         "collision_backend": replay_input.collision_backend,
         "jagua_container_guard": replay_input.jagua_container_guard,
-        "jagua_executable": _jagua_executable_payload(runtime.jagua_executable),
+        "jagua_executable": (
+            jagua_executable_payload
+            if use_jagua_payload_override
+            else _jagua_executable_payload(runtime.jagua_executable)
+        ),
         "jagua_differential_audit": runtime.jagua_differential_audit,
     }
 
@@ -1611,6 +1673,120 @@ def m7_semantic_runtime_sha256(runtime: M7ReplayRuntime) -> str:
     """Hash every outcome-affecting value in one exact M7 replay runtime."""
 
     return f"sha256:{semantic_sha256(_semantic_runtime_payload(runtime))}"
+
+
+def _private_jagua_executable(
+    capture: _JaguaExecutableCapture | None,
+) -> tuple[Path | None, Path | None]:
+    if capture is None:
+        return None, None
+    directory = Path(tempfile.mkdtemp(prefix="yieldforge-m8-jagua-"))
+    target = directory / f"jagua-{capture.payload['content_sha256'][7:23]}"
+    try:
+        target.write_bytes(capture.content)
+        target.chmod(0o500)
+        if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(
+            capture.content
+        ).digest():
+            raise ValueError("M7 private Jagua executable copy differs from captured content")
+    except (OSError, ValueError):
+        if target.exists():
+            target.unlink()
+        directory.rmdir()
+        raise
+    return target, directory
+
+
+def snapshot_m7_replay_runtime(
+    runtime: M7ReplayRuntime,
+    *,
+    maximum_capture_attempts: int = 3,
+) -> M7SemanticRuntimeSnapshot:
+    """Deep-capture one stable semantic runtime with isolated caches and Jagua bytes."""
+
+    if maximum_capture_attempts < 1:
+        raise ValueError("M7 semantic runtime capture requires at least one attempt")
+    last_error: Exception | None = None
+    for _attempt in range(maximum_capture_attempts):
+        try:
+            before_sha256 = m7_semantic_runtime_sha256(runtime)
+            replay_input = copy.deepcopy(runtime.replay_input)
+            rules = copy.deepcopy(runtime.rules)
+            runtime_candidates = copy.deepcopy(runtime.runtime_candidates)
+            standard_profile_cache = copy.deepcopy(runtime.standard_profile_cache)
+            fit_search_cache = copy.deepcopy(runtime.fit_search_cache)
+            shared_fit_search_cache = copy.deepcopy(runtime.shared_fit_search_cache)
+            prepared_layout_cache = copy.deepcopy(runtime.prepared_layout_cache)
+            jagua_capture = _capture_jagua_executable(runtime.jagua_executable)
+            jagua_differential_audit = runtime.jagua_differential_audit
+            comparison_runtime = M7ReplayRuntime(
+                replay_input=replay_input,
+                runtime_candidates=runtime_candidates,
+                rules=rules,
+                standard_profile_cache=standard_profile_cache,
+                fit_search_cache=fit_search_cache,
+                shared_fit_search_cache=shared_fit_search_cache,
+                prepared_layout_cache=prepared_layout_cache,
+                jagua_executable=runtime.jagua_executable,
+                jagua_differential_audit=jagua_differential_audit,
+            )
+            captured_sha256 = f"sha256:{semantic_sha256(_semantic_runtime_payload(
+                comparison_runtime,
+                jagua_executable_payload=(
+                    jagua_capture.payload if jagua_capture is not None else None
+                ),
+                use_jagua_payload_override=True,
+            ))}"
+            after_sha256 = m7_semantic_runtime_sha256(runtime)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            last_error = error
+            continue
+        if before_sha256 != captured_sha256 or captured_sha256 != after_sha256:
+            last_error = ValueError("M7 semantic runtime changed during snapshot capture")
+            continue
+
+        private_executable = None
+        private_directory = None
+        try:
+            private_executable, private_directory = _private_jagua_executable(jagua_capture)
+            snapshot_runtime = _M7SnapshotReplayRuntime(
+                replay_input=replay_input,
+                runtime_candidates=MappingProxyType(runtime_candidates),
+                rules=rules,
+                standard_profile_cache=standard_profile_cache,
+                fit_search_cache=fit_search_cache,
+                shared_fit_search_cache=shared_fit_search_cache,
+                prepared_layout_cache=prepared_layout_cache,
+                jagua_executable=private_executable,
+                jagua_differential_audit=jagua_differential_audit,
+            )
+            snapshot_runtime.seal()
+            snapshot_sha256 = f"sha256:{semantic_sha256(_semantic_runtime_payload(
+                snapshot_runtime,
+                jagua_executable_payload=(
+                    jagua_capture.payload if jagua_capture is not None else None
+                ),
+                use_jagua_payload_override=True,
+            ))}"
+            final_source_sha256 = m7_semantic_runtime_sha256(runtime)
+            if snapshot_sha256 != captured_sha256 or final_source_sha256 != captured_sha256:
+                raise ValueError("M7 semantic runtime changed during snapshot finalization")
+            return M7SemanticRuntimeSnapshot(
+                runtime=snapshot_runtime,
+                semantic_sha256=captured_sha256,
+                _jagua_private_directory=private_directory,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            if private_directory is not None:
+                snapshot = M7SemanticRuntimeSnapshot(
+                    runtime=comparison_runtime,
+                    semantic_sha256=captured_sha256,
+                    _jagua_private_directory=private_directory,
+                )
+                snapshot.close()
+            last_error = error
+            continue
+    raise ValueError("M7 semantic runtime could not be captured consistently") from last_error
 
 
 def _canonical_cursor_payload(cursor: M7ReplayCursor) -> dict[str, object]:
@@ -2411,6 +2587,7 @@ __all__ = [
     "M7ReplayCursor",
     "M7ReplayRuntime",
     "M7ReplayRuntimeMetrics",
+    "M7SemanticRuntimeSnapshot",
     "M7ReplaySummary",
     "M7StepResult",
     "M7StandardActionProfile",
@@ -2429,4 +2606,5 @@ __all__ = [
     "run_m7_replay",
     "run_m7_continuation",
     "select_m7_fallback",
+    "snapshot_m7_replay_runtime",
 ]
