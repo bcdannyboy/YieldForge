@@ -4,6 +4,7 @@ import pytest
 
 from tests.oracle.fixtures import two_problem_runtime
 from yieldforge.baseline.replay import initial_m7_cursor
+from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle.proofs import M8ActionProof, build_m8_action_proof
 from yieldforge.oracle.reference import M8OracleRequest
 from yieldforge.oracle.sparse import score_sparse_event
@@ -52,6 +53,47 @@ def _proof_with_classification(
     )
 
 
+def _unsafe_rehash(proof: M8ActionProof, **changes: object) -> M8ActionProof:
+    provisional = proof.model_copy(update=changes)
+    digest = semantic_sha256(
+        provisional,
+        excluded_fields={"proof_id", "content_sha256"},
+    )
+    return provisional.model_copy(
+        update={
+            "proof_id": f"yfm8ap-{digest[:24]}",
+            "content_sha256": f"sha256:{digest}",
+        }
+    )
+
+
+@pytest.mark.parametrize("source_classification", ["state_rejoin", "no_fit"])
+def test_checker_rejects_rehashed_noncanonical_exact_transition(
+    source_classification: str,
+) -> None:
+    from yieldforge.oracle.checker import check_action_proof
+
+    request = _request()
+    proof = _proof_with_classification(request, source_classification)
+    source = next(
+        witness
+        for witness in proof.witnesses
+        if witness.classification == source_classification
+    )
+    replacement = source.model_copy(
+        update={
+            "classification": "exact_transition",
+            "influences": (),
+        }
+    )
+    tampered = _rebuild(proof, witnesses=(replacement,))
+
+    result = check_action_proof(request, tampered)
+
+    assert not result.valid
+    assert result.failure_code == "witness_mismatch"
+
+
 def test_checker_is_independent_of_both_scoring_control_flows(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from yieldforge.oracle import reference, sparse
     from yieldforge.oracle.checker import check_action_proof
@@ -79,7 +121,6 @@ def test_checker_is_independent_of_both_scoring_control_flows(monkeypatch) -> No
 @pytest.mark.parametrize(
     "mutation",
     [
-        "classification",
         "event_position",
         "state_hash",
         "decision_key",
@@ -98,14 +139,11 @@ def test_checker_fails_closed_on_independently_rehashed_tampering(
 
     request = _request()
     proof = _proof_with_classification(request, "no_fit")
-    if mutation == "classification":
-        witness = proof.witnesses[0].model_copy(update={"classification": "exact_transition"})
-        tampered = proof.model_copy(update={"witnesses": (witness,)})
-    elif mutation == "event_position":
+    if mutation == "event_position":
         witness = proof.witnesses[0].model_copy(
             update={"event_position": proof.witnesses[0].event_position + 1}
         )
-        tampered = proof.model_copy(update={"witnesses": (witness,)})
+        tampered = _unsafe_rehash(proof, witnesses=(witness,))
     elif mutation == "state_hash":
         witness = proof.witnesses[0].model_copy(
             update={"state_after_sha256": "sha256:" + "f" * 64}
