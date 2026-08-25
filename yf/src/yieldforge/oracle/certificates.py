@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 
@@ -11,8 +14,16 @@ from yieldforge.baseline.replay import (
     M7ActionDescriptor,
     M7PolicyActionBinding,
     M7ReplayCursor,
+    M7ReplayEvent,
     M7ReplayRuntime,
+    M7StepResult,
+    apply_m7_action_descriptor,
+    apply_m7_frozen_action_evidence,
+    enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
+    m7_cursor_sha256,
+    m7_shared_fit_search_cache_key,
+    select_m7_fallback,
 )
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle.compiled import (
@@ -21,6 +32,8 @@ from yieldforge.oracle.compiled import (
 )
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
 from yieldforge.replay.contracts import InventoryItem
+
+_COMMON_FACT_AUTH_KEY = secrets.token_bytes(32)
 
 
 def _item_ids(items: tuple[InventoryItem, ...]) -> tuple[str, ...]:
@@ -58,12 +71,262 @@ class EventPassivityResult:
             raise ValueError("M8 passive result must carry exactly one event witness")
 
 
+@dataclass(frozen=True)
+class M8CommonTransitionFact:
+    """Factory-sealed exact M7 winner and transition for one common event."""
+
+    replay_input_id: str
+    replay_input_sha256: str
+    event_position: int
+    cursor_before: M7ReplayCursor
+    cursor_before_sha256: str
+    step: M7StepResult
+    cursor_after_sha256: str
+    event_id: str
+    policy_rank: PolicyRank
+    content_sha256: str
+    _auth_sha256: str
+
+
 def _rank_payload(rank: PolicyRank) -> dict[str, object]:
     return {
         "policy": rank.policy.value,
         "comparison_key": rank.comparison_key,
         "decision_key": rank.decision_key,
     }
+
+
+def _context_payload(context: ActionPolicyContext) -> dict[str, object]:
+    return {
+        "action_id": context.action_id,
+        "kind": context.kind.value,
+        "candidate_id": context.candidate_id,
+        "candidate_width": context.candidate_width,
+        "selected_stock_id": context.selected_stock_id,
+        "immediate_net_cost": context.immediate_net_cost,
+        "selected_remnant_age_hours": context.selected_remnant_age_hours,
+        "returned_regularity": context.returned_regularity,
+        "known_order_lookahead_term": context.known_order_lookahead_term,
+    }
+
+
+def _common_fact_payload(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    cursor_before: M7ReplayCursor,
+    step: M7StepResult,
+    policy_rank: PolicyRank,
+) -> dict[str, object]:
+    return {
+        "schema_version": "yieldforge.m8-common-transition-fact.v1",
+        "replay_input_id": runtime.replay_input.input_id,
+        "replay_input_sha256": runtime.replay_input.content_sha256,
+        "event_position": event_position,
+        "cursor_before_sha256": m7_cursor_sha256(cursor_before),
+        "descriptor": {
+            "action_id": step.descriptor.action_id,
+            "kind": step.descriptor.kind.value,
+            "candidate_id": step.descriptor.candidate_id,
+            "selected_remnant_id": step.descriptor.selected_remnant_id,
+            "evidence": (
+                step.descriptor.evidence.model_dump(mode="json")
+                if step.descriptor.evidence is not None
+                else None
+            ),
+        },
+        "selected_context": _context_payload(step.selected_context),
+        "action_binding": {
+            "catalog_action_id": step.action_binding.catalog_action_id,
+            "materialized_action_id": step.action_binding.materialized_action_id,
+            "context": _context_payload(step.action_binding.context),
+        },
+        "event": step.event.model_dump(mode="json"),
+        "cursor_after_sha256": m7_cursor_sha256(step.cursor),
+        "event_id": step.event.event_id,
+        "policy_rank": _rank_payload(policy_rank),
+    }
+
+
+def _seal_common_fact(content_sha256: str) -> str:
+    return "sha256:" + hmac.new(
+        _COMMON_FACT_AUTH_KEY,
+        content_sha256.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def build_m8_common_transition_fact(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+) -> M8CommonTransitionFact:
+    """Build one reusable authenticated exact common winner and transition fact."""
+
+    event_position = cursor.next_event_position
+    for item in cursor.inventory:
+        compile_translation_rejections(
+            runtime,
+            event_position=event_position,
+            item=item,
+        )
+    authoritative_runtime = _fresh_runtime(runtime)
+    catalog = enumerate_m7_action_catalog(
+        authoritative_runtime,
+        cursor=cursor,
+        complete=False,
+    )
+    _require_common_search_caches_match_authoritative(
+        runtime,
+        authoritative_runtime=authoritative_runtime,
+        event_position=event_position,
+        inventory=cursor.inventory,
+    )
+    selected = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
+    descriptor = next(
+        item for item in catalog.actions if item.action_id == selected.action_id
+    )
+    step = apply_m7_action_descriptor(
+        authoritative_runtime,
+        cursor=cursor,
+        catalog=catalog,
+        descriptor=descriptor,
+        decision_key=selected.decision_key,
+    )
+    rank = rank_policy_action(runtime.replay_input.policy.name, step.selected_context)
+    payload = _common_fact_payload(
+        runtime,
+        event_position=event_position,
+        cursor_before=cursor,
+        step=step,
+        policy_rank=rank,
+    )
+    content_sha256 = f"sha256:{semantic_sha256(payload)}"
+    return M8CommonTransitionFact(
+        replay_input_id=runtime.replay_input.input_id,
+        replay_input_sha256=runtime.replay_input.content_sha256,
+        event_position=event_position,
+        cursor_before=cursor,
+        cursor_before_sha256=m7_cursor_sha256(cursor),
+        step=step,
+        cursor_after_sha256=m7_cursor_sha256(step.cursor),
+        event_id=step.event.event_id,
+        policy_rank=rank,
+        content_sha256=content_sha256,
+        _auth_sha256=_seal_common_fact(content_sha256),
+    )
+
+
+def _validate_common_transition_fact(
+    runtime: M7ReplayRuntime,
+    fact: M8CommonTransitionFact,
+) -> None:
+    if not isinstance(fact, M8CommonTransitionFact):
+        raise ValueError("M8 common transition fact has the wrong runtime type")
+    if (
+        fact.replay_input_id != runtime.replay_input.input_id
+        or fact.replay_input_sha256 != runtime.replay_input.content_sha256
+        or type(fact.event_position) is not int
+        or fact.event_position < 0
+        or fact.event_position >= len(runtime.replay_input.instances)
+        or fact.event_position != fact.cursor_before.next_event_position
+    ):
+        raise ValueError("M8 common transition fact differs from the frozen replay input")
+    before_sha256 = m7_cursor_sha256(fact.cursor_before)
+    after_sha256 = m7_cursor_sha256(fact.step.cursor)
+    if (
+        fact.cursor_before_sha256 != before_sha256
+        or fact.cursor_after_sha256 != after_sha256
+        or fact.event_id != fact.step.event.event_id
+    ):
+        raise ValueError("M8 common transition fact cursor or event binding differs")
+    try:
+        canonical_event = M7ReplayEvent.model_validate(
+            fact.step.event.model_dump(mode="python"),
+            strict=True,
+        )
+    except (AttributeError, ValueError) as error:
+        raise ValueError("M8 common replay event is not canonical") from error
+    if canonical_event != fact.step.event:
+        raise ValueError("M8 common replay event differs from canonical persisted evidence")
+    binding = runtime.replay_input.instances[fact.event_position]
+    step = fact.step
+    expected_stock_id = (
+        "current_standard_sheet"
+        if step.event.action.selected_remnant_id is None
+        else step.event.action.selected_remnant_id
+    )
+    if (
+        step.action_binding.catalog_action_id != step.descriptor.action_id
+        or step.action_binding.materialized_action_id != step.event.action.action_id
+        or step.action_binding.context != step.selected_context
+        or step.descriptor.kind is not step.event.action.kind
+        or step.descriptor.candidate_id != step.event.action.candidate_id
+        or step.descriptor.selected_remnant_id != step.event.action.selected_remnant_id
+        or step.selected_context.kind is not step.event.action.kind
+        or step.selected_context.candidate_id != step.event.action.candidate_id
+        or step.selected_context.selected_stock_id != expected_stock_id
+        or step.event.sequence != fact.event_position
+        or step.event.binding_id != binding.binding_id
+        or step.event.occurred_at != binding.released_at
+        or step.event.storage_interval_start != fact.cursor_before.current_time
+        or step.event.inventory_before != fact.cursor_before.inventory
+        or step.event.inventory_after != step.cursor.inventory
+        or step.event.cumulative_costs != step.cursor.cumulative_costs
+        or step.event.timestamp_group_sequence != step.cursor.timestamp_group_sequence
+        or step.event.timestamp_subsequence != step.cursor.timestamp_subsequence
+        or step.cursor.next_event_position != fact.event_position + 1
+        or step.cursor.current_time != binding.released_at
+        or step.cursor.previous_release != binding.released_at
+    ):
+        raise ValueError("M8 common transition fact has inconsistent exact transition fields")
+    expected_rank = rank_policy_action(
+        runtime.replay_input.policy.name,
+        step.selected_context,
+    )
+    if (
+        fact.policy_rank != expected_rank
+        or step.event.policy_decision_key != expected_rank.decision_key
+    ):
+        raise ValueError("M8 common transition fact has inconsistent exact policy rank")
+    payload = _common_fact_payload(
+        runtime,
+        event_position=fact.event_position,
+        cursor_before=fact.cursor_before,
+        step=step,
+        policy_rank=fact.policy_rank,
+    )
+    expected_content = f"sha256:{semantic_sha256(payload)}"
+    if fact.content_sha256 != expected_content or not hmac.compare_digest(
+        fact._auth_sha256,
+        _seal_common_fact(expected_content),
+    ):
+        raise ValueError("M8 common transition fact content authentication failed")
+
+
+def _derive_branch_inventory_delta(
+    common: M7ReplayCursor,
+    branch: M7ReplayCursor,
+) -> BranchInventoryDelta:
+    m7_cursor_sha256(common)
+    m7_cursor_sha256(branch)
+    if (
+        branch.next_event_position != common.next_event_position
+        or branch.current_time != common.current_time
+        or branch.timestamp_group_sequence != common.timestamp_group_sequence
+        or branch.timestamp_subsequence != common.timestamp_subsequence
+        or branch.previous_release != common.previous_release
+    ):
+        raise ValueError("M8 branch cursor metadata differs from the common cursor")
+    common_by_id = {item.remnant.remnant_id: item for item in common.inventory}
+    branch_by_id = {item.remnant.remnant_id: item for item in branch.inventory}
+    for remnant_id in set(common_by_id) & set(branch_by_id):
+        if common_by_id[remnant_id] != branch_by_id[remnant_id]:
+            raise ValueError("M8 shared remnant record differs between common and branch")
+    return BranchInventoryDelta(
+        added=tuple(branch_by_id[key] for key in sorted(set(branch_by_id) - set(common_by_id))),
+        removed=tuple(common_by_id[key] for key in sorted(set(common_by_id) - set(branch_by_id))),
+    )
 
 
 def _rejection_payload(
@@ -138,25 +401,97 @@ def _fresh_runtime(runtime: M7ReplayRuntime) -> M7ReplayRuntime:
     )
 
 
-def _shared_cache_key(
+def _require_cached_searches_match_authoritative(
     runtime: M7ReplayRuntime,
     *,
     event_position: int,
     item: InventoryItem,
-) -> tuple[str, str, str]:
+    authoritative: tuple[LayoutFitSearchResult, ...],
+) -> None:
     binding = runtime.replay_input.instances[event_position]
     verified = runtime.runtime_candidates[binding.problem_id]
-    return (
-        semantic_sha256(
-            {
-                "geometry": item.remnant.geometry.model_dump(mode="json"),
-                "fit_config": runtime.replay_input.fit_config.model_dump(mode="json"),
-                "search_config": runtime.replay_input.search_config.model_dump(mode="json"),
-            }
-        ),
+    local_key = (
+        item.remnant.remnant_id,
         binding.problem_id,
         verified.evidence.candidate_set_id,
     )
+    cached_local = runtime.fit_search_cache.get(local_key)
+    if cached_local is not None:
+        canonical_local = _canonical_searches(cached_local, label="local")
+        _require_search_bindings(
+            runtime,
+            event_position=event_position,
+            item=item,
+            searches=canonical_local,
+            require_remnant_id=True,
+        )
+        if canonical_local != authoritative:
+            raise ValueError(
+                "M8 local fit-search cache value differs from authoritative registered search"
+            )
+
+    if runtime.shared_fit_search_cache is not None:
+        cached_shared = runtime.shared_fit_search_cache.get(
+            m7_shared_fit_search_cache_key(
+                geometry=item.remnant.geometry,
+                fit_config=runtime.replay_input.fit_config,
+                search_config=runtime.replay_input.search_config,
+                problem_id=binding.problem_id,
+                candidate_set_id=verified.evidence.candidate_set_id,
+            )
+        )
+        if cached_shared is not None:
+            canonical_shared = _canonical_searches(cached_shared, label="shared")
+            _require_search_bindings(
+                runtime,
+                event_position=event_position,
+                item=item,
+                searches=canonical_shared,
+                require_remnant_id=False,
+            )
+            rebound_shared = tuple(
+                search.model_copy(update={"remnant_id": item.remnant.remnant_id})
+                for search in canonical_shared
+            )
+            if rebound_shared != authoritative:
+                raise ValueError(
+                    "M8 shared fit-search cache value differs from authoritative registered "
+                    "search"
+                )
+
+
+def _require_common_search_caches_match_authoritative(
+    runtime: M7ReplayRuntime,
+    *,
+    authoritative_runtime: M7ReplayRuntime,
+    event_position: int,
+    inventory: tuple[InventoryItem, ...],
+) -> None:
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    for item in inventory:
+        local_key = (
+            item.remnant.remnant_id,
+            binding.problem_id,
+            verified.evidence.candidate_set_id,
+        )
+        authoritative = authoritative_runtime.fit_search_cache.get(local_key)
+        if authoritative is None:
+            continue
+        canonical = _canonical_searches(authoritative, label="authoritative common")
+        _require_search_bindings(
+            runtime,
+            event_position=event_position,
+            item=item,
+            searches=canonical,
+            require_remnant_id=True,
+        )
+        _require_cached_searches_match_authoritative(
+            runtime,
+            event_position=event_position,
+            item=item,
+            authoritative=canonical,
+        )
 
 
 def _authoritative_competitor(
@@ -196,43 +531,12 @@ def _authoritative_competitor(
         require_remnant_id=True,
     )
 
-    cached_local = runtime.fit_search_cache.get(local_key)
-    if cached_local is not None:
-        canonical_local = _canonical_searches(cached_local, label="local")
-        _require_search_bindings(
-            runtime,
-            event_position=event_position,
-            item=item,
-            searches=canonical_local,
-            require_remnant_id=True,
-        )
-        if canonical_local != authoritative:
-            raise ValueError(
-                "M8 local fit-search cache value differs from authoritative registered search"
-            )
-
-    if runtime.shared_fit_search_cache is not None:
-        cached_shared = runtime.shared_fit_search_cache.get(
-            _shared_cache_key(runtime, event_position=event_position, item=item)
-        )
-        if cached_shared is not None:
-            canonical_shared = _canonical_searches(cached_shared, label="shared")
-            _require_search_bindings(
-                runtime,
-                event_position=event_position,
-                item=item,
-                searches=canonical_shared,
-                require_remnant_id=False,
-            )
-            rebound_shared = tuple(
-                search.model_copy(update={"remnant_id": item.remnant.remnant_id})
-                for search in canonical_shared
-            )
-            if rebound_shared != authoritative:
-                raise ValueError(
-                    "M8 shared fit-search cache value differs from authoritative registered "
-                    "search"
-                )
+    _require_cached_searches_match_authoritative(
+        runtime,
+        event_position=event_position,
+        item=item,
+        authoritative=authoritative,
+    )
     return competitor, context, authoritative
 
 
@@ -245,6 +549,7 @@ def _evidence_sha256(
     delta: BranchInventoryDelta,
     common: M7PolicyActionBinding,
     common_rank: PolicyRank,
+    common_fact_sha256: str,
     common_action_id: str,
     branch_action_id: str,
     state_before_sha256: str,
@@ -291,6 +596,7 @@ def _evidence_sha256(
         "inventory_item": item.model_dump(mode="json"),
         "remnant": item.remnant.model_dump(mode="json"),
         "common": {
+            "transition_fact_sha256": common_fact_sha256,
             "catalog_action_id": common.catalog_action_id,
             "materialized_action_id": common.materialized_action_id,
             "context": asdict(common.context),
@@ -317,6 +623,7 @@ def _influence(
     delta: BranchInventoryDelta,
     common: M7PolicyActionBinding,
     common_rank: PolicyRank,
+    common_fact_sha256: str,
     common_action_id: str,
     branch_action_id: str,
     state_before_sha256: str,
@@ -336,6 +643,7 @@ def _influence(
             delta=delta,
             common=common,
             common_rank=common_rank,
+            common_fact_sha256=common_fact_sha256,
             common_action_id=common_action_id,
             branch_action_id=branch_action_id,
             state_before_sha256=state_before_sha256,
@@ -375,6 +683,7 @@ def _influence(
             delta=delta,
             common=common,
             common_rank=common_rank,
+            common_fact_sha256=common_fact_sha256,
             common_action_id=common_action_id,
             branch_action_id=branch_action_id,
             state_before_sha256=state_before_sha256,
@@ -409,6 +718,7 @@ def _influence(
         delta=delta,
         common=common,
         common_rank=common_rank,
+        common_fact_sha256=common_fact_sha256,
         common_action_id=common_action_id,
         branch_action_id=branch_action_id,
         state_before_sha256=state_before_sha256,
@@ -438,45 +748,44 @@ def _influence(
 def certify_event_passivity(
     runtime: M7ReplayRuntime,
     *,
-    cursor_template: M7ReplayCursor,
-    event_position: int,
-    common: M7PolicyActionBinding,
-    delta: BranchInventoryDelta,
-    common_action_id: str,
-    branch_action_id: str,
-    state_before_sha256: str,
-    state_after_sha256: str,
+    common: M8CommonTransitionFact,
+    branch_cursor: M7ReplayCursor,
 ) -> EventPassivityResult:
     """Prove one branch event selects the exact common M7 action, or fail closed."""
 
-    if event_position != cursor_template.next_event_position:
-        raise ValueError("M8 certificate event position differs from cursor")
-    if common.materialized_action_id != common_action_id:
-        raise ValueError("M8 supplied common action differs from its materialized binding")
-    common_ids = set(_item_ids(cursor_template.inventory))
-    if any(item.remnant.remnant_id in common_ids for item in delta.added):
-        raise ValueError("M8 added remnant is already present in the common inventory")
-    if any(item.remnant.remnant_id not in common_ids for item in delta.removed):
-        raise ValueError("M8 removed remnant is absent from the common inventory")
-    if branch_action_id != common_action_id or not delta.added and not delta.removed:
+    _validate_common_transition_fact(runtime, common)
+    delta = _derive_branch_inventory_delta(common.cursor_before, branch_cursor)
+    if not delta.added and not delta.removed:
         return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
-    if common.context.selected_stock_id in set(_item_ids(delta.removed)):
+    binding = common.step.action_binding
+    common_action_id = common.step.event.action.action_id
+    branch_action_id = common_action_id
+    if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
         return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
 
-    common_rank = rank_policy_action(runtime.replay_input.policy.name, common.context)
+    branch_after = apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=branch_cursor,
+        event_position=common.event_position,
+        action=common.step.event.action,
+    )
+    state_before_sha256 = m7_cursor_sha256(branch_cursor)
+    state_after_sha256 = m7_cursor_sha256(branch_after)
+    common_rank = common.policy_rank
     influences = []
     exact_search_count = 0
     for direction, items in (("added", delta.added), ("removed", delta.removed)):
         for item in items:
             influence, searches = _influence(
                 runtime,
-                cursor_template=cursor_template,
-                event_position=event_position,
+                cursor_template=common.cursor_before,
+                event_position=common.event_position,
                 item=item,
                 direction=direction,
                 delta=delta,
-                common=common,
+                common=binding,
                 common_rank=common_rank,
+                common_fact_sha256=common.content_sha256,
                 common_action_id=common_action_id,
                 branch_action_id=branch_action_id,
                 state_before_sha256=state_before_sha256,
@@ -499,7 +808,7 @@ def certify_event_passivity(
     return EventPassivityResult(
         passive=True,
         witness=M8EventWitness(
-            event_position=event_position,
+            event_position=common.event_position,
             classification=classification,
             common_action_id=common_action_id,
             branch_action_id=branch_action_id,
@@ -514,5 +823,7 @@ def certify_event_passivity(
 __all__ = [
     "BranchInventoryDelta",
     "EventPassivityResult",
+    "M8CommonTransitionFact",
+    "build_m8_common_transition_fact",
     "certify_event_passivity",
 ]

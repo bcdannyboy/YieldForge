@@ -1,26 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
+from inspect import signature
 
 import pytest
 from shapely import Polygon, box
 
 from tests.oracle.fixtures import inventory_item, two_problem_runtime
 from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
-from yieldforge.baseline.policies import M7PolicyName
+from yieldforge.baseline.policies import M7PolicyName, select_policy_action
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
     apply_m7_action_descriptor,
+    apply_m7_frozen_action_evidence,
     enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
     initial_m7_cursor,
+    m7_cursor_sha256,
     select_m7_fallback,
 )
 from yieldforge.oracle.certificates import (
     BranchInventoryDelta,
+    build_m8_common_transition_fact,
     certify_event_passivity,
 )
 from yieldforge.oracle.compiled import compile_translation_rejections
+from yieldforge.replay.contracts import InventoryItem
 from yieldforge.reuse.contracts import MaterialIdentity
 from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
 
@@ -57,38 +63,41 @@ def _as_fit(search: LayoutFitSearchResult) -> LayoutFitSearchResult:
     )
 
 
-def _common_step(runtime, *, cursor: M7ReplayCursor | None = None):  # type: ignore[no-untyped-def]
+def _common_fact(runtime, *, cursor: M7ReplayCursor | None = None):  # type: ignore[no-untyped-def]
     current = cursor or initial_m7_cursor(runtime.replay_input)
-    catalog = enumerate_m7_action_catalog(runtime, cursor=current)
-    selected = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
-    descriptor = next(item for item in catalog.actions if item.action_id == selected.action_id)
-    step = apply_m7_action_descriptor(
-        runtime,
-        cursor=current,
-        catalog=catalog,
-        descriptor=descriptor,
-        decision_key=selected.decision_key,
+    return current, build_m8_common_transition_fact(runtime, cursor=current)
+
+
+def _branch_cursor(
+    common: M7ReplayCursor,
+    *,
+    added=(),  # type: ignore[no-untyped-def]
+    removed=(),  # type: ignore[no-untyped-def]
+) -> M7ReplayCursor:
+    removed_ids = {item.remnant.remnant_id for item in removed}
+    inventory = tuple(
+        sorted(
+            (
+                *(item for item in common.inventory if item.remnant.remnant_id not in removed_ids),
+                *added,
+            ),
+            key=lambda item: item.remnant.remnant_id,
+        )
     )
-    return current, step
+    return replace(common, inventory=inventory)
 
 
-def _certify(runtime, item, *, cursor=None, common_step=None):  # type: ignore[no-untyped-def]
-    current, step = (
-        _common_step(runtime, cursor=cursor)
-        if common_step is None
-        else (cursor, common_step)
+def _certify(runtime, item, *, cursor=None, common_fact=None):  # type: ignore[no-untyped-def]
+    current, fact = (
+        _common_fact(runtime, cursor=cursor)
+        if common_fact is None
+        else (cursor, common_fact)
     )
     assert current is not None
     return certify_event_passivity(
         runtime,
-        cursor_template=current,
-        event_position=current.next_event_position,
-        common=step.action_binding,
-        delta=BranchInventoryDelta(added=(item,), removed=()),
-        common_action_id=step.action_binding.materialized_action_id,
-        branch_action_id=step.action_binding.materialized_action_id,
-        state_before_sha256=_sha(1),
-        state_after_sha256=_sha(2),
+        common=fact,
+        branch_cursor=_branch_cursor(current, added=(item,)),
     )
 
 
@@ -431,6 +440,381 @@ def test_single_remnant_helper_never_substitutes_the_standard_policy_winner() ->
     assert context.action_id == descriptor.action_id
 
 
+@pytest.mark.parametrize("policy", tuple(M7PolicyName))
+def test_single_remnant_helper_matches_complete_catalog_policy_winner(
+    policy: M7PolicyName,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0, policy=policy)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token=f"differential-{policy.value}",
+    )
+    common_cursor = initial_m7_cursor(runtime.replay_input)
+
+    descriptor, context = enumerate_m7_single_remnant_competitor(
+        runtime,
+        event_position=0,
+        item=item,
+        cursor_template=common_cursor,
+    )
+    branch_cursor = replace(common_cursor, inventory=(item,))
+    complete = enumerate_m7_action_catalog(runtime, cursor=branch_cursor, complete=True)
+    remnant_contexts = tuple(
+        candidate
+        for candidate in complete.contexts
+        if candidate.selected_stock_id == item.remnant.remnant_id
+    )
+    expected = select_policy_action(policy, remnant_contexts)
+    expected_descriptor = next(
+        candidate for candidate in complete.actions if candidate.action_id == expected.action_id
+    )
+    expected_context = next(
+        candidate for candidate in remnant_contexts if candidate.action_id == expected.action_id
+    )
+
+    assert descriptor == expected_descriptor
+    assert context == expected_context
+    assert expected.decision_key[-3:] == (
+        f"candidate_id={expected_context.candidate_id}",
+        f"selected_stock_id={item.remnant.remnant_id}",
+        f"action_id={expected_context.action_id}",
+    )
+
+
+def test_common_transition_fact_rejects_tampered_numeric_context() -> None:
+    rates = FeasibilityRateManifest(
+        purchase_cost_per_area=1.0,
+        storage_cost_per_area_hour=0.0,
+        return_handling_cost_per_remnant=0.0,
+        retrieval_handling_cost_per_remnant=200.0,
+        scrap_credit_per_area=0.0,
+    )
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        policy=M7PolicyName.NET_COST,
+        rates=rates,
+    )
+    cursor, fact = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="forged-common-cost",
+    )
+    context = replace(fact.step.selected_context, immediate_net_cost=-1e9)
+    binding = replace(fact.step.action_binding, context=context)
+    forged = replace(
+        fact,
+        step=replace(
+            fact.step,
+            selected_context=context,
+            action_binding=binding,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="common transition fact"):
+        certify_event_passivity(
+            runtime,
+            common=forged,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_common_transition_fact_rejects_tampered_winner_search_cache() -> None:
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        policy=M7PolicyName.REMNANT_FIRST,
+    )
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="common-cache-winner",
+    )
+    cursor = replace(initial_m7_cursor(runtime.replay_input), inventory=(item,))
+    enumerate_m7_action_catalog(runtime, cursor=cursor, complete=False)
+    cache_key = next(iter(runtime.fit_search_cache))
+    runtime.fit_search_cache[cache_key] = tuple(
+        _as_no_fit(search) for search in runtime.fit_search_cache[cache_key]
+    )
+
+    with pytest.raises(ValueError, match="local fit-search cache value"):
+        build_m8_common_transition_fact(runtime, cursor=cursor)
+
+
+def test_common_transition_fact_rejects_nonwinner_action() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
+    selected = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
+    nonwinner = next(item for item in catalog.actions if item.action_id != selected.action_id)
+    nonwinner_context = next(
+        item for item in catalog.contexts if item.action_id == nonwinner.action_id
+    )
+    nonwinner_selection = select_policy_action(
+        runtime.replay_input.policy.name,
+        (nonwinner_context,),
+    )
+    nonwinner_step = apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=catalog,
+        descriptor=nonwinner,
+        decision_key=nonwinner_selection.decision_key,
+    )
+    forged = replace(fact, step=nonwinner_step)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="nonwinner-common",
+    )
+
+    with pytest.raises(ValueError, match="common transition fact"):
+        certify_event_passivity(
+            runtime,
+            common=forged,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+@pytest.mark.parametrize("mutation", ["digest", "event", "cursor"])
+def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    if mutation == "digest":
+        forged = replace(fact, content_sha256=_sha(99))
+    elif mutation == "event":
+        event = fact.step.event.model_copy(update={"event_id": "yfm7e-" + "0" * 24})
+        forged = replace(fact, step=replace(fact.step, event=event))
+    else:
+        forged = replace(
+            fact,
+            cursor_before=replace(
+                fact.cursor_before,
+                current_time=fact.cursor_before.current_time + timedelta(seconds=1),
+            ),
+        )
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token=f"fact-{mutation}",
+    )
+
+    with pytest.raises(ValueError, match="common transition fact|replay event"):
+        certify_event_passivity(
+            runtime,
+            common=forged,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+@pytest.mark.parametrize("mutation", ["catalog_action_id", "materialized_action_id", "rank"])
+def test_common_transition_fact_rejects_tampered_action_identities_and_rank(
+    mutation: str,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    if mutation == "catalog_action_id":
+        action_id = "m7-standard:forged-candidate"
+        context = replace(fact.step.selected_context, action_id=action_id)
+        binding = replace(
+            fact.step.action_binding,
+            catalog_action_id=action_id,
+            context=context,
+        )
+        descriptor = replace(fact.step.descriptor, action_id=action_id)
+        forged = replace(
+            fact,
+            step=replace(
+                fact.step,
+                descriptor=descriptor,
+                selected_context=context,
+                action_binding=binding,
+            ),
+        )
+    elif mutation == "materialized_action_id":
+        action_id = "yfm7a-" + "0" * 24
+        action = fact.step.event.action.model_copy(update={"action_id": action_id})
+        event = fact.step.event.model_copy(update={"action": action})
+        binding = replace(fact.step.action_binding, materialized_action_id=action_id)
+        forged = replace(
+            fact,
+            step=replace(fact.step, action_binding=binding, event=event),
+        )
+    else:
+        forged = replace(
+            fact,
+            policy_rank=replace(fact.policy_rank, comparison_key=("forged",)),
+        )
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token=f"fact-{mutation}",
+    )
+
+    with pytest.raises(ValueError, match="common transition fact|replay event"):
+        certify_event_passivity(
+            runtime,
+            common=forged,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_certifier_derives_complete_delta_and_state_hashes_from_branch_cursor() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    items = tuple(
+        sorted(
+            (
+                inventory_item(
+                    box(0, 0, 3, 20),
+                    material=runtime.replay_input.instances[0].material,
+                    token="derived-one",
+                ),
+                inventory_item(
+                    box(0, 0, 2, 20),
+                    material=runtime.replay_input.instances[0].material,
+                    token="derived-two",
+                ),
+            ),
+            key=lambda item: item.remnant.remnant_id,
+        )
+    )
+    branch = _branch_cursor(cursor, added=items)
+
+    result = certify_event_passivity(runtime, common=fact, branch_cursor=branch)
+
+    assert result.passive
+    assert result.witness is not None
+    assert tuple(item.remnant_id for item in result.witness.influences) == tuple(
+        item.remnant.remnant_id for item in items
+    )
+    assert result.witness.state_before_sha256 == m7_cursor_sha256(branch)
+    expected_after = apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=branch,
+        event_position=0,
+        action=fact.step.event.action,
+    )
+    assert result.witness.state_after_sha256 == m7_cursor_sha256(expected_after)
+    assert result.witness.common_action_id == fact.step.event.action.action_id
+    assert result.witness.branch_action_id == fact.step.event.action.action_id
+    assert "delta" not in signature(certify_event_passivity).parameters
+    assert "state_before_sha256" not in signature(certify_event_passivity).parameters
+
+
+def test_certifier_rejects_changed_shared_remnant_record() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="changed-shared-record",
+    )
+    cursor = replace(initial_m7_cursor(runtime.replay_input), inventory=(item,))
+    _, fact = _common_fact(runtime, cursor=cursor)
+    changed = item.model_copy(update={"entered_at": item.entered_at + timedelta(hours=1)})
+
+    with pytest.raises(ValueError, match="shared remnant record"):
+        certify_event_passivity(
+            runtime,
+            common=fact,
+            branch_cursor=replace(cursor, inventory=(changed,)),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "next_event_position",
+        "current_time",
+        "timestamp_group_sequence",
+        "timestamp_subsequence",
+        "previous_release",
+    ],
+)
+def test_certifier_rejects_branch_cursor_metadata_mismatch(field: str) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    values = {
+        "next_event_position": cursor.next_event_position + 1,
+        "current_time": cursor.current_time + timedelta(seconds=1),
+        "timestamp_group_sequence": cursor.timestamp_group_sequence + 1,
+        "timestamp_subsequence": cursor.timestamp_subsequence + 1,
+        "previous_release": cursor.current_time,
+    }
+
+    with pytest.raises(ValueError, match="cursor metadata"):
+        certify_event_passivity(
+            runtime,
+            common=fact,
+            branch_cursor=replace(cursor, **{field: values[field]}),
+        )
+
+
+def test_frozen_action_application_matches_ordinary_standard_transition() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+
+    frozen = apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=cursor,
+        event_position=0,
+        action=fact.step.event.action,
+    )
+
+    assert fact.step.event.action.kind.value == "open_standard_sheet"
+    assert frozen == fact.step.cursor
+
+
+def test_frozen_action_application_rejects_returned_remnant_identity_conflict() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor, fact = _common_fact(runtime)
+    returned = fact.step.event.action.returned_remnants
+    assert returned
+    conflict = InventoryItem(remnant=returned[0], entered_at=cursor.current_time)
+
+    with pytest.raises(ValueError, match="duplicate remnant identities"):
+        apply_m7_frozen_action_evidence(
+            runtime,
+            cursor=replace(cursor, inventory=(conflict,)),
+            event_position=0,
+            action=fact.step.event.action,
+        )
+
+
+def test_frozen_action_application_matches_ordinary_remnant_transition() -> None:
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        policy=M7PolicyName.REMNANT_FIRST,
+    )
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="frozen-remnant",
+    )
+    cursor = replace(initial_m7_cursor(runtime.replay_input), inventory=(item,))
+    _, fact = _common_fact(runtime, cursor=cursor)
+
+    frozen = apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=cursor,
+        event_position=0,
+        action=fact.step.event.action,
+    )
+
+    assert fact.step.event.action.kind.value == "consume_remnant"
+    assert frozen == fact.step.cursor
+    with pytest.raises(ValueError, match="selected remnant is missing"):
+        apply_m7_frozen_action_evidence(
+            runtime,
+            cursor=replace(cursor, inventory=()),
+            event_position=0,
+            action=fact.step.event.action,
+        )
+
+
 def test_removed_common_winner_is_unresolved_before_any_search() -> None:
     runtime = two_problem_runtime(
         first_width=4.0,
@@ -443,21 +827,15 @@ def test_removed_common_winner_is_unresolved_before_any_search() -> None:
         token="removed-winner",
     )
     cursor = replace(initial_m7_cursor(runtime.replay_input), inventory=(item,))
-    _, step = _common_step(runtime, cursor=cursor)
+    _, fact = _common_fact(runtime, cursor=cursor)
 
     result = certify_event_passivity(
         runtime,
-        cursor_template=cursor,
-        event_position=0,
-        common=step.action_binding,
-        delta=BranchInventoryDelta(added=(), removed=(item,)),
-        common_action_id=step.action_binding.materialized_action_id,
-        branch_action_id=step.action_binding.materialized_action_id,
-        state_before_sha256=_sha(1),
-        state_after_sha256=_sha(2),
+        common=fact,
+        branch_cursor=_branch_cursor(cursor, removed=(item,)),
     )
 
-    assert step.action_binding.context.selected_stock_id == item.remnant.remnant_id
+    assert fact.step.action_binding.context.selected_stock_id == item.remnant.remnant_id
     assert not result.passive
     assert result.witness is None
     assert result.exact_search_count == 0
@@ -480,23 +858,17 @@ def test_removed_nonwinner_is_certified_by_exact_same_policy_dominance() -> None
         )
     )
     cursor = replace(initial_m7_cursor(runtime.replay_input), inventory=items)
-    _, step = _common_step(runtime, cursor=cursor)
+    _, fact = _common_fact(runtime, cursor=cursor)
     removed = next(
         item
         for item in items
-        if item.remnant.remnant_id != step.action_binding.context.selected_stock_id
+        if item.remnant.remnant_id != fact.step.action_binding.context.selected_stock_id
     )
 
     result = certify_event_passivity(
         runtime,
-        cursor_template=cursor,
-        event_position=0,
-        common=step.action_binding,
-        delta=BranchInventoryDelta(added=(), removed=(removed,)),
-        common_action_id=step.action_binding.materialized_action_id,
-        branch_action_id=step.action_binding.materialized_action_id,
-        state_before_sha256=_sha(1),
-        state_after_sha256=_sha(2),
+        common=fact,
+        branch_cursor=_branch_cursor(cursor, removed=(removed,)),
     )
 
     assert result.passive
@@ -531,18 +903,12 @@ def test_event_can_mix_no_fit_and_policy_dominated_influences() -> None:
             key=lambda item: item.remnant.remnant_id,
         )
     )
-    cursor, step = _common_step(runtime)
+    cursor, fact = _common_fact(runtime)
 
     result = certify_event_passivity(
         runtime,
-        cursor_template=cursor,
-        event_position=0,
-        common=step.action_binding,
-        delta=BranchInventoryDelta(added=items, removed=()),
-        common_action_id=step.action_binding.materialized_action_id,
-        branch_action_id=step.action_binding.materialized_action_id,
-        state_before_sha256=_sha(1),
-        state_after_sha256=_sha(2),
+        common=fact,
+        branch_cursor=_branch_cursor(cursor, added=items),
     )
 
     assert result.passive

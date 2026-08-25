@@ -62,7 +62,12 @@ from yieldforge.replay.contracts import (
     rounded_cost,
 )
 from yieldforge.residuals.contracts import ResidualRuleSet
-from yieldforge.reuse.contracts import RemnantFitConfig, ReuseAccounting, polygon_from_record
+from yieldforge.reuse.contracts import (
+    CanonicalPolygon,
+    RemnantFitConfig,
+    ReuseAccounting,
+    polygon_from_record,
+)
 from yieldforge.reuse.geometry import material_key
 from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
 
@@ -71,6 +76,29 @@ type M7PreparedLayoutCache = OrderedDict[tuple[str, str], tuple[PreparedLayoutFo
 
 _MAX_PREPARED_LAYOUT_CACHE_PROBLEMS = 2
 _REMNANT_ACTION_MATERIALIZATION_BATCH_SIZE = 64
+
+
+def m7_shared_fit_search_cache_key(
+    *,
+    geometry: CanonicalPolygon,
+    fit_config: RemnantFitConfig,
+    search_config: LayoutFitSearchConfig,
+    problem_id: str,
+    candidate_set_id: str,
+) -> tuple[str, str, str]:
+    """Return the frozen content key for one reusable geometry-search result."""
+
+    return (
+        semantic_sha256(
+            {
+                "geometry": geometry.model_dump(mode="json"),
+                "fit_config": fit_config.model_dump(mode="json"),
+                "search_config": search_config.model_dump(mode="json"),
+            }
+        ),
+        problem_id,
+        candidate_set_id,
+    )
 
 
 def _utc(value: datetime, label: str) -> datetime:
@@ -730,16 +758,12 @@ def _generate_actions(
         cache_key = (item.remnant.remnant_id, problem.problem_id, evidence.candidate_set_id)
         searches = fit_search_cache.get(cache_key)
         cache_hit_recorded = False
-        shared_cache_key = (
-            semantic_sha256(
-                {
-                    "geometry": item.remnant.geometry.model_dump(mode="json"),
-                    "fit_config": fit_config.model_dump(mode="json"),
-                    "search_config": search_config.model_dump(mode="json"),
-                }
-            ),
-            problem.problem_id,
-            evidence.candidate_set_id,
+        shared_cache_key = m7_shared_fit_search_cache_key(
+            geometry=item.remnant.geometry,
+            fit_config=fit_config,
+            search_config=search_config,
+            problem_id=problem.problem_id,
+            candidate_set_id=evidence.candidate_set_id,
         )
         if searches is None and shared_fit_search_cache is not None:
             cached_shared = shared_fit_search_cache.get(shared_cache_key)
@@ -1482,6 +1506,58 @@ def _validate_runtime(runtime: M7ReplayRuntime) -> None:
         raise ValueError("M7 replay collision backend differs from runtime extension")
 
 
+def _canonical_cursor_payload(cursor: M7ReplayCursor) -> dict[str, object]:
+    if not isinstance(cursor, M7ReplayCursor):
+        raise ValueError("M7 cursor must use the exact runtime cursor type")
+    if type(cursor.next_event_position) is not int or cursor.next_event_position < 0:
+        raise ValueError("M7 cursor event position must be a nonnegative integer")
+    if type(cursor.timestamp_group_sequence) is not int:
+        raise ValueError("M7 cursor timestamp group sequence must be an integer")
+    if type(cursor.timestamp_subsequence) is not int or cursor.timestamp_subsequence < 0:
+        raise ValueError("M7 cursor timestamp subsequence must be a nonnegative integer")
+    try:
+        current_time = _utc(cursor.current_time, "M7 cursor current time")
+        previous_release = (
+            _utc(cursor.previous_release, "M7 cursor previous release")
+            if cursor.previous_release is not None
+            else None
+        )
+        inventory = tuple(
+            InventoryItem.model_validate(item.model_dump(mode="python"), strict=True)
+            for item in cursor.inventory
+        )
+        cumulative = ReplayCostLedger.model_validate(
+            cursor.cumulative_costs.model_dump(mode="python"),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError("M7 cursor contains malformed canonical state") from error
+    if inventory != cursor.inventory or cumulative != cursor.cumulative_costs:
+        raise ValueError("M7 cursor differs from its canonical state")
+    inventory_ids = _inventory_ids(inventory)
+    if inventory_ids != tuple(sorted(set(inventory_ids))):
+        raise ValueError("M7 cursor inventory must use sorted unique identities")
+    return {
+        "next_event_position": cursor.next_event_position,
+        "current_time": current_time.isoformat().replace("+00:00", "Z"),
+        "inventory": tuple(item.model_dump(mode="json") for item in inventory),
+        "cumulative_costs": cumulative.model_dump(mode="json"),
+        "timestamp_group_sequence": cursor.timestamp_group_sequence,
+        "timestamp_subsequence": cursor.timestamp_subsequence,
+        "previous_release": (
+            previous_release.isoformat().replace("+00:00", "Z")
+            if previous_release is not None
+            else None
+        ),
+    }
+
+
+def m7_cursor_sha256(cursor: M7ReplayCursor) -> str:
+    """Hash every canonical field in one exact runtime replay cursor."""
+
+    return f"sha256:{semantic_sha256(_canonical_cursor_payload(cursor))}"
+
+
 def initial_m7_cursor(replay_input: M7ReplayInput) -> M7ReplayCursor:
     """Return the exact empty state before the first registered event."""
 
@@ -1693,6 +1769,160 @@ def enumerate_m7_single_remnant_competitor(
     )
 
 
+@dataclass(frozen=True)
+class _M7AppliedAction:
+    storage_cost: float
+    timestamp_group_sequence: int
+    timestamp_subsequence: int
+    inventory_after: tuple[InventoryItem, ...]
+    delta_costs: ReplayCostLedger
+    cumulative_costs: ReplayCostLedger
+    cursor: M7ReplayCursor
+
+
+def _canonical_materialized_action(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    event_position: int,
+    action: M7LayoutActionEvidence,
+) -> M7LayoutActionEvidence:
+    try:
+        canonical = M7LayoutActionEvidence.model_validate(
+            action.model_dump(mode="python"),
+            strict=True,
+        )
+    except (AttributeError, ValueError) as error:
+        raise ValueError("M7 frozen action evidence is malformed") from error
+    if canonical != action:
+        raise ValueError("M7 frozen action evidence differs from canonical content")
+    replay_input = runtime.replay_input
+    if event_position < 0 or event_position >= len(replay_input.instances):
+        raise ValueError("M7 frozen action position is outside the replay stream")
+    binding = replay_input.instances[event_position]
+    problem = next(item for item in replay_input.problems if item.problem_id == binding.problem_id)
+    verified = runtime.runtime_candidates[binding.problem_id]
+    if (
+        canonical.problem_id != problem.problem_id
+        or canonical.problem_sha256 != problem.content_sha256
+        or canonical.candidate_set_id != verified.evidence.candidate_set_id
+        or canonical.candidate_set_sha256 != verified.evidence.content_sha256
+        or canonical.candidate_id not in {item.candidate_id for item in verified.candidates}
+        or canonical.selected_stock.material != binding.material
+    ):
+        raise ValueError("M7 frozen action evidence differs from the frozen replay input")
+    if canonical.kind is M7ActionKind.OPEN_STANDARD_SHEET:
+        if canonical.selected_stock.lineage.root_stock_id != binding.binding_id:
+            raise ValueError("M7 frozen standard action belongs to another event binding")
+    else:
+        selected_id = canonical.selected_remnant_id
+        inventory_by_id = {item.remnant.remnant_id: item for item in cursor.inventory}
+        if selected_id is None or selected_id not in inventory_by_id:
+            raise ValueError("M7 selected remnant is missing from inventory")
+        if inventory_by_id[selected_id].remnant != canonical.selected_stock:
+            raise ValueError("M7 frozen remnant action differs from branch inventory")
+        search = canonical.search_result
+        if (
+            search is None
+            or search.remnant_id != selected_id
+            or search.candidate_id != canonical.candidate_id
+            or search.config != replay_input.search_config
+        ):
+            raise ValueError("M7 frozen remnant search differs from the frozen replay input")
+    return canonical
+
+
+def _apply_m7_materialized_action(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    event_position: int,
+    action: M7LayoutActionEvidence,
+) -> _M7AppliedAction:
+    _validate_runtime(runtime)
+    m7_cursor_sha256(cursor)
+    if event_position != cursor.next_event_position:
+        raise ValueError("M7 frozen action position differs from cursor")
+    canonical = _canonical_materialized_action(
+        runtime,
+        cursor=cursor,
+        event_position=event_position,
+        action=action,
+    )
+    replay_input = runtime.replay_input
+    binding = replay_input.instances[event_position]
+    if binding.released_at != cursor.previous_release:
+        group_sequence = cursor.timestamp_group_sequence + 1
+        group_subsequence = 0
+    else:
+        group_sequence = cursor.timestamp_group_sequence
+        group_subsequence = cursor.timestamp_subsequence + 1
+    storage = _storage_cost(
+        cursor.inventory,
+        start=cursor.current_time,
+        end=binding.released_at,
+        rate=replay_input.rates.storage_cost_per_area_hour,
+    )
+    inventory_after = _execute_action(canonical, cursor.inventory, binding.released_at)
+    delta = _ledger(
+        purchase_cost=(
+            canonical.selected_stock.geometry.area * replay_input.rates.purchase_cost_per_area
+            if canonical.kind is M7ActionKind.OPEN_STANDARD_SHEET
+            else 0.0
+        ),
+        storage_cost=storage,
+        return_handling_cost=(
+            len(canonical.returned_remnants)
+            * replay_input.rates.return_handling_cost_per_remnant
+        ),
+        retrieval_handling_cost=(
+            replay_input.rates.retrieval_handling_cost_per_remnant
+            if canonical.kind is M7ActionKind.CONSUME_REMNANT
+            else 0.0
+        ),
+        scrap_proceeds=(
+            canonical.accounting.scrap_area * replay_input.rates.scrap_credit_per_area
+        ),
+    )
+    cumulative = _add_ledgers(cursor.cumulative_costs, delta)
+    next_cursor = M7ReplayCursor(
+        next_event_position=event_position + 1,
+        current_time=binding.released_at,
+        inventory=inventory_after,
+        cumulative_costs=cumulative,
+        timestamp_group_sequence=group_sequence,
+        timestamp_subsequence=group_subsequence,
+        previous_release=binding.released_at,
+    )
+    m7_cursor_sha256(next_cursor)
+    return _M7AppliedAction(
+        storage_cost=storage,
+        timestamp_group_sequence=group_sequence,
+        timestamp_subsequence=group_subsequence,
+        inventory_after=inventory_after,
+        delta_costs=delta,
+        cumulative_costs=cumulative,
+        cursor=next_cursor,
+    )
+
+
+def apply_m7_frozen_action_evidence(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    event_position: int,
+    action: M7LayoutActionEvidence,
+) -> M7ReplayCursor:
+    """Apply one validated materialized action without enumerating losing actions."""
+
+    return _apply_m7_materialized_action(
+        runtime,
+        cursor=cursor,
+        event_position=event_position,
+        action=action,
+    ).cursor
+
+
 def apply_m7_action_descriptor(
     runtime: M7ReplayRuntime,
     *,
@@ -1752,25 +1982,18 @@ def apply_m7_action_descriptor(
         if descriptor.evidence is None:
             raise ValueError("M7 remnant descriptor has no exact evidence")
         action = descriptor.evidence
-    inventory_after = _execute_action(action, cursor.inventory, binding.released_at)
-    delta = _ledger(
-        purchase_cost=(
-            action.selected_stock.geometry.area * replay_input.rates.purchase_cost_per_area
-            if action.kind is M7ActionKind.OPEN_STANDARD_SHEET
-            else 0.0
-        ),
-        storage_cost=catalog.storage_cost,
-        return_handling_cost=(
-            len(action.returned_remnants) * replay_input.rates.return_handling_cost_per_remnant
-        ),
-        retrieval_handling_cost=(
-            replay_input.rates.retrieval_handling_cost_per_remnant
-            if action.kind is M7ActionKind.CONSUME_REMNANT
-            else 0.0
-        ),
-        scrap_proceeds=action.accounting.scrap_area * replay_input.rates.scrap_credit_per_area,
+    applied = _apply_m7_materialized_action(
+        runtime,
+        cursor=cursor,
+        event_position=catalog.event_position,
+        action=action,
     )
-    cumulative = _add_ledgers(cursor.cumulative_costs, delta)
+    if (
+        applied.storage_cost != catalog.storage_cost
+        or applied.timestamp_group_sequence != catalog.timestamp_group_sequence
+        or applied.timestamp_subsequence != catalog.timestamp_subsequence
+    ):
+        raise ValueError("M7 action catalog transition metadata differs from cursor")
     event = _event(
         sequence=catalog.event_position,
         binding=binding,
@@ -1781,18 +2004,9 @@ def apply_m7_action_descriptor(
         generated=catalog.generated,
         decision_key=decision_key,
         action=action,
-        inventory_after=inventory_after,
-        delta=delta,
-        cumulative=cumulative,
-    )
-    next_cursor = M7ReplayCursor(
-        next_event_position=catalog.event_position + 1,
-        current_time=binding.released_at,
-        inventory=inventory_after,
-        cumulative_costs=cumulative,
-        timestamp_group_sequence=catalog.timestamp_group_sequence,
-        timestamp_subsequence=catalog.timestamp_subsequence,
-        previous_release=binding.released_at,
+        inventory_after=applied.inventory_after,
+        delta=applied.delta_costs,
+        cumulative=applied.cumulative_costs,
     )
     return M7StepResult(
         descriptor=descriptor,
@@ -1803,7 +2017,7 @@ def apply_m7_action_descriptor(
             context=selected_context,
         ),
         event=event,
-        cursor=next_cursor,
+        cursor=applied.cursor,
     )
 
 
@@ -2096,11 +2310,14 @@ __all__ = [
     "M7SharedFitSearchCache",
     "M7PreparedLayoutCache",
     "apply_m7_action_descriptor",
+    "apply_m7_frozen_action_evidence",
     "build_m7_replay_input",
     "cursor_after_event",
     "enumerate_m7_action_catalog",
     "enumerate_m7_single_remnant_competitor",
     "initial_m7_cursor",
+    "m7_cursor_sha256",
+    "m7_shared_fit_search_cache_key",
     "run_m7_replay",
     "run_m7_continuation",
     "select_m7_fallback",
