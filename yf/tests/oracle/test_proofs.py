@@ -29,6 +29,7 @@ def _no_fit_influence(index: int = 1) -> M8InfluenceWitness:
         classification="no_fit",
         evidence_sha256=_sha(100 + index),
         common_action_id=_action(10),
+        common_catalog_action_id=_action(10),
         common_decision_key=("immediate_net_cost=10", f"action_id={_action(10)}"),
     )
 
@@ -40,7 +41,9 @@ def _policy_dominated_influence(index: int = 2) -> M8InfluenceWitness:
         classification="policy_dominated",
         evidence_sha256=_sha(100 + index),
         common_action_id=_action(10),
+        common_catalog_action_id=_action(10),
         competing_action_id=_action(20 + index),
+        competing_catalog_action_id=_action(20 + index),
         common_decision_key=("immediate_net_cost=10", f"action_id={_action(10)}"),
         competing_decision_key=("immediate_net_cost=20", f"action_id={_action(20 + index)}"),
     )
@@ -186,15 +189,77 @@ def test_influence_classifications_require_matching_nonempty_evidence(
 def test_no_fit_and_policy_dominated_require_their_specific_fields() -> None:
     no_fit_with_competitor = _no_fit_influence().model_dump(mode="python")
     no_fit_with_competitor["competing_action_id"] = _action(20)
+    no_fit_with_competitor["competing_catalog_action_id"] = _action(20)
     no_fit_with_competitor["competing_decision_key"] = ("action_id=competitor",)
     with pytest.raises(ValidationError, match="no-fit influence"):
         M8InfluenceWitness.model_validate(no_fit_with_competitor, strict=True)
 
     dominated_without_competitor = _policy_dominated_influence().model_dump(mode="python")
     dominated_without_competitor["competing_action_id"] = None
+    dominated_without_competitor["competing_catalog_action_id"] = None
     dominated_without_competitor["competing_decision_key"] = None
     with pytest.raises(ValidationError, match="policy-dominated influence"):
         M8InfluenceWitness.model_validate(dominated_without_competitor, strict=True)
+
+
+def test_influence_binds_materialized_and_catalog_action_identities_separately() -> None:
+    standard_catalog_id = "m7-standard:candidate-one"
+    influence = M8InfluenceWitness(
+        remnant_id="yfrm-" + "1" * 24,
+        candidate_id="candidate-one",
+        classification="policy_dominated",
+        evidence_sha256=_sha(101),
+        common_action_id=_action(10),
+        common_catalog_action_id=standard_catalog_id,
+        competing_action_id=_action(20),
+        competing_catalog_action_id=_action(20),
+        common_decision_key=(f"action_id={standard_catalog_id}",),
+        competing_decision_key=(f"action_id={_action(20)}",),
+    )
+
+    assert influence.common_action_id != influence.common_catalog_action_id
+    assert influence.competing_action_id == influence.competing_catalog_action_id
+
+    tampered_catalog = influence.model_dump(mode="python")
+    tampered_catalog["common_catalog_action_id"] = "m7-standard:tampered"
+    with pytest.raises(ValidationError, match="catalog action ID"):
+        M8InfluenceWitness.model_validate(tampered_catalog, strict=True)
+
+    tampered_materialized = influence.model_dump(mode="python")
+    tampered_materialized["common_action_id"] = _action(99)
+    event_payload = {
+        "event_position": 0,
+        "classification": "policy_dominated",
+        "common_action_id": _action(10),
+        "branch_action_id": _action(10),
+        "state_before_sha256": _sha(1),
+        "state_after_sha256": _sha(2),
+        "influences": (tampered_materialized,),
+    }
+    with pytest.raises(ValidationError, match="materialized common action ID"):
+        M8EventWitness.model_validate(event_payload, strict=True)
+
+
+def test_policy_dominated_event_accepts_mixed_no_fit_and_dominated_influences() -> None:
+    event = M8EventWitness(
+        event_position=4,
+        classification="policy_dominated",
+        common_action_id=_action(10),
+        branch_action_id=_action(10),
+        state_before_sha256=_sha(2),
+        state_after_sha256=_sha(3),
+        influences=(_no_fit_influence(), _policy_dominated_influence()),
+    )
+
+    assert tuple(item.classification for item in event.influences) == (
+        "no_fit",
+        "policy_dominated",
+    )
+
+    no_fit_with_dominated = event.model_dump(mode="python")
+    no_fit_with_dominated["classification"] = "no_fit"
+    with pytest.raises(ValidationError, match="every influence to be no-fit"):
+        M8EventWitness.model_validate(no_fit_with_dominated, strict=True)
 
 
 def test_certified_same_action_events_reject_inconsistent_action_bindings() -> None:
@@ -211,7 +276,7 @@ def test_certified_same_action_events_reject_inconsistent_action_bindings() -> N
         ("proof_hash", "SHA-256"),
         ("proof_id", "proof ID"),
         ("witness_order", "exact ordered suffix"),
-        ("classification_evidence", "matching influence"),
+        ("classification_evidence", "at least one policy-dominated influence"),
         ("suffix_hash", "SHA-256"),
         ("final_cost", "SHA-256"),
         ("action_id", "SHA-256"),

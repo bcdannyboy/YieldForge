@@ -32,30 +32,45 @@ class M8InfluenceWitness(BaselineContractModel):
     classification: M8InfluenceClassification
     evidence_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
     common_action_id: StrictStr = Field(pattern=_ACTION_ID_PATTERN)
+    common_catalog_action_id: StrictStr = Field(min_length=1)
     competing_action_id: StrictStr | None = Field(default=None, pattern=_ACTION_ID_PATTERN)
+    competing_catalog_action_id: StrictStr | None = Field(default=None, min_length=1)
     common_decision_key: tuple[StrictStr, ...] = Field(min_length=1)
     competing_decision_key: tuple[StrictStr, ...] | None = None
 
     @model_validator(mode="after")
     def require_classification_evidence_and_action_bindings(self) -> Self:
-        if f"action_id={self.common_action_id}" not in self.common_decision_key:
-            raise ValueError("influence common decision key does not bind its action ID")
+        if f"action_id={self.common_catalog_action_id}" not in self.common_decision_key:
+            raise ValueError(
+                "influence common decision key does not bind its catalog action ID"
+            )
         if self.classification == "no_fit":
-            if self.competing_action_id is not None or self.competing_decision_key is not None:
+            if (
+                self.competing_action_id is not None
+                or self.competing_catalog_action_id is not None
+                or self.competing_decision_key is not None
+            ):
                 raise ValueError("no-fit influence cannot carry a competing policy action")
             return self
         if (
             self.candidate_id is None
             or self.competing_action_id is None
+            or self.competing_catalog_action_id is None
             or self.competing_decision_key is None
         ):
             raise ValueError(
-                "policy-dominated influence requires candidate, competing action, and decision key"
+                "policy-dominated influence requires candidate, competing materialized and "
+                "catalog actions, and decision key"
             )
         if self.competing_action_id == self.common_action_id:
             raise ValueError("policy-dominated influence requires distinct competing action")
-        if f"action_id={self.competing_action_id}" not in self.competing_decision_key:
-            raise ValueError("influence competing decision key does not bind its action ID")
+        if (
+            f"action_id={self.competing_catalog_action_id}"
+            not in self.competing_decision_key
+        ):
+            raise ValueError(
+                "influence competing decision key does not bind its catalog action ID"
+            )
         return self
 
 
@@ -89,16 +104,32 @@ class M8EventWitness(BaselineContractModel):
                 "certified no-fit and policy-dominated events require the same common "
                 "and branch action"
             )
-        if not self.influences or any(
-            item.classification != self.classification for item in self.influences
-        ):
+        if not self.influences:
             raise ValueError(
                 f"{self.classification} event requires nonempty matching influence witnesses"
             )
+        classifications = {item.classification for item in self.influences}
+        if self.classification == "no_fit" and classifications != {"no_fit"}:
+            raise ValueError("no-fit event requires every influence to be no-fit")
+        if self.classification == "policy_dominated" and not (
+            classifications <= {"no_fit", "policy_dominated"}
+            and "policy_dominated" in classifications
+        ):
+            raise ValueError(
+                "policy-dominated event requires no-fit or policy-dominated influences "
+                "and at least one policy-dominated influence"
+            )
         if any(item.common_action_id != self.common_action_id for item in self.influences):
-            raise ValueError("event influence does not bind the event common action ID")
+            raise ValueError(
+                "event influence does not bind the event materialized common action ID"
+            )
         influence_keys = tuple(
-            (item.remnant_id, item.candidate_id, item.competing_action_id)
+            (
+                item.remnant_id,
+                item.candidate_id,
+                item.competing_action_id,
+                item.competing_catalog_action_id,
+            )
             for item in self.influences
         )
         if len(influence_keys) != len(set(influence_keys)):

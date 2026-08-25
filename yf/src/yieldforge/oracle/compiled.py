@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from yieldforge.baseline.geometry import (
+    TranslationRejectionCertificate,
+    certify_translation_impossible,
+    prepare_layout_footprint,
+)
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
     M7ReplayRuntime,
     enumerate_m7_action_catalog,
     select_m7_fallback,
 )
-from yieldforge.replay.contracts import ReplayCostLedger
+from yieldforge.replay.contracts import InventoryItem, ReplayCostLedger
+
+_MAX_PREPARED_LAYOUT_CACHE_PROBLEMS = 2
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,63 @@ class CompiledStandardWinner:
     action_id: str
     candidate_id: str
     decision_key: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CompiledTranslationRejection:
+    candidate_id: str
+    certificate: TranslationRejectionCertificate
+
+
+def compile_translation_rejections(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+) -> tuple[CompiledTranslationRejection, ...]:
+    """Evaluate every safe constant-time rejection for one remnant/event pair."""
+
+    if event_position < 0 or event_position >= len(runtime.replay_input.instances):
+        raise ValueError("M8 rejection event position is outside the stream")
+    binding = runtime.replay_input.instances[event_position]
+    problem = next(
+        problem
+        for problem in runtime.replay_input.problems
+        if problem.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    prepared_key = (problem.problem_id, verified.evidence.candidate_set_id)
+    layouts = runtime.prepared_layout_cache.get(prepared_key)
+    if layouts is None:
+        layouts = tuple(
+            prepare_layout_footprint(
+                problem.problem,
+                candidate,
+                runtime.replay_input.fit_config,
+            )
+            for candidate in verified.candidates
+        )
+        runtime.prepared_layout_cache[prepared_key] = layouts
+        while len(runtime.prepared_layout_cache) > _MAX_PREPARED_LAYOUT_CACHE_PROBLEMS:
+            runtime.prepared_layout_cache.popitem(last=False)
+    else:
+        runtime.prepared_layout_cache.move_to_end(prepared_key)
+    if tuple(layout.candidate_id for layout in layouts) != tuple(
+        candidate.candidate_id for candidate in verified.candidates
+    ):
+        raise ValueError("M8 compiled layout candidate identities differ")
+    return tuple(
+        CompiledTranslationRejection(
+            candidate_id=candidate.candidate_id,
+            certificate=certify_translation_impossible(
+                layout,
+                item.remnant,
+                material=binding.material,
+                fit_config=runtime.replay_input.fit_config,
+            ),
+        )
+        for candidate, layout in zip(verified.candidates, layouts, strict=True)
+    )
 
 
 def compile_standard_winner(
@@ -63,4 +127,9 @@ def compile_standard_winner(
     )
 
 
-__all__ = ["CompiledStandardWinner", "compile_standard_winner"]
+__all__ = [
+    "CompiledStandardWinner",
+    "CompiledTranslationRejection",
+    "compile_standard_winner",
+    "compile_translation_rejections",
+]

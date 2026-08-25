@@ -655,6 +655,7 @@ def _generate_actions(
     shared_fit_search_cache: M7SharedFitSearchCache | None,
     prepared_layout_cache: M7PreparedLayoutCache,
     retain_all_remnant_actions: bool = False,
+    retain_policy_best_remnant: bool = False,
 ) -> GeneratedActionSet:
     evidence = verified.evidence
     if (
@@ -917,7 +918,21 @@ def _generate_actions(
             )
             if best_remnant_key < best_standard_key:
                 raise ValueError("M7 myopic lazy-materialization ordering invariant failed")
-        remnant_actions = ()
+        if retain_policy_best_remnant and remnant_action_arguments:
+            best_arguments = min(
+                remnant_action_arguments,
+                key=lambda arguments: (
+                    arguments[5].width,
+                    arguments[5].candidate_id,
+                    arguments[6].remnant_id,
+                ),
+            )
+            best_action = _build_remnant_action_from_arguments(best_arguments)
+            if best_action is None:
+                raise ValueError("M7 fit witness did not materialize an exact remnant action")
+            remnant_actions = (best_action,)
+        else:
+            remnant_actions = ()
     else:
         candidate_widths = {item.candidate_id: item.width for item in verified.candidates}
         inventory_by_id = {item.remnant.remnant_id: item for item in inventory}
@@ -1607,6 +1622,77 @@ def select_m7_fallback(
     return selection
 
 
+def enumerate_m7_single_remnant_competitor(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+    cursor_template: M7ReplayCursor,
+) -> tuple[M7ActionDescriptor | None, ActionPolicyContext | None]:
+    """Return the exact best feasible action for one remnant at one M7 event."""
+
+    _validate_runtime(runtime)
+    if event_position != cursor_template.next_event_position:
+        raise ValueError("M7 single-remnant event position differs from cursor")
+    if event_position < 0 or event_position >= len(runtime.replay_input.instances):
+        raise ValueError("M7 single-remnant event position is outside the replay stream")
+    replay_input = runtime.replay_input
+    binding = replay_input.instances[event_position]
+    problem = next(
+        problem
+        for problem in replay_input.problems
+        if problem.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    generated = _generate_actions(
+        binding=binding,
+        problem=problem,
+        verified=verified,
+        inventory=(item,),
+        rules=runtime.rules,
+        fit_config=replay_input.fit_config,
+        search_config=replay_input.search_config,
+        policy=replay_input.policy.name,
+        rates=replay_input.rates,
+        runtime_metrics=runtime.runtime_metrics,
+        standard_profile_cache=runtime.standard_profile_cache,
+        standard_profile_executor=runtime.standard_profile_executor,
+        jagua_executable=runtime.jagua_executable,
+        jagua_container_guard=replay_input.jagua_container_guard or 1.0,
+        jagua_differential_audit=runtime.jagua_differential_audit,
+        fit_search_cache=runtime.fit_search_cache,
+        shared_fit_search_cache=runtime.shared_fit_search_cache,
+        prepared_layout_cache=runtime.prepared_layout_cache,
+        retain_all_remnant_actions=False,
+        retain_policy_best_remnant=True,
+    )
+    if not generated.remnant_actions:
+        return None, None
+    if len(generated.remnant_actions) != 1:
+        raise ValueError("M7 single-remnant search retained more than one policy competitor")
+    action = generated.remnant_actions[0]
+    contexts = _policy_contexts(
+        generated,
+        candidates=verified.candidates,
+        inventory=(item,),
+        occurred_at=binding.released_at,
+        rates=replay_input.rates,
+    )
+    matching = tuple(context for context in contexts if context.action_id == action.action_id)
+    if len(matching) != 1:
+        raise ValueError("M7 single-remnant competitor lacks one exact policy context")
+    return (
+        M7ActionDescriptor(
+            action_id=action.action_id,
+            kind=action.kind,
+            candidate_id=action.candidate_id,
+            selected_remnant_id=action.selected_remnant_id,
+            evidence=action,
+        ),
+        matching[0],
+    )
+
+
 def apply_m7_action_descriptor(
     runtime: M7ReplayRuntime,
     *,
@@ -2013,6 +2099,7 @@ __all__ = [
     "build_m7_replay_input",
     "cursor_after_event",
     "enumerate_m7_action_catalog",
+    "enumerate_m7_single_remnant_competitor",
     "initial_m7_cursor",
     "run_m7_replay",
     "run_m7_continuation",
