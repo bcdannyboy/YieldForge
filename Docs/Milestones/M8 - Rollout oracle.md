@@ -1,6 +1,6 @@
 # M8 — Rollout oracle
 
-**Status:** Prepared — exact full-horizon design frozen; implementation not started
+**Status:** Implemented — single-process runtime feasibility is a no-go; distributed exact execution is next
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -19,7 +19,9 @@ Rollout is not a mathematical upper bound and may miss value requiring coordinat
   twice with identical content.
 - The rollout arm must receive the same candidate/action evidence while future access remains
   isolated from the baseline arm.
-- No oracle advantage, paired savings estimate, or M8 implementation exists yet.
+- No oracle advantage or paired savings estimate exists. The certificate generator, independent
+  checker, exhaustive differential kernel, and calibration-only v2 gate are implemented; evaluation
+  remains sealed.
 
 ## Planning boundary
 
@@ -38,3 +40,27 @@ six-stream pilot, or M8 evaluation.
 
 See [[plans/2026-08-24-m8-rollout-oracle-design]] and
 [[plans/2026-08-24-m8-rollout-oracle-implementation]].
+
+## First go/no-go execution — 2026-08-25
+
+The certificate kernel is exact on the implemented evidence boundary: 45 exhaustive finite cases
+produced 140 proofs and 270 witnesses with zero reference mismatches. The latest runtime changes are
+committed through `fbfa062`; 314 baseline/oracle tests and 222 directly affected tests passed, with
+independent adversarial review of proof commitments, cursor provenance, capability cleanup, and
+generator/checker separation.
+
+The canonical calibration-only execution then established a single-process runtime no-go:
+
+- candidate verification completed for all eight required problems;
+- `no_signal` completed 428 full action proofs in `163.15911` seconds, including cyclic-GC cleanup;
+- `exact_recurrence` remained inside the exact common-transition remnant geometry search after more
+  than 480 seconds; the run was stopped rather than spending the same unbounded local path across all
+  six cells; and
+- no M8 result artifact was published and `evaluation_partition_opened` remained false.
+
+This is a runtime-feasibility decision, not a semantic failure and not an M8 savings result. The
+complete three-way v2 artifact was not emitted because the exactness/audit phases after the six full
+generators were not reached. The next authorized branch is distributed exact execution: shard the
+six calibration cells and, where necessary, exact branch/action work while preserving the frozen
+action catalog, proof identities, independent checker, sampled reference audit, and single final
+projection calculation. Further local threshold changes or evaluation access remain prohibited.

@@ -6,18 +6,17 @@
 
 ## Current objective
 
-Implement the prepared exact full-horizon rollout oracle against the immutable M7 baseline freeze.
-Preserve complete action parity, baseline information masking, exact accounting, and paired evidence
-boundaries through sparse exact delta replay rather than branch-by-branch future replay.
+Complete the first M8 certificate gate against the immutable M7 baseline freeze using distributed
+exact execution. Preserve complete action parity, baseline information masking, exact accounting,
+independent proof checking, and the sealed evaluation boundary.
 
 ## Next step
 
-Execute Task 1 of [[plans/2026-08-24-m8-rollout-oracle-implementation]]: expose complete M7 action
-descriptors, one-action execution, and frozen-policy continuation from arbitrary state while
-regression-locking all published M7 content identities. Then build the slow reference, compile M7
-standard winners and safe future-fit rejection certificates, and require a zero-mismatch 20x sparse
-proof with a seven-day-or-less held-out projection. Persistent cache and complete-stream work remain
-gated on that proof.
+Implement the distributed-exact fallback for the calibration-only v2 gate. Shard the six regime
+cells and exact branch/action work without changing catalogs, horizons, proof hashes, checker
+independence, sampled reference audit, or projection rules. Reassemble one deterministic artifact;
+keep evaluation sealed until exactness, coverage, 20x sampled speedup, and the seven-day projection
+gate all resolve.
 
 ## Evidence bridge completed
 
@@ -59,10 +58,13 @@ gated on that proof.
   then replayed all 36 streams and 864 events twice with identical content. It opened 826 sheets,
   retrieved 38 remnants, and recorded mean net cost 29,733.304499. One Jagua-unrepresentable guard
   used the registered unfiltered Shapely fallback; policy and exact replay semantics were unchanged.
-- M8 preparation freezes the complete-remaining-horizon rollout design, exact M7 fallback tie rule,
-  full-versus-known-only visibility boundary, sparse exact delta architecture, slow-reference
-  differential, 20x speed gate, seven-day execution ceiling, calibration-only pilot, and held-out
-  evaluation hold point. No M8 oracle execution or savings result exists yet.
+- M8 certificate generation, independent checking, exhaustive differential semantics, and the
+  calibration-only v2 runner are implemented through `fbfa062`. The canonical first execution
+  verified eight candidate problems and completed `no_signal` with 428 proofs in `163.15911`
+  cleanup-inclusive seconds. `exact_recurrence` exceeded 480 seconds in authoritative remnant
+  geometry, proving the single-process path operationally infeasible; the run was stopped before an
+  artifact was published. Evaluation remains sealed, and no M8 oracle advantage or savings result
+  exists.
 
 ## Experiment status
 
