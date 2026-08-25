@@ -105,7 +105,15 @@ def _cells(*, bindings=None):  # type: ignore[no-untyped-def]
     return tuple(cells)
 
 
-def _finalize(*, cells=None, bindings=None):  # type: ignore[no-untyped-def]
+def _finalize(  # type: ignore[no-untyped-def]
+    *,
+    cells=None,
+    bindings=None,
+    generator_wall_seconds=0.2,
+    checker_wall_seconds=0.3,
+    audit_wall_seconds=0.4,
+    total_wall_seconds=1.0,
+):
     from yieldforge.oracle.experiment import finalize_certificate_proof
 
     selected = _bindings() if bindings is None else bindings
@@ -124,13 +132,19 @@ def _finalize(*, cells=None, bindings=None):  # type: ignore[no-untyped-def]
         calibration_view_sha256="sha256:" + "c" * 64,
         cells=_cells(bindings=selected) if cells is None else cells,
         audit_bindings=selected,
+        measured_process_count=6,
+        generator_wall_seconds=generator_wall_seconds,
+        checker_wall_seconds=checker_wall_seconds,
+        audit_wall_seconds=audit_wall_seconds,
+        total_wall_seconds=total_wall_seconds,
     )
 
 
 def test_certificate_gate_passes_only_complete_exact_fast_result() -> None:
     result = _finalize()
 
-    assert result.schema_version == "yieldforge.m8-certificate-proof.v2"
+    assert result.schema_version == "yieldforge.m8-certificate-proof.v3"
+    assert result.execution_mode == "distributed_exact"
     assert result.checked_action_count == result.current_action_count
     assert result.valid_proof_count == result.current_action_count
     assert result.audit_mismatch_count == 0
@@ -144,7 +158,12 @@ def test_certificate_gate_passes_only_complete_exact_fast_result() -> None:
     assert result.state_rejoin_count > 0
     assert result.projected_held_out_calendar_days <= 7.0
     assert result.configured_worker_count == 8
-    assert result.measured_process_count == 1
+    assert result.measured_process_count == 6
+    assert result.generator_wall_seconds == 0.2
+    assert result.checker_wall_seconds == 0.3
+    assert result.certificate_pipeline_wall_seconds == 0.5
+    assert result.audit_wall_seconds == 0.4
+    assert result.total_wall_seconds == 1.0
     assert result.evaluation_partition_opened is False
     assert result.technical_decision == "pass_certificate_exact"
 
@@ -280,16 +299,11 @@ def test_certificate_gate_rejects_no_positive_passive_certificate_evidence() -> 
 
 
 def test_certificate_gate_requires_distributed_only_for_projection() -> None:
-    cells = tuple(
-        item.model_copy(
-            update={
-                "certificate_elapsed_seconds": 50.0,
-            }
-        )
-        for item in _cells()
+    result = _finalize(
+        generator_wall_seconds=29.0,
+        checker_wall_seconds=1.0,
+        total_wall_seconds=31.0,
     )
-
-    result = _finalize(cells=cells)
 
     assert result.sampled_speedup >= 20.0
     assert result.projected_held_out_calendar_days > 7.0
@@ -328,13 +342,13 @@ def test_certificate_cell_rejects_incomplete_proof_action_ids() -> None:
         )
 
 
-def test_projection_uses_observed_single_process_time_without_worker_division() -> None:
+def test_projection_uses_observed_distributed_wall_time_without_worker_division() -> None:
     result = _finalize()
     observed_action_events = sum(
         item.current_action_count * item.future_event_count for item in result.cells
     )
     expected_seconds = (
-        result.certificate_pipeline_elapsed_seconds
+        result.certificate_pipeline_wall_seconds
         / observed_action_events
         * result.held_out_action_count
         * 11.5
@@ -344,6 +358,32 @@ def test_projection_uses_observed_single_process_time_without_worker_division() 
     assert result.projected_held_out_calendar_days == round(
         expected_seconds / 86_400.0, 6
     )
+
+
+def test_distributed_result_rejects_inconsistent_wall_time() -> None:
+    result = _finalize()
+
+    with pytest.raises(ValidationError, match="pipeline wall time"):
+        type(result).model_validate(
+            {
+                **result.model_dump(mode="python"),
+                "certificate_pipeline_wall_seconds": 0.6,
+            },
+            strict=True,
+        )
+
+
+def test_distributed_result_rejects_unmeasured_worker_claim() -> None:
+    result = _finalize()
+
+    with pytest.raises(ValidationError):
+        type(result).model_validate(
+            {
+                **result.model_dump(mode="python"),
+                "measured_process_count": 8,
+            },
+            strict=True,
+        )
 
 
 def test_certificate_gate_runtime_does_not_install_an_unmeasured_executor() -> None:

@@ -214,9 +214,10 @@ class M8CertificateProofResult(BaselineContractModel):
 
     model_config = ConfigDict(revalidate_instances="always")
 
-    schema_version: Literal["yieldforge.m8-certificate-proof.v2"] = (
-        "yieldforge.m8-certificate-proof.v2"
+    schema_version: Literal["yieldforge.m8-certificate-proof.v3"] = (
+        "yieldforge.m8-certificate-proof.v3"
     )
+    execution_mode: Literal["distributed_exact"] = "distributed_exact"
     proof_id: StrictStr = Field(pattern=r"^yfm8proof-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     m0_contract_id: StrictStr = Field(pattern=r"^yfm0-[0-9a-f]{24}$")
@@ -235,7 +236,7 @@ class M8CertificateProofResult(BaselineContractModel):
     completed_cell_count: Literal[6] = 6
     prefix_event_count: Literal[2] = 2
     configured_worker_count: Literal[8] = 8
-    measured_process_count: Literal[1] = 1
+    measured_process_count: Literal[6] = 6
     held_out_action_count: Literal[550542] = 550_542
     audit_bindings: tuple[M8AuditActionBinding, ...] = Field(min_length=6)
     audit_sample_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -260,6 +261,11 @@ class M8CertificateProofResult(BaselineContractModel):
     certificate_elapsed_seconds: StrictFloat = Field(gt=0)
     checker_elapsed_seconds: StrictFloat = Field(gt=0)
     certificate_pipeline_elapsed_seconds: StrictFloat = Field(gt=0)
+    generator_wall_seconds: StrictFloat = Field(gt=0)
+    checker_wall_seconds: StrictFloat = Field(gt=0)
+    certificate_pipeline_wall_seconds: StrictFloat = Field(gt=0)
+    audit_wall_seconds: StrictFloat = Field(gt=0)
+    total_wall_seconds: StrictFloat = Field(gt=0)
     sampled_reference_elapsed_seconds: StrictFloat = Field(gt=0)
     sampled_certificate_elapsed_seconds: StrictFloat = Field(gt=0)
     sampled_checker_elapsed_seconds: StrictFloat = Field(gt=0)
@@ -289,7 +295,22 @@ class M8CertificateProofResult(BaselineContractModel):
         expected_sample_sha = audit_sample_sha256(self.audit_bindings)
         if self.audit_sample_sha256 != expected_sample_sha:
             raise ValueError("M8 certificate audit sample SHA-256 does not reconcile")
-        aggregates = _aggregate_certificate_metrics(self.cells, self.audit_bindings)
+        expected_pipeline_wall = round(
+            self.generator_wall_seconds + self.checker_wall_seconds,
+            6,
+        )
+        if self.certificate_pipeline_wall_seconds != expected_pipeline_wall:
+            raise ValueError("M8 distributed pipeline wall time does not reconcile")
+        if self.total_wall_seconds < round(
+            self.certificate_pipeline_wall_seconds + self.audit_wall_seconds,
+            6,
+        ):
+            raise ValueError("M8 distributed total wall time does not reconcile")
+        aggregates = _aggregate_certificate_metrics(
+            self.cells,
+            self.audit_bindings,
+            certificate_pipeline_wall_seconds=self.certificate_pipeline_wall_seconds,
+        )
         for field_name, expected in aggregates.items():
             if getattr(self, field_name) != expected:
                 raise ValueError(
@@ -436,6 +457,8 @@ def _coverage_gaps(
 def _aggregate_certificate_metrics(
     cells: tuple[M8CertificateProofCell, ...],
     audit_bindings: tuple[M8AuditActionBinding, ...],
+    *,
+    certificate_pipeline_wall_seconds: float,
 ) -> dict[str, object]:
     current = sum(item.current_action_count for item in cells)
     checked = sum(item.checked_action_count for item in cells)
@@ -461,12 +484,12 @@ def _aggregate_certificate_metrics(
         sampled_certificate_seconds + sampled_checker_seconds, 6
     )
     speedup = round(reference_seconds / sampled_pipeline_seconds, 6)
-    throughput = round(current / pipeline_seconds, 6)
+    throughput = round(current / certificate_pipeline_wall_seconds, 6)
     observed_action_events = sum(
         item.current_action_count * max(1, item.future_event_count) for item in cells
     )
     projected_seconds = (
-        pipeline_seconds
+        certificate_pipeline_wall_seconds
         / observed_action_events
         * _HELD_OUT_ACTION_COUNT
         * _HELD_OUT_MEAN_FUTURE_EVENT_COUNT
@@ -570,6 +593,11 @@ def finalize_certificate_proof(
     calibration_view_sha256: str,
     cells: tuple[M8CertificateProofCell, ...],
     audit_bindings: tuple[M8AuditActionBinding, ...],
+    measured_process_count: int,
+    generator_wall_seconds: float,
+    checker_wall_seconds: float,
+    audit_wall_seconds: float,
+    total_wall_seconds: float,
 ) -> M8CertificateProofResult:
     """Reconcile the six calibration cells and apply the revised hard gate."""
 
@@ -582,7 +610,15 @@ def finalize_certificate_proof(
         raise ValueError("M8 certificate proof requires all six registered cells")
     ordered_bindings = tuple(sorted(audit_bindings, key=_audit_binding_key))
     _require_audit_reconciliation(ordered_cells, ordered_bindings)
-    aggregates = _aggregate_certificate_metrics(ordered_cells, ordered_bindings)
+    pipeline_wall_seconds = round(
+        generator_wall_seconds + checker_wall_seconds,
+        6,
+    )
+    aggregates = _aggregate_certificate_metrics(
+        ordered_cells,
+        ordered_bindings,
+        certificate_pipeline_wall_seconds=pipeline_wall_seconds,
+    )
     decision = _gate_decision(
         current_action_count=int(aggregates["current_action_count"]),
         checked_action_count=int(aggregates["checked_action_count"]),
@@ -607,7 +643,8 @@ def finalize_certificate_proof(
         projected_days=float(aggregates["projected_held_out_calendar_days"]),
     )
     semantic = {
-        "schema_version": "yieldforge.m8-certificate-proof.v2",
+        "schema_version": "yieldforge.m8-certificate-proof.v3",
+        "execution_mode": "distributed_exact",
         "m0_contract_id": m0_contract_id,
         "m0_contract_sha256": m0_contract_sha256,
         "m6_contract_id": m6_contract_id,
@@ -624,12 +661,17 @@ def finalize_certificate_proof(
         "completed_cell_count": 6,
         "prefix_event_count": _PREFIX_EVENT_COUNT,
         "configured_worker_count": _WORKER_COUNT,
-        "measured_process_count": 1,
+        "measured_process_count": measured_process_count,
         "held_out_action_count": _HELD_OUT_ACTION_COUNT,
         "audit_bindings": [item.model_dump(mode="json") for item in ordered_bindings],
         "audit_sample_sha256": audit_sample_sha256(ordered_bindings),
         "cells": [item.model_dump(mode="json") for item in ordered_cells],
         **aggregates,
+        "generator_wall_seconds": round(generator_wall_seconds, 6),
+        "checker_wall_seconds": round(checker_wall_seconds, 6),
+        "certificate_pipeline_wall_seconds": pipeline_wall_seconds,
+        "audit_wall_seconds": round(audit_wall_seconds, 6),
+        "total_wall_seconds": round(total_wall_seconds, 6),
         "evaluation_partition_opened": False,
         "technical_decision": decision,
         "claim_ceiling": (
