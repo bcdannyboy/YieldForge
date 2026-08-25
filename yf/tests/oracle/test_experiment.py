@@ -31,6 +31,16 @@ def _phase_spawn_descendant(pid_path: str) -> None:
     time.sleep(30)
 
 
+def _phase_record_pid(pid_path: str) -> int:
+    Path(pid_path).write_text(str(os.getpid()))
+    return os.getpid()
+
+
+def _phase_delayed_failure(delay_seconds: float) -> None:
+    time.sleep(delay_seconds)
+    raise RuntimeError("delayed phase failure")
+
+
 def _bindings():  # type: ignore[no-untyped-def]
     from yieldforge.oracle.experiment import M8AuditActionBinding
 
@@ -647,6 +657,40 @@ def test_distributed_phase_timeout_terminates_worker_descendants(
             os.kill(descendant_pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def test_distributed_phase_never_signals_a_completed_worker_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    pid_path = tmp_path / "completed.pid"
+    signaled_groups = []
+    monkeypatch.setattr(
+        experiment.os,
+        "killpg",
+        lambda group_id, sent_signal: signaled_groups.append(
+            (group_id, sent_signal)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="delayed phase failure"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_record_pid,
+            ((str(pid_path),),),
+            process_count=1,
+            timeout_seconds=5.0,
+        )
+        experiment._run_process_phase(  # pragma: no cover  # noqa: SLF001
+            _phase_delayed_failure,
+            ((0.2,),),
+            process_count=1,
+            timeout_seconds=5.0,
+        )
+
+    completed_pid = int(pid_path.read_text())
+    assert all(group_id != completed_pid for group_id, _signal in signaled_groups)
 
 
 def test_distributed_generator_worker_round_trips_one_real_cell() -> None:

@@ -788,27 +788,26 @@ def _run_process_phase(
     context = multiprocessing.get_context("spawn")
     results = [None] * len(tasks)
     pending = iter(enumerate(tasks))
-    active: dict[Connection, tuple[int, multiprocessing.Process]] = {}
-    owned_processes: list[multiprocessing.Process] = []
-    owned_receivers: list[Connection] = []
+    active: dict[Connection, tuple[int, _OwnedPhaseProcess]] = {}
+    owned_processes: list[_OwnedPhaseProcess] = []
 
     def start_next() -> bool:
         try:
             index, task = next(pending)
         except StopIteration:
             return False
-        receiver, sender = context.Pipe(duplex=False)
-        owned_receivers.append(receiver)
+        receiver, sender = context.Pipe(duplex=True)
         process = context.Process(
             target=_process_phase_entry,
             args=(operation, task, sender),
         )
-        owned_processes.append(process)
+        owned = _OwnedPhaseProcess(process=process, connection=receiver)
+        owned_processes.append(owned)
         try:
             process.start()
         finally:
             sender.close()
-        active[receiver] = (index, process)
+        active[receiver] = (index, owned)
         return True
 
     completed = 0
@@ -826,7 +825,8 @@ def _run_process_phase(
             if not ready:
                 continue
             for receiver in ready:
-                index, process = active.pop(receiver)
+                index, owned = active[receiver]
+                process = owned.process
                 try:
                     message = receiver.recv()
                 except EOFError as error:
@@ -834,14 +834,27 @@ def _run_process_phase(
                         "M8 distributed worker exited without a result "
                         f"(exit_code={process.exitcode})"
                     ) from error
-                finally:
-                    receiver.close()
-                process.join(timeout=1.0)
                 status, payload, details = message
+                if status == "ready":
+                    if owned.group_id is not None or payload != process.pid:
+                        raise RuntimeError(
+                            "M8 distributed worker process-group handshake differs"
+                        )
+                    owned.group_id = payload
+                    receiver.send("start")
+                    continue
+                active.pop(receiver)
+                receiver.close()
+                process.join(timeout=1.0)
+                if process.is_alive():
+                    raise RuntimeError(
+                        "M8 distributed worker did not exit after returning a result"
+                    )
                 if status != "ok":
                     raise RuntimeError(
                         f"M8 distributed worker failed: {payload}\n{details}"
                     )
+                owned.resolved = True
                 results[index] = payload
                 completed += 1
                 start_next()
@@ -849,8 +862,8 @@ def _run_process_phase(
         _terminate_owned_processes(owned_processes)
         raise
     finally:
-        for receiver in owned_receivers:
-            receiver.close()
+        for owned in owned_processes:
+            owned.connection.close()
     _terminate_owned_processes(owned_processes)
     if any(item is None for item in results):
         raise RuntimeError("M8 distributed phase left a task without a result")
@@ -868,6 +881,9 @@ def _process_phase_entry(
         if not hasattr(os, "setsid"):
             raise RuntimeError("M8 distributed workers require POSIX process groups")
         os.setsid()
+        sender.send(("ready", os.getpid(), ""))
+        if sender.recv() != "start":
+            raise RuntimeError("M8 distributed worker start handshake differs")
         sender.send(("ok", operation(*task), ""))
     except BaseException as error:
         try:
@@ -884,40 +900,30 @@ def _process_phase_entry(
         sender.close()
 
 
-def _terminate_owned_processes(
-    processes: list[multiprocessing.Process],
-) -> None:
+@dataclass
+class _OwnedPhaseProcess:
+    process: multiprocessing.Process
+    connection: Connection
+    group_id: int | None = None
+    resolved: bool = False
+
+
+def _terminate_owned_processes(processes: list[_OwnedPhaseProcess]) -> None:
     """Join completed workers and terminate or kill every remaining owned worker."""
 
-    owned_groups: set[int] = set()
-    for process in processes:
-        pid = process.pid
-        if pid is None:
+    for owned in processes:
+        if owned.resolved:
             continue
-        try:
-            group_id = os.getpgid(pid)
-        except ProcessLookupError:
-            group_id = pid
-        if group_id == pid:
-            owned_groups.add(pid)
+        process = owned.process
+        if owned.group_id is not None:
             try:
-                os.killpg(pid, signal.SIGTERM)
+                os.killpg(owned.group_id, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        elif process.is_alive():
-            process.terminate()
-    for process in processes:
-        if process.pid is not None:
-            process.join(timeout=1.0)
-    for group_id in owned_groups:
-        try:
-            os.killpg(group_id, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    for process in processes:
-        if process.pid is not None and process.is_alive():
+        elif process.pid is not None and process.is_alive():
             process.kill()
-    for process in processes:
+    for owned in processes:
+        process = owned.process
         if process.pid is not None:
             process.join(timeout=1.0)
 
