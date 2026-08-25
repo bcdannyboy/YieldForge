@@ -298,7 +298,7 @@ def test_certificate_gate_rejects_no_positive_passive_certificate_evidence() -> 
     assert result.technical_decision == "redesign_certificate_proof"
 
 
-def test_certificate_gate_requires_distributed_only_for_projection() -> None:
+def test_distributed_gate_requires_action_sharding_only_for_projection() -> None:
     result = _finalize(
         generator_wall_seconds=29.0,
         checker_wall_seconds=1.0,
@@ -307,7 +307,7 @@ def test_certificate_gate_requires_distributed_only_for_projection() -> None:
 
     assert result.sampled_speedup >= 20.0
     assert result.projected_held_out_calendar_days > 7.0
-    assert result.technical_decision == "require_distributed_exact"
+    assert result.technical_decision == "require_action_sharding"
 
 
 @pytest.mark.parametrize(

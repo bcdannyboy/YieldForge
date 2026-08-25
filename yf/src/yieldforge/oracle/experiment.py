@@ -280,7 +280,7 @@ class M8CertificateProofResult(BaselineContractModel):
     technical_decision: Literal[
         "pass_certificate_exact",
         "redesign_certificate_proof",
-        "require_distributed_exact",
+        "require_action_sharding",
     ]
     claim_ceiling: Literal[
         "calibration_certificate_runtime_and_semantic_proof_only_not_evaluation_advantage_"
@@ -576,7 +576,7 @@ def _gate_decision(
     ):
         return "redesign_certificate_proof"
     if projected_days > 7.0:
-        return "require_distributed_exact"
+        return "require_action_sharding"
     return "pass_certificate_exact"
 
 
