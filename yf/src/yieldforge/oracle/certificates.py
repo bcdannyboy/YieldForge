@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 
 from yieldforge.baseline.contracts import LayoutFitSearchResult
-from yieldforge.baseline.policies import PolicyRank, rank_policy_action
+from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_policy_action
 from yieldforge.baseline.replay import (
     M7ActionDescriptor,
     M7PolicyActionBinding,
@@ -78,33 +79,161 @@ def _rejection_payload(
 
 
 def _search_payload(
+    searches: tuple[LayoutFitSearchResult, ...],
+    *,
+    label: str,
+) -> tuple[dict[str, object], ...]:
+    canonical = _canonical_searches(searches, label=label)
+    return tuple(search.model_dump(mode="json") for search in canonical)
+
+
+def _canonical_searches(
+    searches: tuple[LayoutFitSearchResult, ...],
+    *,
+    label: str,
+) -> tuple[LayoutFitSearchResult, ...]:
+    try:
+        return tuple(
+            LayoutFitSearchResult.model_validate(
+                search.model_dump(mode="python"),
+                strict=True,
+            )
+            for search in searches
+        )
+    except ValueError as error:
+        raise ValueError(f"M8 {label} fit-search cache value is invalid") from error
+
+
+def _require_search_bindings(
     runtime: M7ReplayRuntime,
     *,
     event_position: int,
     item: InventoryItem,
-) -> tuple[dict[str, object], ...]:
+    searches: tuple[LayoutFitSearchResult, ...],
+    require_remnant_id: bool,
+) -> None:
     binding = runtime.replay_input.instances[event_position]
     verified = runtime.runtime_candidates[binding.problem_id]
-    cache_key = (
+    if (
+        tuple(search.candidate_id for search in searches)
+        != tuple(candidate.candidate_id for candidate in verified.candidates)
+        or any(search.config != runtime.replay_input.search_config for search in searches)
+        or (
+            require_remnant_id
+            and any(search.remnant_id != item.remnant.remnant_id for search in searches)
+        )
+    ):
+        raise ValueError("M8 exact search identities differ from the frozen request")
+
+
+def _fresh_runtime(runtime: M7ReplayRuntime) -> M7ReplayRuntime:
+    return M7ReplayRuntime(
+        replay_input=runtime.replay_input,
+        runtime_candidates=runtime.runtime_candidates,
+        rules=runtime.rules,
+        standard_profile_executor=runtime.standard_profile_executor,
+        jagua_executable=runtime.jagua_executable,
+        jagua_differential_audit=runtime.jagua_differential_audit,
+        prepared_layout_cache=OrderedDict(),
+    )
+
+
+def _shared_cache_key(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+) -> tuple[str, str, str]:
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    return (
+        semantic_sha256(
+            {
+                "geometry": item.remnant.geometry.model_dump(mode="json"),
+                "fit_config": runtime.replay_input.fit_config.model_dump(mode="json"),
+                "search_config": runtime.replay_input.search_config.model_dump(mode="json"),
+            }
+        ),
+        binding.problem_id,
+        verified.evidence.candidate_set_id,
+    )
+
+
+def _authoritative_competitor(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+    cursor_template: M7ReplayCursor,
+) -> tuple[
+    M7ActionDescriptor | None,
+    ActionPolicyContext | None,
+    tuple[LayoutFitSearchResult, ...],
+]:
+    fresh = _fresh_runtime(runtime)
+    competitor, context = enumerate_m7_single_remnant_competitor(
+        fresh,
+        event_position=event_position,
+        item=item,
+        cursor_template=cursor_template,
+    )
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    local_key = (
         item.remnant.remnant_id,
         binding.problem_id,
         verified.evidence.candidate_set_id,
     )
-    searches = runtime.fit_search_cache.get(cache_key)
-    if searches is None:
-        raise ValueError("M8 exact single-remnant search did not populate frozen evidence")
-    canonical = tuple(
-        LayoutFitSearchResult.model_validate(search.model_dump(mode="python"), strict=True)
-        for search in searches
+    authoritative = fresh.fit_search_cache.get(local_key)
+    if authoritative is None:
+        raise ValueError("M8 fresh exact search did not produce authoritative evidence")
+    authoritative = _canonical_searches(authoritative, label="authoritative")
+    _require_search_bindings(
+        runtime,
+        event_position=event_position,
+        item=item,
+        searches=authoritative,
+        require_remnant_id=True,
     )
-    if (
-        tuple(search.candidate_id for search in canonical)
-        != tuple(candidate.candidate_id for candidate in verified.candidates)
-        or any(search.remnant_id != item.remnant.remnant_id for search in canonical)
-        or any(search.config != runtime.replay_input.search_config for search in canonical)
-    ):
-        raise ValueError("M8 exact search identities differ from the frozen request")
-    return tuple(search.model_dump(mode="json") for search in canonical)
+
+    cached_local = runtime.fit_search_cache.get(local_key)
+    if cached_local is not None:
+        canonical_local = _canonical_searches(cached_local, label="local")
+        _require_search_bindings(
+            runtime,
+            event_position=event_position,
+            item=item,
+            searches=canonical_local,
+            require_remnant_id=True,
+        )
+        if canonical_local != authoritative:
+            raise ValueError(
+                "M8 local fit-search cache value differs from authoritative registered search"
+            )
+
+    if runtime.shared_fit_search_cache is not None:
+        cached_shared = runtime.shared_fit_search_cache.get(
+            _shared_cache_key(runtime, event_position=event_position, item=item)
+        )
+        if cached_shared is not None:
+            canonical_shared = _canonical_searches(cached_shared, label="shared")
+            _require_search_bindings(
+                runtime,
+                event_position=event_position,
+                item=item,
+                searches=canonical_shared,
+                require_remnant_id=False,
+            )
+            rebound_shared = tuple(
+                search.model_copy(update={"remnant_id": item.remnant.remnant_id})
+                for search in canonical_shared
+            )
+            if rebound_shared != authoritative:
+                raise ValueError(
+                    "M8 shared fit-search cache value differs from authoritative registered "
+                    "search"
+                )
+    return competitor, context, authoritative
 
 
 def _evidence_sha256(
@@ -228,13 +357,13 @@ def _influence(
             0,
         )
 
-    competitor, context = enumerate_m7_single_remnant_competitor(
+    competitor, context, authoritative_searches = _authoritative_competitor(
         runtime,
         event_position=event_position,
         item=item,
         cursor_template=cursor_template,
     )
-    searches = _search_payload(runtime, event_position=event_position, item=item)
+    searches = _search_payload(authoritative_searches, label="authoritative")
     if competitor is None or context is None:
         if competitor is not None or context is not None:
             raise ValueError("M8 exact competitor descriptor and context must appear together")

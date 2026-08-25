@@ -37,6 +37,17 @@ class CompiledTranslationRejection:
     certificate: TranslationRejectionCertificate
 
 
+def _same_prepared_layout(left, right) -> bool:  # type: ignore[no-untyped-def]
+    return (
+        left.candidate_id == right.candidate_id
+        and left.geometry.wkb == right.geometry.wkb
+        and tuple(item.wkb for item in left.part_polygons)
+        == tuple(item.wkb for item in right.part_polygons)
+        and left.vertices == right.vertices
+        and left.bounds == right.bounds
+    )
+
+
 def compile_translation_rejections(
     runtime: M7ReplayRuntime,
     *,
@@ -55,25 +66,34 @@ def compile_translation_rejections(
     )
     verified = runtime.runtime_candidates[binding.problem_id]
     prepared_key = (problem.problem_id, verified.evidence.candidate_set_id)
-    layouts = runtime.prepared_layout_cache.get(prepared_key)
-    if layouts is None:
-        layouts = tuple(
-            prepare_layout_footprint(
-                problem.problem,
-                candidate,
-                runtime.replay_input.fit_config,
-            )
-            for candidate in verified.candidates
+    cached_layouts = runtime.prepared_layout_cache.get(prepared_key)
+    expected_layouts = tuple(
+        prepare_layout_footprint(
+            problem.problem,
+            candidate,
+            runtime.replay_input.fit_config,
         )
-        runtime.prepared_layout_cache[prepared_key] = layouts
+        for candidate in verified.candidates
+    )
+    if cached_layouts is None:
+        runtime.prepared_layout_cache[prepared_key] = expected_layouts
         while len(runtime.prepared_layout_cache) > _MAX_PREPARED_LAYOUT_CACHE_PROBLEMS:
             runtime.prepared_layout_cache.popitem(last=False)
     else:
+        if tuple(layout.candidate_id for layout in cached_layouts) != tuple(
+            candidate.candidate_id for candidate in verified.candidates
+        ):
+            raise ValueError("M8 compiled layout candidate identities differ")
+        if any(
+            not _same_prepared_layout(cached, expected)
+            for cached, expected in zip(
+                cached_layouts,
+                expected_layouts,
+                strict=True,
+            )
+        ):
+            raise ValueError("M8 prepared layout cache value differs from frozen geometry")
         runtime.prepared_layout_cache.move_to_end(prepared_key)
-    if tuple(layout.candidate_id for layout in layouts) != tuple(
-        candidate.candidate_id for candidate in verified.candidates
-    ):
-        raise ValueError("M8 compiled layout candidate identities differ")
     return tuple(
         CompiledTranslationRejection(
             candidate_id=candidate.candidate_id,
@@ -84,7 +104,7 @@ def compile_translation_rejections(
                 fit_config=runtime.replay_input.fit_config,
             ),
         )
-        for candidate, layout in zip(verified.candidates, layouts, strict=True)
+        for candidate, layout in zip(verified.candidates, expected_layouts, strict=True)
     )
 
 

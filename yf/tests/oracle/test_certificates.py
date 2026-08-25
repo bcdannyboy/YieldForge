@@ -6,6 +6,7 @@ import pytest
 from shapely import Polygon, box
 
 from tests.oracle.fixtures import inventory_item, two_problem_runtime
+from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
 from yieldforge.baseline.policies import M7PolicyName
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
@@ -26,6 +27,34 @@ from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
 
 def _sha(index: int) -> str:
     return f"sha256:{index:064x}"
+
+
+def _as_no_fit(search: LayoutFitSearchResult) -> LayoutFitSearchResult:
+    return LayoutFitSearchResult(
+        status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
+        candidate_id=search.candidate_id,
+        remnant_id=search.remnant_id,
+        config=search.config,
+        generated_candidate_count=search.generated_candidate_count,
+        duplicate_candidate_count=search.duplicate_candidate_count,
+        evaluated_candidate_count=search.evaluated_candidate_count,
+        budget_truncated=search.budget_truncated,
+        translation=None,
+    )
+
+
+def _as_fit(search: LayoutFitSearchResult) -> LayoutFitSearchResult:
+    return LayoutFitSearchResult(
+        status=LayoutFitSearchStatus.FIT,
+        candidate_id=search.candidate_id,
+        remnant_id=search.remnant_id,
+        config=search.config,
+        generated_candidate_count=max(1, search.generated_candidate_count),
+        duplicate_candidate_count=search.duplicate_candidate_count,
+        evaluated_candidate_count=max(1, search.evaluated_candidate_count),
+        budget_truncated=search.budget_truncated,
+        translation=(0.0, 0.0),
+    )
 
 
 def _common_step(runtime, *, cursor: M7ReplayCursor | None = None):  # type: ignore[no-untyped-def]
@@ -131,6 +160,50 @@ def test_cheap_rejection_fails_closed_on_tampered_prepared_layout_identity() -> 
         compile_translation_rejections(runtime, event_position=0, item=item)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["geometry", "part_polygons", "vertices", "bounds"],
+)
+def test_cheap_rejection_fails_closed_on_same_id_different_layout_value(
+    mutation: str,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token=f"tampered-layout-{mutation}",
+    )
+    compile_translation_rejections(runtime, event_position=0, item=item)
+    cache_key = next(iter(runtime.prepared_layout_cache))
+    if mutation == "geometry":
+        altered = tuple(
+            replace(layout, geometry=box(0, 0, 20, 20))
+            for layout in runtime.prepared_layout_cache[cache_key]
+        )
+    elif mutation == "part_polygons":
+        altered = tuple(
+            replace(layout, part_polygons=(box(0, 0, 20, 20),))
+            for layout in runtime.prepared_layout_cache[cache_key]
+        )
+    elif mutation == "vertices":
+        altered = tuple(
+            replace(
+                layout,
+                vertices=((0.0, 0.0), (0.0, 20.0), (20.0, 0.0), (20.0, 20.0)),
+            )
+            for layout in runtime.prepared_layout_cache[cache_key]
+        )
+    else:
+        altered = tuple(
+            replace(layout, bounds=(0.0, 0.0, 20.0, 20.0))
+            for layout in runtime.prepared_layout_cache[cache_key]
+        )
+    runtime.prepared_layout_cache[cache_key] = altered
+
+    with pytest.raises(ValueError, match="layout cache value"):
+        _certify(runtime, item)
+
+
 def test_registered_search_no_fit_is_authoritative_after_cheap_bounds_survive() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     concave = Polygon([(0, 0), (6, 0), (6, 5), (2, 5), (2, 10), (0, 10)])
@@ -160,6 +233,13 @@ def test_exact_no_fit_fails_closed_on_tampered_cached_search_identity() -> None:
         material=runtime.replay_input.instances[0].material,
         token="tampered-search-cache",
     )
+    descriptor, context = enumerate_m7_single_remnant_competitor(
+        runtime,
+        event_position=0,
+        item=item,
+        cursor_template=initial_m7_cursor(runtime.replay_input),
+    )
+    assert descriptor is None and context is None
     assert _certify(runtime, item).passive
     cache_key = next(iter(runtime.fit_search_cache))
     searches = runtime.fit_search_cache[cache_key]
@@ -169,6 +249,82 @@ def test_exact_no_fit_fails_closed_on_tampered_cached_search_identity() -> None:
     )
 
     with pytest.raises(ValueError, match="search identities"):
+        _certify(runtime, item)
+
+
+def test_exact_no_fit_fails_closed_on_local_no_fit_to_fit_substitution() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    concave = Polygon([(0, 0), (6, 0), (6, 5), (2, 5), (2, 10), (0, 10)])
+    item = inventory_item(
+        concave,
+        material=runtime.replay_input.instances[0].material,
+        token="local-no-fit-to-fit",
+    )
+    descriptor, context = enumerate_m7_single_remnant_competitor(
+        runtime,
+        event_position=0,
+        item=item,
+        cursor_template=initial_m7_cursor(runtime.replay_input),
+    )
+    assert descriptor is None and context is None
+    cache_key = next(iter(runtime.fit_search_cache))
+    runtime.fit_search_cache[cache_key] = tuple(
+        _as_fit(search) for search in runtime.fit_search_cache[cache_key]
+    )
+
+    with pytest.raises(ValueError, match="local fit-search cache value"):
+        _certify(runtime, item)
+
+
+def test_exact_competitor_fails_closed_on_local_fit_to_no_fit_substitution() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="local-fit-to-no-fit",
+    )
+    descriptor, context = enumerate_m7_single_remnant_competitor(
+        runtime,
+        event_position=0,
+        item=item,
+        cursor_template=initial_m7_cursor(runtime.replay_input),
+    )
+    assert descriptor is not None and context is not None
+    initial = _certify(runtime, item)
+    assert not initial.passive
+    cache_key = next(iter(runtime.fit_search_cache))
+    runtime.fit_search_cache[cache_key] = tuple(
+        _as_no_fit(search) for search in runtime.fit_search_cache[cache_key]
+    )
+
+    with pytest.raises(ValueError, match="local fit-search cache value"):
+        _certify(runtime, item)
+
+
+def test_exact_competitor_fails_closed_on_shared_fit_to_no_fit_substitution() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    runtime.shared_fit_search_cache = {}
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="shared-fit-to-no-fit",
+    )
+    descriptor, context = enumerate_m7_single_remnant_competitor(
+        runtime,
+        event_position=0,
+        item=item,
+        cursor_template=initial_m7_cursor(runtime.replay_input),
+    )
+    assert descriptor is not None and context is not None
+    initial = _certify(runtime, item)
+    assert not initial.passive
+    shared_key = next(iter(runtime.shared_fit_search_cache))
+    runtime.shared_fit_search_cache[shared_key] = tuple(
+        _as_no_fit(search) for search in runtime.shared_fit_search_cache[shared_key]
+    )
+    runtime.fit_search_cache.clear()
+
+    with pytest.raises(ValueError, match="shared fit-search cache value"):
         _certify(runtime, item)
 
 
