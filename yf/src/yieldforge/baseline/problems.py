@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from yieldforge.baseline.contracts import (
+    M7CalibrationProblemView,
     M7ProblemIndex,
     ReusableGeometryProblem,
     TemporalInstanceBinding,
@@ -13,6 +14,7 @@ from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.temporal_benchmark.catalog import load_registered_catalog
 from yieldforge.temporal_benchmark.contracts import (
     TemporalBenchmarkContract,
+    TemporalPartition,
     build_registered_contract,
 )
 from yieldforge.temporal_benchmark.generator import TemporalStreamManifest
@@ -229,4 +231,108 @@ def build_registered_problem_index() -> M7ProblemIndex:
         shared_problem_count=len(calibration_problem_ids & evaluation_problem_ids),
         problems=ordered_problems,
         instances=tuple(instances),
+    )
+
+
+def build_registered_calibration_problem_view(
+    *,
+    full_problem_index_id: str,
+    full_problem_index_sha256: str,
+) -> M7CalibrationProblemView:
+    """Lower only registered calibration streams and bind the frozen full-index identity."""
+
+    contract = TemporalBenchmarkContract.model_validate_json(
+        _CONTRACT_PATH.read_bytes(), strict=True
+    )
+    if contract != build_registered_contract():
+        raise ValueError("committed M6 contract differs from the registered builder")
+    population = TemporalPopulationManifest.model_validate_json(
+        _POPULATION_PATH.read_bytes(), strict=True
+    )
+    catalog = load_registered_catalog()
+    if (
+        population.contract_id != contract.contract_id
+        or population.contract_sha256 != contract.content_sha256
+        or population.source_catalog_sha256 != catalog.artifact_sha256
+        or population.failed_cells
+        or population.calibration_stream_count != 12
+    ):
+        raise ValueError("committed M6 population is not a complete calibration binding")
+    problems: dict[str, ReusableGeometryProblem] = {}
+    instances: list[TemporalInstanceBinding] = []
+    batch_count = 0
+
+    calibration_records = tuple(
+        record
+        for record in population.streams
+        if record.partition is TemporalPartition.CALIBRATION
+    )
+    if len(calibration_records) != 12:
+        raise ValueError("registered M6 calibration stream census differs")
+    for record in calibration_records:
+        stream = TemporalStreamManifest.model_validate_json(
+            (_STREAM_ROOT / record.filename).read_bytes(), strict=True
+        )
+        if (
+            stream.stream_id != record.stream_id
+            or stream.content_sha256 != record.stream_sha256
+            or (stream.regime, stream.seed, stream.partition)
+            != (record.regime, record.seed, record.partition)
+            or stream.partition is not TemporalPartition.CALIBRATION
+        ):
+            raise ValueError("M6 calibration stream does not match its population record")
+        report = lower_stream(contract, stream, catalog)
+        batch_count += len(report.batches)
+        for batch in report.batches:
+            for subsequence, projection in enumerate(batch.projections):
+                projected = catalog.project(projection.tasks_index)
+                problem = _reusable_problem(
+                    catalog_sha256=catalog.artifact_sha256,
+                    candidate_requirement=contract.candidate_requirement,
+                    batch=batch,
+                    projection=projection,
+                    projected=projected,
+                )
+                prior = problems.setdefault(problem.problem_id, problem)
+                if prior != problem:
+                    raise ValueError("reusable problem identity collision")
+                instances.append(
+                    _instance_binding(
+                        stream=stream,
+                        batch=batch,
+                        subsequence=subsequence,
+                        problem=problem,
+                    )
+                )
+
+    ordered_problems = tuple(sorted(problems.values(), key=lambda item: item.problem_id))
+    semantic = {
+        "schema_version": "yieldforge.m7-calibration-problem-view.v1",
+        "full_problem_index_id": full_problem_index_id,
+        "full_problem_index_sha256": full_problem_index_sha256,
+        "m6_contract_id": contract.contract_id,
+        "m6_contract_sha256": contract.content_sha256,
+        "m6_population_id": population.population_id,
+        "m6_population_sha256": population.content_sha256,
+        "source_catalog_sha256": catalog.artifact_sha256,
+        "calibration_batch_count": batch_count,
+        "calibration_instance_count": len(instances),
+        "calibration_problem_count": len(ordered_problems),
+        "problems": [item.model_dump(mode="json") for item in ordered_problems],
+        "instances": [item.model_dump(mode="json") for item in instances],
+        "evaluation_partition_opened": False,
+        "full_problem_index_identity_source": "frozen_m7_baseline",
+        "claim_ceiling": (
+            "calibration_only_problem_view_bound_to_frozen_full_index_not_evaluation_policy_"
+            "or_savings_evidence"
+        ),
+    }
+    digest = semantic_sha256(semantic)
+    validated = dict(semantic)
+    validated["problems"] = ordered_problems
+    validated["instances"] = tuple(instances)
+    return M7CalibrationProblemView(
+        view_id=f"yfm7cv-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        **validated,
     )

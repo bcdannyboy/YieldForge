@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from yieldforge.temporal_benchmark.contracts import TemporalRegime
 
@@ -54,6 +56,17 @@ def _cells(*, bindings=None):  # type: ignore[no-untyped-def]
                 key=lambda item: item.catalog_action_id,
             )
         )
+        current_action_ids = tuple(
+            sorted(
+                (
+                    *(item.catalog_action_id for item in cell_bindings),
+                    *(
+                        f"m7-standard:filler-{offset}-{index:03}"
+                        for index in range(100 - len(cell_bindings))
+                    ),
+                )
+            )
+        )
         cells.append(
             M8CertificateProofCell(
                 regime=regime,
@@ -65,6 +78,8 @@ def _cells(*, bindings=None):  # type: ignore[no-untyped-def]
                 audit_action_ids=tuple(item.catalog_action_id for item in cell_bindings),
                 audit_sample_sha256=audit_sample_sha256(cell_bindings),
                 current_action_kinds=("remnant", "standard"),
+                current_action_ids=current_action_ids,
+                proof_catalog_action_ids=current_action_ids,
                 current_action_count=100,
                 checked_action_count=100,
                 valid_proof_count=100,
@@ -81,6 +96,9 @@ def _cells(*, bindings=None):  # type: ignore[no-untyped-def]
                 state_rejoin_count=10,
                 certificate_elapsed_seconds=0.25,
                 checker_elapsed_seconds=0.25,
+                sampled_certificate_elapsed_seconds=0.01,
+                sampled_checker_elapsed_seconds=0.01,
+                sampled_checker_failure_count=0,
                 sampled_reference_elapsed_seconds=0.5,
             )
         )
@@ -102,6 +120,8 @@ def _finalize(*, cells=None, bindings=None):  # type: ignore[no-untyped-def]
         problem_index_sha256="sha256:" + "8" * 64,
         freeze_id="yfm7freeze-" + "9" * 24,
         freeze_sha256="sha256:" + "a" * 64,
+        calibration_view_id="yfm7cv-" + "b" * 24,
+        calibration_view_sha256="sha256:" + "c" * 64,
         cells=_cells(bindings=selected) if cells is None else cells,
         audit_bindings=selected,
     )
@@ -115,8 +135,11 @@ def test_certificate_gate_passes_only_complete_exact_fast_result() -> None:
     assert result.valid_proof_count == result.current_action_count
     assert result.audit_mismatch_count == 0
     assert result.checker_failure_count == 0
+    assert result.sampled_checker_failure_count == 0
     assert result.sampled_speedup == 25.0
     assert result.projected_held_out_calendar_days <= 7.0
+    assert result.configured_worker_count == 8
+    assert result.measured_process_count == 1
     assert result.evaluation_partition_opened is False
     assert result.technical_decision == "pass_certificate_exact"
 
@@ -124,10 +147,9 @@ def test_certificate_gate_passes_only_complete_exact_fast_result() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("checked_action_count", 99),
-        ("valid_proof_count", 99),
         ("checker_failure_count", 1),
         ("audit_mismatch_count", 1),
+        ("sampled_checker_failure_count", 1),
     ],
 )
 def test_certificate_gate_redesigns_for_each_exactness_failure(
@@ -135,14 +157,17 @@ def test_certificate_gate_redesigns_for_each_exactness_failure(
     value: int,
 ) -> None:
     cells = _cells()
-    cells = (cells[0].model_copy(update={field: value}), *cells[1:])
+    update = {field: value}
+    if field == "checker_failure_count":
+        update["valid_proof_count"] = 99
+    cells = (cells[0].model_copy(update=update), *cells[1:])
 
     assert _finalize(cells=cells).technical_decision == "redesign_certificate_proof"
 
 
 def test_certificate_gate_redesigns_for_slow_matched_sample() -> None:
     cells = tuple(
-        item.model_copy(update={"certificate_elapsed_seconds": 2.0})
+        item.model_copy(update={"sampled_certificate_elapsed_seconds": 0.04})
         for item in _cells()
     )
 
@@ -173,7 +198,6 @@ def test_certificate_gate_requires_distributed_only_for_projection() -> None:
         item.model_copy(
             update={
                 "certificate_elapsed_seconds": 50.0,
-                "sampled_reference_elapsed_seconds": 5000.0,
             }
         )
         for item in _cells()
@@ -184,6 +208,134 @@ def test_certificate_gate_requires_distributed_only_for_projection() -> None:
     assert result.sampled_speedup >= 20.0
     assert result.projected_held_out_calendar_days > 7.0
     assert result.technical_decision == "require_distributed_exact"
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"checked_action_count": 99},
+        {"valid_proof_count": 99},
+        {"valid_proof_count": 99, "checker_failure_count": 2},
+    ],
+)
+def test_certificate_cell_rejects_nonlocal_proof_count_reconciliation(
+    update: dict[str, int],
+) -> None:
+    cell = _cells()[0]
+
+    with pytest.raises(ValidationError, match="cell proof counts do not reconcile"):
+        type(cell).model_validate(
+            {**cell.model_dump(mode="python"), **update}, strict=True
+        )
+
+
+def test_certificate_cell_rejects_incomplete_proof_action_ids() -> None:
+    cell = _cells()[0]
+
+    with pytest.raises(ValidationError, match="proof action IDs"):
+        type(cell).model_validate(
+            {
+                **cell.model_dump(mode="python"),
+                "proof_catalog_action_ids": cell.proof_catalog_action_ids[:-1],
+            },
+            strict=True,
+        )
+
+
+def test_projection_uses_observed_single_process_time_without_worker_division() -> None:
+    result = _finalize()
+    observed_action_events = sum(
+        item.current_action_count * item.future_event_count for item in result.cells
+    )
+    expected_seconds = (
+        result.certificate_pipeline_elapsed_seconds
+        / observed_action_events
+        * result.held_out_action_count
+        * 11.5
+        * 2.0
+    )
+
+    assert result.projected_held_out_calendar_days == round(
+        expected_seconds / 86_400.0, 6
+    )
+
+
+def test_certificate_gate_runtime_does_not_install_an_unmeasured_executor() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+
+    source = two_problem_runtime(first_width=4.0, second_width=4.0)
+    measured = experiment._runtime(  # noqa: SLF001
+        source.replay_input,
+        source.runtime_candidates,
+        source.rules,
+        source.jagua_executable,
+    )
+
+    assert measured.standard_profile_executor is None
+
+
+def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    preflight = experiment.score_sparse_event(request)
+    audit = experiment._freeze_audit_bindings(  # noqa: SLF001
+        experiment._audit_candidates_for_cell(  # noqa: SLF001
+            runtime.replay_input.instances,
+            preflight,
+        )
+    )
+    counts = {"full": 0, "sample": 0, "checker": []}
+    original_full = experiment.score_sparse_event
+    original_sample = experiment.score_certificate_actions
+    original_checker = experiment.check_action_proofs
+
+    def counted_full(request):  # type: ignore[no-untyped-def]
+        counts["full"] += 1
+        return original_full(request)
+
+    def counted_sample(request, *, action_ids):  # type: ignore[no-untyped-def]
+        counts["sample"] += 1
+        return original_sample(request, action_ids=action_ids)
+
+    def counted_checker(request, proofs):  # type: ignore[no-untyped-def]
+        counts["checker"].append(len(proofs))
+        return original_checker(request, proofs)
+
+    monkeypatch.setattr(experiment, "score_sparse_event", counted_full)
+    monkeypatch.setattr(experiment, "score_certificate_actions", counted_sample)
+    monkeypatch.setattr(experiment, "check_action_proofs", counted_checker)
+    monkeypatch.setattr(experiment, "_request_for_cell", lambda *args, **kwargs: request)
+    cell = SimpleNamespace(stream=runtime.replay_input.instances)
+
+    result = experiment._execute_timed_cell(  # noqa: SLF001
+        cell,
+        rules=None,
+        jagua_executable=tmp_path / "unused",
+        audit_bindings=audit,
+        progress=None,
+    )
+
+    assert counts == {
+        "full": 1,
+        "sample": 1,
+        "checker": [result.current_action_count, len(audit)],
+    }
+    assert result.sampled_certificate_elapsed_seconds > 0
+    assert result.sampled_checker_elapsed_seconds > 0
 
 
 def test_certificate_result_rejects_missing_registered_regime() -> None:

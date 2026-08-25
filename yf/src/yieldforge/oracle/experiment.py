@@ -7,7 +7,6 @@ import json
 import os
 import secrets
 import stat
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -22,7 +21,7 @@ from yieldforge.baseline.archives import (
 )
 from yieldforge.baseline.contracts import (
     BaselineContractModel,
-    M7ProblemIndex,
+    M7CalibrationProblemView,
     TemporalInstanceBinding,
 )
 from yieldforge.baseline.experiment import M7FrozenBaseline, select_calibration_instances
@@ -35,7 +34,11 @@ from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha2
 from yieldforge.oracle.checker import check_action_proofs
 from yieldforge.oracle.proofs import M8ActionProof, M8EventClassification
 from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
-from yieldforge.oracle.sparse import M8SparseResult, score_sparse_event
+from yieldforge.oracle.sparse import (
+    M8SparseResult,
+    score_certificate_actions,
+    score_sparse_event,
+)
 from yieldforge.oracle.visibility import FullRealizedVisibility
 from yieldforge.residuals.contracts import rule_set_from_m0
 from yieldforge.reuse.contracts import RemnantFitConfig
@@ -133,6 +136,8 @@ class M8CertificateProofCell(BaselineContractModel):
     audit_action_ids: tuple[StrictStr, ...] = Field(min_length=1)
     audit_sample_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     current_action_kinds: tuple[M8ActionKind, ...]
+    current_action_ids: tuple[StrictStr, ...] = Field(min_length=1)
+    proof_catalog_action_ids: tuple[StrictStr, ...] = Field(min_length=1)
     current_action_count: StrictInt = Field(ge=1)
     checked_action_count: StrictInt = Field(ge=0)
     valid_proof_count: StrictInt = Field(ge=0)
@@ -144,6 +149,9 @@ class M8CertificateProofCell(BaselineContractModel):
     state_rejoin_count: StrictInt = Field(ge=0)
     certificate_elapsed_seconds: StrictFloat = Field(gt=0)
     checker_elapsed_seconds: StrictFloat = Field(gt=0)
+    sampled_certificate_elapsed_seconds: StrictFloat = Field(gt=0)
+    sampled_checker_elapsed_seconds: StrictFloat = Field(gt=0)
+    sampled_checker_failure_count: StrictInt = Field(ge=0)
     sampled_reference_elapsed_seconds: StrictFloat = Field(gt=0)
 
     @model_validator(mode="after")
@@ -152,10 +160,30 @@ class M8CertificateProofCell(BaselineContractModel):
             raise ValueError("M8 cell audit action IDs must be sorted and unique")
         if self.current_action_kinds != tuple(sorted(set(self.current_action_kinds))):
             raise ValueError("M8 current action kinds must be sorted and unique")
+        if (
+            self.current_action_ids != tuple(sorted(set(self.current_action_ids)))
+            or self.proof_catalog_action_ids
+            != tuple(sorted(set(self.proof_catalog_action_ids)))
+            or self.current_action_ids != self.proof_catalog_action_ids
+            or len(self.current_action_ids) != self.current_action_count
+        ):
+            raise ValueError("M8 cell proof action IDs do not cover the current catalog")
+        if not set(self.audit_action_ids) <= set(self.current_action_ids):
+            raise ValueError("M8 cell audit IDs are absent from the current catalog")
         if self.witness_classifications != _classification_tuple(
             self.witness_classifications
         ):
             raise ValueError("M8 cell witness classifications must be canonical and unique")
+        if (
+            self.checked_action_count != self.current_action_count
+            or self.valid_proof_count + self.checker_failure_count
+            != self.checked_action_count
+        ):
+            raise ValueError("M8 cell proof counts do not reconcile")
+        if self.sampled_checker_failure_count > len(self.audit_action_ids):
+            raise ValueError("M8 sampled checker failures exceed frozen audit actions")
+        if self.audit_mismatch_count > len(self.audit_action_ids):
+            raise ValueError("M8 audit mismatches exceed frozen audit actions")
         return self
 
 
@@ -179,10 +207,13 @@ class M8CertificateProofResult(BaselineContractModel):
     problem_index_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     freeze_id: StrictStr = Field(pattern=r"^yfm7freeze-[0-9a-f]{24}$")
     freeze_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    calibration_view_id: StrictStr = Field(pattern=r"^yfm7cv-[0-9a-f]{24}$")
+    calibration_view_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     proof_cell_count: Literal[6] = 6
     completed_cell_count: Literal[6] = 6
     prefix_event_count: Literal[2] = 2
-    worker_count: Literal[8] = 8
+    configured_worker_count: Literal[8] = 8
+    measured_process_count: Literal[1] = 1
     held_out_action_count: Literal[550542] = 550_542
     audit_bindings: tuple[M8AuditActionBinding, ...] = Field(min_length=6)
     audit_sample_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -191,6 +222,7 @@ class M8CertificateProofResult(BaselineContractModel):
     checked_action_count: StrictInt = Field(ge=0)
     valid_proof_count: StrictInt = Field(ge=0)
     checker_failure_count: StrictInt = Field(ge=0)
+    sampled_checker_failure_count: StrictInt = Field(ge=0)
     audit_action_count: StrictInt = Field(ge=1)
     audit_mismatch_count: StrictInt = Field(ge=0)
     witness_classifications: tuple[M8EventClassification, ...] = Field(min_length=1)
@@ -203,6 +235,8 @@ class M8CertificateProofResult(BaselineContractModel):
     certificate_pipeline_elapsed_seconds: StrictFloat = Field(gt=0)
     sampled_reference_elapsed_seconds: StrictFloat = Field(gt=0)
     sampled_certificate_elapsed_seconds: StrictFloat = Field(gt=0)
+    sampled_checker_elapsed_seconds: StrictFloat = Field(gt=0)
+    sampled_certificate_pipeline_elapsed_seconds: StrictFloat = Field(gt=0)
     sampled_speedup: StrictFloat = Field(gt=0)
     full_certificate_actions_per_second: StrictFloat = Field(gt=0)
     projected_held_out_calendar_days: StrictFloat = Field(ge=0)
@@ -239,6 +273,7 @@ class M8CertificateProofResult(BaselineContractModel):
             checked_action_count=self.checked_action_count,
             valid_proof_count=self.valid_proof_count,
             checker_failure_count=self.checker_failure_count,
+            sampled_checker_failure_count=self.sampled_checker_failure_count,
             audit_mismatch_count=self.audit_mismatch_count,
             uncovered_witness_classifications=self.uncovered_witness_classifications,
             uncovered_action_kinds=self.uncovered_action_kinds,
@@ -355,6 +390,7 @@ def _aggregate_certificate_metrics(
     checked = sum(item.checked_action_count for item in cells)
     valid = sum(item.valid_proof_count for item in cells)
     failures = sum(item.checker_failure_count for item in cells)
+    sampled_failures = sum(item.sampled_checker_failure_count for item in cells)
     mismatches = sum(item.audit_mismatch_count for item in cells)
     certificate_seconds = round(
         sum(item.certificate_elapsed_seconds for item in cells), 6
@@ -364,18 +400,16 @@ def _aggregate_certificate_metrics(
     reference_seconds = round(
         sum(item.sampled_reference_elapsed_seconds for item in cells), 6
     )
-    by_cell = _audit_by_cell(audit_bindings)
     sampled_certificate_seconds = round(
-        sum(
-            (item.certificate_elapsed_seconds + item.checker_elapsed_seconds)
-            * len(by_cell[item.regime])
-            / item.current_action_count
-            for item in cells
-        ),
-        6,
+        sum(item.sampled_certificate_elapsed_seconds for item in cells), 6
     )
-    sampled_certificate_seconds = max(0.000001, sampled_certificate_seconds)
-    speedup = round(reference_seconds / sampled_certificate_seconds, 6)
+    sampled_checker_seconds = round(
+        sum(item.sampled_checker_elapsed_seconds for item in cells), 6
+    )
+    sampled_pipeline_seconds = round(
+        sampled_certificate_seconds + sampled_checker_seconds, 6
+    )
+    speedup = round(reference_seconds / sampled_pipeline_seconds, 6)
     throughput = round(current / pipeline_seconds, 6)
     observed_action_events = sum(
         item.current_action_count * max(1, item.future_event_count) for item in cells
@@ -386,7 +420,6 @@ def _aggregate_certificate_metrics(
         * _HELD_OUT_ACTION_COUNT
         * _HELD_OUT_MEAN_FUTURE_EVENT_COUNT
         * _PROJECTION_SAFETY_FACTOR
-        / _WORKER_COUNT
     )
     projected_days = round(projected_seconds / 86_400.0, 6)
     witness_classifications = _classification_tuple(
@@ -402,6 +435,7 @@ def _aggregate_certificate_metrics(
         "checked_action_count": checked,
         "valid_proof_count": valid,
         "checker_failure_count": failures,
+        "sampled_checker_failure_count": sampled_failures,
         "audit_action_count": len(audit_bindings),
         "audit_mismatch_count": mismatches,
         "witness_classifications": witness_classifications,
@@ -414,6 +448,8 @@ def _aggregate_certificate_metrics(
         "certificate_pipeline_elapsed_seconds": pipeline_seconds,
         "sampled_reference_elapsed_seconds": reference_seconds,
         "sampled_certificate_elapsed_seconds": sampled_certificate_seconds,
+        "sampled_checker_elapsed_seconds": sampled_checker_seconds,
+        "sampled_certificate_pipeline_elapsed_seconds": sampled_pipeline_seconds,
         "sampled_speedup": speedup,
         "full_certificate_actions_per_second": throughput,
         "projected_held_out_calendar_days": projected_days,
@@ -426,6 +462,7 @@ def _gate_decision(
     checked_action_count: int,
     valid_proof_count: int,
     checker_failure_count: int,
+    sampled_checker_failure_count: int,
     audit_mismatch_count: int,
     uncovered_witness_classifications: tuple[M8EventClassification, ...],
     uncovered_action_kinds: tuple[M8ActionKind, ...],
@@ -438,6 +475,7 @@ def _gate_decision(
         checked_action_count != current_action_count
         or valid_proof_count != current_action_count
         or checker_failure_count
+        or sampled_checker_failure_count
         or audit_mismatch_count
         or uncovered_witness_classifications
         or uncovered_action_kinds
@@ -463,6 +501,8 @@ def finalize_certificate_proof(
     problem_index_sha256: str,
     freeze_id: str,
     freeze_sha256: str,
+    calibration_view_id: str,
+    calibration_view_sha256: str,
     cells: tuple[M8CertificateProofCell, ...],
     audit_bindings: tuple[M8AuditActionBinding, ...],
 ) -> M8CertificateProofResult:
@@ -483,6 +523,9 @@ def finalize_certificate_proof(
         checked_action_count=int(aggregates["checked_action_count"]),
         valid_proof_count=int(aggregates["valid_proof_count"]),
         checker_failure_count=int(aggregates["checker_failure_count"]),
+        sampled_checker_failure_count=int(
+            aggregates["sampled_checker_failure_count"]
+        ),
         audit_mismatch_count=int(aggregates["audit_mismatch_count"]),
         uncovered_witness_classifications=aggregates[
             "uncovered_witness_classifications"
@@ -507,10 +550,13 @@ def finalize_certificate_proof(
         "problem_index_sha256": problem_index_sha256,
         "freeze_id": freeze_id,
         "freeze_sha256": freeze_sha256,
+        "calibration_view_id": calibration_view_id,
+        "calibration_view_sha256": calibration_view_sha256,
         "proof_cell_count": 6,
         "completed_cell_count": 6,
         "prefix_event_count": _PREFIX_EVENT_COUNT,
-        "worker_count": _WORKER_COUNT,
+        "configured_worker_count": _WORKER_COUNT,
+        "measured_process_count": 1,
         "held_out_action_count": _HELD_OUT_ACTION_COUNT,
         "audit_bindings": [item.model_dump(mode="json") for item in ordered_bindings],
         "audit_sample_sha256": audit_sample_sha256(ordered_bindings),
@@ -538,14 +584,13 @@ def _runtime(  # type: ignore[no-untyped-def]
     replay_input,
     verified,
     rules,
-    profile_executor,
     jagua_executable,
 ) -> M7ReplayRuntime:
     return M7ReplayRuntime(
         replay_input=replay_input,
         runtime_candidates=verified,
         rules=rules,
-        standard_profile_executor=profile_executor,
+        standard_profile_executor=None,
         jagua_executable=jagua_executable,
     )
 
@@ -637,14 +682,12 @@ def _request_for_cell(
     cell: _ExecutionCell,
     *,
     rules,  # type: ignore[no-untyped-def]
-    executor: ProcessPoolExecutor,
     jagua_executable: Path,
 ) -> M8OracleRequest:
     runtime = _runtime(
         cell.replay_input,
         cell.verified,
         rules,
-        executor,
         jagua_executable,
     )
     return M8OracleRequest(
@@ -689,7 +732,7 @@ def _audit_candidates_for_cell(
 
 def _build_execution_cells(
     *,
-    index: M7ProblemIndex,
+    index: M7CalibrationProblemView,
     m0: M0ExperimentContract,
     frozen: M7FrozenBaseline,
     verified,  # type: ignore[no-untyped-def]
@@ -703,8 +746,8 @@ def _build_execution_cells(
         replay_input = build_m7_replay_input(
             m0_contract_id=m0.contract_id,
             m0_contract_sha256=m0.content_sha256,
-            problem_index_id=index.index_id,
-            problem_index_sha256=index.content_sha256,
+            problem_index_id=index.full_problem_index_id,
+            problem_index_sha256=index.full_problem_index_sha256,
             m6_contract_id=index.m6_contract_id,
             m6_contract_sha256=index.m6_contract_sha256,
             m6_population_id=index.m6_population_id,
@@ -735,7 +778,6 @@ def _execute_timed_cell(
     cell: _ExecutionCell,
     *,
     rules,  # type: ignore[no-untyped-def]
-    executor: ProcessPoolExecutor,
     jagua_executable: Path,
     audit_bindings: tuple[M8AuditActionBinding, ...],
     progress,  # type: ignore[no-untyped-def]
@@ -743,7 +785,6 @@ def _execute_timed_cell(
     request = _request_for_cell(
         cell,
         rules=rules,
-        executor=executor,
         jagua_executable=jagua_executable,
     )
     started = perf_counter()
@@ -776,9 +817,38 @@ def _execute_timed_cell(
         ):
             raise ValueError("M8 timed certificate differs from its pre-timing audit freeze")
 
-    sparse_scores = {
+    full_scores = {
         item.action_id: item.final_net_cost for item in sparse.decision.scores
     }
+    audit_action_ids = tuple(item.catalog_action_id for item in audit_bindings)
+    started = perf_counter()
+    sampled = score_certificate_actions(request, action_ids=audit_action_ids)
+    sampled_certificate_seconds = max(
+        0.000001, round(perf_counter() - started, 6)
+    )
+    sampled_proofs = tuple(item.proof for item in sampled)
+    started = perf_counter()
+    sampled_checks = check_action_proofs(request, sampled_proofs)
+    sampled_checker_seconds = max(0.000001, round(perf_counter() - started, 6))
+    if (
+        tuple(item.score.action_id for item in sampled) != audit_action_ids
+        or len(sampled_checks) != len(audit_bindings)
+    ):
+        raise ValueError("M8 matched certificate batch differs from its frozen audit IDs")
+    sampled_by_id = {item.score.action_id: item for item in sampled}
+    for binding in audit_bindings:
+        sampled_item = sampled_by_id[binding.catalog_action_id]
+        if (
+            sampled_item.proof.proof_id,
+            sampled_item.proof.semantic_runtime_sha256,
+            _proof_classifications(sampled_item.proof),
+        ) != (
+            binding.proof_id,
+            binding.semantic_runtime_sha256,
+            binding.witness_classifications,
+        ):
+            raise ValueError("M8 matched certificate differs from its pre-timing audit freeze")
+
     started = perf_counter()
     reference_scores = tuple(
         score_reference_action(request, action_id=item.catalog_action_id)
@@ -786,7 +856,12 @@ def _execute_timed_cell(
     )
     reference_seconds = max(0.000001, round(perf_counter() - started, 6))
     audit_mismatches = sum(
-        item.final_net_cost != sparse_scores[item.action_id] for item in reference_scores
+        (
+            item.final_net_cost
+            != sampled_by_id[item.action_id].score.final_net_cost
+            or item.final_net_cost != full_scores[item.action_id]
+        )
+        for item in reference_scores
     )
     witness_classifications = _classification_tuple(
         {
@@ -798,6 +873,7 @@ def _execute_timed_cell(
     current_kinds = tuple(sorted({_action_kind(item) for item in current_action_ids}))
     valid = sum(item.valid for item in checks)
     failures = len(checks) - valid
+    sampled_failures = sum(not item.valid for item in sampled_checks)
     if progress is not None:
         progress(
             f"certificate {cell.stream[0].regime.value} "
@@ -806,7 +882,10 @@ def _execute_timed_cell(
         )
         progress(
             f"certificate audit {cell.stream[0].regime.value} "
-            f"actions={len(audit_bindings)} mismatches={audit_mismatches} "
+            f"actions={len(audit_bindings)} sampled_checker_failures={sampled_failures} "
+            f"mismatches={audit_mismatches} "
+            f"sampled_certificate_seconds={sampled_certificate_seconds} "
+            f"sampled_checker_seconds={sampled_checker_seconds} "
             f"reference_seconds={reference_seconds}"
         )
     proof_runtime_hashes = {item.semantic_runtime_sha256 for item in sparse.proofs}
@@ -821,6 +900,8 @@ def _execute_timed_cell(
         audit_action_ids=tuple(item.catalog_action_id for item in audit_bindings),
         audit_sample_sha256=audit_sample_sha256(audit_bindings),
         current_action_kinds=current_kinds,
+        current_action_ids=tuple(sorted(current_action_ids)),
+        proof_catalog_action_ids=tuple(sorted(proof_ids)),
         current_action_count=len(current_action_ids),
         checked_action_count=len(checks),
         valid_proof_count=valid,
@@ -844,32 +925,33 @@ def _execute_timed_cell(
         ),
         certificate_elapsed_seconds=certificate_seconds,
         checker_elapsed_seconds=checker_seconds,
+        sampled_certificate_elapsed_seconds=sampled_certificate_seconds,
+        sampled_checker_elapsed_seconds=sampled_checker_seconds,
+        sampled_checker_failure_count=sampled_failures,
         sampled_reference_elapsed_seconds=reference_seconds,
     )
 
 
 def execute_sparse_prefix_proof(
     *,
-    index: M7ProblemIndex,
+    index: M7CalibrationProblemView,
     m0: M0ExperimentContract,
     frozen: M7FrozenBaseline,
     archive_roots: tuple[Path, ...],
     jagua_executable: Path,
     progress=None,  # type: ignore[no-untyped-def]
-    _worker_count: int = _WORKER_COUNT,
 ) -> M8CertificateProofResult:
     """Run the revised calibration-only gate without loading evaluation streams."""
 
-    if type(_worker_count) is not int or not 1 <= _worker_count <= _WORKER_COUNT:
-        raise ValueError("M8 internal worker override must be between one and eight")
     contract = build_registered_contract()
     if (
-        (index.index_id, index.content_sha256)
+        (index.full_problem_index_id, index.full_problem_index_sha256)
         != (frozen.problem_index_id, frozen.problem_index_sha256)
         or (m0.contract_id, m0.content_sha256)
         != (frozen.m0_contract_id, frozen.m0_contract_sha256)
         or (index.m6_contract_id, index.m6_contract_sha256)
         != (contract.contract_id, contract.content_sha256)
+        or index.evaluation_partition_opened
     ):
         raise ValueError("M8 certificate proof inputs do not share the frozen M0/M6/M7 boundary")
     executable = Path(jagua_executable)
@@ -936,38 +1018,34 @@ def execute_sparse_prefix_proof(
         selected_streams=selected_streams,
     )
     rules = rule_set_from_m0(m0.remnant_eligibility)
-    max_workers = min(_worker_count, os.cpu_count() or 1)
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        candidates = []
-        for cell in execution_cells:
-            request = _request_for_cell(
-                cell,
-                rules=rules,
-                executor=executor,
-                jagua_executable=executable,
-            )
-            candidates.extend(
-                _audit_candidates_for_cell(cell.stream, score_sparse_event(request))
-            )
-        frozen_audit = _freeze_audit_bindings(tuple(candidates))
-        if progress is not None:
-            progress(
-                f"froze certificate audit actions={len(frozen_audit)} "
-                f"sample={audit_sample_sha256(frozen_audit)}"
-            )
-
-        audit_by_cell = _audit_by_cell(frozen_audit)
-        cells = tuple(
-            _execute_timed_cell(
-                cell,
-                rules=rules,
-                executor=executor,
-                jagua_executable=executable,
-                audit_bindings=audit_by_cell[cell.stream[0].regime],
-                progress=progress,
-            )
-            for cell in execution_cells
+    candidates = []
+    for cell in execution_cells:
+        request = _request_for_cell(
+            cell,
+            rules=rules,
+            jagua_executable=executable,
         )
+        candidates.extend(
+            _audit_candidates_for_cell(cell.stream, score_sparse_event(request))
+        )
+    frozen_audit = _freeze_audit_bindings(tuple(candidates))
+    if progress is not None:
+        progress(
+            f"froze certificate audit actions={len(frozen_audit)} "
+            f"sample={audit_sample_sha256(frozen_audit)}"
+        )
+
+    audit_by_cell = _audit_by_cell(frozen_audit)
+    cells = tuple(
+        _execute_timed_cell(
+            cell,
+            rules=rules,
+            jagua_executable=executable,
+            audit_bindings=audit_by_cell[cell.stream[0].regime],
+            progress=progress,
+        )
+        for cell in execution_cells
+    )
     return finalize_certificate_proof(
         m0_contract_id=m0.contract_id,
         m0_contract_sha256=m0.content_sha256,
@@ -975,10 +1053,12 @@ def execute_sparse_prefix_proof(
         m6_contract_sha256=index.m6_contract_sha256,
         m6_population_id=index.m6_population_id,
         m6_population_sha256=index.m6_population_sha256,
-        problem_index_id=index.index_id,
-        problem_index_sha256=index.content_sha256,
+        problem_index_id=index.full_problem_index_id,
+        problem_index_sha256=index.full_problem_index_sha256,
         freeze_id=frozen.freeze_id,
         freeze_sha256=frozen.content_sha256,
+        calibration_view_id=index.view_id,
+        calibration_view_sha256=index.content_sha256,
         cells=cells,
         audit_bindings=frozen_audit,
     )

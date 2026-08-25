@@ -69,6 +69,36 @@ def test_sparse_surviving_future_fit_falls_back_to_exact_and_matches_reference()
     assert all(check_action_proof(request, proof).valid for proof in sparse.proofs)
 
 
+def test_certificate_action_batch_scores_only_frozen_ordered_subset() -> None:
+    from yieldforge.oracle.checker import check_action_proofs
+    from yieldforge.oracle.sparse import score_certificate_actions, score_sparse_event
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    full = score_sparse_event(request)
+    action_ids = tuple(
+        item.action_id for item in (full.decision.scores[-1], full.decision.scores[0])
+    )
+
+    sampled = score_certificate_actions(request, action_ids=action_ids)
+
+    assert tuple(item.score.action_id for item in sampled) == action_ids
+    assert tuple(item.score for item in sampled) == tuple(
+        next(score for score in full.decision.scores if score.action_id == action_id)
+        for action_id in action_ids
+    )
+    assert all(
+        result.valid
+        for result in check_action_proofs(
+            request, tuple(item.proof for item in sampled)
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "poisoned_cache",
     ["standard_profile", "fit_search", "prepared_layout", "shared_fit_search"],

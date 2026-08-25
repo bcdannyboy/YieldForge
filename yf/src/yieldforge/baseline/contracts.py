@@ -219,6 +219,88 @@ class M7ProblemIndex(BaselineContractModel):
         return self
 
 
+class M7CalibrationProblemView(BaselineContractModel):
+    """Calibration-only M7 view bound to the frozen complete-index identity."""
+
+    model_config = ConfigDict(revalidate_instances="always")
+
+    schema_version: Literal["yieldforge.m7-calibration-problem-view.v1"] = (
+        "yieldforge.m7-calibration-problem-view.v1"
+    )
+    view_id: StrictStr = Field(pattern=r"^yfm7cv-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    full_problem_index_id: StrictStr = Field(pattern=r"^yfm7i-[0-9a-f]{24}$")
+    full_problem_index_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    m6_contract_id: StrictStr = Field(pattern=r"^yfm6-[0-9a-f]{24}$")
+    m6_contract_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    m6_population_id: StrictStr = Field(pattern=r"^yftp-[0-9a-f]{24}$")
+    m6_population_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_catalog_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    calibration_batch_count: Literal[256] = 256
+    calibration_instance_count: Literal[288] = 288
+    calibration_problem_count: Literal[90] = 90
+    problems: tuple[ReusableGeometryProblem, ...] = Field(min_length=90, max_length=90)
+    instances: tuple[TemporalInstanceBinding, ...] = Field(min_length=288, max_length=288)
+    evaluation_partition_opened: Literal[False] = False
+    full_problem_index_identity_source: Literal["frozen_m7_baseline"] = (
+        "frozen_m7_baseline"
+    )
+    claim_ceiling: Literal[
+        "calibration_only_problem_view_bound_to_frozen_full_index_not_evaluation_policy_or_"
+        "savings_evidence"
+    ] = (
+        "calibration_only_problem_view_bound_to_frozen_full_index_not_evaluation_policy_or_"
+        "savings_evidence"
+    )
+
+    @model_validator(mode="after")
+    def require_calibration_only_identity(self) -> Self:
+        if self.full_problem_index_id != (
+            f"yfm7i-{self.full_problem_index_sha256[7:31]}"
+        ):
+            raise ValueError("M7 calibration view full-index identity does not reconcile")
+        if len(self.instances) != self.calibration_instance_count:
+            raise ValueError("M7 calibration view instance count does not reconcile")
+        if len(self.problems) != self.calibration_problem_count:
+            raise ValueError("M7 calibration view problem count does not reconcile")
+        if any(
+            item.partition is not TemporalPartition.CALIBRATION for item in self.instances
+        ):
+            raise ValueError("M7 calibration view contains a non-calibration binding")
+        problem_ids = tuple(item.problem_id for item in self.problems)
+        if problem_ids != tuple(sorted(set(problem_ids))):
+            raise ValueError("M7 calibration view problems must be sorted and unique")
+        referenced_ids = {item.problem_id for item in self.instances}
+        if referenced_ids != set(problem_ids):
+            raise ValueError("M7 calibration view problem set does not reconcile")
+        problem_by_id = {item.problem_id: item for item in self.problems}
+        if any(
+            item.problem_sha256 != problem_by_id[item.problem_id].content_sha256
+            or item.tasks_index != problem_by_id[item.problem_id].tasks_index
+            for item in self.instances
+        ):
+            raise ValueError("M7 calibration view binding differs from its problem")
+        if len({item.binding_id for item in self.instances}) != len(self.instances):
+            raise ValueError("M7 calibration view binding identities must be unique")
+        stream_ids = {item.stream_id for item in self.instances}
+        if len(stream_ids) != 12 or any(
+            sum(candidate.stream_id == stream_id for candidate in self.instances) != 24
+            for stream_id in stream_ids
+        ):
+            raise ValueError("M7 calibration view must contain the twelve frozen streams")
+        if any(
+            sum(candidate.regime is regime for candidate in self.instances) != 48
+            for regime in TemporalRegime
+        ):
+            raise ValueError("M7 calibration view regime census differs")
+        digest = semantic_sha256(self, excluded_fields={"view_id", "content_sha256"})
+        if self.content_sha256 != f"sha256:{digest}":
+            raise ValueError("M7 calibration view content SHA-256 does not match")
+        if self.view_id != f"yfm7cv-{digest[:24]}":
+            raise ValueError("M7 calibration view ID does not match semantic content")
+        return self
+
+
 class M2ArchiveReference(BaselineContractModel):
     """Canonical M2 result evidence required to re-open one immutable archive."""
 

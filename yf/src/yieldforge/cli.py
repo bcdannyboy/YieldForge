@@ -21,7 +21,10 @@ from yieldforge.baseline.experiment import (
     publish_frozen_baseline,
     publish_problem_index,
 )
-from yieldforge.baseline.problems import build_registered_problem_index
+from yieldforge.baseline.problems import (
+    build_registered_calibration_problem_view,
+    build_registered_problem_index,
+)
 from yieldforge.datasets.fetch import fetch_file
 from yieldforge.datasets.passive_report import (
     PassiveEvidenceError,
@@ -539,10 +542,13 @@ def _evaluate_m7_baseline(args: argparse.Namespace) -> int:
 
 
 def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
-    index = build_registered_problem_index()
     m0 = load_frozen_json(args.m0, M0ExperimentContract)
     frozen = M7FrozenBaseline.model_validate_json(
         args.frozen_baseline.read_bytes(), strict=True
+    )
+    index = build_registered_calibration_problem_view(
+        full_problem_index_id=frozen.problem_index_id,
+        full_problem_index_sha256=frozen.problem_index_sha256,
     )
 
     def progress(message: str) -> None:
@@ -564,6 +570,8 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
         f"checker_failures={result.checker_failure_count} "
         f"audit_mismatches={result.audit_mismatch_count} "
         f"sampled_speedup={result.sampled_speedup} "
+        f"measured_processes={result.measured_process_count} "
+        f"configured_workers={result.configured_worker_count} "
         f"projected_days={result.projected_held_out_calendar_days} "
         f"decision={result.technical_decision} output={result_path}"
     )

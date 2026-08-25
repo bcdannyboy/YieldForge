@@ -230,6 +230,76 @@ def test_m8_sparse_proof_does_not_expose_the_internal_worker_override() -> None:
         )
 
 
+def test_m8_command_builds_only_the_calibration_problem_view(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,  # type: ignore[no-untyped-def]
+) -> None:
+    from types import SimpleNamespace
+
+    from yieldforge import cli
+
+    frozen = SimpleNamespace(
+        problem_index_id="yfm7i-" + "1" * 24,
+        problem_index_sha256="sha256:" + "2" * 64,
+    )
+    view = object()
+    observed = {}
+    monkeypatch.setattr(cli, "load_frozen_json", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "M7FrozenBaseline",
+        SimpleNamespace(model_validate_json=lambda *args, **kwargs: frozen),
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_registered_problem_index",
+        lambda: pytest.fail("complete problem index opened evaluation streams"),
+    )
+
+    def calibration_view(**kwargs):  # type: ignore[no-untyped-def]
+        observed.update(kwargs)
+        return view
+
+    result = SimpleNamespace(
+        proof_id="yfm8proof-" + "3" * 24,
+        completed_cell_count=6,
+        valid_proof_count=10,
+        current_action_count=10,
+        checker_failure_count=0,
+        audit_mismatch_count=0,
+        sampled_speedup=20.0,
+        measured_process_count=1,
+        configured_worker_count=8,
+        projected_held_out_calendar_days=1.0,
+        technical_decision="pass_certificate_exact",
+    )
+    monkeypatch.setattr(cli, "build_registered_calibration_problem_view", calibration_view)
+    monkeypatch.setattr(
+        cli,
+        "execute_sparse_prefix_proof",
+        lambda **kwargs: result if kwargs["index"] is view else pytest.fail("wrong view"),
+    )
+    monkeypatch.setattr(cli, "publish_sparse_proof", lambda *args: tmp_path / "proof.json")
+    frozen_path = tmp_path / "freeze.json"
+    frozen_path.write_text("{}")
+
+    assert cli._prove_m8_sparse_oracle(  # noqa: SLF001
+        SimpleNamespace(
+            m0=tmp_path / "m0.json",
+            frozen_baseline=frozen_path,
+            archive_root=[tmp_path / "archives"],
+            jagua_binary=tmp_path / "jagua",
+            output=tmp_path,
+        )
+    ) == 0
+    assert observed == {
+        "full_problem_index_id": frozen.problem_index_id,
+        "full_problem_index_sha256": frozen.problem_index_sha256,
+    }
+    assert "Published M8 certificate proof" in capsys.readouterr().out
+
+
 def test_datasets_audit_check_validates_passive_report(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     report_path, manifest_path = write_audit_inputs(tmp_path)
 

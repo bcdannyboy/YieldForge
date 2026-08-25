@@ -398,6 +398,17 @@ def score_certificate_action(
         return _score_prepared_certificate_actions(context, action_ids=(action_id,))[0]
 
 
+def score_certificate_actions(
+    request: M8OracleRequest,
+    *,
+    action_ids: tuple[str, ...],
+) -> tuple[M8CertificateActionResult, ...]:
+    """Generate one event-major proof batch for an exact frozen action subset."""
+
+    with _prepare_m8_generator_context(request) as context:
+        return _score_prepared_certificate_actions(context, action_ids=action_ids)
+
+
 def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
     """Score every current action event-major and emit one exact proof per action."""
 
@@ -442,5 +453,6 @@ __all__ = [
     "M8SparseMetrics",
     "M8SparseResult",
     "score_certificate_action",
+    "score_certificate_actions",
     "score_sparse_event",
 ]
