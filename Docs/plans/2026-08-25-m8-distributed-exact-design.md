@@ -4,8 +4,10 @@
 
 Run the six independent M8 calibration cells concurrently in owned CPU processes. Generate the
 complete proof batch for each cell in one process, close that process pool, then verify each batch in
-a fresh process pool. Run the frozen sampled-reference audit in a third fresh pool and reassemble the
-six results only after exact action coverage, proof identity, checker, and audit reconciliation pass.
+a fresh process pool. Freeze the sampled-reference audit from those proofs, then execute its
+certificate generator, independent checker, and brute-force reference as three fresh action-level
+process phases over the identical frozen `(regime, action_id)` task set. Reassemble the six results
+only after exact action coverage, proof identity, checker, and audit reconciliation pass.
 
 This is the selected first distributed step because it reduces elapsed time without changing an
 action catalog, future horizon, collision predicate, proof hash, or policy rule. It also avoids
@@ -18,23 +20,33 @@ sharding remains a measured fallback if the slowest single cell is still operati
    preserve one common path per cell. The held-out population has enough streams to saturate all
    eight configured workers later.
 2. **Action shards within every cell.** This can shorten one cell but makes every shard recompute the
-   same exact common-transition geometry. It is reserved for a demonstrated residual straggler.
+   same exact common-transition geometry. Full generator/checker action sharding remains reserved;
+   the measured 30-minute audit straggler justified action-level sharding only for the small frozen
+   audit, where all three compared methods use the same task topology.
 3. **Threads or GPU execution.** The workload is branch-heavy Python and authoritative GEOS/Jagua
    geometry, not a uniform numerical kernel. Neither route is justified before measuring processes.
 
 ## Contract and timing
 
 The unpublished single-process v2 result contract becomes a distributed v3 contract. It records the
-fixed eight-worker configuration, the number of processes actually exercised, generator wall time,
+fixed eight-worker configuration, the maximum number of processes actually exercised, generator wall time,
 independent-checker wall time, full distributed pipeline wall time, and total calibration-gate wall
 time. Per-cell elapsed values remain worker work-time evidence; held-out projection uses observed
 distributed pipeline wall time and does not divide by an unmeasured worker count.
+
+The matched audit sums per-action worker elapsed time separately for certificate generation,
+checking, and reference scoring. Each side receives exactly the same frozen action keys and the same
+eight-process budget, so the speedup is not inflated by sharding only the slow reference side. Audit
+wall time is the sum of the three observed phase walls; total wall time remains at least generator,
+checker, and audit wall time combined.
 
 Every cell must still contain the exact sorted current action vector and the exact sorted proof
 action vector. Reassembly rejects missing cells, missing or duplicate actions, mismatched proof
 runtime identities, invalid proofs, or sampled-reference mismatches. A worker exception cancels the
 gate and publishes no artifact. Each distributed phase has a frozen 30-minute deadline; failure,
-timeout, or interruption terminates every process owned by that phase before control returns.
+timeout, or interruption terminates every process owned by that phase before control returns. This
+split was selected after the first distributed run completed all six generators and all six fresh
+checkers but the former combined audit phase reached its 1,800-second bound.
 
 ## Isolation and claim boundary
 

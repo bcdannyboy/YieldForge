@@ -269,7 +269,7 @@ def test_m8_command_builds_only_the_calibration_problem_view(
         checker_failure_count=0,
         audit_mismatch_count=0,
         sampled_speedup=20.0,
-        measured_process_count=6,
+        measured_process_count=8,
         configured_worker_count=8,
         certificate_pipeline_wall_seconds=12.5,
         total_wall_seconds=15.0,
@@ -313,7 +313,7 @@ def test_m8_command_builds_only_the_calibration_problem_view(
     assert progress_flushes == [True]
     output = capsys.readouterr().out
     assert "Published M8 certificate proof" in output
-    assert "measured_processes=6" in output
+    assert "measured_processes=8" in output
     assert "pipeline_wall_seconds=12.5" in output
     assert "total_wall_seconds=15.0" in output
 

@@ -12,11 +12,10 @@ independent proof checking, and the sealed evaluation boundary.
 
 ## Next step
 
-Implement the distributed-exact fallback for the calibration-only v2 gate. Shard the six regime
-cells and exact branch/action work without changing catalogs, horizons, proof hashes, checker
-independence, sampled reference audit, or projection rules. Reassemble one deterministic artifact;
-keep evaluation sealed until exactness, coverage, 20x sampled speedup, and the seven-day projection
-gate all resolve.
+Rerun the distributed-exact calibration gate with the audit split into matched per-action
+certificate, checker, and brute-force reference phases. Reassemble one deterministic artifact; keep
+evaluation sealed until exactness, coverage, 20x sampled speedup, and the seven-day projection gate
+all resolve.
 
 ## Evidence bridge completed
 
@@ -65,6 +64,11 @@ gate all resolve.
   geometry, proving the single-process path operationally infeasible; the run was stopped before an
   artifact was published. Evaluation remains sealed, and no M8 oracle advantage or savings result
   exists.
+- The first distributed M8 attempt completed all six generators in `1523.938529` wall seconds and
+  all six fresh checkers in `1491.160716` wall seconds, covering 3,469 proofs without a reported
+  checker failure. It froze a 12-action audit, then the combined audit phase reached its 1,800-second
+  deadline. No artifact was published. The audit is now split into three matched action-level phases
+  over the identical keys and an eight-process maximum; the canonical rerun remains pending.
 
 ## Experiment status
 

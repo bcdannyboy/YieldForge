@@ -243,7 +243,7 @@ class M8CertificateProofResult(BaselineContractModel):
     completed_cell_count: Literal[6] = 6
     prefix_event_count: Literal[2] = 2
     configured_worker_count: Literal[8] = 8
-    measured_process_count: Literal[6] = 6
+    measured_process_count: Literal[8] = 8
     held_out_action_count: Literal[550542] = 550_542
     audit_bindings: tuple[M8AuditActionBinding, ...] = Field(min_length=6)
     audit_sample_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -739,6 +739,30 @@ class _FullCheckerResult:
 
 
 @dataclass(frozen=True)
+class _SampleAuditGeneratorResult:
+    regime: TemporalRegime
+    action_id: str
+    sampled: M8CertificateActionResult
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class _SampleAuditCheckerResult:
+    regime: TemporalRegime
+    action_id: str
+    check: M8ProofCheckResult
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class _ReferenceAuditActionResult:
+    regime: TemporalRegime
+    action_id: str
+    score: M8ActionScore
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
 class _AuditPhaseResult:
     regime: TemporalRegime
     sampled: tuple[M8CertificateActionResult, ...]
@@ -973,48 +997,167 @@ def _check_cell_worker(
     )
 
 
-def _audit_cell_worker(
+def _sample_audit_generator_worker(
     cell: _ExecutionCell,
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
-    audit_bindings: tuple[M8AuditActionBinding, ...],
-) -> _AuditPhaseResult:
-    """Run one frozen matched audit in a third owned worker process."""
+    action_id: str,
+) -> _SampleAuditGeneratorResult:
+    """Regenerate one frozen sampled certificate action in a fresh process."""
 
     request = _request_for_cell(
         cell,
         rules=rules,
         jagua_executable=jagua_executable,
     )
-    action_ids = tuple(item.catalog_action_id for item in audit_bindings)
-    sampled, certificate_elapsed = _measure_proof_phase(
-        lambda: score_certificate_actions(request, action_ids=action_ids)
+    sampled_items, certificate_elapsed = _measure_proof_phase(
+        lambda: score_certificate_actions(request, action_ids=(action_id,))
     )
-    sampled_proofs = tuple(item.proof for item in sampled)
-    sampled_checks, checker_elapsed = _measure_proof_phase(
-        lambda: check_action_proofs(request, sampled_proofs)
-    )
-    reference_scores, reference_elapsed = _measure_proof_phase(
-        lambda: score_reference_actions(request, action_ids=action_ids)
-    )
-    return _AuditPhaseResult(
+    if (
+        len(sampled_items) != 1
+        or sampled_items[0].score.action_id != action_id
+    ):
+        raise ValueError("M8 sampled generator worker returned a different action")
+    return _SampleAuditGeneratorResult(
         regime=cell.stream[0].regime,
-        sampled=sampled,
-        sampled_checks=sampled_checks,
-        reference_scores=reference_scores,
-        sampled_certificate_elapsed_seconds=max(
-            0.000001,
-            round(certificate_elapsed, 6),
-        ),
-        sampled_checker_elapsed_seconds=max(
-            0.000001,
-            round(checker_elapsed, 6),
-        ),
-        sampled_reference_elapsed_seconds=max(
-            0.000001,
-            round(reference_elapsed, 6),
-        ),
+        action_id=action_id,
+        sampled=sampled_items[0],
+        elapsed_seconds=max(0.000001, round(certificate_elapsed, 6)),
     )
+
+
+def _sample_audit_checker_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+    action_id: str,
+    proof: M8ActionProof,
+) -> _SampleAuditCheckerResult:
+    """Check one frozen sampled proof in a separate fresh process."""
+
+    request = _request_for_cell(
+        cell,
+        rules=rules,
+        jagua_executable=jagua_executable,
+    )
+    checks, elapsed = _measure_proof_phase(
+        lambda: check_action_proofs(request, (proof,))
+    )
+    if len(checks) != 1 or proof.catalog_action_id != action_id:
+        raise ValueError("M8 sampled checker worker returned a different action")
+    return _SampleAuditCheckerResult(
+        regime=cell.stream[0].regime,
+        action_id=action_id,
+        check=checks[0],
+        elapsed_seconds=max(0.000001, round(elapsed, 6)),
+    )
+
+
+def _reference_audit_action_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+    action_id: str,
+) -> _ReferenceAuditActionResult:
+    """Brute-score one frozen audit action in its own bounded process task."""
+
+    request = _request_for_cell(
+        cell,
+        rules=rules,
+        jagua_executable=jagua_executable,
+    )
+    scores, elapsed = _measure_proof_phase(
+        lambda: score_reference_actions(request, action_ids=(action_id,))
+    )
+    if len(scores) != 1 or scores[0].action_id != action_id:
+        raise ValueError("M8 reference audit worker returned a different action")
+    return _ReferenceAuditActionResult(
+        regime=cell.stream[0].regime,
+        action_id=action_id,
+        score=scores[0],
+        elapsed_seconds=max(0.000001, round(elapsed, 6)),
+    )
+
+
+def _assemble_audit_results(
+    *,
+    sampled: tuple[_SampleAuditGeneratorResult, ...],
+    checked: tuple[_SampleAuditCheckerResult, ...],
+    references: tuple[_ReferenceAuditActionResult, ...],
+    audit_by_cell: dict[TemporalRegime, tuple[M8AuditActionBinding, ...]],
+) -> tuple[_AuditPhaseResult, ...]:
+    """Reassemble split audit phases only after exact frozen-ID reconciliation."""
+
+    regimes = tuple(regime for regime in TemporalRegime if regime in audit_by_cell)
+    if not regimes or any(not audit_by_cell[regime] for regime in regimes):
+        raise ValueError("M8 split audit bindings require nonempty registered regimes")
+
+    expected_keys = tuple(
+        (regime, binding.catalog_action_id)
+        for regime in regimes
+        for binding in audit_by_cell[regime]
+    )
+    expected_key_set = set(expected_keys)
+
+    def index_phase(results, phase: str):  # type: ignore[no-untyped-def]
+        by_key = {}
+        for item in results:
+            key = (item.regime, item.action_id)
+            if key in by_key:
+                raise ValueError(f"M8 split audit {phase} actions are duplicate")
+            by_key[key] = item
+        if set(by_key) != expected_key_set or len(results) != len(expected_keys):
+            raise ValueError(f"M8 split audit {phase} actions are incomplete")
+        return by_key
+
+    sampled_by_key = index_phase(sampled, "sampled generator")
+    checked_by_key = index_phase(checked, "sampled checker")
+    reference_by_key = index_phase(references, "reference")
+
+    assembled = []
+    for regime in regimes:
+        bindings = audit_by_cell[regime]
+        action_ids = tuple(item.catalog_action_id for item in bindings)
+        sampled_items = tuple(
+            sampled_by_key[(regime, action_id)] for action_id in action_ids
+        )
+        checked_items = tuple(
+            checked_by_key[(regime, action_id)] for action_id in action_ids
+        )
+        action_references = tuple(
+            reference_by_key[(regime, action_id)] for action_id in action_ids
+        )
+        if any(
+            item.sampled.score.action_id != item.action_id
+            for item in sampled_items
+        ) or any(
+            item.score.action_id != item.action_id for item in action_references
+        ):
+            raise ValueError("M8 split audit actions differ from their returned scores")
+        assembled.append(
+            _AuditPhaseResult(
+                regime=regime,
+                sampled=tuple(item.sampled for item in sampled_items),
+                sampled_checks=tuple(item.check for item in checked_items),
+                reference_scores=tuple(item.score for item in action_references),
+                sampled_certificate_elapsed_seconds=max(
+                    0.000001,
+                    round(sum(item.elapsed_seconds for item in sampled_items), 6),
+                ),
+                sampled_checker_elapsed_seconds=max(
+                    0.000001,
+                    round(sum(item.elapsed_seconds for item in checked_items), 6),
+                ),
+                sampled_reference_elapsed_seconds=max(
+                    0.000001,
+                    round(
+                        sum(item.elapsed_seconds for item in action_references),
+                        6,
+                    ),
+                ),
+            )
+        )
+    return tuple(assembled)
 
 
 def _proof_classifications(
@@ -1350,17 +1493,17 @@ def _execute_distributed_cells(
     process_count: int,
     progress=None,  # type: ignore[no-untyped-def]
 ) -> _DistributedCellExecution:
-    """Run generation, independent checking, and audit in three fresh pools."""
+    """Run generation, checking, and three split audit phases in fresh pools."""
 
     if len(execution_cells) != len(TemporalRegime):
         raise ValueError("M8 distributed execution requires all six regime cells")
-    measured_process_count = min(process_count, len(execution_cells))
+    cell_process_count = min(process_count, len(execution_cells))
     total_started = perf_counter()
 
     if progress is not None:
         progress(
             "phase_start regime=all phase=distributed_generator "
-            f"processes={measured_process_count}"
+            f"processes={cell_process_count}"
         )
     phase_started = perf_counter()
     generated = _order_worker_results(
@@ -1398,11 +1541,23 @@ def _execute_distributed_cells(
             f"sample={audit_sample_sha256(frozen_audit)}"
         )
     audit_by_cell = _audit_by_cell(frozen_audit)
+    generated_by_regime = {item.regime: item for item in generated}
+    audit_action_tasks = tuple(
+        (
+            generated_by_regime[regime].cell,
+            rules,
+            jagua_executable,
+            binding.catalog_action_id,
+        )
+        for regime in TemporalRegime
+        for binding in audit_by_cell[regime]
+    )
+    audit_process_count = min(process_count, len(audit_action_tasks))
 
     if progress is not None:
         progress(
             "phase_start regime=all phase=distributed_checker "
-            f"processes={measured_process_count}"
+            f"processes={cell_process_count}"
         )
     phase_started = perf_counter()
     checked = _order_worker_results(
@@ -1436,38 +1591,108 @@ def _execute_distributed_cells(
             f"wall_seconds={checker_wall_seconds}"
         )
 
+    audit_wall_seconds = 0.0
     if progress is not None:
         progress(
-            "phase_start regime=all phase=distributed_audit "
-            f"processes={measured_process_count}"
+            "phase_start regime=all phase=distributed_audit_generator "
+            f"processes={audit_process_count} actions={len(audit_action_tasks)}"
         )
     phase_started = perf_counter()
-    audited = _order_worker_results(
-        _run_process_phase(
-            _audit_cell_worker,
-            tuple(
-                (
-                    item.cell,
-                    rules,
-                    jagua_executable,
-                    audit_by_cell[item.regime],
-                )
-                for item in generated
-            ),
-            process_count=process_count,
-        )
+    sampled = _run_process_phase(
+        _sample_audit_generator_worker,
+        audit_action_tasks,
+        process_count=process_count,
     )
-    audit_wall_seconds = max(
+    sampled_generator_wall_seconds = max(
         0.000001,
         round(perf_counter() - phase_started, 6),
     )
+    audit_wall_seconds += sampled_generator_wall_seconds
     if progress is not None:
-        for item in audited:
+        for item in sampled:
             progress(
                 f"phase_complete regime={item.regime.value} "
-                "phase=distributed_audit "
-                f"actions={len(item.reference_scores)}"
+                "phase=distributed_audit_generator "
+                f"action={item.action_id} worker_seconds={item.elapsed_seconds}"
             )
+        progress(
+            "phase_complete regime=all phase=distributed_audit_generator "
+            f"wall_seconds={sampled_generator_wall_seconds}"
+        )
+
+    if progress is not None:
+        progress(
+            "phase_start regime=all phase=distributed_audit_checker "
+            f"processes={audit_process_count} actions={len(sampled)}"
+        )
+    phase_started = perf_counter()
+    sampled_checked = _run_process_phase(
+        _sample_audit_checker_worker,
+        tuple(
+            (
+                generated_by_regime[sampled_item.regime].cell,
+                rules,
+                jagua_executable,
+                sampled_item.action_id,
+                sampled_item.sampled.proof,
+            )
+            for sampled_item in sampled
+        ),
+        process_count=process_count,
+    )
+    sampled_checker_wall_seconds = max(
+        0.000001,
+        round(perf_counter() - phase_started, 6),
+    )
+    audit_wall_seconds += sampled_checker_wall_seconds
+    if progress is not None:
+        for item in sampled_checked:
+            progress(
+                f"phase_complete regime={item.regime.value} "
+                "phase=distributed_audit_checker "
+                f"action={item.action_id} worker_seconds={item.elapsed_seconds}"
+            )
+        progress(
+            "phase_complete regime=all phase=distributed_audit_checker "
+            f"wall_seconds={sampled_checker_wall_seconds}"
+        )
+
+    if progress is not None:
+        progress(
+            "phase_start regime=all phase=distributed_audit_reference "
+            f"processes={audit_process_count} actions={len(audit_action_tasks)}"
+        )
+    phase_started = perf_counter()
+    references = _run_process_phase(
+        _reference_audit_action_worker,
+        audit_action_tasks,
+        process_count=process_count,
+    )
+    reference_wall_seconds = max(
+        0.000001,
+        round(perf_counter() - phase_started, 6),
+    )
+    audit_wall_seconds = round(audit_wall_seconds + reference_wall_seconds, 6)
+    if progress is not None:
+        for item in references:
+            progress(
+                f"phase_complete regime={item.regime.value} "
+                "phase=distributed_audit_reference "
+                f"action={item.action_id} worker_seconds={item.elapsed_seconds}"
+            )
+        progress(
+            "phase_complete regime=all phase=distributed_audit_reference "
+            f"wall_seconds={reference_wall_seconds}"
+        )
+
+    audited = _assemble_audit_results(
+        sampled=sampled,
+        checked=sampled_checked,
+        references=references,
+        audit_by_cell=audit_by_cell,
+    )
+    measured_process_count = max(cell_process_count, audit_process_count)
+    if progress is not None:
         progress(
             "phase_complete regime=all phase=distributed_audit "
             f"wall_seconds={audit_wall_seconds}"

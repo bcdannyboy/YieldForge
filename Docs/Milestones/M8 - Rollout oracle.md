@@ -1,6 +1,6 @@
 # M8 — Rollout oracle
 
-**Status:** Implemented — single-process runtime feasibility is a no-go; distributed exact execution is next
+**Status:** Implemented — distributed generator/checker passed; split exact audit rerun is next
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -64,3 +64,18 @@ generators were not reached. The next authorized branch is distributed exact exe
 six calibration cells and, where necessary, exact branch/action work while preserving the frozen
 action catalog, proof identities, independent checker, sampled reference audit, and single final
 projection calculation. Further local threshold changes or evaluation access remain prohibited.
+
+## First distributed execution — 2026-08-25
+
+The cell-sharded exact generator completed all six regimes in `1523.938529` wall seconds and emitted
+3,469 proofs. A fresh cell-sharded checker then checked all 3,469 proofs in `1491.160716` wall seconds
+without reporting a checker failure. The pre-timing audit freeze selected 12 actions with sample hash
+`sha256:2ee9b5d22261c7bf6d7cb5115bdccc329016fb58af5723ab2663792e0215adb1`.
+
+The former combined audit phase reached its fixed 1,800-second deadline, terminated its owned worker
+groups, and published no artifact. This localizes the remaining runtime problem to audit scheduling,
+not full certificate generation or independent checking. The implementation now runs the frozen 12
+actions through separate certificate, checker, and brute-force reference phases; every phase uses
+the same action keys and up to eight processes, and deterministic assembly rejects any missing or
+duplicate action. The next action is a canonical calibration rerun. Evaluation remains sealed, so
+there is still no M8 oracle-advantage or savings result.
