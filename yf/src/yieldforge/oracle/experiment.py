@@ -40,7 +40,7 @@ from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha2
 from yieldforge.oracle.checker import M8ProofCheckResult, check_action_proofs
 from yieldforge.oracle.contracts import M8ActionScore
 from yieldforge.oracle.proofs import M8ActionProof, M8EventClassification
-from yieldforge.oracle.reference import M8OracleRequest, score_reference_actions
+from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
 from yieldforge.oracle.sparse import (
     M8CertificateActionResult,
     M8SparseResult,
@@ -760,6 +760,13 @@ class _ReferenceAuditCellResult:
 
 
 @dataclass(frozen=True)
+class _ReferenceAuditActionResult:
+    regime: TemporalRegime
+    score: M8ActionScore
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
 class _AuditPhaseResult:
     regime: TemporalRegime
     sampled: tuple[M8CertificateActionResult, ...]
@@ -1056,28 +1063,67 @@ def _sample_audit_checker_worker(
     )
 
 
-def _reference_audit_cell_worker(
+def _reference_audit_action_worker(
     cell: _ExecutionCell,
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
-    action_ids: tuple[str, ...],
-) -> _ReferenceAuditCellResult:
-    """Brute-score one frozen per-regime audit batch in a fresh process."""
+    action_id: str,
+) -> _ReferenceAuditActionResult:
+    """Brute-score one frozen audit action in a fresh owned process."""
 
     request = _request_for_cell(
         cell,
         rules=rules,
         jagua_executable=jagua_executable,
     )
-    scores, elapsed = _measure_proof_phase(
-        lambda: score_reference_actions(request, action_ids=action_ids)
+    score, elapsed = _measure_proof_phase(
+        lambda: score_reference_action(request, action_id=action_id)
     )
-    if tuple(item.action_id for item in scores) != action_ids:
-        raise ValueError("M8 reference audit worker returned different actions")
-    return _ReferenceAuditCellResult(
+    if score.action_id != action_id:
+        raise ValueError("M8 reference audit worker returned a different action")
+    return _ReferenceAuditActionResult(
         regime=cell.stream[0].regime,
-        scores=scores,
+        score=score,
         elapsed_seconds=max(0.000001, round(elapsed, 6)),
+    )
+
+
+def _assemble_reference_audit_actions(
+    results: tuple[_ReferenceAuditActionResult, ...],
+    *,
+    audit_by_cell: dict[TemporalRegime, tuple[M8AuditActionBinding, ...]],
+) -> tuple[_ReferenceAuditCellResult, ...]:
+    """Restore frozen per-regime vectors after independent reference branches."""
+
+    regimes = tuple(regime for regime in TemporalRegime if regime in audit_by_cell)
+    expected = tuple(
+        (regime, binding.catalog_action_id)
+        for regime in regimes
+        for binding in audit_by_cell[regime]
+    )
+    by_key = {(item.regime, item.score.action_id): item for item in results}
+    if (
+        len(results) != len(expected)
+        or len(by_key) != len(expected)
+        or set(by_key) != set(expected)
+    ):
+        raise ValueError("M8 split audit reference actions are incomplete or duplicate")
+    return tuple(
+        _ReferenceAuditCellResult(
+            regime=regime,
+            scores=tuple(
+                by_key[(regime, binding.catalog_action_id)].score
+                for binding in audit_by_cell[regime]
+            ),
+            elapsed_seconds=round(
+                sum(
+                    by_key[(regime, binding.catalog_action_id)].elapsed_seconds
+                    for binding in audit_by_cell[regime]
+                ),
+                6,
+            ),
+        )
+        for regime in regimes
     )
 
 
@@ -1650,21 +1696,23 @@ def _execute_distributed_cells(
             f"processes={audit_process_count} actions={len(frozen_audit)}"
         )
     phase_started = perf_counter()
-    references = _run_process_phase(
-        _reference_audit_cell_worker,
+    reference_actions = _run_process_phase(
+        _reference_audit_action_worker,
         tuple(
             (
                 generated_by_regime[regime].cell,
                 rules,
                 jagua_executable,
-                tuple(
-                    binding.catalog_action_id
-                    for binding in audit_by_cell[regime]
-                ),
+                binding.catalog_action_id,
             )
             for regime in audit_regime_schedule
+            for binding in audit_by_cell[regime]
         ),
-        process_count=process_count,
+        process_count=audit_process_count,
+    )
+    references = _assemble_reference_audit_actions(
+        reference_actions,
+        audit_by_cell=audit_by_cell,
     )
     reference_wall_seconds = max(
         0.000001,

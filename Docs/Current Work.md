@@ -12,10 +12,10 @@ independent proof checking, and the sealed evaluation boundary.
 
 ## Next step
 
-Verify the event-major exact reference optimization, then rerun the distributed-exact calibration
-gate with the same matched per-regime certificate, checker, and reference batches. Reassemble one
-deterministic artifact; keep evaluation sealed until exactness, coverage, 20x sampled speedup, and
-the seven-day projection gate all resolve.
+Verify independently bounded brute-reference action tasks, then rerun the distributed-exact
+calibration gate with per-regime certificate/checker batches and exact per-action reference tasks.
+Reassemble one deterministic artifact; keep evaluation sealed until exactness, coverage, 20x
+sampled speedup, and the seven-day projection gate all resolve.
 
 ## Evidence bridge completed
 
@@ -85,6 +85,11 @@ the seven-day projection gate all resolve.
   reference batch reached one worker's unchanged 1,800-second limit. Cleanup completed and no
   artifact was published. The reference now advances independent branches event-major to reuse
   same-event prepared geometry without changing exact frozen-M7 decisions or the six-batch topology.
+- The event-major rerun completed generation (`1517.683438` seconds), checking (`1516.867955`), audit
+  generation (`1389.675381`), and audit checking (`1469.414074`), then the reference again reached
+  one worker's unchanged 1,800-second limit. Cleanup completed and no artifact was published. The
+  12 frozen brute-reference actions now run as independently bounded tasks on six workers and are
+  reassembled into exact two-action regime vectors before the audit can pass.
 
 ## Experiment status
 

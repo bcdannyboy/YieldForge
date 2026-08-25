@@ -6,9 +6,10 @@
 deterministic, fail-closed proof reassembly.
 
 **Architecture:** Execute one complete cell per CPU process, close the generator pool, verify all
-proofs in a fresh process pool, then run matched per-regime certificate, checker, and reference audit
-phases over identical frozen action batches. Preserve the existing proof semantics and use measured
-distributed wall time for the held-out projection.
+proofs in a fresh process pool, then run per-regime certificate/checker audit batches and independent
+single-action brute-reference tasks over identical frozen action membership. Reassemble reference
+actions into their six regime vectors before reconciliation. Preserve the existing proof semantics
+and use measured distributed wall time for the held-out projection.
 
 **Tech Stack:** Python 3.12, owned `multiprocessing` workers, Pydantic v2, pytest, uv, Ruff.
 
@@ -73,9 +74,10 @@ distributed wall time for the held-out projection.
 
 The six-cell generator and fresh checker phases both completed, but the combined audit worker phase
 reached its 1,800-second deadline. The authorized refinement splits the audit into three independently
-bounded per-regime phases. All three phases use the same frozen action batches and process budget;
-missing or duplicate results fail closed before per-cell assembly. Full generator/checker work
-remains cell-sharded because it completed and action sharding would duplicate expensive common paths.
+bounded phases. Every phase uses the same frozen action membership and at most six measured
+processes; missing or duplicate results fail closed before per-cell assembly. Full generator/checker
+work remains cell-sharded because it completed and action sharding would duplicate expensive common
+paths.
 
 The first split-audit execution exposed a second scheduling boundary: a phase-global 1,800-second
 timer shortchanged actions queued behind the first eight workers. The supervisor now grants each
@@ -84,9 +86,10 @@ group cleanup. Audit actions are scheduled by descending observed full-generator
 after sample membership is frozen, so slow actions start first without changing evidence selection.
 
 The slow-first action-level rerun established that task queuing was not the only cost: one isolated
-certificate action itself exceeded 1,800 seconds under eight-process contention. The matched audit
-therefore uses six per-regime batches for generator, checker, and reference alike. This shares each
-regime's common geometry, keeps timing topology comparable, and reduces simultaneous CPU pressure.
+certificate action itself exceeded 1,800 seconds under eight-process contention. Certificate
+generation and checking therefore use six per-regime batches, sharing each regime's common geometry
+and reducing simultaneous CPU pressure. Reference action isolation is reconsidered only after its
+distinct two-branch batch limit is measured below.
 
 The matched per-regime rerun cleared its generator (`1400.985884` seconds) and checker
 (`1485.550346` seconds), but the sequential two-action brute reference reached one worker's
@@ -95,3 +98,10 @@ advance each batch's independent action cursors one frozen M7 event at a time. T
 ordering permits same-event prepared-geometry reuse without consulting certificate evidence.
 Differential tests must prove equality with repeated isolated single-action replay before another
 canonical calibration attempt.
+
+The event-major rerun again reached the reference worker limit after all preceding phases passed.
+Run one brute reference action per fresh task, cap the phase at the six already measured audit
+processes, preserve slow-regime-first ordering, and aggregate the two exact action results back into
+each frozen regime batch. Reject missing, duplicate, wrong-regime, or wrong-action results before
+the existing audit assembly. Keep the certificate generator and checker per-regime because those
+batches already pass and share necessary common geometry.

@@ -790,22 +790,27 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
         ),
         process_count=1,
     )
-    (references,) = experiment._run_process_phase(  # noqa: SLF001
-        experiment._reference_audit_cell_worker,  # noqa: SLF001
-        (
+    reference_actions = experiment._run_process_phase(  # noqa: SLF001
+        experiment._reference_audit_action_worker,  # noqa: SLF001
+        tuple(
             (
                 cell,
                 runtime.rules,
                 runtime.jagua_executable,
-                tuple(binding.catalog_action_id for binding in audit_bindings),
-            ),
+                binding.catalog_action_id,
+            )
+            for binding in audit_bindings
         ),
         process_count=1,
+    )
+    references = experiment._assemble_reference_audit_actions(  # noqa: SLF001
+        reference_actions,
+        audit_by_cell={generated.regime: audit_bindings},
     )
     audited = experiment._assemble_audit_results(  # noqa: SLF001
         sampled=(sampled,),
         checked=(sampled_checked,),
-        references=(references,),
+        references=references,
         audit_by_cell={generated.regime: audit_bindings},
     )[0]
     result = experiment._assemble_timed_cell(  # noqa: SLF001
@@ -902,18 +907,21 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         SimpleNamespace(regime=regime)
         for regime in audit_schedule
     )
-    references = tuple(
+    reference_actions = tuple(
         SimpleNamespace(
             regime=regime,
+            score=SimpleNamespace(action_id=action_id),
             elapsed_seconds=0.1,
         )
         for regime in audit_schedule
+        for bound_regime, action_id in audit_action_ids
+        if bound_regime is regime
     )
     audited = tuple(
         SimpleNamespace(regime=regime) for regime in TemporalRegime
     )
     phase_results = iter(
-        (generated, checked, sampled, sampled_checked, references)
+        (generated, checked, sampled, sampled_checked, reference_actions)
     )
     operations = []
     phase_regimes = []
@@ -923,7 +931,7 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         if operation.__name__ in {
             "_sample_audit_generator_worker",
             "_sample_audit_checker_worker",
-            "_reference_audit_cell_worker",
+            "_reference_audit_action_worker",
         }:
             phase_regimes.append(
                 tuple(task[0].stream[0].regime for task in tasks)
@@ -971,9 +979,13 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         ("_check_cell_worker", 6, 8),
         ("_sample_audit_generator_worker", 6, 8),
         ("_sample_audit_checker_worker", 6, 8),
-        ("_reference_audit_cell_worker", 6, 8),
+        ("_reference_audit_action_worker", 12, 6),
     ]
-    assert phase_regimes == [audit_schedule] * 3
+    assert phase_regimes == [
+        audit_schedule,
+        audit_schedule,
+        tuple(regime for regime in audit_schedule for _offset in range(2)),
+    ]
     assert tuple(item.regime for item in result.cells) == tuple(TemporalRegime)
     assert result.generator_wall_seconds == 2.0
     assert result.checker_wall_seconds == 3.0
@@ -1043,6 +1055,53 @@ def test_distributed_audit_assembly_rejects_incomplete_reference_actions(
             references=tuple(references),
             audit_by_cell=audit_by_cell,
         )
+
+
+@pytest.mark.parametrize("failure", [None, "missing", "duplicate"])
+def test_reference_action_assembly_reconciles_frozen_regime_batches(
+    failure: str | None,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    regime = TemporalRegime.NO_SIGNAL
+    action_ids = ("m7-standard:first", "m7-standard:second")
+    audit_by_cell = {
+        regime: tuple(
+            SimpleNamespace(catalog_action_id=action_id)
+            for action_id in action_ids
+        )
+    }
+    first = SimpleNamespace(
+        regime=regime,
+        score=SimpleNamespace(action_id=action_ids[0]),
+        elapsed_seconds=0.2,
+    )
+    second = SimpleNamespace(
+        regime=regime,
+        score=SimpleNamespace(action_id=action_ids[1]),
+        elapsed_seconds=0.3,
+    )
+    results = [second, first]
+    if failure == "missing":
+        results.pop()
+    elif failure == "duplicate":
+        results[-1] = second
+
+    if failure is not None:
+        with pytest.raises(ValueError, match="reference actions"):
+            experiment._assemble_reference_audit_actions(  # noqa: SLF001
+                tuple(results),
+                audit_by_cell=audit_by_cell,
+            )
+        return
+
+    (assembled,) = experiment._assemble_reference_audit_actions(  # noqa: SLF001
+        tuple(results),
+        audit_by_cell=audit_by_cell,
+    )
+    assert assembled.regime is regime
+    assert tuple(item.action_id for item in assembled.scores) == action_ids
+    assert assembled.elapsed_seconds == 0.5
 
 
 def test_certificate_result_rejects_missing_registered_regime() -> None:
