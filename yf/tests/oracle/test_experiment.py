@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +9,14 @@ import pytest
 from pydantic import ValidationError
 
 from yieldforge.temporal_benchmark.contracts import TemporalRegime
+
+
+def _phase_test_operation(mode: str, value: int):  # type: ignore[no-untyped-def]
+    if mode == "fail":
+        raise RuntimeError("forced phase failure")
+    if mode == "sleep":
+        time.sleep(value)
+    return value, os.getpid()
 
 
 def _bindings():  # type: ignore[no-untyped-def]
@@ -526,51 +536,48 @@ def test_distributed_phase_reassembly_is_regime_ordered_and_complete() -> None:
         experiment._order_worker_results((*results[:-1], results[0]))  # noqa: SLF001
 
 
-def test_distributed_phase_uses_a_fresh_bounded_executor_each_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_distributed_phase_preserves_input_order_across_processes() -> None:
     from yieldforge.oracle import experiment
 
-    constructed = []
-
-    class ImmediateFuture:
-        def __init__(self, value):  # type: ignore[no-untyped-def]
-            self.value = value
-
-        def result(self):  # type: ignore[no-untyped-def]
-            return self.value
-
-    class RecordingExecutor:
-        def __init__(self, *, max_workers):  # type: ignore[no-untyped-def]
-            self.max_workers = max_workers
-            constructed.append(self)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):  # type: ignore[no-untyped-def]
-            return False
-
-        def submit(self, operation, *args):  # type: ignore[no-untyped-def]
-            return ImmediateFuture(operation(*args))
-
-    monkeypatch.setattr(experiment, "ProcessPoolExecutor", RecordingExecutor)
-
-    first = experiment._run_process_phase(  # noqa: SLF001
-        str,
-        ((1,), (2,)),
+    results = experiment._run_process_phase(  # noqa: SLF001
+        _phase_test_operation,
+        (("return", 1), ("return", 2)),
         process_count=6,
-    )
-    second = experiment._run_process_phase(  # noqa: SLF001
-        str,
-        ((3,),),
-        process_count=6,
+        timeout_seconds=5.0,
     )
 
-    assert first == ("1", "2")
-    assert second == ("3",)
-    assert len(constructed) == 2
-    assert [item.max_workers for item in constructed] == [2, 1]
+    assert tuple(value for value, _pid in results) == (1, 2)
+    assert all(pid != os.getpid() for _value, pid in results)
+
+
+def test_distributed_phase_terminates_sibling_after_worker_failure() -> None:
+    from yieldforge.oracle import experiment
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="forced phase failure"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_test_operation,
+            (("fail", 0), ("sleep", 5)),
+            process_count=2,
+            timeout_seconds=10.0,
+        )
+
+    assert time.monotonic() - started < 2.0
+
+
+def test_distributed_phase_terminates_workers_at_deadline() -> None:
+    from yieldforge.oracle import experiment
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="exceeded"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_test_operation,
+            (("sleep", 5),),
+            process_count=1,
+            timeout_seconds=0.1,
+        )
+
+    assert time.monotonic() - started < 2.0
 
 
 def test_distributed_generator_worker_round_trips_one_real_cell() -> None:

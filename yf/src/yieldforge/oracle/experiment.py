@@ -5,15 +5,17 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import multiprocessing
 import os
 import secrets
 import stat
+import traceback
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
+from multiprocessing.connection import Connection, wait
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Literal, Self
 
 from pydantic import ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
@@ -57,6 +59,7 @@ _HELD_OUT_ACTION_COUNT = 550_542
 _HELD_OUT_MEAN_FUTURE_EVENT_COUNT = 11.5
 _PROJECTION_SAFETY_FACTOR = 2.0
 _WORKER_COUNT = 8
+_DISTRIBUTED_PHASE_TIMEOUT_SECONDS = 1_800.0
 _WITNESS_ORDER: tuple[M8EventClassification, ...] = (
     "exact_transition",
     "no_fit",
@@ -770,16 +773,124 @@ def _run_process_phase(
     tasks: tuple[tuple[object, ...], ...],
     *,
     process_count: int,
+    timeout_seconds: float = _DISTRIBUTED_PHASE_TIMEOUT_SECONDS,
 ):
-    """Run one bounded fail-closed process phase in input order."""
+    """Run one bounded fail-closed process phase and terminate owned workers."""
 
     if not tasks:
         raise ValueError("M8 distributed phase requires at least one task")
     if not 1 <= process_count <= _WORKER_COUNT:
         raise ValueError("M8 distributed process count is outside the frozen boundary")
-    with ProcessPoolExecutor(max_workers=min(process_count, len(tasks))) as executor:
-        futures = tuple(executor.submit(operation, *task) for task in tasks)
-        return tuple(future.result() for future in futures)
+    if timeout_seconds <= 0:
+        raise ValueError("M8 distributed phase timeout must be positive")
+
+    context = multiprocessing.get_context("spawn")
+    results = [None] * len(tasks)
+    pending = iter(enumerate(tasks))
+    active: dict[Connection, tuple[int, multiprocessing.Process]] = {}
+    owned_processes: list[multiprocessing.Process] = []
+
+    def start_next() -> bool:
+        try:
+            index, task = next(pending)
+        except StopIteration:
+            return False
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_process_phase_entry,
+            args=(operation, task, sender),
+        )
+        process.start()
+        sender.close()
+        active[receiver] = (index, process)
+        owned_processes.append(process)
+        return True
+
+    for _ in range(min(process_count, len(tasks))):
+        start_next()
+    deadline = monotonic() + timeout_seconds
+    completed = 0
+    try:
+        while completed < len(tasks):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"M8 distributed phase exceeded {timeout_seconds} seconds"
+                )
+            ready = wait(tuple(active), timeout=min(1.0, remaining))
+            if not ready:
+                continue
+            for receiver in ready:
+                index, process = active.pop(receiver)
+                try:
+                    message = receiver.recv()
+                except EOFError as error:
+                    raise RuntimeError(
+                        "M8 distributed worker exited without a result "
+                        f"(exit_code={process.exitcode})"
+                    ) from error
+                finally:
+                    receiver.close()
+                process.join(timeout=1.0)
+                status, payload, details = message
+                if status != "ok":
+                    raise RuntimeError(
+                        f"M8 distributed worker failed: {payload}\n{details}"
+                    )
+                results[index] = payload
+                completed += 1
+                start_next()
+    except BaseException:
+        _terminate_owned_processes(owned_processes)
+        raise
+    finally:
+        for receiver in tuple(active):
+            receiver.close()
+    _terminate_owned_processes(owned_processes)
+    if any(item is None for item in results):
+        raise RuntimeError("M8 distributed phase left a task without a result")
+    return tuple(results)
+
+
+def _process_phase_entry(
+    operation,  # type: ignore[no-untyped-def]
+    task: tuple[object, ...],
+    sender: Connection,
+) -> None:
+    """Execute one task and return only serialized evidence or serialized failure."""
+
+    try:
+        sender.send(("ok", operation(*task), ""))
+    except BaseException as error:
+        try:
+            sender.send(
+                (
+                    "error",
+                    f"{type(error).__name__}: {error}",
+                    traceback.format_exc(),
+                )
+            )
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        sender.close()
+
+
+def _terminate_owned_processes(
+    processes: list[multiprocessing.Process],
+) -> None:
+    """Join completed workers and terminate or kill every remaining owned worker."""
+
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    for process in processes:
+        process.join(timeout=1.0)
+    for process in processes:
+        if process.is_alive():
+            process.kill()
+    for process in processes:
+        process.join(timeout=1.0)
 
 
 def _generate_cell_worker(

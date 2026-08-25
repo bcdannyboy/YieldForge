@@ -33,7 +33,8 @@ distributed pipeline wall time and does not divide by an unmeasured worker count
 Every cell must still contain the exact sorted current action vector and the exact sorted proof
 action vector. Reassembly rejects missing cells, missing or duplicate actions, mismatched proof
 runtime identities, invalid proofs, or sampled-reference mismatches. A worker exception cancels the
-gate and publishes no artifact.
+gate and publishes no artifact. Each distributed phase has a frozen 30-minute deadline; failure,
+timeout, or interruption terminates every process owned by that phase before control returns.
 
 ## Isolation and claim boundary
 
@@ -41,4 +42,3 @@ Generator and checker pools never share mutable runtimes or private proof capabi
 reconstructs its runtime from frozen calibration inputs. Evaluation partitions remain unopened. A
 passing distributed calibration gate is software evidence about exactness and runtime feasibility;
 it is not an M8 savings result, physical validation, or commercial evidence.
-
