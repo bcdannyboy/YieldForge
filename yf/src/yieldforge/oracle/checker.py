@@ -29,6 +29,10 @@ from yieldforge.oracle.certificates import (
     build_validated_m8_common_transition_in_context,
     certify_event_passivity,
 )
+from yieldforge.oracle.compiled import (
+    _prepare_translation_layout_batch,
+    _PreparedTranslationLayoutBatch,
+)
 from yieldforge.oracle.prepared import prepared_context_fingerprint
 from yieldforge.oracle.proofs import M8ActionProof, M8EventWitness, m8_suffix_sha256
 
@@ -80,6 +84,7 @@ class _M8PreparedCheckerContext:
     _visible: tuple[TemporalInstanceBinding, ...]
     _stop_event_position: int
     _suffix_sha256: str
+    _prepared_layouts: _PreparedTranslationLayoutBatch
 
     def require_active(self) -> None:
         registered = _PREPARED_CHECKER_REGISTRY.get(id(self))
@@ -110,7 +115,7 @@ _PREPARED_CHECKER_REGISTRY: dict[
 
 def _checker_context_fingerprint(context: _M8PreparedCheckerContext) -> str:
     return prepared_context_fingerprint(
-        kind="checker",
+        kind=f"checker:{id(context._prepared_layouts)}",  # noqa: SLF001
         context_id=id(context),
         authority=context._authority,
         request=context._request,
@@ -209,49 +214,55 @@ def _prepare_m8_checker_context(
         if visible != expected:
             raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
         stop = catalog.event_position + 1 + len(visible)
-        context = _M8PreparedCheckerContext(
-            _authority=authority,
-            _request=captured,
-            _catalog=catalog,
-            _fallback_step=fallback_step,
-            _visible=visible,
-            _stop_event_position=stop,
-            _suffix_sha256=m8_suffix_sha256(
-                semantic_runtime_sha256=authority.semantic_sha256,
-                start_event_position=catalog.event_position,
-                stop_event_position=stop,
-                bindings=visible,
-            ),
-        )
-        key = id(context)
+        event_positions = tuple(range(catalog.event_position + 1, stop))
+        with _prepare_translation_layout_batch(
+            authority.runtime,
+            event_positions=event_positions,
+        ) as prepared_layouts:
+            context = _M8PreparedCheckerContext(
+                _authority=authority,
+                _request=captured,
+                _catalog=catalog,
+                _fallback_step=fallback_step,
+                _visible=visible,
+                _stop_event_position=stop,
+                _suffix_sha256=m8_suffix_sha256(
+                    semantic_runtime_sha256=authority.semantic_sha256,
+                    start_event_position=catalog.event_position,
+                    stop_event_position=stop,
+                    bindings=visible,
+                ),
+                _prepared_layouts=prepared_layouts,
+            )
+            key = id(context)
 
-        def discard(
-            reference: weakref.ReferenceType[_M8PreparedCheckerContext],
-        ) -> None:
-            registered = _PREPARED_CHECKER_REGISTRY.get(key)
-            if registered is not None and registered[0] is reference:
-                _PREPARED_CHECKER_REGISTRY.pop(key, None)
+            def discard(
+                reference: weakref.ReferenceType[_M8PreparedCheckerContext],
+            ) -> None:
+                registered = _PREPARED_CHECKER_REGISTRY.get(key)
+                if registered is not None and registered[0] is reference:
+                    _PREPARED_CHECKER_REGISTRY.pop(key, None)
 
-        reference = weakref.ref(context, discard)
-        _PREPARED_CHECKER_REGISTRY[key] = (
-            reference,
-            os.getpid(),
-            id(authority),
-            _checker_context_fingerprint(context),
-        )
-        try:
-            yield context
-        finally:
-            integrity_error = None
+            reference = weakref.ref(context, discard)
+            _PREPARED_CHECKER_REGISTRY[key] = (
+                reference,
+                os.getpid(),
+                id(authority),
+                _checker_context_fingerprint(context),
+            )
             try:
-                context.require_active()
-            except ValueError as error:
-                integrity_error = error
-            registered = _PREPARED_CHECKER_REGISTRY.get(key)
-            if registered is not None and registered[0]() is context:
-                _PREPARED_CHECKER_REGISTRY.pop(key, None)
-            if integrity_error is not None:
-                raise integrity_error
+                yield context
+            finally:
+                integrity_error = None
+                try:
+                    context.require_active()
+                except ValueError as error:
+                    integrity_error = error
+                registered = _PREPARED_CHECKER_REGISTRY.get(key)
+                if registered is not None and registered[0]() is context:
+                    _PREPARED_CHECKER_REGISTRY.pop(key, None)
+                if integrity_error is not None:
+                    raise integrity_error
 
 
 def _initialize_branch(
@@ -338,6 +349,7 @@ def _check_event(
             runtime,
             common=common,
             branch_cursor=branch.cursor,
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
         )
         if passivity.passive:
             if passivity.witness is None:

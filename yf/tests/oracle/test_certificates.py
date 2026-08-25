@@ -34,6 +34,7 @@ from yieldforge.baseline.replay import (
 )
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle import certificates as certificate_module
+from yieldforge.oracle import compiled as compiled_module
 from yieldforge.oracle.certificates import (
     BranchInventoryDelta,
     ValidatedCommonTransition,
@@ -239,6 +240,46 @@ def test_material_rejection_certifies_added_remnant_without_search() -> None:
     assert result.witness is not None
     assert result.witness.classification == "no_fit"
     assert result.exact_search_count == 0
+
+
+def test_private_prepared_layout_batch_constructs_each_layout_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="prepared-layout-batch",
+    )
+    original = compiled_module.prepare_layout_footprint
+    constructed: list[str] = []
+
+    def counted(problem, candidate, config):  # type: ignore[no-untyped-def]
+        constructed.append(candidate.candidate_id)
+        return original(problem, candidate, config)
+
+    monkeypatch.setattr(compiled_module, "prepare_layout_footprint", counted)
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(0,),
+    ) as prepared:
+        first = compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+        second = compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
+            runtime,
+            prepared=prepared,
+            event_position=0,
+            item=item,
+        )
+
+    problem_id = runtime.replay_input.instances[0].problem_id
+    expected = runtime.runtime_candidates[problem_id].evidence.candidate_ids
+    assert tuple(constructed) == expected
+    assert first == second
 
 
 def test_cheap_rejection_fails_closed_on_tampered_prepared_layout_identity() -> None:

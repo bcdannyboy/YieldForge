@@ -552,7 +552,7 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
     )
 
     def progress(message: str) -> None:
-        print(f"M8 certificate proof: {message}")
+        print(f"M8 certificate proof: {message}", flush=True)
 
     result = execute_sparse_prefix_proof(
         index=index,

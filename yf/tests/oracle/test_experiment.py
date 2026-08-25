@@ -361,7 +361,7 @@ def test_certificate_gate_runtime_does_not_install_an_unmeasured_executor() -> N
     assert measured.standard_profile_executor is None
 
 
-def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
+def test_timed_cell_reuses_preflight_full_batch_and_checks_it_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -385,14 +385,13 @@ def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
         )
     )
     counts = {"full": 0, "sample": 0, "reference": 0, "checker": []}
-    original_full = experiment.score_sparse_event
     original_sample = experiment.score_certificate_actions
     original_checker = experiment.check_action_proofs
     original_reference = experiment.score_reference_actions
 
     def counted_full(request):  # type: ignore[no-untyped-def]
         counts["full"] += 1
-        return original_full(request)
+        return preflight
 
     def counted_sample(request, *, action_ids):  # type: ignore[no-untyped-def]
         counts["sample"] += 1
@@ -413,23 +412,68 @@ def test_timed_cell_uses_one_full_and_one_matched_batch_checker(
     monkeypatch.setattr(experiment, "score_reference_actions", counted_reference)
     monkeypatch.setattr(experiment, "_request_for_cell", lambda *args, **kwargs: request)
     cell = SimpleNamespace(stream=runtime.replay_input.instances)
+    progress: list[str] = []
 
     result = experiment._execute_timed_cell(  # noqa: SLF001
         cell,
         rules=None,
         jagua_executable=tmp_path / "unused",
         audit_bindings=audit,
-        progress=None,
+        full_sparse=preflight,
+        full_certificate_seconds=0.125,
+        progress=progress.append,
     )
 
     assert counts == {
-        "full": 1,
+        "full": 0,
         "sample": 1,
         "reference": 1,
         "checker": [result.current_action_count, len(audit)],
     }
+    assert result.certificate_elapsed_seconds == 0.125
     assert result.sampled_certificate_elapsed_seconds > 0
     assert result.sampled_checker_elapsed_seconds > 0
+    assert [item.split()[0] for item in progress] == [
+        "phase_start",
+        "phase_complete",
+        "phase_start",
+        "phase_complete",
+        "phase_start",
+        "phase_complete",
+        "phase_start",
+        "phase_complete",
+    ]
+
+
+def test_audit_freeze_is_independent_of_preflight_elapsed_time() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    sparse = experiment.score_sparse_event(request)
+    cell = SimpleNamespace(stream=runtime.replay_input.instances)
+    fast = experiment._SparsePreflightResult(  # noqa: SLF001
+        cell=cell,
+        sparse=sparse,
+        elapsed_seconds=0.001,
+    )
+    slow = experiment._SparsePreflightResult(  # noqa: SLF001
+        cell=cell,
+        sparse=sparse,
+        elapsed_seconds=100_000.0,
+    )
+
+    assert experiment._freeze_preflight_audit((fast,)) == (  # noqa: SLF001
+        experiment._freeze_preflight_audit((slow,))  # noqa: SLF001
+    )
 
 
 def test_certificate_result_rejects_missing_registered_regime() -> None:

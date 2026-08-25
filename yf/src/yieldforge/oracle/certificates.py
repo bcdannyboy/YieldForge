@@ -32,6 +32,8 @@ from yieldforge.baseline.replay import (
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle.compiled import (
     CompiledTranslationRejection,
+    _compile_prepared_translation_rejections,
+    _PreparedTranslationLayoutBatch,
     compile_translation_rejections,
 )
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
@@ -887,11 +889,21 @@ def _influence(
     branch_action_id: str,
     state_before_sha256: str,
     state_after_sha256: str,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None,
 ) -> tuple[M8InfluenceWitness | None, int]:
-    rejections = compile_translation_rejections(
-        runtime,
-        event_position=event_position,
-        item=item,
+    rejections = (
+        compile_translation_rejections(
+            runtime,
+            event_position=event_position,
+            item=item,
+        )
+        if prepared_layouts is None
+        else _compile_prepared_translation_rejections(
+            runtime,
+            prepared=prepared_layouts,
+            event_position=event_position,
+            item=item,
+        )
     )
     if rejections and all(entry.certificate.impossible for entry in rejections):
         digest = _evidence_sha256(
@@ -1009,6 +1021,7 @@ def certify_event_passivity(
     *,
     common: ValidatedCommonTransition,
     branch_cursor: M7ReplayCursor,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
 ) -> EventPassivityResult:
     """Prove one branch event selects the exact common M7 action, or fail closed."""
 
@@ -1056,6 +1069,7 @@ def certify_event_passivity(
                         branch_action_id=branch_action_id,
                         state_before_sha256=state_before_sha256,
                         state_after_sha256=state_after_sha256,
+                        prepared_layouts=prepared_layouts,
                     )
                     exact_search_count += searches
                     if influence is None:

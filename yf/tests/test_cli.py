@@ -275,12 +275,23 @@ def test_m8_command_builds_only_the_calibration_problem_view(
         technical_decision="pass_certificate_exact",
     )
     monkeypatch.setattr(cli, "build_registered_calibration_problem_view", calibration_view)
-    monkeypatch.setattr(
-        cli,
-        "execute_sparse_prefix_proof",
-        lambda **kwargs: result if kwargs["index"] is view else pytest.fail("wrong view"),
-    )
+    def execute(**kwargs):  # type: ignore[no-untyped-def]
+        if kwargs["index"] is not view:
+            pytest.fail("wrong view")
+        kwargs["progress"]("phase_start regime=no_signal phase=preflight_generator")
+        return result
+
+    monkeypatch.setattr(cli, "execute_sparse_prefix_proof", execute)
     monkeypatch.setattr(cli, "publish_sparse_proof", lambda *args: tmp_path / "proof.json")
+    progress_flushes: list[bool | None] = []
+    original_print = print
+
+    def recording_print(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and str(args[0]).startswith("M8 certificate proof: phase_"):
+            progress_flushes.append(kwargs.get("flush"))
+        original_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", recording_print)
     frozen_path = tmp_path / "freeze.json"
     frozen_path.write_text("{}")
 
@@ -297,6 +308,7 @@ def test_m8_command_builds_only_the_calibration_problem_view(
         "full_problem_index_id": frozen.problem_index_id,
         "full_problem_index_sha256": frozen.problem_index_sha256,
     }
+    assert progress_flushes == [True]
     assert "Published M8 certificate proof" in capsys.readouterr().out
 
 
