@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -79,7 +81,25 @@ class M8PreparedCheckerContext:
     _suffix_sha256: str
 
     def require_active(self) -> None:
+        registered = _PREPARED_CHECKER_REGISTRY.get(id(self))
+        if (
+            type(self) is not M8PreparedCheckerContext
+            or registered is None
+            or registered[0]() is not self
+            or registered[1] != os.getpid()
+            or registered[2] != id(self._authority)
+        ):
+            raise ValueError("M8 prepared checker capability is invalid or inactive")
         self._authority.require_active(self._request.runtime)
+
+    def __reduce__(self) -> object:
+        raise TypeError("M8 prepared checker capabilities cannot be serialized")
+
+
+_PREPARED_CHECKER_REGISTRY: dict[
+    int,
+    tuple[weakref.ReferenceType[M8PreparedCheckerContext], int, int],
+] = {}
 
 
 @dataclass
@@ -169,7 +189,7 @@ def prepare_m8_checker_context(
         if visible != expected:
             raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
         stop = catalog.event_position + 1 + len(visible)
-        yield M8PreparedCheckerContext(
+        context = M8PreparedCheckerContext(
             _authority=authority,
             _request=captured,
             _catalog=catalog,
@@ -183,6 +203,27 @@ def prepare_m8_checker_context(
                 bindings=visible,
             ),
         )
+        key = id(context)
+
+        def discard(
+            reference: weakref.ReferenceType[M8PreparedCheckerContext],
+        ) -> None:
+            registered = _PREPARED_CHECKER_REGISTRY.get(key)
+            if registered is not None and registered[0] is reference:
+                _PREPARED_CHECKER_REGISTRY.pop(key, None)
+
+        reference = weakref.ref(context, discard)
+        _PREPARED_CHECKER_REGISTRY[key] = (
+            reference,
+            os.getpid(),
+            id(authority),
+        )
+        try:
+            yield context
+        finally:
+            registered = _PREPARED_CHECKER_REGISTRY.get(key)
+            if registered is not None and registered[0]() is context:
+                _PREPARED_CHECKER_REGISTRY.pop(key, None)
 
 
 def _initialize_branch(
@@ -322,6 +363,8 @@ def check_prepared_action_proofs(
 ) -> tuple[M8ProofCheckResult, ...]:
     """Check a proof batch event-major against one independent common path."""
 
+    if type(context) is not M8PreparedCheckerContext:
+        raise ValueError("M8 prepared checker capability has the wrong type")
     context.require_active()
     branches: list[_CheckedBranch | None] = []
     results: list[M8ProofCheckResult | None] = []

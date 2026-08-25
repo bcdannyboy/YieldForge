@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -76,7 +78,25 @@ class M8PreparedGeneratorContext:
     _suffix_sha256: str
 
     def require_active(self) -> None:
+        registered = _PREPARED_GENERATOR_REGISTRY.get(id(self))
+        if (
+            type(self) is not M8PreparedGeneratorContext
+            or registered is None
+            or registered[0]() is not self
+            or registered[1] != os.getpid()
+            or registered[2] != id(self._authority)
+        ):
+            raise ValueError("M8 prepared generator capability is invalid or inactive")
         self._authority.require_active(self._request.runtime)
+
+    def __reduce__(self) -> object:
+        raise TypeError("M8 prepared generator capabilities cannot be serialized")
+
+
+_PREPARED_GENERATOR_REGISTRY: dict[
+    int,
+    tuple[weakref.ReferenceType[M8PreparedGeneratorContext], int, int],
+] = {}
 
 
 @dataclass
@@ -132,7 +152,7 @@ def prepare_m8_generator_context(
         if visible != expected:
             raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
         stop = catalog.event_position + 1 + len(visible)
-        yield M8PreparedGeneratorContext(
+        context = M8PreparedGeneratorContext(
             _authority=authority,
             _request=captured,
             _catalog=catalog,
@@ -146,6 +166,27 @@ def prepare_m8_generator_context(
                 bindings=visible,
             ),
         )
+        key = id(context)
+
+        def discard(
+            reference: weakref.ReferenceType[M8PreparedGeneratorContext],
+        ) -> None:
+            registered = _PREPARED_GENERATOR_REGISTRY.get(key)
+            if registered is not None and registered[0] is reference:
+                _PREPARED_GENERATOR_REGISTRY.pop(key, None)
+
+        reference = weakref.ref(context, discard)
+        _PREPARED_GENERATOR_REGISTRY[key] = (
+            reference,
+            os.getpid(),
+            id(authority),
+        )
+        try:
+            yield context
+        finally:
+            registered = _PREPARED_GENERATOR_REGISTRY.get(key)
+            if registered is not None and registered[0]() is context:
+                _PREPARED_GENERATOR_REGISTRY.pop(key, None)
 
 
 def _initial_branch(
@@ -254,6 +295,8 @@ def score_prepared_certificate_actions(
 ) -> tuple[M8CertificateActionResult, ...]:
     """Score a prepared action subset event-major with one common capability at a time."""
 
+    if type(context) is not M8PreparedGeneratorContext:
+        raise ValueError("M8 prepared generator capability has the wrong type")
     context.require_active()
     requested = (
         tuple(item.action_id for item in context._catalog.actions)  # noqa: SLF001

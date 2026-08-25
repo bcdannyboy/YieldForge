@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
+
 import pytest
 
 from tests.oracle.fixtures import two_problem_runtime
@@ -226,6 +229,38 @@ def test_generator_and_checker_are_separate_scoped_authorities() -> None:
         generator_authority.require_active()
     with pytest.raises(ValueError, match="no longer active"):
         generator_authority.require_active()
+
+
+def test_prepared_apis_reject_crossed_reconstructed_and_copied_contexts() -> None:
+    from yieldforge.oracle.checker import (
+        check_prepared_action_proofs,
+        prepare_m8_checker_context,
+    )
+    from yieldforge.oracle.sparse import (
+        prepare_m8_generator_context,
+        score_prepared_certificate_actions,
+    )
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+    with prepare_m8_generator_context(request) as generator:
+        with prepare_m8_checker_context(request) as checker:
+            with pytest.raises(ValueError, match="prepared checker capability"):
+                check_prepared_action_proofs(generator, proofs)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="prepared generator capability"):
+                score_prepared_certificate_actions(checker)  # type: ignore[arg-type]
+
+            reconstructed_generator = replace(generator)
+            reconstructed_checker = replace(checker)
+            with pytest.raises(ValueError, match="prepared generator capability"):
+                score_prepared_certificate_actions(reconstructed_generator)
+            with pytest.raises(ValueError, match="prepared checker capability"):
+                check_prepared_action_proofs(reconstructed_checker, proofs)
+
+            with pytest.raises(TypeError, match="cannot be serialized"):
+                copy.copy(generator)
+            with pytest.raises(TypeError, match="cannot be serialized"):
+                copy.copy(checker)
 
 
 def test_generator_authority_cleans_up_when_scoring_raises() -> None:
