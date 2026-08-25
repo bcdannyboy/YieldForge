@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import gc
+import os
 import pickle
 import subprocess
 import sys
@@ -160,6 +162,32 @@ def _strict_primary_rules(runtime):  # type: ignore[no-untyped-def]
         }
     )
     return runtime.rules.model_copy(update={"primary": primary})
+
+
+def _write_collision_jagua(path, *, collision: bool) -> None:  # type: ignore[no-untyped-def]
+    collision_literal = repr(collision)
+    path.write_text(
+        "#!/bin/sh\n"
+        "python3 -c 'import json,sys; request=json.load(sys.stdin); "
+        'print(json.dumps({"schema_version":"yieldforge.m7-jagua-search-response.v1",'
+        '"backend":"jagua-rs","backend_version":"0.7.0",'
+        '"coordinate_precision":"f32","build_microseconds":1,'
+        '"generation_microseconds":2,"query_microseconds":3,'
+        '"searches":[{"layout_id":layout["layout_id"],'
+        '"generated_candidate_count":1,"duplicate_candidate_count":0,'
+        '"budget_truncated":False,"translations":[[0.0,0.0]],'
+        '"collisions":['
+        + collision_literal
+        + ']} for layout in request["layouts"]]}))\'\n'
+    )
+    path.chmod(0o700)
+
+
+def _private_jagua_path(common):  # type: ignore[no-untyped-def]
+    registered = certificate_module._VALIDATED_COMMON_REGISTRY[id(common)]  # noqa: SLF001
+    path = registered[5].runtime.jagua_executable
+    assert path is not None
+    return path
 
 
 @pytest.mark.parametrize(
@@ -819,8 +847,7 @@ def test_common_transition_fact_rejects_outcome_flag_runtime_drift() -> None:
 
 def test_common_transition_fact_binds_jagua_executable_content(tmp_path) -> None:  # type: ignore[no-untyped-def]
     executable = tmp_path / "fake-jagua"
-    executable.write_text("#!/bin/sh\nexit 0\n")
-    executable.chmod(0o700)
+    _write_collision_jagua(executable, collision=False)
     runtime = two_problem_runtime(
         first_width=4.0,
         second_width=4.0,
@@ -843,6 +870,134 @@ def test_common_transition_fact_binds_jagua_executable_content(tmp_path) -> None
             common=fact,
             branch_cursor=_branch_cursor(cursor, added=(item,)),
         )
+
+
+@pytest.mark.parametrize("tamper", ["replace_bytes", "delete", "symlink"])
+def test_certificate_revalidates_private_jagua_executable(
+    tmp_path,
+    tamper: str,
+) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "source-jagua"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+    )
+    cursor, common = _common_fact(runtime)
+    private = _private_jagua_path(common)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token=f"private-jagua-{tamper}",
+    )
+    if tamper == "replace_bytes":
+        private.chmod(0o700)
+        private.write_text("#!/bin/sh\nexit 1\n")
+        private.chmod(0o500)
+    elif tamper == "delete":
+        private.unlink()
+    else:
+        private.unlink()
+        private.symlink_to(executable)
+
+    with pytest.raises(ValueError, match="private Jagua executable"):
+        certify_event_passivity(
+            runtime,
+            common=common,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+
+
+def test_certificate_revalidates_and_cleans_fresh_jagua_lease(
+    tmp_path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "source-jagua"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+    )
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token="private-jagua-post-invocation",
+    )
+    original_influence = certificate_module._influence  # noqa: SLF001
+    lease_paths = []
+
+    def tamper_after_influence(proof_runtime, **kwargs):  # type: ignore[no-untyped-def]
+        result = original_influence(proof_runtime, **kwargs)
+        lease = proof_runtime.jagua_executable
+        assert lease is not None
+        lease_paths.append(lease)
+        lease.chmod(0o700)
+        lease.write_text("#!/bin/sh\nexit 1\n")
+        lease.chmod(0o500)
+        return result
+
+    monkeypatch.setattr(certificate_module, "_influence", tamper_after_influence)
+
+    with pytest.raises(ValueError, match="private Jagua executable"):
+        certify_event_passivity(
+            runtime,
+            common=common,
+            branch_cursor=_branch_cursor(cursor, added=(item,)),
+        )
+    assert len(lease_paths) == 1
+    assert not lease_paths[0].exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork lifecycle semantics")
+def test_forked_child_cannot_cleanup_and_replace_parent_snapshot_jagua(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "source-jagua"
+    _write_collision_jagua(executable, collision=False)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+    )
+    cursor, common = _common_fact(runtime)
+    private = _private_jagua_path(common)
+    private_directory = private.parent
+    private_inode = private.stat().st_ino
+
+    child_pid = os.fork()
+    if child_pid == 0:
+        del common
+        gc.collect()
+        if not private_directory.exists():
+            private_directory.mkdir(mode=0o700)
+            _write_collision_jagua(private, collision=True)
+        os._exit(0)
+    waited_pid, status = os.waitpid(child_pid, 0)
+    assert waited_pid == child_pid
+    assert os.waitstatus_to_exitcode(status) == 0
+
+    assert private_directory.exists()
+    assert private.stat().st_ino == private_inode
+
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="forked-jagua-replacement",
+    )
+    result = certify_event_passivity(
+        runtime,
+        common=common,
+        branch_cursor=_branch_cursor(cursor, added=(item,)),
+    )
+    assert not result.passive
 
 
 def test_semantic_runtime_requires_regular_jagua_executable(tmp_path) -> None:  # type: ignore[no-untyped-def]

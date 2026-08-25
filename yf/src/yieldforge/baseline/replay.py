@@ -5,11 +5,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+import os
+import secrets
 import stat
 import tempfile
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Executor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
@@ -653,22 +656,92 @@ class _M7SnapshotReplayRuntime(M7ReplayRuntime):
 
 
 @dataclass(frozen=True)
+class _PrivateJaguaFileIdentity:
+    path: Path
+    device: int
+    inode: int
+    mode: int
+    size_bytes: int
+    content_sha256: str
+
+
+@dataclass(frozen=True)
+class _PrivateJaguaResources:
+    directory: Path
+    directory_device: int
+    directory_inode: int
+    directory_mode: int
+    executable: _PrivateJaguaFileIdentity
+    content: bytes
+
+
+@dataclass(frozen=True)
 class M7SemanticRuntimeSnapshot:
     """Owned immutable semantic inputs plus private caches for one M8 proof worker."""
 
     runtime: M7ReplayRuntime
     semantic_sha256: str
-    _jagua_private_directory: Path | None = None
+    _owner_pid: int
+    _jagua_private: _PrivateJaguaResources | None = None
+
+    @contextmanager
+    def runtime_for_proof(self) -> Iterator[M7ReplayRuntime]:
+        """Yield a sealed runtime with a fresh content-bound Jagua executable."""
+
+        if os.getpid() != self._owner_pid:
+            raise ValueError("M7 semantic runtime snapshot belongs to another process")
+        private = self._jagua_private
+        if private is None:
+            yield self.runtime
+            return
+        _validate_private_jagua_resources(private)
+        lease = _materialize_private_jagua_file(
+            private,
+            prefix="proof",
+        )
+        proof_runtime = _M7SnapshotReplayRuntime(
+            replay_input=self.runtime.replay_input,
+            runtime_candidates=self.runtime.runtime_candidates,
+            rules=self.runtime.rules,
+            standard_profile_cache=self.runtime.standard_profile_cache,
+            fit_search_cache=self.runtime.fit_search_cache,
+            shared_fit_search_cache=self.runtime.shared_fit_search_cache,
+            prepared_layout_cache=self.runtime.prepared_layout_cache,
+            jagua_executable=lease.path,
+            jagua_differential_audit=self.runtime.jagua_differential_audit,
+        )
+        proof_runtime.seal()
+        try:
+            yield proof_runtime
+        finally:
+            try:
+                _validate_private_jagua_resources(private)
+                _validate_private_jagua_file(lease, expected_content=private.content)
+            finally:
+                _unlink_owned_private_file(lease)
 
     def close(self) -> None:
         """Release the optional private Jagua executable copy."""
 
-        directory = self._jagua_private_directory
-        if directory is None or not directory.exists():
+        if os.getpid() != self._owner_pid:
             return
-        for child in directory.iterdir():
-            child.unlink()
-        directory.rmdir()
+        private = self._jagua_private
+        if private is None:
+            return
+        _unlink_owned_private_file(private.executable)
+        try:
+            directory = os.lstat(private.directory)
+        except OSError:
+            return
+        if (
+            stat.S_ISDIR(directory.st_mode)
+            and directory.st_dev == private.directory_device
+            and directory.st_ino == private.directory_inode
+        ):
+            try:
+                private.directory.rmdir()
+            except OSError:
+                return
 
     def __reduce__(self) -> object:
         raise TypeError("M7 semantic runtime snapshots cannot be serialized")
@@ -1675,26 +1748,223 @@ def m7_semantic_runtime_sha256(runtime: M7ReplayRuntime) -> str:
     return f"sha256:{semantic_sha256(_semantic_runtime_payload(runtime))}"
 
 
-def _private_jagua_executable(
-    capture: _JaguaExecutableCapture | None,
-) -> tuple[Path | None, Path | None]:
-    if capture is None:
-        return None, None
-    directory = Path(tempfile.mkdtemp(prefix="yieldforge-m8-jagua-"))
-    target = directory / f"jagua-{capture.payload['content_sha256'][7:23]}"
+def _private_jagua_content_sha256(content: bytes) -> str:
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _validate_private_jagua_directory(private: _PrivateJaguaResources) -> None:
     try:
-        target.write_bytes(capture.content)
-        target.chmod(0o500)
-        if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(
-            capture.content
-        ).digest():
-            raise ValueError("M7 private Jagua executable copy differs from captured content")
+        current = os.lstat(private.directory)
+    except OSError as error:
+        raise ValueError("M7 private Jagua executable directory is unavailable") from error
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != private.directory_device
+        or current.st_ino != private.directory_inode
+        or stat.S_IMODE(current.st_mode) != private.directory_mode
+    ):
+        raise ValueError("M7 private Jagua executable directory identity differs")
+
+
+def _read_private_jagua_file(identity: _PrivateJaguaFileIdentity) -> bytes:
+    try:
+        before = os.lstat(identity.path)
+    except OSError as error:
+        raise ValueError("M7 private Jagua executable is unavailable") from error
+    expected = (
+        identity.device,
+        identity.inode,
+        identity.mode,
+        identity.size_bytes,
+    )
+    observed = (
+        before.st_dev,
+        before.st_ino,
+        stat.S_IMODE(before.st_mode),
+        before.st_size,
+    )
+    if not stat.S_ISREG(before.st_mode) or observed != expected:
+        raise ValueError("M7 private Jagua executable identity differs")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(identity.path, flags)
+    except OSError as error:
+        raise ValueError("M7 private Jagua executable cannot be opened safely") from error
+    try:
+        try:
+            opened = os.fstat(descriptor)
+            opened_identity = (
+                opened.st_dev,
+                opened.st_ino,
+                stat.S_IMODE(opened.st_mode),
+                opened.st_size,
+            )
+            if not stat.S_ISREG(opened.st_mode) or opened_identity != expected:
+                raise ValueError("M7 private Jagua executable changed while opening")
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            content = b"".join(chunks)
+        except OSError as error:
+            raise ValueError("M7 private Jagua executable changed while reading") from error
+    finally:
+        os.close(descriptor)
+    try:
+        after = os.lstat(identity.path)
+    except OSError as error:
+        raise ValueError("M7 private Jagua executable changed while reading") from error
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        stat.S_IMODE(after.st_mode),
+        after.st_size,
+    )
+    if not stat.S_ISREG(after.st_mode) or after_identity != expected:
+        raise ValueError("M7 private Jagua executable changed while reading")
+    return content
+
+
+def _validate_private_jagua_file(
+    identity: _PrivateJaguaFileIdentity,
+    *,
+    expected_content: bytes,
+) -> None:
+    content = _read_private_jagua_file(identity)
+    if (
+        content != expected_content
+        or _private_jagua_content_sha256(content) != identity.content_sha256
+    ):
+        raise ValueError("M7 private Jagua executable content differs")
+
+
+def _validate_private_jagua_resources(private: _PrivateJaguaResources) -> None:
+    _validate_private_jagua_directory(private)
+    _validate_private_jagua_file(private.executable, expected_content=private.content)
+    _validate_private_jagua_directory(private)
+
+
+def _write_private_jagua_content(descriptor: int, content: bytes) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("private Jagua executable write made no progress")
+        remaining = remaining[written:]
+
+
+def _materialize_private_jagua_file(
+    private: _PrivateJaguaResources,
+    *,
+    prefix: str,
+) -> _PrivateJaguaFileIdentity:
+    _validate_private_jagua_directory(private)
+    content_sha256 = _private_jagua_content_sha256(private.content)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    last_error: OSError | None = None
+    for _attempt in range(3):
+        target = private.directory / f"{prefix}-{secrets.token_hex(24)}"
+        try:
+            descriptor = os.open(target, flags, 0o500)
+        except OSError as error:
+            last_error = error
+            continue
+        try:
+            os.fchmod(descriptor, 0o500)
+            _write_private_jagua_content(descriptor, private.content)
+            os.fsync(descriptor)
+            created = os.fstat(descriptor)
+        except OSError:
+            os.close(descriptor)
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            raise
+        os.close(descriptor)
+        identity = _PrivateJaguaFileIdentity(
+            path=target,
+            device=created.st_dev,
+            inode=created.st_ino,
+            mode=stat.S_IMODE(created.st_mode),
+            size_bytes=created.st_size,
+            content_sha256=content_sha256,
+        )
+        try:
+            _validate_private_jagua_file(identity, expected_content=private.content)
+        except ValueError:
+            _unlink_owned_private_file(identity)
+            raise
+        return identity
+    raise ValueError("M7 private Jagua executable lease cannot be created") from last_error
+
+
+def _unlink_owned_private_file(identity: _PrivateJaguaFileIdentity) -> None:
+    try:
+        current = os.lstat(identity.path)
+    except OSError:
+        return
+    if current.st_dev != identity.device or current.st_ino != identity.inode:
+        return
+    try:
+        identity.path.unlink()
+    except OSError:
+        return
+
+
+def _private_jagua_resources(
+    capture: _JaguaExecutableCapture | None,
+) -> _PrivateJaguaResources | None:
+    if capture is None:
+        return None
+    directory = Path(tempfile.mkdtemp(prefix="yieldforge-m8-jagua-")).resolve(
+        strict=True
+    )
+    directory.chmod(0o700)
+    created_directory = os.lstat(directory)
+    placeholder = _PrivateJaguaFileIdentity(
+        path=directory / "unmaterialized",
+        device=-1,
+        inode=-1,
+        mode=0o500,
+        size_bytes=len(capture.content),
+        content_sha256=_private_jagua_content_sha256(capture.content),
+    )
+    private = _PrivateJaguaResources(
+        directory=directory,
+        directory_device=created_directory.st_dev,
+        directory_inode=created_directory.st_ino,
+        directory_mode=stat.S_IMODE(created_directory.st_mode),
+        executable=placeholder,
+        content=capture.content,
+    )
+    try:
+        executable = _materialize_private_jagua_file(private, prefix="bound")
+        private = _PrivateJaguaResources(
+            directory=directory,
+            directory_device=created_directory.st_dev,
+            directory_inode=created_directory.st_ino,
+            directory_mode=stat.S_IMODE(created_directory.st_mode),
+            executable=executable,
+            content=capture.content,
+        )
+        _validate_private_jagua_resources(private)
+        return private
     except (OSError, ValueError):
-        if target.exists():
-            target.unlink()
-        directory.rmdir()
+        _unlink_owned_private_file(private.executable)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
         raise
-    return target, directory
 
 
 def snapshot_m7_replay_runtime(
@@ -1745,10 +2015,9 @@ def snapshot_m7_replay_runtime(
             last_error = ValueError("M7 semantic runtime changed during snapshot capture")
             continue
 
-        private_executable = None
-        private_directory = None
+        private = None
         try:
-            private_executable, private_directory = _private_jagua_executable(jagua_capture)
+            private = _private_jagua_resources(jagua_capture)
             snapshot_runtime = _M7SnapshotReplayRuntime(
                 replay_input=replay_input,
                 runtime_candidates=MappingProxyType(runtime_candidates),
@@ -1757,7 +2026,7 @@ def snapshot_m7_replay_runtime(
                 fit_search_cache=fit_search_cache,
                 shared_fit_search_cache=shared_fit_search_cache,
                 prepared_layout_cache=prepared_layout_cache,
-                jagua_executable=private_executable,
+                jagua_executable=(private.executable.path if private is not None else None),
                 jagua_differential_audit=jagua_differential_audit,
             )
             snapshot_runtime.seal()
@@ -1774,14 +2043,16 @@ def snapshot_m7_replay_runtime(
             return M7SemanticRuntimeSnapshot(
                 runtime=snapshot_runtime,
                 semantic_sha256=captured_sha256,
-                _jagua_private_directory=private_directory,
+                _owner_pid=os.getpid(),
+                _jagua_private=private,
             )
         except (OSError, RuntimeError, TypeError, ValueError) as error:
-            if private_directory is not None:
+            if private is not None:
                 snapshot = M7SemanticRuntimeSnapshot(
                     runtime=comparison_runtime,
                     semantic_sha256=captured_sha256,
-                    _jagua_private_directory=private_directory,
+                    _owner_pid=os.getpid(),
+                    _jagua_private=private,
                 )
                 snapshot.close()
             last_error = error

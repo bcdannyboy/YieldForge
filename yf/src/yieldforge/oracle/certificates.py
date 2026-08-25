@@ -269,16 +269,17 @@ def build_m8_common_transition_fact(
 
     snapshot = snapshot_m7_replay_runtime(runtime)
     try:
-        fact = _derive_m8_common_transition_fact(
-            snapshot.runtime,
-            cursor=cursor,
-            semantic_runtime_sha256=snapshot.semantic_sha256,
-        )
-        _require_caller_runtime_stable(
-            runtime,
-            expected_sha256=snapshot.semantic_sha256,
-            operation="M8 common fact derivation",
-        )
+        with snapshot.runtime_for_proof() as proof_runtime:
+            fact = _derive_m8_common_transition_fact(
+                proof_runtime,
+                cursor=cursor,
+                semantic_runtime_sha256=snapshot.semantic_sha256,
+            )
+            _require_caller_runtime_stable(
+                runtime,
+                expected_sha256=snapshot.semantic_sha256,
+                operation="M8 common fact derivation",
+            )
         return fact
     finally:
         snapshot.close()
@@ -386,6 +387,8 @@ def _register_validated_common_transition(
     def discard(reference: weakref.ReferenceType[ValidatedCommonTransition]) -> None:
         registered = _VALIDATED_COMMON_REGISTRY.get(key)
         if registered is not None and registered[0] is reference:
+            if os.getpid() != registered[4]:
+                return
             _VALIDATED_COMMON_REGISTRY.pop(key, None)
             registered[5].close()
 
@@ -411,21 +414,22 @@ def build_validated_m8_common_transition(
     snapshot = snapshot_m7_replay_runtime(runtime)
     registered = False
     try:
-        fact = _derive_m8_common_transition_fact(
-            snapshot.runtime,
-            cursor=cursor,
-            semantic_runtime_sha256=snapshot.semantic_sha256,
-        )
-        _validate_portable_common_transition_fact(
-            snapshot.runtime,
-            fact,
-            semantic_runtime_sha256=snapshot.semantic_sha256,
-        )
-        _require_caller_runtime_stable(
-            runtime,
-            expected_sha256=snapshot.semantic_sha256,
-            operation="M8 common capability derivation",
-        )
+        with snapshot.runtime_for_proof() as proof_runtime:
+            fact = _derive_m8_common_transition_fact(
+                proof_runtime,
+                cursor=cursor,
+                semantic_runtime_sha256=snapshot.semantic_sha256,
+            )
+            _validate_portable_common_transition_fact(
+                proof_runtime,
+                fact,
+                semantic_runtime_sha256=snapshot.semantic_sha256,
+            )
+            _require_caller_runtime_stable(
+                runtime,
+                expected_sha256=snapshot.semantic_sha256,
+                operation="M8 common capability derivation",
+            )
         result = _register_validated_common_transition(fact, snapshot)
         registered = True
         return result
@@ -445,23 +449,24 @@ def validate_m8_common_transition_fact(
     snapshot = snapshot_m7_replay_runtime(runtime)
     registered = False
     try:
-        _validate_portable_common_transition_fact(
-            snapshot.runtime,
-            fact,
-            semantic_runtime_sha256=snapshot.semantic_sha256,
-        )
-        authoritative = _derive_m8_common_transition_fact(
-            snapshot.runtime,
-            cursor=cursor,
-            semantic_runtime_sha256=snapshot.semantic_sha256,
-        )
-        if fact != authoritative:
-            raise ValueError("M8 portable fact differs from authoritative common transition")
-        _require_caller_runtime_stable(
-            runtime,
-            expected_sha256=snapshot.semantic_sha256,
-            operation="M8 common capability validation",
-        )
+        with snapshot.runtime_for_proof() as proof_runtime:
+            _validate_portable_common_transition_fact(
+                proof_runtime,
+                fact,
+                semantic_runtime_sha256=snapshot.semantic_sha256,
+            )
+            authoritative = _derive_m8_common_transition_fact(
+                proof_runtime,
+                cursor=cursor,
+                semantic_runtime_sha256=snapshot.semantic_sha256,
+            )
+            if fact != authoritative:
+                raise ValueError("M8 portable fact differs from authoritative common transition")
+            _require_caller_runtime_stable(
+                runtime,
+                expected_sha256=snapshot.semantic_sha256,
+                operation="M8 common capability validation",
+            )
         result = _register_validated_common_transition(fact, snapshot)
         registered = True
         return result
@@ -495,6 +500,7 @@ def _require_validated_common_transition(
         or registered[2] != common.fact.content_sha256
         or registered[3] != common.fact.semantic_runtime_sha256
         or registered[4] != os.getpid()
+        or registered[5]._owner_pid != registered[4]  # noqa: SLF001
         or registered[5].semantic_sha256 != common.fact.semantic_runtime_sha256
     ):
         raise ValueError("M8 certifier requires a validated common transition capability")
@@ -962,78 +968,78 @@ def certify_event_passivity(
     """Prove one branch event selects the exact common M7 action, or fail closed."""
 
     fact, snapshot = _require_validated_common_transition(runtime, common)
-    proof_runtime = snapshot.runtime
-    try:
-        delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
-        if not delta.added and not delta.removed:
-            return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
-        binding = fact.step.action_binding
-        common_action_id = fact.step.event.action.action_id
-        branch_action_id = common_action_id
-        if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
-            return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
+    with snapshot.runtime_for_proof() as proof_runtime:
+        try:
+            delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
+            if not delta.added and not delta.removed:
+                return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
+            binding = fact.step.action_binding
+            common_action_id = fact.step.event.action.action_id
+            branch_action_id = common_action_id
+            if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
+                return EventPassivityResult(passive=False, witness=None, exact_search_count=0)
 
-        branch_after = apply_m7_frozen_action_evidence(
-            proof_runtime,
-            cursor=branch_cursor,
-            event_position=fact.event_position,
-            action=fact.step.event.action,
-        )
-        state_before_sha256 = m7_cursor_sha256(branch_cursor)
-        state_after_sha256 = m7_cursor_sha256(branch_after)
-        common_rank = fact.policy_rank
-        influences = []
-        exact_search_count = 0
-        for direction, items in (("added", delta.added), ("removed", delta.removed)):
-            for item in items:
-                influence, searches = _influence(
-                    proof_runtime,
-                    cursor_template=fact.cursor_before,
+            branch_after = apply_m7_frozen_action_evidence(
+                proof_runtime,
+                cursor=branch_cursor,
+                event_position=fact.event_position,
+                action=fact.step.event.action,
+            )
+            state_before_sha256 = m7_cursor_sha256(branch_cursor)
+            state_after_sha256 = m7_cursor_sha256(branch_after)
+            common_rank = fact.policy_rank
+            influences = []
+            exact_search_count = 0
+            for direction, items in (("added", delta.added), ("removed", delta.removed)):
+                for item in items:
+                    influence, searches = _influence(
+                        proof_runtime,
+                        cursor_template=fact.cursor_before,
+                        event_position=fact.event_position,
+                        item=item,
+                        direction=direction,
+                        delta=delta,
+                        common=binding,
+                        common_rank=common_rank,
+                        common_fact_sha256=fact.content_sha256,
+                        common_action_id=common_action_id,
+                        branch_action_id=branch_action_id,
+                        state_before_sha256=state_before_sha256,
+                        state_after_sha256=state_after_sha256,
+                    )
+                    exact_search_count += searches
+                    if influence is None:
+                        return EventPassivityResult(
+                            passive=False,
+                            witness=None,
+                            exact_search_count=exact_search_count,
+                        )
+                    influences.append(influence)
+
+            classification = (
+                "no_fit"
+                if all(item.classification == "no_fit" for item in influences)
+                else "policy_dominated"
+            )
+            return EventPassivityResult(
+                passive=True,
+                witness=M8EventWitness(
                     event_position=fact.event_position,
-                    item=item,
-                    direction=direction,
-                    delta=delta,
-                    common=binding,
-                    common_rank=common_rank,
-                    common_fact_sha256=fact.content_sha256,
+                    classification=classification,
                     common_action_id=common_action_id,
                     branch_action_id=branch_action_id,
                     state_before_sha256=state_before_sha256,
                     state_after_sha256=state_after_sha256,
-                )
-                exact_search_count += searches
-                if influence is None:
-                    return EventPassivityResult(
-                        passive=False,
-                        witness=None,
-                        exact_search_count=exact_search_count,
-                    )
-                influences.append(influence)
-
-        classification = (
-            "no_fit"
-            if all(item.classification == "no_fit" for item in influences)
-            else "policy_dominated"
-        )
-        return EventPassivityResult(
-            passive=True,
-            witness=M8EventWitness(
-                event_position=fact.event_position,
-                classification=classification,
-                common_action_id=common_action_id,
-                branch_action_id=branch_action_id,
-                state_before_sha256=state_before_sha256,
-                state_after_sha256=state_after_sha256,
-                influences=tuple(influences),
-            ),
-            exact_search_count=exact_search_count,
-        )
-    finally:
-        _require_caller_runtime_stable(
-            runtime,
-            expected_sha256=snapshot.semantic_sha256,
-            operation="M8 certificate operation",
-        )
+                    influences=tuple(influences),
+                ),
+                exact_search_count=exact_search_count,
+            )
+        finally:
+            _require_caller_runtime_stable(
+                runtime,
+                expected_sha256=snapshot.semantic_sha256,
+                operation="M8 certificate operation",
+            )
 
 
 __all__ = [
