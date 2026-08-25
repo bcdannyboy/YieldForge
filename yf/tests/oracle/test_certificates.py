@@ -955,6 +955,79 @@ def test_certificate_revalidates_and_cleans_fresh_jagua_lease(
     assert not lease_paths[0].exists()
 
 
+def test_transient_fresh_jagua_lease_swap_cannot_override_shapely_fit(
+    tmp_path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "source-jagua"
+    _write_collision_jagua(executable, collision=False)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+    )
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="transient-private-jagua-swap",
+    )
+    original_influence = certificate_module._influence  # noqa: SLF001
+    proof_audit_flags = []
+
+    def swap_then_restore(proof_runtime, **kwargs):  # type: ignore[no-untyped-def]
+        lease = proof_runtime.jagua_executable
+        assert lease is not None
+        original_content = lease.read_bytes()
+        proof_audit_flags.append(proof_runtime.jagua_differential_audit)
+        lease.chmod(0o700)
+        _write_collision_jagua(lease, collision=True)
+        try:
+            return original_influence(proof_runtime, **kwargs)
+        finally:
+            lease.write_bytes(original_content)
+            lease.chmod(0o500)
+
+    monkeypatch.setattr(certificate_module, "_influence", swap_then_restore)
+
+    result = certify_event_passivity(
+        runtime,
+        common=common,
+        branch_cursor=_branch_cursor(cursor, added=(item,)),
+    )
+
+    assert not result.passive
+    assert proof_audit_flags == [True]
+    assert runtime.jagua_differential_audit is False
+
+
+def test_all_collision_jagua_cannot_override_authoritative_shapely_fit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "all-collision-jagua"
+    _write_collision_jagua(executable, collision=True)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=executable,
+    )
+    cursor, common = _common_fact(runtime)
+    item = inventory_item(
+        box(0, 0, 4, 10),
+        material=runtime.replay_input.instances[0].material,
+        token="all-collision-vs-shapely-fit",
+    )
+
+    result = certify_event_passivity(
+        runtime,
+        common=common,
+        branch_cursor=_branch_cursor(cursor, added=(item,)),
+    )
+
+    assert not result.passive
+    assert runtime.jagua_differential_audit is False
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork lifecycle semantics")
 def test_forked_child_cannot_cleanup_and_replace_parent_snapshot_jagua(
     tmp_path,

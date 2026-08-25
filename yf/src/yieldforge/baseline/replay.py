@@ -708,7 +708,7 @@ class M7SemanticRuntimeSnapshot:
             shared_fit_search_cache=self.runtime.shared_fit_search_cache,
             prepared_layout_cache=self.runtime.prepared_layout_cache,
             jagua_executable=lease.path,
-            jagua_differential_audit=self.runtime.jagua_differential_audit,
+            jagua_differential_audit=True,
         )
         proof_runtime.seal()
         try:
@@ -1382,6 +1382,7 @@ def _search_candidate_chunk(  # type: ignore[no-untyped-def]
     audit_count = 0
     mismatch_count = 0
     audit_seconds = 0.0
+    result = accelerated
     if jagua_executable is not None and jagua_differential_audit:
         if rust_generated:
             generation_started = perf_counter()
@@ -1425,7 +1426,8 @@ def _search_candidate_chunk(  # type: ignore[no-untyped-def]
             for left, right in zip(authoritative_batches, translation_batches, strict=True)
         ) + sum(left != right for left, right in zip(authoritative, accelerated, strict=True))
         audit_seconds = perf_counter() - audit_started
-    return accelerated, _JaguaChunkMetrics(
+        result = authoritative
+    return result, _JaguaChunkMetrics(
         wall_seconds=prefilter.wall_seconds,
         guarded_query_count=prefilter.guarded_query_count,
         rejection_count=prefilter.jagua_rejection_count,
