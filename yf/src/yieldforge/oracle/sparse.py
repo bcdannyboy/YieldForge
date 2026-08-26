@@ -7,7 +7,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
 from yieldforge.baseline.contracts import TemporalInstanceBinding
 from yieldforge.baseline.replay import (
@@ -30,7 +30,10 @@ from yieldforge.oracle.certificates import (
     _capture_unchecked_event_passivity,
     _capture_unchecked_m8_common_transition,
     _derive_m8_common_transition_fact_unprofiled,
+    _guard_unchecked_prepared_common_source,
+    _M8UncheckedPreparedSourceGuard,
     _release_validated_common_transition,
+    _require_unchecked_prepared_source_guard,
     _validated_common_transition_fact,
     build_validated_m8_common_transition_in_context,
     certify_event_passivity,
@@ -174,7 +177,7 @@ class M8UncheckedBranchEventCapture:
     influences: tuple[M8UncheckedInfluenceCapture, ...] = ()
     attempted_influences: tuple[M8UncheckedInfluenceCapture, ...] = ()
     exact_step: M7StepResult | None = None
-    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+    authority_mode: ClassVar[Literal["unchecked_portable"]] = "unchecked_portable"
 
     def __post_init__(self) -> None:
         if self.state_after_sha256 != m7_cursor_sha256(self.branch_after):
@@ -237,7 +240,7 @@ class M8UncheckedBranchTraversalCapture:
     rejection_count: int
     survivor_count: int
     rejoin_count: int
-    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+    authority_mode: ClassVar[Literal["unchecked_portable"]] = "unchecked_portable"
 
 
 @dataclass(frozen=True)
@@ -246,7 +249,7 @@ class M8UncheckedTraversalCapture:
 
     common_transitions: tuple[M8UncheckedProducerTransition, ...]
     branches: tuple[M8UncheckedBranchTraversalCapture, ...]
-    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+    authority_mode: ClassVar[Literal["unchecked_portable"]] = "unchecked_portable"
 
 
 @contextmanager
@@ -380,12 +383,21 @@ def _advance_unchecked_branch(
     branch: _UncheckedBranchState,
     *,
     common: M8UncheckedProducerTransition,
+    prepared_source_guard: _M8UncheckedPreparedSourceGuard | None = None,
 ) -> None:
     """Advance one branch from a producer record without accepting proof authority."""
 
     if type(common) is not M8UncheckedProducerTransition:
         raise ValueError("M8 producer traversal requires an unchecked common transition")
     runtime = context._request.runtime  # noqa: SLF001
+    if prepared_source_guard is not None:
+        _require_unchecked_prepared_source_guard(
+            prepared_source_guard,
+            runtime=runtime,
+            common=common,
+            scope_owner=context,
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+        )
     fact = common.common_fact
     if branch.cursor == fact.cursor_before:
         state_before = m7_cursor_sha256(branch.cursor)
@@ -411,7 +423,7 @@ def _advance_unchecked_branch(
             common=common,
             branch_cursor=branch.cursor,
             prepared_layouts=context._prepared_layouts,  # noqa: SLF001
-            runtime_authority=context._authority,  # noqa: SLF001
+            prepared_source_guard=prepared_source_guard,
         )
         branch.survivor_count += passivity.exact_search_count
         if passivity.passive:
@@ -506,8 +518,20 @@ def _capture_prepared_unchecked_traversal(
             runtime_authority=context._authority,  # noqa: SLF001
         )
         commons.append(common)
-        for branch in branches:
-            _advance_unchecked_branch(context, branch, common=common)
+        with _guard_unchecked_prepared_common_source(
+            context._request.runtime,  # noqa: SLF001
+            runtime_authority=context._authority,  # noqa: SLF001
+            scope_owner=context,
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            common=common,
+        ) as prepared_source_guard:
+            for branch in branches:
+                _advance_unchecked_branch(
+                    context,
+                    branch,
+                    common=common,
+                    prepared_source_guard=prepared_source_guard,
+                )
         common_cursor = common.common_fact.step.cursor
     context.require_active()
     return M8UncheckedTraversalCapture(

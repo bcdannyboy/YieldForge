@@ -6,12 +6,12 @@ import hashlib
 import os
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from yieldforge.baseline.archives import (
     VerifiedCandidateRejectionLayout,
@@ -505,7 +505,7 @@ class M8UncheckedProducerTransition:
     inventory_classifications: tuple[M8UncheckedCommonInventoryCapture, ...]
     standard_candidates: tuple[M8UncheckedStandardCandidateCapture, ...]
     source: M8UncheckedCommonSourceCapture
-    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+    authority_mode: ClassVar[Literal["unchecked_portable"]] = "unchecked_portable"
 
     def __post_init__(self) -> None:
         if not 0 <= self.common_fact.event_position < len(self.source.replay_input.instances):
@@ -688,7 +688,7 @@ class M8UncheckedEventPassivityCapture:
     state_after_sha256: str | None
     influences: tuple[M8UncheckedInfluenceCapture, ...]
     exact_search_count: int
-    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+    authority_mode: ClassVar[Literal["unchecked_portable"]] = "unchecked_portable"
 
     def __post_init__(self) -> None:
         if self.exact_search_count < 0:
@@ -1712,6 +1712,172 @@ def _capture_executable_identity(
         after.st_size,
         after.st_mode & 0o777,
     )
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class _M8UncheckedPreparedSourceGuard:
+    """Private O(1) lease for one already-deep-checked producer common source."""
+
+    _token: object = field(repr=False, compare=False)
+
+    def __reduce__(self) -> object:
+        raise TypeError("M8 unchecked prepared source guards cannot be serialized")
+
+
+@dataclass(frozen=True)
+class _RegisteredUncheckedPreparedSourceGuard:
+    reference: weakref.ReferenceType[_M8UncheckedPreparedSourceGuard]
+    owner_pid: int
+    token: object
+    runtime: M7ReplayRuntime
+    runtime_authority: M7AuthoritativeProofRuntime
+    scope_owner: object
+    prepared_layouts: _PreparedTranslationLayoutBatch
+    common: M8UncheckedProducerTransition
+    common_fact: M8CommonTransitionFact
+    source: M8UncheckedCommonSourceCapture
+    semantic_runtime_sha256: str
+    replay_input_id: str
+    replay_input_sha256: str
+    executable_identity: tuple[str | None, int | None, int | None]
+
+
+_UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY: dict[
+    int,
+    _RegisteredUncheckedPreparedSourceGuard,
+] = {}
+
+
+def _require_unchecked_prepared_source_guard(
+    guard: _M8UncheckedPreparedSourceGuard,
+    *,
+    runtime: M7ReplayRuntime,
+    common: M8UncheckedProducerTransition,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+    scope_owner: object | None = None,
+) -> None:
+    """Perform only scope and object-identity checks inside the branch hot loop."""
+
+    registered = _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.get(id(guard))
+    if (
+        type(guard) is not _M8UncheckedPreparedSourceGuard
+        or registered is None
+        or registered.reference() is not guard
+        or registered.owner_pid != os.getpid()
+        or registered.token is not guard._token  # noqa: SLF001
+        or registered.runtime is not runtime
+        or registered.runtime_authority.runtime is not runtime
+        or (scope_owner is not None and registered.scope_owner is not scope_owner)
+        or registered.prepared_layouts is not prepared_layouts
+        or registered.common is not common
+        or registered.common_fact is not common.common_fact
+        or registered.source is not common.source
+        or registered.semantic_runtime_sha256 != common.common_fact.semantic_runtime_sha256
+        or registered.semantic_runtime_sha256 != common.source.semantic_runtime_sha256
+        or registered.semantic_runtime_sha256 != registered.runtime_authority.semantic_sha256
+        or registered.replay_input_id != runtime.replay_input.input_id
+        or registered.replay_input_id != common.common_fact.replay_input_id
+        or registered.replay_input_sha256 != runtime.replay_input.content_sha256
+        or registered.replay_input_sha256 != common.common_fact.replay_input_sha256
+        or registered.executable_identity
+        != (
+            common.source.jagua_executable_sha256,
+            common.source.jagua_executable_size_bytes,
+            common.source.jagua_executable_mode_bits,
+        )
+    ):
+        raise ValueError("M8 unchecked prepared source guard is invalid or inactive")
+
+
+@contextmanager
+def _guard_unchecked_prepared_common_source(
+    runtime: M7ReplayRuntime,
+    *,
+    runtime_authority: M7AuthoritativeProofRuntime,
+    scope_owner: object,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+    common: M8UncheckedProducerTransition,
+) -> Iterator[_M8UncheckedPreparedSourceGuard]:
+    """Deep-check one common source around all of its producer branch consumers."""
+
+    if type(common) is not M8UncheckedProducerTransition:
+        raise ValueError("M8 unchecked prepared guard requires a producer transition")
+    expected_executable_identity = (
+        common.source.jagua_executable_sha256,
+        common.source.jagua_executable_size_bytes,
+        common.source.jagua_executable_mode_bits,
+    )
+
+    def require_expensive_boundary() -> None:
+        _require_unchecked_runtime_source_identity(
+            runtime,
+            semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
+            runtime_authority=runtime_authority,
+            operation="traversal",
+        )
+        if _capture_executable_identity(runtime) != expected_executable_identity:
+            raise ValueError("M8 unchecked prepared source executable binding differs")
+
+    require_expensive_boundary()
+    token = object()
+    guard = _M8UncheckedPreparedSourceGuard(token)
+    key = id(guard)
+
+    def discard(reference: weakref.ReferenceType[_M8UncheckedPreparedSourceGuard]) -> None:
+        registered = _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.get(key)
+        if registered is not None and registered.reference is reference:
+            _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.pop(key, None)
+
+    reference = weakref.ref(guard, discard)
+    registered = _RegisteredUncheckedPreparedSourceGuard(
+        reference=reference,
+        owner_pid=os.getpid(),
+        token=token,
+        runtime=runtime,
+        runtime_authority=runtime_authority,
+        scope_owner=scope_owner,
+        prepared_layouts=prepared_layouts,
+        common=common,
+        common_fact=common.common_fact,
+        source=common.source,
+        semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
+        replay_input_id=runtime.replay_input.input_id,
+        replay_input_sha256=runtime.replay_input.content_sha256,
+        executable_identity=expected_executable_identity,
+    )
+    _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY[key] = registered
+    try:
+        yield guard
+    finally:
+        integrity_error: ValueError | None = None
+        try:
+            _require_unchecked_prepared_source_guard(
+                guard,
+                runtime=runtime,
+                common=common,
+                scope_owner=scope_owner,
+                prepared_layouts=prepared_layouts,
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            integrity_error = ValueError("M8 unchecked prepared source guard integrity differs")
+            integrity_error.__cause__ = error
+        current = _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.get(key)
+        if current is registered:
+            _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.pop(key, None)
+        elif integrity_error is None:
+            integrity_error = ValueError("M8 unchecked prepared source guard cleanup differs")
+        try:
+            # This detects persistent boundary changes. A swap restored between reads remains
+            # explicitly unchecked producer provenance for the fresh Task-5 checker to audit.
+            require_expensive_boundary()
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            if integrity_error is None:
+                integrity_error = ValueError(
+                    "M8 unchecked prepared source changed during branch traversal"
+                )
+                integrity_error.__cause__ = error
+        if integrity_error is not None:
+            raise integrity_error
 
 
 def _require_unchecked_runtime_source_identity(
@@ -3274,45 +3440,17 @@ def _build_passive_event_result(
     )
 
 
-def _capture_unchecked_event_passivity(
+def _capture_unchecked_event_passivity_body(
     runtime: M7ReplayRuntime,
     *,
     common: M8UncheckedProducerTransition,
     branch_cursor: M7ReplayCursor,
     prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
-    runtime_authority: M7AuthoritativeProofRuntime | None = None,
 ) -> M8UncheckedEventPassivityCapture:
-    """Traverse one branch using only a producer record and return unchecked source."""
+    """Build one unchecked branch result beneath the source-integrity boundary."""
 
     if type(common) is not M8UncheckedProducerTransition:
         raise ValueError("M8 unchecked traversal requires a producer-only transition record")
-    expected_executable_identity = (
-        common.source.jagua_executable_sha256,
-        common.source.jagua_executable_size_bytes,
-        common.source.jagua_executable_mode_bits,
-    )
-    if _capture_executable_identity(runtime) != expected_executable_identity:
-        raise ValueError("M8 unchecked traversal Jagua executable binding differs")
-    _require_unchecked_runtime_source_identity(
-        runtime,
-        semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
-        runtime_authority=runtime_authority,
-        operation="traversal",
-    )
-
-    def finish(
-        captured: M8UncheckedEventPassivityCapture,
-    ) -> M8UncheckedEventPassivityCapture:
-        if _capture_executable_identity(runtime) != expected_executable_identity:
-            raise ValueError("M8 Jagua executable changed during unchecked traversal")
-        _require_unchecked_runtime_source_identity(
-            runtime,
-            semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
-            runtime_authority=runtime_authority,
-            operation="traversal",
-        )
-        return captured
-
     fact = common.common_fact
     if (
         fact.semantic_runtime_sha256 != common.source.semantic_runtime_sha256
@@ -3322,30 +3460,26 @@ def _capture_unchecked_event_passivity(
         raise ValueError("M8 unchecked producer transition differs from runtime context")
     delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
     if not delta.added and not delta.removed:
-        return finish(
-            M8UncheckedEventPassivityCapture(
-                passive=False,
-                classification=None,
-                branch_after=None,
-                state_before_sha256=None,
-                state_after_sha256=None,
-                influences=(),
-                exact_search_count=0,
-            )
+        return M8UncheckedEventPassivityCapture(
+            passive=False,
+            classification=None,
+            branch_after=None,
+            state_before_sha256=None,
+            state_after_sha256=None,
+            influences=(),
+            exact_search_count=0,
         )
     binding = fact.step.action_binding
     common_action_id = fact.step.event.action.action_id
     if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
-        return finish(
-            M8UncheckedEventPassivityCapture(
-                passive=False,
-                classification=None,
-                branch_after=None,
-                state_before_sha256=None,
-                state_after_sha256=None,
-                influences=(),
-                exact_search_count=0,
-            )
+        return M8UncheckedEventPassivityCapture(
+            passive=False,
+            classification=None,
+            branch_after=None,
+            state_before_sha256=None,
+            state_after_sha256=None,
+            influences=(),
+            exact_search_count=0,
         )
     transition = apply_m7_frozen_action_evidence_with_commitments(
         runtime,
@@ -3377,33 +3511,79 @@ def _capture_unchecked_event_passivity(
             exact_search_count += searches
             influences.append(captured)
             if captured.classification == "policy_not_dominated":
-                return finish(
-                    M8UncheckedEventPassivityCapture(
-                        passive=False,
-                        classification=None,
-                        branch_after=None,
-                        state_before_sha256=transition.cursor_before_sha256,
-                        state_after_sha256=transition.cursor_after_sha256,
-                        influences=tuple(influences),
-                        exact_search_count=exact_search_count,
-                    )
+                return M8UncheckedEventPassivityCapture(
+                    passive=False,
+                    classification=None,
+                    branch_after=None,
+                    state_before_sha256=transition.cursor_before_sha256,
+                    state_after_sha256=transition.cursor_after_sha256,
+                    influences=tuple(influences),
+                    exact_search_count=exact_search_count,
                 )
     classification: Literal["no_fit", "policy_dominated"] = (
         "no_fit"
         if all(item.classification == "no_fit" for item in influences)
         else "policy_dominated"
     )
-    return finish(
-        M8UncheckedEventPassivityCapture(
-            passive=True,
-            classification=classification,
-            branch_after=transition.cursor,
-            state_before_sha256=transition.cursor_before_sha256,
-            state_after_sha256=transition.cursor_after_sha256,
-            influences=tuple(influences),
-            exact_search_count=exact_search_count,
-        )
+    return M8UncheckedEventPassivityCapture(
+        passive=True,
+        classification=classification,
+        branch_after=transition.cursor,
+        state_before_sha256=transition.cursor_before_sha256,
+        state_after_sha256=transition.cursor_after_sha256,
+        influences=tuple(influences),
+        exact_search_count=exact_search_count,
     )
+
+
+def _capture_unchecked_event_passivity(
+    runtime: M7ReplayRuntime,
+    *,
+    common: M8UncheckedProducerTransition,
+    branch_cursor: M7ReplayCursor,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    prepared_source_guard: _M8UncheckedPreparedSourceGuard | None = None,
+) -> M8UncheckedEventPassivityCapture:
+    """Traverse one branch using only a producer record and return unchecked source."""
+
+    if type(common) is not M8UncheckedProducerTransition:
+        raise ValueError("M8 unchecked traversal requires a producer-only transition record")
+    expected_executable_identity = (
+        common.source.jagua_executable_sha256,
+        common.source.jagua_executable_size_bytes,
+        common.source.jagua_executable_mode_bits,
+    )
+
+    def require_source_integrity() -> None:
+        if prepared_source_guard is not None:
+            if prepared_layouts is None:
+                raise ValueError("M8 unchecked prepared traversal lacks exact layout scope")
+            _require_unchecked_prepared_source_guard(
+                prepared_source_guard,
+                runtime=runtime,
+                common=common,
+                prepared_layouts=prepared_layouts,
+            )
+            return
+        if _capture_executable_identity(runtime) != expected_executable_identity:
+            raise ValueError("M8 unchecked traversal Jagua executable binding differs")
+        _require_unchecked_runtime_source_identity(
+            runtime,
+            semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
+            runtime_authority=None,
+            operation="traversal",
+        )
+
+    require_source_integrity()
+    try:
+        return _capture_unchecked_event_passivity_body(
+            runtime,
+            common=common,
+            branch_cursor=branch_cursor,
+            prepared_layouts=prepared_layouts,
+        )
+    finally:
+        require_source_integrity()
 
 
 def certify_event_passivity(

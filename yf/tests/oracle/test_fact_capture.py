@@ -3,22 +3,30 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
 from shapely import Polygon, box
 
-from tests.oracle.fixtures import inventory_item, two_problem_runtime
+from tests.oracle.fixtures import (
+    exhaustive_certificate_cases,
+    inventory_item,
+    two_problem_runtime,
+)
 from yieldforge.baseline.jagua import (
     JaguaGeneratedPrefilterResult,
     JaguaRepresentationError,
 )
 from yieldforge.baseline.policies import M7PolicyName
 from yieldforge.baseline.replay import (
+    M7AuthoritativeProofRuntime,
     apply_m7_action_descriptor,
     enumerate_m7_action_catalog,
     initial_m7_cursor,
+    m7_cursor_sha256,
     m7_semantic_runtime_sha256,
+    run_m7_continuation,
     select_m7_fallback,
 )
 from yieldforge.experiments.contracts import semantic_sha256
@@ -58,6 +66,66 @@ def _jsonable(value):  # type: ignore[no-untyped-def]
     return value
 
 
+def _producer_influence_row(influence):  # type: ignore[no-untyped-def]
+    competitor = influence.competitor
+    competitor_rank = influence.competitor_rank
+    return (
+        influence.remnant_id,
+        competitor.candidate_id if competitor is not None else None,
+        influence.classification,
+        influence.legacy_evidence_sha256,
+        influence.common_action_id,
+        influence.common.catalog_action_id,
+        (
+            competitor.evidence.action_id
+            if competitor is not None and competitor.evidence is not None
+            else None
+        ),
+        competitor.action_id if competitor is not None else None,
+        influence.common_rank.decision_key,
+        competitor_rank.decision_key if competitor_rank is not None else None,
+    )
+
+
+def _trusted_influence_row(influence):  # type: ignore[no-untyped-def]
+    return (
+        influence.remnant_id,
+        influence.candidate_id,
+        influence.classification,
+        influence.evidence_sha256,
+        influence.common_action_id,
+        influence.common_catalog_action_id,
+        influence.competing_action_id,
+        influence.competing_catalog_action_id,
+        influence.common_decision_key,
+        influence.competing_decision_key,
+    )
+
+
+def _producer_event_row(event):  # type: ignore[no-untyped-def]
+    return (
+        event.event_position,
+        event.classification,
+        event.common_action_id,
+        event.branch_action_id,
+        event.state_before_sha256,
+        event.state_after_sha256,
+        tuple(_producer_influence_row(item) for item in event.influences),
+    )
+
+
+def _trusted_event_row(event):  # type: ignore[no-untyped-def]
+    return (
+        event.event_position,
+        event.classification,
+        event.common_action_id,
+        event.branch_action_id,
+        event.state_before_sha256,
+        event.state_after_sha256,
+        tuple(_trusted_influence_row(item) for item in event.influences),
+    )
+
+
 def test_unchecked_common_capture_is_portable_and_authority_free() -> None:
     runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
     cursor = _fallback_cursor(runtime)
@@ -91,10 +159,12 @@ def test_unchecked_common_capture_is_portable_and_authority_free() -> None:
     assert not isinstance(captured, certificates.ValidatedCommonTransition)
 
 
-def test_unchecked_counted_capture_retains_translation_order_without_trusted_audit(
+def test_unchecked_counted_capture_skips_duplicate_audit_and_matches_trusted_v1(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from yieldforge.baseline import replay
+
     jagua_path = tmp_path / "jagua-spike"
     jagua_path.write_bytes(b"frozen-test-binary")
     jagua_path.chmod(0o700)
@@ -113,6 +183,7 @@ def test_unchecked_counted_capture_retains_translation_order_without_trusted_aud
     cursor = replace(_fallback_cursor(runtime), inventory=(area_only,))
     verified = runtime.runtime_candidates[binding.problem_id]
     python_generate = certificates.generate_layout_translations
+    trusted_audit = certificates.audit_layout_translation_batch
 
     def fake_generated_prefilter(  # type: ignore[no-untyped-def]
         _executable,
@@ -150,6 +221,7 @@ def test_unchecked_counted_capture_retains_translation_order_without_trusted_aud
         raise AssertionError("unchecked producer invoked trusted-local count audit")
 
     monkeypatch.setattr(certificates, "run_jagua_generated_prefilter", fake_generated_prefilter)
+    monkeypatch.setattr(replay, "run_jagua_generated_prefilter", fake_generated_prefilter)
     monkeypatch.setattr(certificates, "audit_layout_translation_batch", unexpected_trusted_audit)
     registry_before = dict(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
 
@@ -187,6 +259,16 @@ def test_unchecked_counted_capture_retains_translation_order_without_trusted_aud
     assert reordered.candidate_id == source.candidate_id
     assert not isinstance(reordered, certificates.ValidatedCommonTransition)
     assert certificates._VALIDATED_COMMON_REGISTRY == registry_before  # noqa: SLF001
+
+    monkeypatch.setattr(certificates, "audit_layout_translation_batch", trusted_audit)
+    trusted = certificates._try_derive_m8_common_transition_fact_fast(  # noqa: SLF001
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=m7_semantic_runtime_sha256(runtime),
+    )
+    assert trusted is not None
+    assert trusted.counted_no_fit_inventory == (area_only,)
+    assert trusted.fact == captured.common_fact
 
 
 def test_producer_only_passivity_retains_full_influence_preimage() -> None:
@@ -241,6 +323,11 @@ def test_producer_only_passivity_retains_full_influence_preimage() -> None:
     )
     assert influence.legacy_evidence_payload["cheap_rejections"]
     assert certificates._VALIDATED_COMMON_REGISTRY == registry_before  # noqa: SLF001
+    for record in (common, captured):
+        assert record.authority_mode == "unchecked_portable"
+        assert "authority_mode" not in {item.name for item in fields(record)}
+        with pytest.raises(TypeError, match="authority_mode"):
+            replace(record, authority_mode="trusted_local")
 
     trusted_common = certificates.build_validated_m8_common_transition(
         runtime,
@@ -320,6 +407,16 @@ def test_event_major_producer_traversal_reuses_one_unchecked_common_per_event(
         assert all(
             common.authority_mode == "unchecked_portable" for common in traversal.common_transitions
         )
+        unchecked_records = (
+            traversal,
+            traversal.branches[0],
+            traversal.branches[0].events[0],
+        )
+        for record in unchecked_records:
+            assert record.authority_mode == "unchecked_portable"
+            assert "authority_mode" not in {item.name for item in fields(record)}
+            with pytest.raises(TypeError, match="authority_mode"):
+                replace(record, authority_mode="trusted_local")
     assert certificates._VALIDATED_COMMON_REGISTRY == registry_before  # noqa: SLF001
 
 
@@ -366,6 +463,376 @@ def test_prepared_unchecked_jagua_traversal_uses_snapshot_semantic_identity(
             "sha256:38fe9f08ce341d1d7f00afa16b26917ccd1efa00bd06b8b4c9cc0515bfb47a67"
         )
     assert certificates._VALIDATED_COMMON_REGISTRY == registry_before  # noqa: SLF001
+
+
+def test_prepared_unchecked_integrity_work_scales_with_events_not_actions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from yieldforge.baseline import replay
+    from yieldforge.oracle import sparse
+
+    jagua_path = tmp_path / "jagua-spike"
+    jagua_path.write_bytes(b"frozen-test-binary")
+    jagua_path.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=4.0,
+        second_width=4.0,
+        event_count=3,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=jagua_path,
+    )
+    material = runtime.replay_input.instances[0].material
+    inventory = tuple(
+        sorted(
+            (
+                inventory_item(
+                    box(0, 0, 4, 10),
+                    material=material,
+                    token=f"integrity-scaling-{index}",
+                )
+                for index in range(8)
+            ),
+            key=lambda item: item.remnant.remnant_id,
+        )
+    )
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=replace(initial_m7_cursor(runtime.replay_input), inventory=inventory),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    candidates = {
+        candidate.candidate_id: candidate
+        for verified in runtime.runtime_candidates.values()
+        for candidate in verified.candidates
+    }
+
+    def nonfiltering_prefilter(  # type: ignore[no-untyped-def]
+        _executable,
+        *,
+        remnant,
+        layouts,
+        fit_config,
+        search_config,
+        container_guard,
+    ):
+        assert container_guard == 1.0
+        batches = tuple(
+            certificates.generate_layout_translations(
+                SimpleNamespace(remnant_id=remnant.remnant_id),
+                candidates[layout.candidate_id],
+                fit_config=fit_config,
+                search_config=search_config,
+                prepared_layout=layout,
+                prepared_remnant=remnant,
+            )
+            for layout in layouts
+        )
+        return JaguaGeneratedPrefilterResult(
+            translation_batches=batches,
+            collision_masks=tuple((False,) * len(batch.translations) for batch in batches),
+            guarded_query_count=sum(len(batch.translations) for batch in batches),
+            jagua_rejection_count=0,
+            build_microseconds=0,
+            generation_microseconds=0,
+            query_microseconds=0,
+            wall_seconds=0.0,
+        )
+
+    monkeypatch.setattr(replay, "run_jagua_generated_prefilter", nonfiltering_prefilter)
+    monkeypatch.setattr(
+        certificates,
+        "run_jagua_generated_prefilter",
+        nonfiltering_prefilter,
+    )
+    original_executable_identity = certificates._capture_executable_identity  # noqa: SLF001
+    original_require_active = M7AuthoritativeProofRuntime.require_active
+    calls = {"executable": 0, "authority": 0}
+
+    def counted_executable_identity(runtime):  # type: ignore[no-untyped-def]
+        calls["executable"] += 1
+        return original_executable_identity(runtime)
+
+    def counted_require_active(self, runtime=None):  # type: ignore[no-untyped-def]
+        calls["authority"] += 1
+        return original_require_active(self, runtime)
+
+    monkeypatch.setattr(
+        certificates,
+        "_capture_executable_identity",
+        counted_executable_identity,
+    )
+    monkeypatch.setattr(
+        M7AuthoritativeProofRuntime,
+        "require_active",
+        counted_require_active,
+    )
+
+    def capture_counts(*, all_actions: bool) -> tuple[int, int, int, int]:
+        with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+            action_ids = tuple(
+                item.action_id
+                for item in context._catalog.actions  # noqa: SLF001
+            )
+            nonfallback = next(
+                action_id
+                for action_id in action_ids
+                if action_id != context._fallback_step.descriptor.action_id  # noqa: SLF001
+            )
+            calls.update(executable=0, authority=0)
+            traversal = sparse._capture_prepared_unchecked_traversal(  # noqa: SLF001
+                context,
+                action_ids=action_ids if all_actions else (nonfallback,),
+            )
+            observed = (
+                calls["executable"],
+                calls["authority"],
+                len(action_ids),
+                len(traversal.common_transitions),
+            )
+        return observed
+
+    one_action = capture_counts(all_actions=False)
+    all_actions = capture_counts(all_actions=True)
+
+    assert one_action[2] >= 18
+    assert one_action[3] == 2
+    assert all_actions[2:] == one_action[2:]
+    assert all_actions[:2] == one_action[:2]
+    assert all_actions[0] == 4 * all_actions[3]
+    assert all_actions[1] == 4 * all_actions[3] + 2
+
+
+def test_prepared_unchecked_source_guard_is_cleaned_after_branch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    registry_before = dict(  # noqa: SLF001
+        certificates._UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY
+    )
+
+    def fail_branch(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("synthetic producer branch failure")
+
+    monkeypatch.setattr(sparse, "_advance_unchecked_branch", fail_branch)
+    with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+        with pytest.raises(RuntimeError, match="synthetic producer branch failure"):
+            sparse._capture_prepared_unchecked_traversal(context)  # noqa: SLF001
+        assert (  # noqa: SLF001
+            certificates._UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY == registry_before
+        )
+    assert (  # noqa: SLF001
+        certificates._UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY == registry_before
+    )
+
+
+def test_prepared_unchecked_source_guard_is_exactly_scope_and_source_bound() -> None:
+    from yieldforge.oracle import sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    registry_before = dict(  # noqa: SLF001
+        certificates._UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY
+    )
+
+    with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+        common = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+            context._request.runtime,  # noqa: SLF001
+            cursor=context._fallback_step.cursor,  # noqa: SLF001
+            semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            runtime_authority=context._authority,  # noqa: SLF001
+        )
+        with certificates._guard_unchecked_prepared_common_source(  # noqa: SLF001
+            context._request.runtime,  # noqa: SLF001
+            runtime_authority=context._authority,  # noqa: SLF001
+            scope_owner=context,
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            common=common,
+        ) as guard:
+            certificates._require_unchecked_prepared_source_guard(  # noqa: SLF001
+                guard,
+                runtime=context._request.runtime,  # noqa: SLF001
+                common=common,
+                scope_owner=context,
+                prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            )
+            with pytest.raises(ValueError, match="invalid or inactive"):
+                certificates._require_unchecked_prepared_source_guard(  # noqa: SLF001
+                    guard,
+                    runtime=context._request.runtime,  # noqa: SLF001
+                    common=replace(common),
+                    scope_owner=context,
+                    prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+                )
+            with pytest.raises(ValueError, match="invalid or inactive"):
+                certificates._require_unchecked_prepared_source_guard(  # noqa: SLF001
+                    guard,
+                    runtime=context._request.runtime,  # noqa: SLF001
+                    common=common,
+                    scope_owner=object(),
+                    prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+                )
+            with pytest.raises(ValueError, match="invalid or inactive"):
+                certificates._require_unchecked_prepared_source_guard(  # noqa: SLF001
+                    guard,
+                    runtime=context._request.runtime,  # noqa: SLF001
+                    common=common,
+                    scope_owner=context,
+                    prepared_layouts=None,
+                )
+        with pytest.raises(ValueError, match="invalid or inactive"):
+            certificates._require_unchecked_prepared_source_guard(  # noqa: SLF001
+                guard,
+                runtime=context._request.runtime,  # noqa: SLF001
+                common=common,
+                scope_owner=context,
+                prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            )
+    assert (  # noqa: SLF001
+        certificates._UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY == registry_before
+    )
+
+
+def test_direct_unchecked_passivity_keeps_full_pre_and_post_integrity_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    jagua_path = tmp_path / "jagua-spike"
+    jagua_path.write_bytes(b"frozen-test-binary")
+    jagua_path.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=9.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=jagua_path,
+    )
+    cursor = _fallback_cursor(runtime)
+    common = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=m7_semantic_runtime_sha256(runtime),
+    )
+    added = inventory_item(
+        box(0, 0, 1, 1),
+        material=runtime.replay_input.instances[cursor.next_event_position].material,
+        token="direct-integrity-check",
+    )
+    branch = replace(
+        cursor,
+        inventory=tuple(
+            sorted((*cursor.inventory, added), key=lambda item: item.remnant.remnant_id)
+        ),
+    )
+    original_executable_identity = certificates._capture_executable_identity  # noqa: SLF001
+    original_semantic_identity = certificates.m7_semantic_runtime_sha256
+    calls = {"executable": 0, "semantic": 0}
+
+    def counted_executable_identity(runtime):  # type: ignore[no-untyped-def]
+        calls["executable"] += 1
+        return original_executable_identity(runtime)
+
+    def counted_semantic_identity(runtime):  # type: ignore[no-untyped-def]
+        calls["semantic"] += 1
+        return original_semantic_identity(runtime)
+
+    monkeypatch.setattr(
+        certificates,
+        "_capture_executable_identity",
+        counted_executable_identity,
+    )
+    monkeypatch.setattr(
+        certificates,
+        "m7_semantic_runtime_sha256",
+        counted_semantic_identity,
+    )
+
+    captured = certificates._capture_unchecked_event_passivity(  # noqa: SLF001
+        runtime,
+        common=common,
+        branch_cursor=branch,
+    )
+
+    assert captured.passive
+    assert calls == {"executable": 2, "semantic": 2}
+
+
+def test_direct_unchecked_passivity_rechecks_integrity_after_internal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    jagua_path = tmp_path / "jagua-spike"
+    jagua_path.write_bytes(b"frozen-test-binary")
+    jagua_path.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=9.0,
+        second_width=4.0,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=jagua_path,
+    )
+    cursor = _fallback_cursor(runtime)
+    common = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=m7_semantic_runtime_sha256(runtime),
+    )
+    added = inventory_item(
+        box(0, 0, 1, 1),
+        material=runtime.replay_input.instances[cursor.next_event_position].material,
+        token="direct-failure-integrity-check",
+    )
+    branch = replace(
+        cursor,
+        inventory=tuple(
+            sorted((*cursor.inventory, added), key=lambda item: item.remnant.remnant_id)
+        ),
+    )
+    original_executable_identity = certificates._capture_executable_identity  # noqa: SLF001
+    original_semantic_identity = certificates.m7_semantic_runtime_sha256
+    calls = {"executable": 0, "semantic": 0}
+
+    def counted_executable_identity(runtime):  # type: ignore[no-untyped-def]
+        calls["executable"] += 1
+        return original_executable_identity(runtime)
+
+    def counted_semantic_identity(runtime):  # type: ignore[no-untyped-def]
+        calls["semantic"] += 1
+        return original_semantic_identity(runtime)
+
+    def fail_influence(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("synthetic influence capture failure")
+
+    monkeypatch.setattr(
+        certificates,
+        "_capture_executable_identity",
+        counted_executable_identity,
+    )
+    monkeypatch.setattr(
+        certificates,
+        "m7_semantic_runtime_sha256",
+        counted_semantic_identity,
+    )
+    monkeypatch.setattr(certificates, "_calculate_influence_source", fail_influence)
+
+    with pytest.raises(RuntimeError, match="synthetic influence capture failure"):
+        certificates._capture_unchecked_event_passivity(  # noqa: SLF001
+            runtime,
+            common=common,
+            branch_cursor=branch,
+        )
+
+    assert calls == {"executable": 2, "semantic": 2}
 
 
 def test_producer_exact_fallback_retains_the_nonwinning_influence_preimage() -> None:
@@ -937,6 +1404,103 @@ def test_common_capture_retains_complete_nonwinners_source_ids_and_semantic_time
     assert portable.event.delta_costs.net_cost_bits == facts.encode_canonical_f64(
         event.delta_costs.net_cost
     )
+
+
+def test_unchecked_producer_matches_v1_across_bounded_45_case_matrix() -> None:
+    from yieldforge.oracle import sparse
+
+    cases = exhaustive_certificate_cases()
+    event_classifications: set[str] = set()
+    inventory_classifications: set[str] = set()
+    influence_classifications: set[str] = set()
+    attempted_sequences: set[tuple[str, ...]] = set()
+    action_counts: set[int] = set()
+    common_counts: set[int] = set()
+
+    for case in cases:
+        with sparse._prepare_m8_generator_context(case.request) as context:  # noqa: SLF001
+            action_ids = tuple(
+                item.action_id
+                for item in context._catalog.actions  # noqa: SLF001
+            )
+            producer = sparse._capture_prepared_unchecked_traversal(  # noqa: SLF001
+                context,
+                action_ids=action_ids,
+            )
+            producer_rows = []
+            for branch in producer.branches:
+                terminal = run_m7_continuation(
+                    context._request.runtime,  # noqa: SLF001
+                    cursor=branch.cursor,
+                    stop_event_position=context._stop_event_position,  # noqa: SLF001
+                )
+                producer_rows.append(
+                    (
+                        branch.descriptor.action_id,
+                        branch.initial_step.event.action.action_id,
+                        terminal.final_costs.net_cost,
+                        m7_cursor_sha256(branch.cursor),
+                        tuple(_producer_event_row(event) for event in branch.events),
+                        branch.exact_count,
+                        branch.skipped_count,
+                        branch.rejection_count,
+                        branch.survivor_count,
+                        branch.rejoin_count,
+                    )
+                )
+                for event in branch.events:
+                    event_classifications.add(event.classification)
+                    influence_classifications.update(
+                        influence.classification for influence in event.influences
+                    )
+                    if event.attempted_influences:
+                        attempted_sequences.add(
+                            tuple(
+                                influence.classification for influence in event.attempted_influences
+                            )
+                        )
+            for common in producer.common_transitions:
+                inventory_classifications.update(
+                    item.classification for item in common.inventory_classifications
+                )
+            action_counts.add(len(action_ids))
+            common_counts.add(len(producer.common_transitions))
+
+        with sparse._prepare_m8_generator_context(case.request) as context:  # noqa: SLF001
+            trusted = sparse._score_prepared_certificate_actions(  # noqa: SLF001
+                context,
+                action_ids=action_ids,
+            )
+            trusted_rows = tuple(
+                (
+                    result.score.action_id,
+                    result.proof.action_id,
+                    result.score.final_net_cost,
+                    result.proof.final_state_sha256,
+                    tuple(_trusted_event_row(event) for event in result.proof.witnesses),
+                    result.exact_branch_event_count,
+                    result.skipped_passive_event_count,
+                    result.rejection_certificate_count,
+                    result.survivor_pair_count,
+                    result.state_rejoin_count,
+                )
+                for result in trusted
+            )
+
+        assert tuple(producer_rows) == trusted_rows, case.case_id
+
+    assert len(cases) == 45
+    assert action_counts == {2, 4, 6}
+    assert common_counts == {1, 2, 3}
+    assert event_classifications == {
+        "state_rejoin",
+        "no_fit",
+        "policy_dominated",
+        "exact_transition",
+    }
+    assert inventory_classifications == {"scalar_no_fit", "exact_survivor"}
+    assert influence_classifications == {"no_fit", "policy_dominated"}
+    assert ("policy_dominated", "policy_not_dominated") in attempted_sequences
 
 
 def test_v1_public_apis_never_return_unchecked_producer_records() -> None:
