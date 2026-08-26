@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import weakref
 from collections import OrderedDict
@@ -9,14 +10,30 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+from enum import StrEnum
+from typing import Literal
 
-from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
+from yieldforge.baseline.archives import (
+    VerifiedCandidateRejectionLayout,
+    VerifiedProblemCandidates,
+)
+from yieldforge.baseline.contracts import (
+    LayoutFitSearchConfig,
+    LayoutFitSearchResult,
+    LayoutFitSearchStatus,
+    M7ActionKind,
+    M7CandidateSetEvidence,
+    ReusableGeometryProblem,
+    TemporalInstanceBinding,
+)
 from yieldforge.baseline.geometry import (
+    LayoutTranslationCandidates,
     certify_translation_impossible,
     generate_layout_translations,
     prepare_layout_footprint,
     prepare_remnant_geometry,
     prepare_translation_rejection_remnant,
+    search_layout_translation,
 )
 from yieldforge.baseline.jagua import (
     JaguaRepresentationError,
@@ -30,8 +47,10 @@ from yieldforge.baseline.replay import (
     M7PolicyActionBinding,
     M7ReplayCursor,
     M7ReplayEvent,
+    M7ReplayInput,
     M7ReplayRuntime,
     M7SemanticRuntimeSnapshot,
+    M7StandardActionProfile,
     M7StepResult,
     apply_m7_action_descriptor,
     apply_m7_frozen_action_evidence_with_commitments,
@@ -46,6 +65,7 @@ from yieldforge.baseline.replay import (
     snapshot_m7_replay_runtime,
 )
 from yieldforge.experiments.contracts import semantic_sha256
+from yieldforge.oracle import facts as portable_facts
 from yieldforge.oracle.compiled import (
     CompiledRejectionProblem,
     CompiledTranslationRejection,
@@ -61,11 +81,13 @@ from yieldforge.oracle.concurrency import (
     activate_m8_local_trusted_audit,
     require_m8_translation_audit_processes,
 )
-from yieldforge.oracle.frontier import certify_frontier_impossible
+from yieldforge.oracle.frontier import ParetoFrontier, certify_frontier_impossible
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
 from yieldforge.oracle.translation_count_audit import audit_layout_translation_batch
 from yieldforge.replay.contracts import InventoryItem
+from yieldforge.residuals.contracts import ResidualRuleSet
+from yieldforge.reuse.contracts import RemnantFitConfig
 from yieldforge.reuse.geometry import material_key
 
 
@@ -209,18 +231,475 @@ class FastCommonTransitionResult:
             item.remnant.remnant_id for item in self.zero_generation_rejected_inventory
         ) != tuple(item.remnant_id for item in self.witnesses):
             raise ValueError("M8 fast common witnesses differ from inventory order")
-        rejected_ids = {
-            item.remnant.remnant_id for item in self.zero_generation_rejected_inventory
-        }
-        counted_ids = {
-            item.remnant.remnant_id for item in self.counted_no_fit_inventory
-        }
+        rejected_ids = {item.remnant.remnant_id for item in self.zero_generation_rejected_inventory}
+        counted_ids = {item.remnant.remnant_id for item in self.counted_no_fit_inventory}
         survivor_ids = {item.remnant.remnant_id for item in self.exact_survivor_inventory}
         if rejected_ids & counted_ids or rejected_ids & survivor_ids or counted_ids & survivor_ids:
             raise ValueError("M8 fast common inventory classifications overlap")
         cursor_ids = {item.remnant.remnant_id for item in self.fact.cursor_before.inventory}
         if rejected_ids | counted_ids | survivor_ids != cursor_ids:
             raise ValueError("M8 fast common classification does not cover inventory")
+
+
+class _CommonDerivationMode(StrEnum):
+    """Closed authority modes for common source derivation."""
+
+    TRUSTED_LOCAL = "trusted_local"
+    UNCHECKED_PORTABLE = "unchecked_portable"
+
+
+@dataclass(frozen=True)
+class _ScalarNoFitSource:
+    """Source translation evidence retained before search-result reduction."""
+
+    searches: tuple[LayoutFitSearchResult, ...] | None
+    translation_batches: tuple[LayoutTranslationCandidates, ...]
+    exact_replay_reason: Literal["unsupported_representation"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.exact_replay_reason is None:
+            if self.searches is None and self.translation_batches:
+                raise ValueError("M8 frontier survivor cannot carry translation claims")
+            if self.searches is not None and len(self.searches) != len(self.translation_batches):
+                if self.searches or self.translation_batches:
+                    raise ValueError("M8 counted source searches and translations differ")
+        elif self.searches is not None or self.translation_batches:
+            raise ValueError("M8 unsupported source cannot carry counted-no-fit claims")
+
+
+@dataclass(frozen=True)
+class M8UncheckedTranslationBatchCapture:
+    """Ordered producer claim with every count and no collision classification."""
+
+    source: LayoutTranslationCandidates
+    candidate_id: str
+    remnant_id: str
+    translations: tuple[tuple[float, float], ...]
+    generated_candidate_count: int
+    duplicate_candidate_count: int
+    evaluated_candidate_count: int
+    budget_truncated: bool
+
+    def __post_init__(self) -> None:
+        if (
+            self.candidate_id != self.source.candidate_id
+            or self.remnant_id != self.source.remnant_id
+            or self.translations != self.source.translations
+            or self.generated_candidate_count != self.source.generated_candidate_count
+            or self.duplicate_candidate_count != self.source.duplicate_candidate_count
+            or self.evaluated_candidate_count != len(self.source.translations)
+            or self.budget_truncated != self.source.budget_truncated
+        ):
+            raise ValueError("M8 unchecked translation capture differs from its source")
+
+    @classmethod
+    def from_source(
+        cls,
+        source: LayoutTranslationCandidates,
+    ) -> M8UncheckedTranslationBatchCapture:
+        return cls(
+            source=source,
+            candidate_id=source.candidate_id,
+            remnant_id=source.remnant_id,
+            translations=source.translations,
+            generated_candidate_count=source.generated_candidate_count,
+            duplicate_candidate_count=source.duplicate_candidate_count,
+            evaluated_candidate_count=len(source.translations),
+            budget_truncated=source.budget_truncated,
+        )
+
+
+@dataclass(frozen=True)
+class M8UncheckedCommonInventoryCapture:
+    """Explicitly unchecked source classification for one common inventory item."""
+
+    item: InventoryItem
+    classification: Literal["scalar_no_fit", "counted_no_fit", "exact_survivor"]
+    material_matches: bool
+    remnant_area: float
+    remnant_width: float
+    remnant_height: float
+    area_tolerance: float
+    coordinate_tolerance: float
+    scalar_witness: FastCommonRejectionWitness | None
+    candidate_rejection_layouts: tuple[VerifiedCandidateRejectionLayout, ...]
+    frontier: ParetoFrontier | None
+    translation_batches: tuple[M8UncheckedTranslationBatchCapture, ...]
+    exact_replay_reason: (
+        Literal[
+            "frontier_survivor",
+            "counted_search_survivor",
+            "unsupported_representation",
+        ]
+        | None
+    ) = None
+
+    def __post_init__(self) -> None:
+        if self.classification == "scalar_no_fit":
+            valid = (
+                self.scalar_witness is not None
+                and bool(self.candidate_rejection_layouts)
+                and self.frontier is not None
+                and not self.translation_batches
+                and self.exact_replay_reason is None
+            )
+        elif self.classification == "counted_no_fit":
+            valid = (
+                self.scalar_witness is None
+                and bool(self.candidate_rejection_layouts)
+                and self.frontier is not None
+                and bool(self.translation_batches)
+                and self.exact_replay_reason is None
+            )
+        else:
+            evidence_shape = (
+                self.frontier is not None,
+                bool(self.candidate_rejection_layouts),
+                bool(self.translation_batches),
+            )
+            expected_reason = {
+                (True, True, False): "frontier_survivor",
+                (True, True, True): "counted_search_survivor",
+                (False, False, False): "unsupported_representation",
+            }.get(evidence_shape)
+            valid = (
+                self.scalar_witness is None
+                and expected_reason is not None
+                and self.exact_replay_reason == expected_reason
+            )
+        if not valid:
+            raise ValueError("M8 unchecked inventory classification evidence is inconsistent")
+        layout_ids = tuple(item.candidate_id for item in self.candidate_rejection_layouts)
+        frontier_ids = (
+            tuple(item.candidate_id for item in self.frontier.members)
+            if self.frontier is not None
+            else ()
+        )
+        if layout_ids != frontier_ids:
+            raise ValueError("M8 unchecked inventory scalar and frontier sources differ")
+        if self.scalar_witness is not None and (
+            self.scalar_witness.remnant_id != self.item.remnant.remnant_id
+            or self.scalar_witness.candidate_ids != tuple(sorted(layout_ids))
+            or self.scalar_witness.material_matches != self.material_matches
+            or self.scalar_witness.remnant_area != self.remnant_area
+            or self.scalar_witness.remnant_width != self.remnant_width
+            or self.scalar_witness.remnant_height != self.remnant_height
+            or self.scalar_witness.area_tolerance != self.area_tolerance
+            or self.scalar_witness.coordinate_tolerance != self.coordinate_tolerance
+        ):
+            raise ValueError("M8 unchecked scalar witness differs from its source measurements")
+        if any(
+            batch.remnant_id != self.item.remnant.remnant_id for batch in self.translation_batches
+        ) or (
+            self.translation_batches
+            and tuple(batch.candidate_id for batch in self.translation_batches) != layout_ids
+        ):
+            raise ValueError("M8 unchecked translation batches differ from inventory source")
+
+    @property
+    def remnant_id(self) -> str:
+        return self.item.remnant.remnant_id
+
+
+@dataclass(frozen=True)
+class M8UncheckedStandardCandidateCapture:
+    """Complete unchecked standard profile, policy context, and rank preimage."""
+
+    profile_position: int
+    descriptor: M7ActionDescriptor
+    profile: M7StandardActionProfile
+    context: ActionPolicyContext
+    rank: PolicyRank
+    policy_immediate_net_cost: float
+    selected_replay_event_net_cost: float | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.profile_position < 0
+            or self.descriptor.kind is not M7ActionKind.OPEN_STANDARD_SHEET
+            or self.descriptor.candidate_id != self.profile.candidate_id
+            or self.context.action_id != self.descriptor.action_id
+            or self.context.candidate_id != self.profile.candidate_id
+            or self.context.immediate_net_cost != self.policy_immediate_net_cost
+            or self.rank != rank_policy_action(self.rank.policy, self.context)
+        ):
+            raise ValueError("M8 unchecked standard candidate source is inconsistent")
+
+
+@dataclass(frozen=True)
+class M8UncheckedCommonSourceCapture:
+    """All frozen source bindings needed to assemble portable fact leaves later."""
+
+    replay_input_id: str
+    replay_input_sha256: str
+    replay_input: M7ReplayInput
+    semantic_runtime_sha256: str
+    stream_id: str
+    stream_sha256: str
+    event_binding: TemporalInstanceBinding
+    problem: ReusableGeometryProblem
+    candidate_set: M7CandidateSetEvidence
+    verified_candidates: VerifiedProblemCandidates
+    fit_config: RemnantFitConfig
+    fit_config_sha256: str
+    search_config: LayoutFitSearchConfig
+    search_config_sha256: str
+    rules: ResidualRuleSet
+    rules_sha256: str
+    collision_backend: str
+    jagua_executable_sha256: str | None
+    jagua_executable_size_bytes: int | None
+    jagua_executable_mode_bits: int | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.replay_input.input_id != self.replay_input_id
+            or self.replay_input.content_sha256 != self.replay_input_sha256
+            or self.replay_input.stream_id != self.stream_id
+            or self.replay_input.stream_sha256 != self.stream_sha256
+            or self.replay_input.fit_config != self.fit_config
+            or self.replay_input.search_config != self.search_config
+            or self.replay_input.collision_backend != self.collision_backend
+            or self.problem not in self.replay_input.problems
+            or self.candidate_set not in self.replay_input.candidate_sets
+            or self.verified_candidates.evidence != self.candidate_set
+            or self.event_binding not in self.replay_input.instances
+        ):
+            raise ValueError("M8 unchecked source bindings differ from the replay input")
+        jagua_identity = (
+            self.jagua_executable_sha256 is not None,
+            self.jagua_executable_size_bytes is not None,
+            self.jagua_executable_mode_bits is not None,
+        )
+        jagua_active = self.collision_backend == "jagua_rs_0_7_0_guarded_prefilter_shapely_witness"
+        if jagua_identity not in {(False, False, False), (True, True, True)} or (
+            jagua_active != all(jagua_identity)
+        ):
+            raise ValueError("M8 unchecked source Jagua binding is incomplete")
+        if jagua_active and (
+            self.jagua_executable_sha256 is None
+            or not self.jagua_executable_sha256.startswith("sha256:")
+            or self.jagua_executable_size_bytes is None
+            or self.jagua_executable_size_bytes <= 0
+            or self.jagua_executable_mode_bits is None
+            or not self.jagua_executable_mode_bits & 0o111
+        ):
+            raise ValueError("M8 unchecked source Jagua executable identity is invalid")
+        expected_fit = f"sha256:{semantic_sha256(self.fit_config.model_dump(mode='json'))}"
+        expected_search = f"sha256:{semantic_sha256(self.search_config.model_dump(mode='json'))}"
+        expected_rules = f"sha256:{semantic_sha256(self.rules.model_dump(mode='json'))}"
+        if (
+            self.fit_config_sha256 != expected_fit
+            or self.search_config_sha256 != expected_search
+            or self.rules_sha256 != expected_rules
+        ):
+            raise ValueError("M8 unchecked source semantic configuration hash differs")
+
+
+@dataclass(frozen=True)
+class M8UncheckedProducerTransition:
+    """Producer-only common record; it carries no accepted proof authority."""
+
+    common_fact: M8CommonTransitionFact
+    portable_transition: portable_facts.M8PortableCommonTransitionV2
+    inventory_classifications: tuple[M8UncheckedCommonInventoryCapture, ...]
+    standard_candidates: tuple[M8UncheckedStandardCandidateCapture, ...]
+    source: M8UncheckedCommonSourceCapture
+    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.common_fact.event_position < len(self.source.replay_input.instances):
+            raise ValueError("M8 unchecked common fact event position is outside its source")
+        if (
+            self.common_fact.replay_input_id != self.source.replay_input_id
+            or self.common_fact.replay_input_sha256 != self.source.replay_input_sha256
+            or self.common_fact.semantic_runtime_sha256 != self.source.semantic_runtime_sha256
+            or self.source.event_binding
+            != self.source.replay_input.instances[self.common_fact.event_position]
+            or self.source.problem.problem_id != self.source.event_binding.problem_id
+            or self.source.candidate_set.problem_id != self.source.problem.problem_id
+        ):
+            raise ValueError("M8 unchecked common fact source context differs")
+        inventory_ids = tuple(item.remnant_id for item in self.inventory_classifications)
+        expected_ids = tuple(
+            item.remnant.remnant_id for item in self.common_fact.cursor_before.inventory
+        )
+        if inventory_ids != expected_ids:
+            raise ValueError("M8 unchecked common capture does not cover source inventory")
+        if tuple(item.item for item in self.inventory_classifications) != (
+            self.common_fact.cursor_before.inventory
+        ):
+            raise ValueError("M8 unchecked inventory capture differs from source items")
+        if (
+            self.portable_transition.cursor_before_sha256 != self.common_fact.cursor_before_sha256
+            or self.portable_transition.cursor_after_sha256 != self.common_fact.cursor_after_sha256
+            or self.portable_transition.event_id != self.common_fact.event_id
+            or self.portable_transition.event_position != self.common_fact.event_position
+            or self.portable_transition.replay_input_id != self.source.replay_input_id
+            or self.portable_transition.replay_input_sha256 != self.source.replay_input_sha256
+            or self.portable_transition.semantic_runtime_sha256
+            != self.source.semantic_runtime_sha256
+        ):
+            raise ValueError("M8 unchecked portable transition differs from legacy common fact")
+        candidate_ids = tuple(item.profile.candidate_id for item in self.standard_candidates)
+        if tuple(item.profile_position for item in self.standard_candidates) != tuple(
+            range(len(self.standard_candidates))
+        ) or candidate_ids != tuple(
+            item.candidate_id for item in self.source.verified_candidates.candidates
+        ):
+            raise ValueError("M8 unchecked standard capture is incomplete or out of order")
+        selected_standard = tuple(
+            item
+            for item in self.standard_candidates
+            if item.descriptor.action_id == self.common_fact.step.descriptor.action_id
+        )
+        if self.common_fact.step.descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET:
+            if (
+                len(selected_standard) != 1
+                or selected_standard[0].rank != self.common_fact.policy_rank
+                or selected_standard[0].selected_replay_event_net_cost
+                != self.common_fact.step.event.delta_costs.net_cost
+            ):
+                raise ValueError("M8 unchecked selected standard source differs")
+        elif selected_standard or any(
+            item.selected_replay_event_net_cost is not None for item in self.standard_candidates
+        ):
+            raise ValueError("M8 unchecked nonselected standard carries replay event cost")
+
+
+@dataclass(frozen=True)
+class M8UncheckedInfluenceCapture:
+    """Full typed influence preimage retained before the legacy digest reduction."""
+
+    event_position: int
+    item: InventoryItem
+    direction: Literal["added", "removed"]
+    delta: BranchInventoryDelta
+    common: M7PolicyActionBinding
+    common_rank: PolicyRank
+    common_fact_sha256: str
+    common_action_id: str
+    branch_action_id: str
+    state_before_sha256: str
+    state_after_sha256: str
+    rejections: tuple[CompiledTranslationRejection, ...]
+    searches: tuple[LayoutFitSearchResult, ...]
+    translation_batches: tuple[M8UncheckedTranslationBatchCapture, ...]
+    competitor: M7ActionDescriptor | None
+    competitor_context: ActionPolicyContext | None
+    competitor_rank: PolicyRank | None
+    classification: Literal["no_fit", "policy_dominated", "policy_not_dominated"]
+    legacy_evidence_sha256: str | None
+
+    def __post_init__(self) -> None:
+        delta_items = self.delta.added if self.direction == "added" else self.delta.removed
+        if (
+            self.item not in delta_items
+            or self.common_action_id != self.common.materialized_action_id
+            or self.common_rank != rank_policy_action(self.common_rank.policy, self.common.context)
+            or not self.state_before_sha256.startswith("sha256:")
+            or not self.state_after_sha256.startswith("sha256:")
+        ):
+            raise ValueError("M8 unchecked influence source bindings differ")
+        if self.translation_batches:
+            if len(self.searches) != len(self.translation_batches):
+                raise ValueError("M8 unchecked influence searches and translations differ")
+            for search, batch in zip(self.searches, self.translation_batches, strict=True):
+                if (
+                    search.candidate_id != batch.candidate_id
+                    or search.remnant_id != batch.remnant_id
+                    or search.generated_candidate_count != batch.generated_candidate_count
+                    or search.duplicate_candidate_count != batch.duplicate_candidate_count
+                    or search.budget_truncated != batch.budget_truncated
+                    or (
+                        search.translation is not None
+                        and (
+                            search.evaluated_candidate_count <= 0
+                            or search.evaluated_candidate_count > len(batch.translations)
+                            or batch.translations[search.evaluated_candidate_count - 1]
+                            != search.translation
+                        )
+                    )
+                ):
+                    raise ValueError("M8 unchecked influence search differs from its source batch")
+        has_competitor = (
+            self.competitor is not None,
+            self.competitor_context is not None,
+            self.competitor_rank is not None,
+        )
+        if has_competitor not in {(False, False, False), (True, True, True)}:
+            raise ValueError("M8 unchecked influence competitor source is incomplete")
+        if self.competitor is not None and (
+            self.competitor.evidence is None
+            or self.competitor_context is None
+            or self.competitor_rank is None
+            or self.competitor.action_id != self.competitor_context.action_id
+            or self.competitor_rank
+            != rank_policy_action(self.competitor_rank.policy, self.competitor_context)
+        ):
+            raise ValueError("M8 unchecked influence competitor bindings differ")
+        if (self.classification == "no_fit" and any(has_competitor)) or (
+            self.classification != "no_fit" and not all(has_competitor)
+        ):
+            raise ValueError("M8 unchecked influence classification differs from competitor")
+        if self.competitor_rank is not None and (
+            (self.classification == "policy_dominated")
+            != (self.common_rank <= self.competitor_rank)
+        ):
+            raise ValueError("M8 unchecked influence policy comparison differs")
+        if (self.classification == "policy_not_dominated") != (self.legacy_evidence_sha256 is None):
+            raise ValueError("M8 unchecked influence legacy digest shape differs")
+
+    @property
+    def remnant_id(self) -> str:
+        return self.item.remnant.remnant_id
+
+    @property
+    def legacy_evidence_payload(self) -> dict[str, object]:
+        if self.classification == "policy_not_dominated":
+            raise ValueError("nonpassive influence has no accepted legacy evidence digest")
+        return _evidence_payload(
+            event_position=self.event_position,
+            remnant_id=self.remnant_id,
+            classification=self.classification,
+            direction=self.direction,
+            delta=self.delta,
+            common=self.common,
+            common_decision_key=self.common_rank.decision_key,
+            common_fact_sha256=self.common_fact_sha256,
+            branch_action_id=self.branch_action_id,
+            state_before_sha256=self.state_before_sha256,
+            state_after_sha256=self.state_after_sha256,
+            rejections=self.rejections,
+            searches=_search_payload(self.searches, label="unchecked influence capture"),
+            competitor=self.competitor,
+            competitor_rank=self.competitor_rank,
+        )
+
+
+@dataclass(frozen=True)
+class M8UncheckedEventPassivityCapture:
+    """Producer-only branch traversal result with no trusted witness provenance."""
+
+    passive: bool
+    classification: Literal["no_fit", "policy_dominated"] | None
+    branch_after: M7ReplayCursor | None
+    state_before_sha256: str | None
+    state_after_sha256: str | None
+    influences: tuple[M8UncheckedInfluenceCapture, ...]
+    exact_search_count: int
+    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+
+    def __post_init__(self) -> None:
+        if self.exact_search_count < 0:
+            raise ValueError("M8 unchecked exact search count cannot be negative")
+        if self.passive != (
+            self.classification is not None
+            and self.branch_after is not None
+            and self.state_before_sha256 is not None
+            and self.state_after_sha256 is not None
+        ):
+            raise ValueError("M8 unchecked passivity capture shape is inconsistent")
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -369,9 +848,7 @@ def _common_transition_fact_from_catalog(
 ) -> M8CommonTransitionFact:
     event_position = cursor.next_event_position
     selected = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
-    descriptor = next(
-        item for item in catalog.actions if item.action_id == selected.action_id
-    )
+    descriptor = next(item for item in catalog.actions if item.action_id == selected.action_id)
     step = apply_m7_action_descriptor(
         execution_runtime,
         cursor=cursor,
@@ -401,6 +878,308 @@ def _common_transition_fact_from_catalog(
         policy_rank=rank,
         semantic_runtime_sha256=semantic_runtime_sha256,
         content_sha256=content_sha256,
+    )
+
+
+def _portable_translation_point(
+    translation: tuple[float, float],
+) -> portable_facts.M8TranslationPointV2:
+    return portable_facts.M8TranslationPointV2(
+        x_bits=portable_facts.encode_canonical_f64(float(translation[0])),
+        y_bits=portable_facts.encode_canonical_f64(float(translation[1])),
+    )
+
+
+def _portable_polygon(polygon):  # type: ignore[no-untyped-def]
+    return portable_facts.M8PortablePolygonV2(
+        wkb_hex=polygon.wkb_hex,
+        polygon_sha256=polygon.polygon_sha256,
+        area_bits=portable_facts.encode_canonical_f64(float(polygon.area)),
+    )
+
+
+def _portable_material(material):  # type: ignore[no-untyped-def]
+    return portable_facts.M8PortableMaterialIdentityV2(
+        material_code=material.material_code,
+        grade=material.grade,
+        thickness=material.thickness,
+        surface=material.surface,
+        grain=material.grain,
+        provenance=material.provenance.value,
+    )
+
+
+def _portable_remnant(remnant):  # type: ignore[no-untyped-def]
+    lineage = remnant.lineage
+    return portable_facts.M8PortableRemnantStockV2(
+        remnant_id=remnant.remnant_id,
+        geometry=_portable_polygon(remnant.geometry),
+        material=_portable_material(remnant.material),
+        root_sheet_area_bits=portable_facts.encode_canonical_f64(float(remnant.root_sheet_area)),
+        root_sheet_short_side_bits=portable_facts.encode_canonical_f64(
+            float(remnant.root_sheet_short_side)
+        ),
+        lineage=portable_facts.M8PortableRemnantLineageV2(
+            root_stock_id=lineage.root_stock_id,
+            parent_remnant_id=lineage.parent_remnant_id,
+            ancestor_remnant_ids=lineage.ancestor_remnant_ids,
+            generation=lineage.generation,
+            source_candidate_id=lineage.source_candidate_id,
+            source_component_sha256=lineage.source_component_sha256,
+        ),
+    )
+
+
+def _portable_inventory_item(item: InventoryItem) -> portable_facts.M8PortableInventoryItemV2:
+    return portable_facts.M8PortableInventoryItemV2(
+        remnant=_portable_remnant(item.remnant),
+        entered_at=portable_facts.encode_canonical_utc(item.entered_at),
+    )
+
+
+def _portable_ledger(ledger):  # type: ignore[no-untyped-def]
+    return portable_facts.M8PortableCostLedgerV2(
+        purchase_cost_bits=portable_facts.encode_canonical_f64(float(ledger.purchase_cost)),
+        storage_cost_bits=portable_facts.encode_canonical_f64(float(ledger.storage_cost)),
+        return_handling_cost_bits=portable_facts.encode_canonical_f64(
+            float(ledger.return_handling_cost)
+        ),
+        retrieval_handling_cost_bits=portable_facts.encode_canonical_f64(
+            float(ledger.retrieval_handling_cost)
+        ),
+        scrap_proceeds_bits=portable_facts.encode_canonical_f64(float(ledger.scrap_proceeds)),
+        terminal_scrap_credit_bits=portable_facts.encode_canonical_f64(
+            float(ledger.terminal_scrap_credit)
+        ),
+        net_cost_bits=portable_facts.encode_canonical_f64(float(ledger.net_cost)),
+    )
+
+
+def _portable_search_config(
+    config: LayoutFitSearchConfig,
+) -> portable_facts.M8PortableLayoutSearchConfigV2:
+    return portable_facts.M8PortableLayoutSearchConfigV2(
+        grid_columns=config.grid_columns,
+        grid_rows=config.grid_rows,
+        maximum_candidates=config.maximum_candidates,
+        candidate_source_order=config.candidate_source_order,
+    )
+
+
+def _portable_search_result(
+    search: LayoutFitSearchResult,
+) -> portable_facts.M8PortableLayoutSearchResultV2:
+    return portable_facts.M8PortableLayoutSearchResultV2(
+        status=search.status.value,
+        candidate_id=search.candidate_id,
+        remnant_id=search.remnant_id,
+        config=_portable_search_config(search.config),
+        generated_candidate_count=search.generated_candidate_count,
+        duplicate_candidate_count=search.duplicate_candidate_count,
+        evaluated_candidate_count=search.evaluated_candidate_count,
+        budget_truncated=search.budget_truncated,
+        translation=(
+            _portable_translation_point(search.translation)
+            if search.translation is not None
+            else None
+        ),
+    )
+
+
+def _portable_accounting(accounting):  # type: ignore[no-untyped-def]
+    return portable_facts.M8PortableAccountingV2(
+        parent_remnant_area_bits=portable_facts.encode_canonical_f64(
+            float(accounting.parent_remnant_area)
+        ),
+        placed_area_bits=portable_facts.encode_canonical_f64(float(accounting.placed_area)),
+        process_loss_area_bits=portable_facts.encode_canonical_f64(
+            float(accounting.process_loss_area)
+        ),
+        retained_child_area_bits=portable_facts.encode_canonical_f64(
+            float(accounting.retained_child_area)
+        ),
+        scrap_area_bits=portable_facts.encode_canonical_f64(float(accounting.scrap_area)),
+        reconciliation_delta_bits=portable_facts.encode_canonical_f64(
+            float(accounting.reconciliation_delta)
+        ),
+        area_tolerance_bits=portable_facts.encode_canonical_f64(float(accounting.area_tolerance)),
+    )
+
+
+def _portable_action(action):  # type: ignore[no-untyped-def]
+    return portable_facts.M8PortableLayoutActionV2(
+        action_id=action.action_id,
+        content_sha256=action.content_sha256,
+        problem_id=action.problem_id,
+        problem_sha256=action.problem_sha256,
+        candidate_set_id=action.candidate_set_id,
+        candidate_set_sha256=action.candidate_set_sha256,
+        candidate_id=action.candidate_id,
+        kind=action.kind.value,
+        selected_stock=_portable_remnant(action.selected_stock),
+        selected_remnant_id=action.selected_remnant_id,
+        translation=_portable_translation_point(action.translation),
+        placements=tuple(
+            portable_facts.M8PortablePlacementV2(
+                part_id=item.part_id,
+                rotation_bits=portable_facts.encode_canonical_f64(float(item.rotation)),
+                translation=_portable_translation_point(item.translation),
+            )
+            for item in action.placements
+        ),
+        placed_parts=tuple(
+            portable_facts.M8PortablePlacedPartV2(
+                part_id=item.part_id,
+                geometry=_portable_polygon(item.geometry),
+            )
+            for item in action.placed_parts
+        ),
+        search_result=(
+            _portable_search_result(action.search_result)
+            if action.search_result is not None
+            else None
+        ),
+        accounting=_portable_accounting(action.accounting),
+        returned_remnants=tuple(_portable_remnant(item) for item in action.returned_remnants),
+    )
+
+
+def _portable_policy_context(
+    context: ActionPolicyContext,
+) -> portable_facts.M8PortablePolicyContextV2:
+    return portable_facts.M8PortablePolicyContextV2(
+        action_id=context.action_id,
+        kind=context.kind.value,
+        candidate_id=context.candidate_id,
+        candidate_width_bits=portable_facts.encode_canonical_f64(float(context.candidate_width)),
+        selected_stock_id=context.selected_stock_id,
+        immediate_net_cost_bits=portable_facts.encode_canonical_f64(
+            float(context.immediate_net_cost)
+        ),
+        selected_remnant_age_hours_bits=portable_facts.encode_canonical_f64(
+            float(context.selected_remnant_age_hours)
+        ),
+        returned_regularity_bits=portable_facts.encode_canonical_f64(
+            float(context.returned_regularity)
+        ),
+        known_order_lookahead_term_bits=portable_facts.encode_canonical_f64(
+            float(context.known_order_lookahead_term)
+        ),
+    )
+
+
+def _portable_policy_rank_components(
+    values: tuple[object, ...],
+) -> tuple[portable_facts.M8PolicyRankComponentV2, ...]:
+    components = []
+    for value in values:
+        if type(value) is float:
+            components.append(
+                portable_facts.M8PolicyRankComponentV2(
+                    component_kind="f64",
+                    f64_bits=portable_facts.encode_canonical_f64(value),
+                )
+            )
+        elif type(value) is int:
+            components.append(
+                portable_facts.M8PolicyRankComponentV2(
+                    component_kind="int",
+                    int_value=value,
+                )
+            )
+        elif type(value) is str:
+            components.append(
+                portable_facts.M8PolicyRankComponentV2(
+                    component_kind="string",
+                    string_value=value,
+                )
+            )
+        else:
+            raise TypeError("M8 policy rank contains an unsupported component type")
+    return tuple(components)
+
+
+def _portable_cursor(cursor: M7ReplayCursor) -> portable_facts.M8PortableReplayCursorV2:
+    return portable_facts.M8PortableReplayCursorV2(
+        next_event_position=cursor.next_event_position,
+        current_time=portable_facts.encode_canonical_utc(cursor.current_time),
+        inventory=tuple(_portable_inventory_item(item) for item in cursor.inventory),
+        cumulative_costs=_portable_ledger(cursor.cumulative_costs),
+        timestamp_group_sequence=cursor.timestamp_group_sequence,
+        timestamp_subsequence=cursor.timestamp_subsequence,
+        previous_release=(
+            portable_facts.encode_canonical_utc(cursor.previous_release)
+            if cursor.previous_release is not None
+            else None
+        ),
+    )
+
+
+def _portable_common_transition(
+    fact: M8CommonTransitionFact,
+) -> portable_facts.M8PortableCommonTransitionV2:
+    step = fact.step
+    event = step.event
+    action = _portable_action(event.action)
+    descriptor_evidence = (
+        _portable_action(step.descriptor.evidence) if step.descriptor.evidence is not None else None
+    )
+    portable_context = _portable_policy_context(step.selected_context)
+    return portable_facts.M8PortableCommonTransitionV2(
+        replay_input_id=fact.replay_input_id,
+        replay_input_sha256=fact.replay_input_sha256,
+        semantic_runtime_sha256=fact.semantic_runtime_sha256,
+        event_position=fact.event_position,
+        cursor_before_sha256=fact.cursor_before_sha256,
+        cursor_before=_portable_cursor(fact.cursor_before),
+        descriptor=portable_facts.M8PortableActionDescriptorV2(
+            action_id=step.descriptor.action_id,
+            kind=step.descriptor.kind.value,
+            candidate_id=step.descriptor.candidate_id,
+            selected_remnant_id=step.descriptor.selected_remnant_id,
+            evidence=descriptor_evidence,
+        ),
+        selected_context=portable_context,
+        action_binding=portable_facts.M8PortableActionBindingV2(
+            catalog_action_id=step.action_binding.catalog_action_id,
+            materialized_action_id=step.action_binding.materialized_action_id,
+            context=_portable_policy_context(step.action_binding.context),
+        ),
+        event=portable_facts.M8PortableReplayEventV2(
+            sequence=event.sequence,
+            event_id=event.event_id,
+            binding_id=event.binding_id,
+            occurred_at=portable_facts.encode_canonical_utc(event.occurred_at),
+            timestamp_group_sequence=event.timestamp_group_sequence,
+            timestamp_subsequence=event.timestamp_subsequence,
+            storage_interval_start=portable_facts.encode_canonical_utc(
+                event.storage_interval_start
+            ),
+            storage_interval_end=portable_facts.encode_canonical_utc(event.storage_interval_end),
+            inventory_before=tuple(
+                _portable_inventory_item(item) for item in event.inventory_before
+            ),
+            action_set_size=event.action_set_size,
+            standard_action_count=event.standard_action_count,
+            remnant_action_count=event.remnant_action_count,
+            fit_search_query_count=event.fit_search_query_count,
+            fit_search_generated_candidate_count=event.fit_search_generated_candidate_count,
+            fit_search_evaluated_candidate_count=event.fit_search_evaluated_candidate_count,
+            fit_search_budget_truncated_count=event.fit_search_budget_truncated_count,
+            policy_decision_key=event.policy_decision_key,
+            action=action,
+            inventory_after=tuple(_portable_inventory_item(item) for item in event.inventory_after),
+            delta_costs=_portable_ledger(event.delta_costs),
+            cumulative_costs=_portable_ledger(event.cumulative_costs),
+        ),
+        cursor_after_sha256=fact.cursor_after_sha256,
+        cursor_after=_portable_cursor(step.cursor),
+        event_id=fact.event_id,
+        policy_rank=portable_facts.M8PortablePolicyRankV2(
+            policy_name=fact.policy_rank.policy.value,
+            comparison_key=_portable_policy_rank_components(fact.policy_rank.comparison_key),
+            decision_key=fact.policy_rank.decision_key,
+        ),
     )
 
 
@@ -486,9 +1265,7 @@ def _zero_generation_rejection_witness(
         return None
     return FastCommonRejectionWitness(
         remnant_id=item.remnant.remnant_id,
-        candidate_ids=tuple(
-            sorted(scalar.candidate_id for scalar in compiled.frontier.members)
-        ),
+        candidate_ids=tuple(sorted(scalar.candidate_id for scalar in compiled.frontier.members)),
         material_matches=material_matches,
         remnant_area=measured.area,
         remnant_width=remnant_width,
@@ -535,17 +1312,18 @@ def _zero_generation_searches(
     )
 
 
-def _synthesize_scalar_no_fit_searches(
+def _synthesize_scalar_no_fit_source(
     runtime: M7ReplayRuntime,
     *,
     event_position: int,
     item: InventoryItem,
-) -> tuple[LayoutFitSearchResult, ...] | None:
-    """Generate exact search counts when scalar geometry already proves no fit."""
+    mode: _CommonDerivationMode,
+) -> _ScalarNoFitSource:
+    """Generate exact search counts while preserving their ordered source batches."""
 
     binding = runtime.replay_input.instances[event_position]
     if material_key(item.remnant.material) != material_key(binding.material):
-        return ()
+        return _ScalarNoFitSource(searches=(), translation_batches=())
     problem = next(
         problem
         for problem in runtime.replay_input.problems
@@ -571,7 +1349,7 @@ def _synthesize_scalar_no_fit_searches(
         for layout in layouts
     )
     if any(not certificate.impossible for certificate in certificates):
-        return None
+        return _ScalarNoFitSource(searches=None, translation_batches=())
     rust_generated = runtime.jagua_executable is not None and not any(
         polygon.interiors for layout in layouts for polygon in layout.part_polygons
     )
@@ -586,33 +1364,38 @@ def _synthesize_scalar_no_fit_searches(
                 container_guard=runtime.replay_input.jagua_container_guard or 1.0,
             )
         except JaguaRepresentationError:
+            if mode is _CommonDerivationMode.UNCHECKED_PORTABLE:
+                return _ScalarNoFitSource(
+                    searches=None,
+                    translation_batches=(),
+                    exact_replay_reason="unsupported_representation",
+                )
             rust_generated = False
         else:
             translations = generated.translation_batches
-            with (
-                activate_m8_local_trusted_audit(),
-                profile_phase("translation_count_audit"),
-            ):
-                audited_counts = audit_layout_translation_batch(
-                    remnant=prepared_remnant,
-                    layouts=layouts,
-                    expected=translations,
-                    fit_config=runtime.replay_input.fit_config,
-                    search_config=runtime.replay_input.search_config,
-                    process_count=require_m8_translation_audit_processes(),
-                )
-            for batch, audited in zip(translations, audited_counts, strict=True):
-                if (
-                    batch.generated_candidate_count
-                    != audited.generated_candidate_count
-                    or batch.duplicate_candidate_count
-                    != audited.duplicate_candidate_count
-                    or len(batch.translations) != audited.evaluated_candidate_count
-                    or batch.budget_truncated != audited.budget_truncated
+            if mode is _CommonDerivationMode.TRUSTED_LOCAL:
+                with (
+                    activate_m8_local_trusted_audit(),
+                    profile_phase("translation_count_audit"),
                 ):
-                    raise ValueError(
-                        "M8 Jagua translation counts differ from independent audit"
+                    audited_counts = audit_layout_translation_batch(
+                        remnant=prepared_remnant,
+                        layouts=layouts,
+                        expected=translations,
+                        fit_config=runtime.replay_input.fit_config,
+                        search_config=runtime.replay_input.search_config,
+                        process_count=require_m8_translation_audit_processes(),
                     )
+                for batch, audited in zip(translations, audited_counts, strict=True):
+                    if (
+                        batch.generated_candidate_count != audited.generated_candidate_count
+                        or batch.duplicate_candidate_count != audited.duplicate_candidate_count
+                        or len(batch.translations) != audited.evaluated_candidate_count
+                        or batch.budget_truncated != audited.budget_truncated
+                    ):
+                        raise ValueError(
+                            "M8 Jagua translation counts differ from independent audit"
+                        )
     if not rust_generated:
         translations = tuple(
             generate_layout_translations(
@@ -625,20 +1408,39 @@ def _synthesize_scalar_no_fit_searches(
             )
             for candidate, layout in zip(verified.candidates, layouts, strict=True)
         )
-    return tuple(
-        LayoutFitSearchResult(
-            status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
-            candidate_id=candidate.candidate_id,
-            remnant_id=item.remnant.remnant_id,
-            config=runtime.replay_input.search_config,
-            generated_candidate_count=batch.generated_candidate_count,
-            duplicate_candidate_count=batch.duplicate_candidate_count,
-            evaluated_candidate_count=len(batch.translations),
-            budget_truncated=batch.budget_truncated,
-            translation=None,
-        )
-        for candidate, batch in zip(verified.candidates, translations, strict=True)
+    return _ScalarNoFitSource(
+        searches=tuple(
+            LayoutFitSearchResult(
+                status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
+                candidate_id=candidate.candidate_id,
+                remnant_id=item.remnant.remnant_id,
+                config=runtime.replay_input.search_config,
+                generated_candidate_count=batch.generated_candidate_count,
+                duplicate_candidate_count=batch.duplicate_candidate_count,
+                evaluated_candidate_count=len(batch.translations),
+                budget_truncated=batch.budget_truncated,
+                translation=None,
+            )
+            for candidate, batch in zip(verified.candidates, translations, strict=True)
+        ),
+        translation_batches=translations,
     )
+
+
+def _synthesize_scalar_no_fit_searches(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+) -> tuple[LayoutFitSearchResult, ...] | None:
+    """Trusted-local count synthesis retained for existing v1 capability paths."""
+
+    return _synthesize_scalar_no_fit_source(
+        runtime,
+        event_position=event_position,
+        item=item,
+        mode=_CommonDerivationMode.TRUSTED_LOCAL,
+    ).searches
 
 
 def _seed_fit_searches(
@@ -749,11 +1551,9 @@ def _try_derive_m8_common_transition_fact_fast(
         if prepared_layouts is None:
             binding = runtime.replay_input.instances[event_position]
             verified = runtime.runtime_candidates[binding.problem_id]
-            if (
-                not verified.rejection_layouts
-                or tuple(item.candidate_id for item in verified.rejection_layouts)
-                != tuple(item.candidate_id for item in verified.candidates)
-            ):
+            if not verified.rejection_layouts or tuple(
+                item.candidate_id for item in verified.rejection_layouts
+            ) != tuple(item.candidate_id for item in verified.candidates):
                 return None
             compiled = compile_rejection_problem(runtime, event_position=event_position)
         else:
@@ -802,9 +1602,7 @@ def _try_derive_m8_common_transition_fact_fast(
         inventory=tuple(rejected),
     )
     execution_runtime = _fresh_runtime(runtime)
-    standard_profiles = (
-        None if compiled_standard is None else compiled_standard.standard_profiles
-    )
+    standard_profiles = None if compiled_standard is None else compiled_standard.standard_profiles
     if counted_no_fit:
         binding = execution_runtime.replay_input.instances[event_position]
         verified = execution_runtime.runtime_candidates[binding.problem_id]
@@ -873,9 +1671,7 @@ def _try_derive_m8_common_transition_fact_fast(
             )
     if compiled_standard is not None and not survivors:
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
-        descriptor = next(
-            item for item in catalog.actions if item.action_id == selection.action_id
-        )
+        descriptor = next(item for item in catalog.actions if item.action_id == selection.action_id)
         if (
             selection.action_id != compiled_standard.action_id
             or selection.decision_key != compiled_standard.decision_key
@@ -895,6 +1691,378 @@ def _try_derive_m8_common_transition_fact_fast(
         counted_no_fit_inventory=tuple(counted_no_fit),
         exact_survivor_inventory=tuple(survivors),
         witnesses=tuple(witnesses),
+    )
+
+
+def _capture_executable_identity(
+    runtime: M7ReplayRuntime,
+) -> tuple[str | None, int | None, int | None]:
+    executable = runtime.jagua_executable
+    if executable is None:
+        return None, None, None
+    before = executable.stat()
+    content = executable.read_bytes()
+    after = executable.stat()
+    before_identity = (before.st_dev, before.st_ino, before.st_mode, before.st_size)
+    after_identity = (after.st_dev, after.st_ino, after.st_mode, after.st_size)
+    if before_identity != after_identity or len(content) != after.st_size:
+        raise ValueError("M8 Jagua executable changed during unchecked source capture")
+    return (
+        f"sha256:{hashlib.sha256(content).hexdigest()}",
+        after.st_size,
+        after.st_mode & 0o777,
+    )
+
+
+def _require_unchecked_runtime_source_identity(
+    runtime: M7ReplayRuntime,
+    *,
+    semantic_runtime_sha256: str,
+    runtime_authority: M7AuthoritativeProofRuntime | None,
+    operation: Literal["common capture", "traversal"],
+) -> None:
+    """Bind source capture to either a direct runtime or its active proof lease."""
+
+    if runtime_authority is None:
+        if m7_semantic_runtime_sha256(runtime) != semantic_runtime_sha256:
+            raise ValueError(f"M8 unchecked {operation} runtime fingerprint differs")
+        return
+    runtime_authority.require_active(runtime)
+    if runtime_authority.semantic_sha256 != semantic_runtime_sha256:
+        raise ValueError(f"M8 unchecked {operation} authority fingerprint differs")
+
+
+def _capture_unchecked_m8_common_transition(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    semantic_runtime_sha256: str,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    runtime_authority: M7AuthoritativeProofRuntime | None = None,
+) -> M8UncheckedProducerTransition:
+    """Capture one producer-only common transition without issuing authority."""
+
+    _require_unchecked_runtime_source_identity(
+        runtime,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        runtime_authority=runtime_authority,
+        operation="common capture",
+    )
+    executable_identity_before = _capture_executable_identity(runtime)
+    event_position = cursor.next_event_position
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    problem = next(
+        item for item in runtime.replay_input.problems if item.problem_id == binding.problem_id
+    )
+    compiled_standard = (
+        None
+        if prepared_layouts is None
+        else _prepared_standard_winner(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
+    compiled = None
+    if cursor.inventory:
+        if prepared_layouts is None:
+            if not verified.rejection_layouts or tuple(
+                item.candidate_id for item in verified.rejection_layouts
+            ) != tuple(item.candidate_id for item in verified.candidates):
+                compiled = None
+            else:
+                compiled = compile_rejection_problem(runtime, event_position=event_position)
+        else:
+            compiled = _prepared_rejection_problem(
+                prepared_layouts,
+                runtime,
+                event_position=event_position,
+            )
+
+    rejected: list[InventoryItem] = []
+    counted_no_fit: list[InventoryItem] = []
+    counted_searches: dict[str, tuple[LayoutFitSearchResult, ...]] = {}
+    survivors: list[InventoryItem] = []
+    classifications: list[M8UncheckedCommonInventoryCapture] = []
+    for item in cursor.inventory:
+        measured = (
+            prepare_translation_rejection_remnant(item.remnant)
+            if prepared_layouts is None
+            else _registered_prepared_remnant_measurement(
+                prepared_layouts,
+                runtime,
+                item.remnant,
+            )
+        )
+        min_x, min_y, max_x, max_y = measured.bounds
+        remnant_width = float(max_x - min_x)
+        remnant_height = float(max_y - min_y)
+        area_tolerance = max(
+            runtime.replay_input.fit_config.coordinate_tolerance,
+            measured.area * runtime.replay_input.fit_config.relative_area_tolerance,
+        )
+        material_matches = material_key(item.remnant.material) == material_key(binding.material)
+        witness = (
+            _zero_generation_rejection_witness(
+                runtime,
+                compiled=compiled,
+                event_position=event_position,
+                item=item,
+                prepared_layouts=prepared_layouts,
+            )
+            if compiled is not None
+            else None
+        )
+        if witness is not None:
+            rejected.append(item)
+            classifications.append(
+                M8UncheckedCommonInventoryCapture(
+                    item=item,
+                    classification="scalar_no_fit",
+                    material_matches=material_matches,
+                    remnant_area=measured.area,
+                    remnant_width=remnant_width,
+                    remnant_height=remnant_height,
+                    area_tolerance=area_tolerance,
+                    coordinate_tolerance=runtime.replay_input.fit_config.coordinate_tolerance,
+                    scalar_witness=witness,
+                    candidate_rejection_layouts=verified.rejection_layouts,
+                    frontier=compiled.frontier,
+                    translation_batches=(),
+                )
+            )
+            continue
+        source = (
+            _synthesize_scalar_no_fit_source(
+                runtime,
+                event_position=event_position,
+                item=item,
+                mode=_CommonDerivationMode.UNCHECKED_PORTABLE,
+            )
+            if compiled is not None
+            else _ScalarNoFitSource(
+                searches=None,
+                translation_batches=(),
+                exact_replay_reason="unsupported_representation",
+            )
+        )
+        if source.searches is not None:
+            if not source.translation_batches:
+                raise ValueError("M8 unchecked counted-no-fit capture lacks translation batches")
+            counted_no_fit.append(item)
+            counted_searches[item.remnant.remnant_id] = source.searches
+            classifications.append(
+                M8UncheckedCommonInventoryCapture(
+                    item=item,
+                    classification="counted_no_fit",
+                    material_matches=material_matches,
+                    remnant_area=measured.area,
+                    remnant_width=remnant_width,
+                    remnant_height=remnant_height,
+                    area_tolerance=area_tolerance,
+                    coordinate_tolerance=runtime.replay_input.fit_config.coordinate_tolerance,
+                    scalar_witness=None,
+                    candidate_rejection_layouts=verified.rejection_layouts,
+                    frontier=compiled.frontier if compiled is not None else None,
+                    translation_batches=tuple(
+                        M8UncheckedTranslationBatchCapture.from_source(batch)
+                        for batch in source.translation_batches
+                    ),
+                )
+            )
+            continue
+        survivors.append(item)
+        unsupported_representation = source.exact_replay_reason == "unsupported_representation"
+        classifications.append(
+            M8UncheckedCommonInventoryCapture(
+                item=item,
+                classification="exact_survivor",
+                material_matches=material_matches,
+                remnant_area=measured.area,
+                remnant_width=remnant_width,
+                remnant_height=remnant_height,
+                area_tolerance=area_tolerance,
+                coordinate_tolerance=runtime.replay_input.fit_config.coordinate_tolerance,
+                scalar_witness=None,
+                candidate_rejection_layouts=(
+                    verified.rejection_layouts
+                    if compiled is not None and not unsupported_representation
+                    else ()
+                ),
+                frontier=(
+                    compiled.frontier
+                    if compiled is not None and not unsupported_representation
+                    else None
+                ),
+                translation_batches=(),
+                exact_replay_reason=(source.exact_replay_reason or "frontier_survivor"),
+            )
+        )
+
+    execution_runtime = _fresh_runtime(runtime)
+    standard_profiles = None if compiled_standard is None else compiled_standard.standard_profiles
+    if counted_no_fit:
+        if standard_profiles is not None:
+            if tuple(item.candidate_id for item in standard_profiles) != tuple(
+                item.candidate_id for item in verified.candidates
+            ):
+                raise ValueError("M8 prepared standard profiles differ from candidates")
+            for profile in standard_profiles:
+                execution_runtime.standard_profile_cache[
+                    (binding.problem_id, profile.candidate_id)
+                ] = profile
+        for item in rejected:
+            if material_key(item.remnant.material) == material_key(binding.material):
+                _seed_fit_searches(
+                    execution_runtime,
+                    event_position=event_position,
+                    item=item,
+                    searches=_zero_generation_searches(
+                        execution_runtime,
+                        event_position=event_position,
+                        item=item,
+                    ),
+                )
+        for item in counted_no_fit:
+            _seed_fit_searches(
+                execution_runtime,
+                event_position=event_position,
+                item=item,
+                searches=counted_searches[item.remnant.remnant_id],
+            )
+        catalog = enumerate_m7_action_catalog(
+            execution_runtime,
+            cursor=cursor,
+            complete=False,
+        )
+        _require_common_search_caches_match_authoritative(
+            runtime,
+            authoritative_runtime=execution_runtime,
+            event_position=event_position,
+            inventory=cursor.inventory,
+        )
+    elif survivors and rejected:
+        catalog = enumerate_m7_pruned_action_catalog(
+            execution_runtime,
+            cursor=cursor,
+            zero_generation_rejected_inventory=tuple(rejected),
+            precomputed_standard_profiles=standard_profiles,
+        )
+        _require_common_search_caches_match_authoritative(
+            runtime,
+            authoritative_runtime=execution_runtime,
+            event_position=event_position,
+            inventory=tuple(survivors),
+        )
+    elif survivors:
+        catalog = enumerate_m7_action_catalog(
+            execution_runtime,
+            cursor=cursor,
+            complete=False,
+        )
+        _require_common_search_caches_match_authoritative(
+            runtime,
+            authoritative_runtime=execution_runtime,
+            event_position=event_position,
+            inventory=cursor.inventory,
+        )
+    else:
+        catalog = enumerate_m7_standard_only_catalog(
+            execution_runtime,
+            cursor=cursor,
+            zero_generation_rejected_inventory=tuple(rejected),
+            precomputed_standard_profiles=standard_profiles,
+        )
+    fact = _common_transition_fact_from_catalog(
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        execution_runtime=execution_runtime,
+        catalog=catalog,
+    )
+
+    if standard_profiles is None:
+        standard_profiles = tuple(
+            execution_runtime.standard_profile_cache[(binding.problem_id, candidate.candidate_id)]
+            for candidate in verified.candidates
+        )
+    profiles_by_candidate = {item.candidate_id: item for item in standard_profiles}
+    contexts_by_action = {item.action_id: item for item in catalog.contexts}
+    standard_descriptors = tuple(
+        item for item in catalog.actions if item.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    )
+    expected_candidate_ids = tuple(item.candidate_id for item in verified.candidates)
+    if (
+        tuple(item.candidate_id for item in standard_descriptors) != expected_candidate_ids
+        or tuple(item.candidate_id for item in standard_profiles) != expected_candidate_ids
+        or len(contexts_by_action) != len(catalog.contexts)
+        or any(item.action_id not in contexts_by_action for item in standard_descriptors)
+    ):
+        raise ValueError("M8 unchecked capture lacks the complete ordered standard candidates")
+    standard_candidates = tuple(
+        M8UncheckedStandardCandidateCapture(
+            profile_position=position,
+            descriptor=descriptor,
+            profile=profiles_by_candidate[descriptor.candidate_id],
+            context=contexts_by_action[descriptor.action_id],
+            rank=rank_policy_action(
+                runtime.replay_input.policy.name,
+                contexts_by_action[descriptor.action_id],
+            ),
+            policy_immediate_net_cost=contexts_by_action[descriptor.action_id].immediate_net_cost,
+            selected_replay_event_net_cost=(
+                fact.step.event.delta_costs.net_cost
+                if descriptor.action_id == fact.step.descriptor.action_id
+                else None
+            ),
+        )
+        for position, descriptor in enumerate(standard_descriptors)
+    )
+    executable_identity_after = _capture_executable_identity(runtime)
+    if executable_identity_after != executable_identity_before:
+        raise ValueError("M8 Jagua executable changed during unchecked source capture")
+    _require_unchecked_runtime_source_identity(
+        runtime,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        runtime_authority=runtime_authority,
+        operation="common capture",
+    )
+    jagua_sha256, jagua_size, jagua_mode = executable_identity_after
+    fit_config_sha256 = (
+        f"sha256:{semantic_sha256(runtime.replay_input.fit_config.model_dump(mode='json'))}"
+    )
+    search_config_sha256 = (
+        f"sha256:{semantic_sha256(runtime.replay_input.search_config.model_dump(mode='json'))}"
+    )
+    source = M8UncheckedCommonSourceCapture(
+        replay_input_id=runtime.replay_input.input_id,
+        replay_input_sha256=runtime.replay_input.content_sha256,
+        replay_input=runtime.replay_input,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        stream_id=runtime.replay_input.stream_id,
+        stream_sha256=runtime.replay_input.stream_sha256,
+        event_binding=binding,
+        problem=problem,
+        candidate_set=verified.evidence,
+        verified_candidates=verified,
+        fit_config=runtime.replay_input.fit_config,
+        fit_config_sha256=fit_config_sha256,
+        search_config=runtime.replay_input.search_config,
+        search_config_sha256=search_config_sha256,
+        rules=runtime.rules,
+        rules_sha256=f"sha256:{semantic_sha256(runtime.rules.model_dump(mode='json'))}",
+        collision_backend=runtime.replay_input.collision_backend,
+        jagua_executable_sha256=jagua_sha256,
+        jagua_executable_size_bytes=jagua_size,
+        jagua_executable_mode_bits=jagua_mode,
+    )
+    return M8UncheckedProducerTransition(
+        common_fact=fact,
+        portable_transition=_portable_common_transition(fact),
+        inventory_classifications=tuple(classifications),
+        standard_candidates=standard_candidates,
+        source=source,
     )
 
 
@@ -1136,8 +2304,7 @@ def _registered_common_entry(
         or registered.binding_token is not common._binding_token
         or registered.owner_pid != os.getpid()
         or registered.snapshot._owner_pid != registered.owner_pid  # noqa: SLF001
-        or registered.snapshot.semantic_sha256
-        != registered.canonical_fact.semantic_runtime_sha256
+        or registered.snapshot.semantic_sha256 != registered.canonical_fact.semantic_runtime_sha256
     ):
         raise ValueError("M8 certifier requires a validated common transition capability")
     if registered.authority is not None:
@@ -1504,8 +2671,7 @@ def _require_cached_searches_match_authoritative(
             )
             if rebound_shared != authoritative:
                 raise ValueError(
-                    "M8 shared fit-search cache value differs from authoritative registered "
-                    "search"
+                    "M8 shared fit-search cache value differs from authoritative registered search"
                 )
 
 
@@ -1589,7 +2755,94 @@ def _authoritative_competitor(
     return competitor, context, authoritative
 
 
-def _evidence_sha256(
+def _capture_unchecked_competitor_source(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+    cursor_template: M7ReplayCursor,
+) -> tuple[
+    M7ActionDescriptor | None,
+    ActionPolicyContext | None,
+    tuple[LayoutFitSearchResult, ...],
+    tuple[M8UncheckedTranslationBatchCapture, ...],
+]:
+    """Search one exact source sequence once, then consume those results."""
+
+    binding = runtime.replay_input.instances[event_position]
+    problem = next(
+        source
+        for source in runtime.replay_input.problems
+        if source.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    prepared_remnant = prepare_remnant_geometry(item.remnant)
+    layouts = tuple(
+        prepare_layout_footprint(
+            problem.problem,
+            candidate,
+            runtime.replay_input.fit_config,
+        )
+        for candidate in verified.candidates
+    )
+    sources = tuple(
+        generate_layout_translations(
+            item.remnant,
+            candidate,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            prepared_layout=layout,
+            prepared_remnant=prepared_remnant,
+        )
+        for candidate, layout in zip(verified.candidates, layouts, strict=True)
+    )
+    authoritative = tuple(
+        search_layout_translation(
+            item.remnant,
+            problem.problem,
+            candidate,
+            material=binding.material,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            prepared_layout=layout,
+            prepared_remnant=prepared_remnant,
+            translation_candidates=source,
+        )
+        for candidate, layout, source in zip(
+            verified.candidates,
+            layouts,
+            sources,
+            strict=True,
+        )
+    )
+    fresh = _fresh_runtime(runtime)
+    _seed_fit_searches(
+        fresh,
+        event_position=event_position,
+        item=item,
+        searches=authoritative,
+    )
+    competitor, context = enumerate_m7_single_remnant_competitor(
+        fresh,
+        event_position=event_position,
+        item=item,
+        cursor_template=cursor_template,
+    )
+    _require_cached_searches_match_authoritative(
+        runtime,
+        event_position=event_position,
+        item=item,
+        authoritative=authoritative,
+    )
+    return (
+        competitor,
+        context,
+        authoritative,
+        tuple(M8UncheckedTranslationBatchCapture.from_source(source) for source in sources),
+    )
+
+
+def _evidence_payload(
     *,
     event_position: int,
     remnant_id: str,
@@ -1606,8 +2859,8 @@ def _evidence_sha256(
     searches: tuple[dict[str, object], ...],
     competitor: M7ActionDescriptor | None,
     competitor_rank: PolicyRank | None,
-) -> str:
-    """Commit one influence through already-validated parent commitments.
+) -> dict[str, object]:
+    """Build the exact legacy influence preimage before digest reduction.
 
     The common fact commits the semantic runtime, replay input, common cursor,
     transition, action binding, event and rank.  The two state commitments bind
@@ -1628,7 +2881,7 @@ def _evidence_sha256(
             "materialized_content_sha256": competitor.evidence.content_sha256,
             "rank": _rank_payload(competitor_rank) if competitor_rank is not None else None,
         }
-    payload = {
+    return {
         "schema_version": "yieldforge.m8-event-influence-evidence.v2",
         "commitments": {
             "common_transition_fact_sha256": common_fact_sha256,
@@ -1651,16 +2904,55 @@ def _evidence_sha256(
         "exact_searches": searches,
         "competitor": competitor_evidence,
     }
+
+
+def _evidence_sha256(
+    *,
+    event_position: int,
+    remnant_id: str,
+    classification: str,
+    direction: str,
+    delta: BranchInventoryDelta,
+    common: M7PolicyActionBinding,
+    common_decision_key: tuple[str, ...],
+    common_fact_sha256: str,
+    branch_action_id: str,
+    state_before_sha256: str,
+    state_after_sha256: str,
+    rejections: tuple[CompiledTranslationRejection, ...],
+    searches: tuple[dict[str, object], ...],
+    competitor: M7ActionDescriptor | None,
+    competitor_rank: PolicyRank | None,
+) -> str:
+    """Commit one influence through already-validated parent commitments."""
+
+    payload = _evidence_payload(
+        event_position=event_position,
+        remnant_id=remnant_id,
+        classification=classification,
+        direction=direction,
+        delta=delta,
+        common=common,
+        common_decision_key=common_decision_key,
+        common_fact_sha256=common_fact_sha256,
+        branch_action_id=branch_action_id,
+        state_before_sha256=state_before_sha256,
+        state_after_sha256=state_after_sha256,
+        rejections=rejections,
+        searches=searches,
+        competitor=competitor,
+        competitor_rank=competitor_rank,
+    )
     return f"sha256:{semantic_sha256(payload)}"
 
 
-def _influence(
+def _calculate_influence_source(
     runtime: M7ReplayRuntime,
     *,
     cursor_template: M7ReplayCursor,
     event_position: int,
     item: InventoryItem,
-    direction: str,
+    direction: Literal["added", "removed"],
     delta: BranchInventoryDelta,
     common: M7PolicyActionBinding,
     common_rank: PolicyRank,
@@ -1670,7 +2962,8 @@ def _influence(
     state_before_sha256: str,
     state_after_sha256: str,
     prepared_layouts: _PreparedTranslationLayoutBatch | None,
-) -> tuple[M8InfluenceWitness | None, int]:
+    mode: _CommonDerivationMode,
+) -> tuple[M8UncheckedInfluenceCapture, int]:
     rejections = (
         compile_translation_rejections(
             runtime,
@@ -1704,23 +2997,50 @@ def _influence(
             competitor_rank=None,
         )
         return (
-            M8InfluenceWitness(
-                remnant_id=item.remnant.remnant_id,
-                classification="no_fit",
-                evidence_sha256=digest,
+            M8UncheckedInfluenceCapture(
+                event_position=event_position,
+                item=item,
+                direction=direction,
+                delta=delta,
+                common=common,
+                common_rank=common_rank,
+                common_fact_sha256=common_fact_sha256,
                 common_action_id=common_action_id,
-                common_catalog_action_id=common.catalog_action_id,
-                common_decision_key=common_rank.decision_key,
+                branch_action_id=branch_action_id,
+                state_before_sha256=state_before_sha256,
+                state_after_sha256=state_after_sha256,
+                rejections=rejections,
+                searches=(),
+                translation_batches=(),
+                competitor=None,
+                competitor_context=None,
+                competitor_rank=None,
+                classification="no_fit",
+                legacy_evidence_sha256=digest,
             ),
             0,
         )
 
-    competitor, context, authoritative_searches = _authoritative_competitor(
-        runtime,
-        event_position=event_position,
-        item=item,
-        cursor_template=cursor_template,
-    )
+    if mode is _CommonDerivationMode.UNCHECKED_PORTABLE:
+        (
+            competitor,
+            context,
+            authoritative_searches,
+            translation_batches,
+        ) = _capture_unchecked_competitor_source(
+            runtime,
+            event_position=event_position,
+            item=item,
+            cursor_template=cursor_template,
+        )
+    else:
+        competitor, context, authoritative_searches = _authoritative_competitor(
+            runtime,
+            event_position=event_position,
+            item=item,
+            cursor_template=cursor_template,
+        )
+        translation_batches = ()
     searches = _search_payload(authoritative_searches, label="authoritative")
     if competitor is None or context is None:
         if competitor is not None or context is not None:
@@ -1743,20 +3063,56 @@ def _influence(
             competitor_rank=None,
         )
         return (
-            M8InfluenceWitness(
-                remnant_id=item.remnant.remnant_id,
-                classification="no_fit",
-                evidence_sha256=digest,
+            M8UncheckedInfluenceCapture(
+                event_position=event_position,
+                item=item,
+                direction=direction,
+                delta=delta,
+                common=common,
+                common_rank=common_rank,
+                common_fact_sha256=common_fact_sha256,
                 common_action_id=common_action_id,
-                common_catalog_action_id=common.catalog_action_id,
-                common_decision_key=common_rank.decision_key,
+                branch_action_id=branch_action_id,
+                state_before_sha256=state_before_sha256,
+                state_after_sha256=state_after_sha256,
+                rejections=rejections,
+                searches=authoritative_searches,
+                translation_batches=translation_batches,
+                competitor=None,
+                competitor_context=None,
+                competitor_rank=None,
+                classification="no_fit",
+                legacy_evidence_sha256=digest,
             ),
             1,
         )
 
     competitor_rank = rank_policy_action(runtime.replay_input.policy.name, context)
     if not common_rank <= competitor_rank:
-        return None, 1
+        return (
+            M8UncheckedInfluenceCapture(
+                event_position=event_position,
+                item=item,
+                direction=direction,
+                delta=delta,
+                common=common,
+                common_rank=common_rank,
+                common_fact_sha256=common_fact_sha256,
+                common_action_id=common_action_id,
+                branch_action_id=branch_action_id,
+                state_before_sha256=state_before_sha256,
+                state_after_sha256=state_after_sha256,
+                rejections=rejections,
+                searches=authoritative_searches,
+                translation_batches=translation_batches,
+                competitor=competitor,
+                competitor_context=context,
+                competitor_rank=competitor_rank,
+                classification="policy_not_dominated",
+                legacy_evidence_sha256=None,
+            ),
+            1,
+        )
     if competitor.evidence is None:
         raise ValueError("M8 exact remnant competitor lacks materialized evidence")
     digest = _evidence_sha256(
@@ -1777,8 +3133,91 @@ def _influence(
         competitor_rank=competitor_rank,
     )
     return (
+        M8UncheckedInfluenceCapture(
+            event_position=event_position,
+            item=item,
+            direction=direction,
+            delta=delta,
+            common=common,
+            common_rank=common_rank,
+            common_fact_sha256=common_fact_sha256,
+            common_action_id=common_action_id,
+            branch_action_id=branch_action_id,
+            state_before_sha256=state_before_sha256,
+            state_after_sha256=state_after_sha256,
+            rejections=rejections,
+            searches=authoritative_searches,
+            translation_batches=translation_batches,
+            competitor=competitor,
+            competitor_context=context,
+            competitor_rank=competitor_rank,
+            classification="policy_dominated",
+            legacy_evidence_sha256=digest,
+        ),
+        1,
+    )
+
+
+def _influence(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor_template: M7ReplayCursor,
+    event_position: int,
+    item: InventoryItem,
+    direction: Literal["added", "removed"],
+    delta: BranchInventoryDelta,
+    common: M7PolicyActionBinding,
+    common_rank: PolicyRank,
+    common_fact_sha256: str,
+    common_action_id: str,
+    branch_action_id: str,
+    state_before_sha256: str,
+    state_after_sha256: str,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None,
+) -> tuple[M8InfluenceWitness | None, int]:
+    """Trusted-local wrapper that reduces the shared source to the v1 witness."""
+
+    captured, search_count = _calculate_influence_source(
+        runtime,
+        cursor_template=cursor_template,
+        event_position=event_position,
+        item=item,
+        direction=direction,
+        delta=delta,
+        common=common,
+        common_rank=common_rank,
+        common_fact_sha256=common_fact_sha256,
+        common_action_id=common_action_id,
+        branch_action_id=branch_action_id,
+        state_before_sha256=state_before_sha256,
+        state_after_sha256=state_after_sha256,
+        prepared_layouts=prepared_layouts,
+        mode=_CommonDerivationMode.TRUSTED_LOCAL,
+    )
+    if captured.classification == "policy_not_dominated":
+        return None, search_count
+    digest = captured.legacy_evidence_sha256
+    if digest is None:  # pragma: no cover - typed classification closes this branch.
+        raise AssertionError("M8 passive influence lacks its legacy digest")
+    if captured.classification == "no_fit":
+        return (
+            M8InfluenceWitness(
+                remnant_id=captured.remnant_id,
+                classification="no_fit",
+                evidence_sha256=digest,
+                common_action_id=common_action_id,
+                common_catalog_action_id=common.catalog_action_id,
+                common_decision_key=common_rank.decision_key,
+            ),
+            search_count,
+        )
+    competitor = captured.competitor
+    competitor_rank = captured.competitor_rank
+    if competitor is None or competitor.evidence is None or competitor_rank is None:
+        raise AssertionError("M8 policy-dominated capture lacks competitor evidence")
+    return (
         M8InfluenceWitness(
-            remnant_id=item.remnant.remnant_id,
+            remnant_id=captured.remnant_id,
             candidate_id=competitor.candidate_id,
             classification="policy_dominated",
             evidence_sha256=digest,
@@ -1789,7 +3228,7 @@ def _influence(
             common_decision_key=common_rank.decision_key,
             competing_decision_key=competitor_rank.decision_key,
         ),
-        1,
+        search_count,
     )
 
 
@@ -1799,9 +3238,7 @@ def _build_passive_event_result(
     event_position: int,
     common_action_id: str,
     branch_action_id: str,
-    build_influences: Callable[
-        [str], tuple[tuple[M8InfluenceWitness, ...] | None, int]
-    ],
+    build_influences: Callable[[str], tuple[tuple[M8InfluenceWitness, ...] | None, int]],
 ) -> EventPassivityResult:
     """Bind one authoritative applied transition to both witness and result."""
 
@@ -1837,6 +3274,138 @@ def _build_passive_event_result(
     )
 
 
+def _capture_unchecked_event_passivity(
+    runtime: M7ReplayRuntime,
+    *,
+    common: M8UncheckedProducerTransition,
+    branch_cursor: M7ReplayCursor,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    runtime_authority: M7AuthoritativeProofRuntime | None = None,
+) -> M8UncheckedEventPassivityCapture:
+    """Traverse one branch using only a producer record and return unchecked source."""
+
+    if type(common) is not M8UncheckedProducerTransition:
+        raise ValueError("M8 unchecked traversal requires a producer-only transition record")
+    expected_executable_identity = (
+        common.source.jagua_executable_sha256,
+        common.source.jagua_executable_size_bytes,
+        common.source.jagua_executable_mode_bits,
+    )
+    if _capture_executable_identity(runtime) != expected_executable_identity:
+        raise ValueError("M8 unchecked traversal Jagua executable binding differs")
+    _require_unchecked_runtime_source_identity(
+        runtime,
+        semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
+        runtime_authority=runtime_authority,
+        operation="traversal",
+    )
+
+    def finish(
+        captured: M8UncheckedEventPassivityCapture,
+    ) -> M8UncheckedEventPassivityCapture:
+        if _capture_executable_identity(runtime) != expected_executable_identity:
+            raise ValueError("M8 Jagua executable changed during unchecked traversal")
+        _require_unchecked_runtime_source_identity(
+            runtime,
+            semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
+            runtime_authority=runtime_authority,
+            operation="traversal",
+        )
+        return captured
+
+    fact = common.common_fact
+    if (
+        fact.semantic_runtime_sha256 != common.source.semantic_runtime_sha256
+        or fact.replay_input_id != runtime.replay_input.input_id
+        or fact.replay_input_sha256 != runtime.replay_input.content_sha256
+    ):
+        raise ValueError("M8 unchecked producer transition differs from runtime context")
+    delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
+    if not delta.added and not delta.removed:
+        return finish(
+            M8UncheckedEventPassivityCapture(
+                passive=False,
+                classification=None,
+                branch_after=None,
+                state_before_sha256=None,
+                state_after_sha256=None,
+                influences=(),
+                exact_search_count=0,
+            )
+        )
+    binding = fact.step.action_binding
+    common_action_id = fact.step.event.action.action_id
+    if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
+        return finish(
+            M8UncheckedEventPassivityCapture(
+                passive=False,
+                classification=None,
+                branch_after=None,
+                state_before_sha256=None,
+                state_after_sha256=None,
+                influences=(),
+                exact_search_count=0,
+            )
+        )
+    transition = apply_m7_frozen_action_evidence_with_commitments(
+        runtime,
+        cursor=branch_cursor,
+        event_position=fact.event_position,
+        action=fact.step.event.action,
+    )
+    influences = []
+    exact_search_count = 0
+    for direction, items in (("added", delta.added), ("removed", delta.removed)):
+        for item in items:
+            captured, searches = _calculate_influence_source(
+                runtime,
+                cursor_template=fact.cursor_before,
+                event_position=fact.event_position,
+                item=item,
+                direction=direction,
+                delta=delta,
+                common=binding,
+                common_rank=fact.policy_rank,
+                common_fact_sha256=fact.content_sha256,
+                common_action_id=common_action_id,
+                branch_action_id=common_action_id,
+                state_before_sha256=transition.cursor_before_sha256,
+                state_after_sha256=transition.cursor_after_sha256,
+                prepared_layouts=prepared_layouts,
+                mode=_CommonDerivationMode.UNCHECKED_PORTABLE,
+            )
+            exact_search_count += searches
+            influences.append(captured)
+            if captured.classification == "policy_not_dominated":
+                return finish(
+                    M8UncheckedEventPassivityCapture(
+                        passive=False,
+                        classification=None,
+                        branch_after=None,
+                        state_before_sha256=transition.cursor_before_sha256,
+                        state_after_sha256=transition.cursor_after_sha256,
+                        influences=tuple(influences),
+                        exact_search_count=exact_search_count,
+                    )
+                )
+    classification: Literal["no_fit", "policy_dominated"] = (
+        "no_fit"
+        if all(item.classification == "no_fit" for item in influences)
+        else "policy_dominated"
+    )
+    return finish(
+        M8UncheckedEventPassivityCapture(
+            passive=True,
+            classification=classification,
+            branch_after=transition.cursor,
+            state_before_sha256=transition.cursor_before_sha256,
+            state_after_sha256=transition.cursor_after_sha256,
+            influences=tuple(influences),
+            exact_search_count=exact_search_count,
+        )
+    )
+
+
 def certify_event_passivity(
     runtime: M7ReplayRuntime,
     *,
@@ -1848,9 +3417,7 @@ def certify_event_passivity(
 
     fact, snapshot, authority = _require_validated_common_transition(runtime, common)
     proof_context = (
-        nullcontext(authority.runtime)
-        if authority is not None
-        else snapshot.runtime_for_proof()
+        nullcontext(authority.runtime) if authority is not None else snapshot.runtime_for_proof()
     )
     with proof_context as proof_runtime:
         try:

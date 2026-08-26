@@ -7,6 +7,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Literal
 
 from yieldforge.baseline.contracts import TemporalInstanceBinding
 from yieldforge.baseline.replay import (
@@ -24,6 +25,10 @@ from yieldforge.baseline.replay import (
     select_m7_fallback,
 )
 from yieldforge.oracle.certificates import (
+    M8UncheckedInfluenceCapture,
+    M8UncheckedProducerTransition,
+    _capture_unchecked_event_passivity,
+    _capture_unchecked_m8_common_transition,
     _derive_m8_common_transition_fact_unprofiled,
     _release_validated_common_transition,
     _validated_common_transition_fact,
@@ -150,6 +155,100 @@ class _BranchState:
     rejoin_count: int = 0
 
 
+@dataclass(frozen=True)
+class M8UncheckedBranchEventCapture:
+    """One explicitly unchecked producer traversal event."""
+
+    event_position: int
+    classification: Literal[
+        "state_rejoin",
+        "no_fit",
+        "policy_dominated",
+        "exact_transition",
+    ]
+    common_action_id: str
+    branch_action_id: str
+    state_before_sha256: str
+    state_after_sha256: str
+    branch_after: M7ReplayCursor
+    influences: tuple[M8UncheckedInfluenceCapture, ...] = ()
+    attempted_influences: tuple[M8UncheckedInfluenceCapture, ...] = ()
+    exact_step: M7StepResult | None = None
+    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+
+    def __post_init__(self) -> None:
+        if self.state_after_sha256 != m7_cursor_sha256(self.branch_after):
+            raise ValueError("M8 unchecked branch-after state commitment differs")
+        if self.classification == "exact_transition":
+            attempted_prefix_is_valid = not self.attempted_influences or (
+                self.attempted_influences[-1].classification == "policy_not_dominated"
+                and all(
+                    item.classification in {"no_fit", "policy_dominated"}
+                    for item in self.attempted_influences[:-1]
+                )
+            )
+            if self.exact_step is None:
+                raise ValueError("M8 unchecked exact transition lacks its source step")
+            if self.influences:
+                raise ValueError("M8 unchecked exact transition cannot claim passive influences")
+            if (
+                self.exact_step.cursor != self.branch_after
+                or self.exact_step.event.sequence != self.event_position
+                or self.exact_step.event.action.action_id != self.branch_action_id
+                or not attempted_prefix_is_valid
+            ):
+                raise ValueError("M8 unchecked exact transition source bindings differ")
+        elif self.exact_step is not None:
+            raise ValueError("M8 unchecked passive event cannot carry an exact fallback step")
+        elif self.attempted_influences:
+            raise ValueError("M8 unchecked passive/rejoin event cannot carry attempted influences")
+        if self.classification == "state_rejoin" and self.influences:
+            raise ValueError("M8 unchecked rejoin event cannot carry passive influences")
+        if self.classification in {"no_fit", "policy_dominated"} and (
+            not self.influences
+            or any(item.classification == "policy_not_dominated" for item in self.influences)
+        ):
+            raise ValueError("M8 unchecked passive event influence source differs")
+
+
+@dataclass
+class _UncheckedBranchState:
+    descriptor: M7ActionDescriptor
+    initial_step: M7StepResult
+    cursor: M7ReplayCursor
+    events: list[M8UncheckedBranchEventCapture] = field(default_factory=list)
+    exact_count: int = 0
+    skipped_count: int = 0
+    rejection_count: int = 0
+    survivor_count: int = 0
+    rejoin_count: int = 0
+
+
+@dataclass(frozen=True)
+class M8UncheckedBranchTraversalCapture:
+    """Frozen producer-only branch state after the captured common suffix."""
+
+    descriptor: M7ActionDescriptor
+    initial_step: M7StepResult
+    cursor: M7ReplayCursor
+    events: tuple[M8UncheckedBranchEventCapture, ...]
+    exact_count: int
+    skipped_count: int
+    rejection_count: int
+    survivor_count: int
+    rejoin_count: int
+    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+
+
+@dataclass(frozen=True)
+class M8UncheckedTraversalCapture:
+    """Event-major producer capture; it contains no accepted M8 proofs."""
+
+    common_transitions: tuple[M8UncheckedProducerTransition, ...]
+    branches: tuple[M8UncheckedBranchTraversalCapture, ...]
+    authority_mode: Literal["unchecked_portable"] = "unchecked_portable"
+
+
 @contextmanager
 def _prepare_m8_generator_context(
     request: M8OracleRequest,
@@ -181,9 +280,7 @@ def _prepare_m8_generator_context(
             descriptor=fallback_descriptor,
             decision_key=fallback.decision_key,
         )
-        visible = captured.visibility.visible_suffix(
-            current_position=catalog.event_position
-        )
+        visible = captured.visibility.visible_suffix(current_position=catalog.event_position)
         registered = captured.runtime.replay_input.instances
         expected = registered[
             catalog.event_position + 1 : catalog.event_position + 1 + len(visible)
@@ -260,6 +357,178 @@ def _initial_branch(
     )
 
 
+def _initial_unchecked_branch(
+    context: _M8PreparedGeneratorContext,
+    descriptor: M7ActionDescriptor,
+) -> _UncheckedBranchState:
+    initial = apply_m7_action_descriptor(
+        context._request.runtime,  # noqa: SLF001 - scoped prepared context.
+        cursor=context._request.cursor,  # noqa: SLF001
+        catalog=context._catalog,  # noqa: SLF001
+        descriptor=descriptor,
+        decision_key=(f"m8_hypothetical_action_id={descriptor.action_id}",),
+    )
+    return _UncheckedBranchState(
+        descriptor=descriptor,
+        initial_step=initial,
+        cursor=initial.cursor,
+    )
+
+
+def _advance_unchecked_branch(
+    context: _M8PreparedGeneratorContext,
+    branch: _UncheckedBranchState,
+    *,
+    common: M8UncheckedProducerTransition,
+) -> None:
+    """Advance one branch from a producer record without accepting proof authority."""
+
+    if type(common) is not M8UncheckedProducerTransition:
+        raise ValueError("M8 producer traversal requires an unchecked common transition")
+    runtime = context._request.runtime  # noqa: SLF001
+    fact = common.common_fact
+    if branch.cursor == fact.cursor_before:
+        state_before = m7_cursor_sha256(branch.cursor)
+        branch.cursor = apply_m7_frozen_action_evidence(
+            runtime,
+            cursor=branch.cursor,
+            event_position=fact.event_position,
+            action=fact.step.event.action,
+        )
+        captured = M8UncheckedBranchEventCapture(
+            event_position=fact.event_position,
+            classification="state_rejoin",
+            common_action_id=fact.step.event.action.action_id,
+            branch_action_id=fact.step.event.action.action_id,
+            state_before_sha256=state_before,
+            state_after_sha256=m7_cursor_sha256(branch.cursor),
+            branch_after=branch.cursor,
+        )
+        branch.rejoin_count += 1
+    else:
+        passivity = _capture_unchecked_event_passivity(
+            runtime,
+            common=common,
+            branch_cursor=branch.cursor,
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            runtime_authority=context._authority,  # noqa: SLF001
+        )
+        branch.survivor_count += passivity.exact_search_count
+        if passivity.passive:
+            if (
+                passivity.classification is None
+                or passivity.branch_after is None
+                or passivity.state_before_sha256 is None
+                or passivity.state_after_sha256 is None
+            ):
+                raise ValueError("M8 unchecked passive capture lacks its branch transition")
+            branch.cursor = passivity.branch_after
+            captured = M8UncheckedBranchEventCapture(
+                event_position=fact.event_position,
+                classification=passivity.classification,
+                common_action_id=fact.step.event.action.action_id,
+                branch_action_id=fact.step.event.action.action_id,
+                state_before_sha256=passivity.state_before_sha256,
+                state_after_sha256=passivity.state_after_sha256,
+                branch_after=branch.cursor,
+                influences=passivity.influences,
+            )
+            branch.skipped_count += 1
+            branch.rejection_count += len(passivity.influences)
+        else:
+            state_before = m7_cursor_sha256(branch.cursor)
+            with profile_phase("action_catalog_enumeration"):
+                branch_catalog = enumerate_m7_action_catalog(
+                    runtime,
+                    cursor=branch.cursor,
+                    complete=False,
+                )
+            increment_profile_count("fallbacks")
+            selection = select_m7_fallback(
+                branch_catalog,
+                policy=runtime.replay_input.policy,
+            )
+            descriptor = next(
+                item for item in branch_catalog.actions if item.action_id == selection.action_id
+            )
+            step = apply_m7_action_descriptor(
+                runtime,
+                cursor=branch.cursor,
+                catalog=branch_catalog,
+                descriptor=descriptor,
+                decision_key=selection.decision_key,
+            )
+            branch.cursor = step.cursor
+            captured = M8UncheckedBranchEventCapture(
+                event_position=fact.event_position,
+                classification="exact_transition",
+                common_action_id=fact.step.event.action.action_id,
+                branch_action_id=step.event.action.action_id,
+                state_before_sha256=state_before,
+                state_after_sha256=m7_cursor_sha256(branch.cursor),
+                branch_after=branch.cursor,
+                attempted_influences=passivity.influences,
+                exact_step=step,
+            )
+            branch.exact_count += 1
+    branch.events.append(captured)
+
+
+def _capture_prepared_unchecked_traversal(
+    context: _M8PreparedGeneratorContext,
+    *,
+    action_ids: tuple[str, ...] | None = None,
+) -> M8UncheckedTraversalCapture:
+    """Capture one event-major suffix without creating any trusted common capability."""
+
+    if type(context) is not _M8PreparedGeneratorContext:
+        raise ValueError("M8 prepared generator capability has the wrong type")
+    context.require_active()
+    requested = (
+        tuple(item.action_id for item in context._catalog.actions)  # noqa: SLF001
+        if action_ids is None
+        else action_ids
+    )
+    if requested != tuple(dict.fromkeys(requested)):
+        raise ValueError("M8 prepared action IDs must be unique and ordered")
+    by_id = {item.action_id: item for item in context._catalog.actions}  # noqa: SLF001
+    if any(action_id not in by_id for action_id in requested):
+        raise ValueError("M8 prepared action is absent from the exact current catalog")
+    branches = [_initial_unchecked_branch(context, by_id[action_id]) for action_id in requested]
+    commons = []
+    common_cursor = context._fallback_step.cursor  # noqa: SLF001
+    while common_cursor.next_event_position < context._stop_event_position:  # noqa: SLF001
+        common = _capture_unchecked_m8_common_transition(
+            context._request.runtime,  # noqa: SLF001
+            cursor=common_cursor,
+            semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            runtime_authority=context._authority,  # noqa: SLF001
+        )
+        commons.append(common)
+        for branch in branches:
+            _advance_unchecked_branch(context, branch, common=common)
+        common_cursor = common.common_fact.step.cursor
+    context.require_active()
+    return M8UncheckedTraversalCapture(
+        common_transitions=tuple(commons),
+        branches=tuple(
+            M8UncheckedBranchTraversalCapture(
+                descriptor=branch.descriptor,
+                initial_step=branch.initial_step,
+                cursor=branch.cursor,
+                events=tuple(branch.events),
+                exact_count=branch.exact_count,
+                skipped_count=branch.skipped_count,
+                rejection_count=branch.rejection_count,
+                survivor_count=branch.survivor_count,
+                rejoin_count=branch.rejoin_count,
+            )
+            for branch in branches
+        ),
+    )
+
+
 def _advance_branch(
     context: _M8PreparedGeneratorContext,
     branch: _BranchState,
@@ -314,9 +583,7 @@ def _advance_branch(
                 policy=runtime.replay_input.policy,
             )
             descriptor = next(
-                item
-                for item in branch_catalog.actions
-                if item.action_id == selection.action_id
+                item for item in branch_catalog.actions if item.action_id == selection.action_id
             )
             step = apply_m7_action_descriptor(
                 runtime,
@@ -473,11 +740,11 @@ def _score_sparse_event_unprofiled(request: M8OracleRequest) -> M8SparseResult:
         decision = build_oracle_decision(
             baseline_action_id=context._fallback_step.descriptor.action_id,  # noqa: SLF001
             expected_action_ids=tuple(
-                item.action_id for item in context._catalog.actions  # noqa: SLF001
+                item.action_id
+                for item in context._catalog.actions  # noqa: SLF001
             ),
             scores=tuple(
-                (item.score.action_id, item.score.final_net_cost)
-                for item in action_results
+                (item.score.action_id, item.score.final_net_cost) for item in action_results
             ),
         )
         return M8SparseResult(
@@ -494,12 +761,8 @@ def _score_sparse_event_unprofiled(request: M8OracleRequest) -> M8SparseResult:
                 rejection_certificate_count=sum(
                     item.rejection_certificate_count for item in action_results
                 ),
-                survivor_pair_count=sum(
-                    item.survivor_pair_count for item in action_results
-                ),
-                state_rejoin_count=sum(
-                    item.state_rejoin_count for item in action_results
-                ),
+                survivor_pair_count=sum(item.survivor_pair_count for item in action_results),
+                state_rejoin_count=sum(item.state_rejoin_count for item in action_results),
             ),
         )
 
