@@ -100,7 +100,8 @@ def _ledger(net_cost: float) -> dict[str, Any]:
 
 def _polygon(seed: str, area: float = 10.0) -> dict[str, Any]:
     return {
-        "schema_version": "yieldforge.canonical-polygon.v1",
+        "schema_version": "yieldforge.m8-portable-polygon.v2",
+        "source_schema_version": "yieldforge.canonical-polygon.v1",
         "wkb_hex": "010300000000000000",
         "polygon_sha256": seed * 64,
         "area_bits": _f(area),
@@ -109,11 +110,13 @@ def _polygon(seed: str, area: float = 10.0) -> dict[str, Any]:
 
 def _remnant(remnant_id: str, *, seed: str = "6") -> dict[str, Any]:
     return {
-        "schema_version": "yieldforge.remnant-stock.v1",
+        "schema_version": "yieldforge.m8-portable-remnant-stock.v2",
+        "source_schema_version": "yieldforge.remnant-stock.v1",
         "remnant_id": remnant_id,
         "geometry": _polygon(seed),
         "material": {
-            "schema_version": "yieldforge.material-identity.v1",
+            "schema_version": "yieldforge.m8-portable-material-identity.v2",
+            "source_schema_version": "yieldforge.material-identity.v1",
             "material_code": "material-a",
             "grade": "grade-a",
             "thickness": "1.0",
@@ -124,7 +127,8 @@ def _remnant(remnant_id: str, *, seed: str = "6") -> dict[str, Any]:
         "root_sheet_area_bits": _f(10.0),
         "root_sheet_short_side_bits": _f(2.0),
         "lineage": {
-            "schema_version": "yieldforge.remnant-lineage.v1",
+            "schema_version": "yieldforge.m8-portable-remnant-lineage.v2",
+            "source_schema_version": "yieldforge.remnant-lineage.v1",
             "root_stock_id": "current_standard_sheet",
             "parent_remnant_id": None,
             "ancestor_remnant_ids": (),
@@ -153,7 +157,8 @@ def _accounting() -> dict[str, Any]:
 
 def _search_config() -> dict[str, Any]:
     return {
-        "schema_version": "yieldforge.m7-layout-fit-search-config.v1",
+        "schema_version": "yieldforge.m8-portable-layout-search-config.v2",
+        "source_schema_version": "yieldforge.m7-layout-fit-search-config.v1",
         "grid_columns": 5,
         "grid_rows": 5,
         "maximum_candidates": 256,
@@ -187,7 +192,8 @@ def _policy_context() -> dict[str, Any]:
 def _action_evidence() -> dict[str, Any]:
     stock_id = "yfrm-" + "f" * 24
     return {
-        "schema_version": "yieldforge.m7-layout-action.v1",
+        "schema_version": "yieldforge.m8-portable-layout-action.v2",
+        "source_schema_version": "yieldforge.m7-layout-action.v1",
         "action_id": "yfm7a-" + "8" * 24,
         "content_sha256": SHA_D,
         "problem_id": "yfm7p-" + "7" * 24,
@@ -224,7 +230,8 @@ def _portable_common_transition() -> dict[str, Any]:
         catalog_action_id="m7-standard:candidate-a",
     )
     return {
-        "schema_version": "yieldforge.m8-common-transition-fact.v1",
+        "schema_version": "yieldforge.m8-portable-common-transition.v2",
+        "source_schema_version": "yieldforge.m8-common-transition-fact.v1",
         "replay_input_id": "yfm7ri-" + "9" * 24,
         "replay_input_sha256": REPLAY,
         "semantic_runtime_sha256": RUNTIME,
@@ -871,6 +878,33 @@ def _rehash_bundle(raw: dict[str, Any]) -> None:
     raw["bundle_sha256"] = m8_bundle_sha256(payload)
 
 
+def _first_validation_error(raw: dict[str, Any]) -> dict[str, Any]:
+    with pytest.raises(ValidationError) as raised:
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+    errors = raised.value.errors(include_url=False)
+    assert len(errors) == 1
+    return errors[0]
+
+
+def _shallow_bundle_hash_input(raw: dict[str, Any]) -> dict[str, Any]:
+    shallow = {
+        "schema_version": raw["schema_version"],
+        "bundle_kind": raw["bundle_kind"],
+        "provenance": raw["provenance"],
+    }
+    for field in (
+        "translation_batches",
+        "candidate_scalar_facts",
+        "frontier_facts",
+        "standard_candidate_facts",
+        "common_lemmas",
+        "influence_facts",
+        "action_roots",
+    ):
+        shallow[field] = tuple({"fact_sha256": entry["fact_sha256"]} for entry in raw[field])
+    return shallow
+
+
 def test_canonical_f64_round_trips_exact_bits_and_normalizes_negative_zero() -> None:
     values = (0.0, -0.0, 1.0, -1.25, 1e-300, 1.7976931348623157e308)
     for value in values:
@@ -881,6 +915,26 @@ def test_canonical_f64_round_trips_exact_bits_and_normalizes_negative_zero() -> 
     assert encode_canonical_f64(-0.0) == "f64:0000000000000000"
     with pytest.raises(ValueError, match="negative zero"):
         decode_canonical_f64("f64:8000000000000000")
+
+
+def test_bundle_hash_shallow_input_is_equivalent_at_hundreds_of_roots() -> None:
+    deep = _bundle().model_dump(mode="python", exclude={"bundle_sha256"})
+    deep_hash = m8_bundle_sha256(deep)
+    assert deep_hash == "sha256:37a51ef534a187d7fd0420ca94fdf0dee11112ca9ad2cd8c59efdce4daf2a2a4"
+    assert deep_hash == m8_bundle_sha256(_shallow_bundle_hash_input(deep))
+
+    template = deep["action_roots"][0]
+    deep["action_roots"] = tuple(
+        {
+            **template,
+            "fact_sha256": f"sha256:{hashlib.sha256(str(index).encode()).hexdigest()}",
+        }
+        for index in range(512)
+    )
+    shallow = _shallow_bundle_hash_input(deep)
+
+    assert len(shallow["action_roots"]) == 512
+    assert m8_bundle_sha256(deep) == m8_bundle_sha256(shallow)
 
 
 @pytest.mark.parametrize(
@@ -978,6 +1032,64 @@ def test_all_eight_named_contracts_strict_load_minimal_fixture() -> None:
     assert tuple(type(item) for item in observed) == expected_types
 
 
+def test_bundle_root_failure_has_stable_structured_error_and_bundle_identity() -> None:
+    raw = _bundle().model_dump(mode="python")
+    raw["bundle_sha256"] = SHA_D
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_bundle_hash_mismatch"
+    assert error["ctx"] == {"bundle_sha256": SHA_D}
+
+
+def test_dangling_cross_fact_failure_has_owner_and_dependency_identities() -> None:
+    raw = _bundle().model_dump(mode="python")
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = SHA_D
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_dangling_reference"
+    assert error["ctx"] == {
+        "fact_sha256": influence["fact_sha256"],
+        "dependency_sha256": SHA_D,
+    }
+
+
+def test_cross_context_failure_identifies_first_offending_fact() -> None:
+    raw = _bundle().model_dump(mode="python")
+    scalar = raw["candidate_scalar_facts"][0]
+    scalar["semantic_runtime_sha256"] = SHA_C
+    _rehash_fact(scalar)
+    _rehash_bundle(raw)
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_context_mismatch"
+    assert error["ctx"] == {"fact_sha256": scalar["fact_sha256"]}
+
+
+def test_unused_fact_failure_identifies_first_unreachable_fact() -> None:
+    raw = _bundle().model_dump(mode="python")
+    unused = deepcopy(raw["candidate_scalar_facts"][0])
+    unused["candidate_id"] = "candidate-unused"
+    _rehash_fact(unused)
+    raw["candidate_scalar_facts"] = tuple(
+        sorted((*raw["candidate_scalar_facts"], unused), key=lambda item: item["fact_sha256"])
+    )
+    _rehash_bundle(raw)
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_unused_fact"
+    assert error["ctx"] == {"fact_sha256": unused["fact_sha256"]}
+
+
 def test_portable_leaves_bind_full_profile_and_search_context() -> None:
     bundle = _bundle()
     translation = bundle.translation_batches[0]
@@ -1017,6 +1129,68 @@ def test_common_lemma_carries_complete_typed_legacy_transition_preimage() -> Non
     assert loaded.portable_transition.event.action.accounting.parent_remnant_area_bits == _f(10.0)
     assert loaded.portable_transition.cursor_before.inventory[0].remnant.geometry.wkb_hex
     assert loaded.portable_transition.cursor_after.cumulative_costs.net_cost_bits == _f(12.25)
+
+
+def _portable_source_mirrors() -> tuple[Any, ...]:
+    bundle = M8UncheckedFactBundleV2.model_validate(_exact_remnant_bundle_raw(), strict=True)
+    transition = bundle.common_lemmas[0].portable_transition
+    action = transition.event.action
+    stock = action.selected_stock
+    search_result = action.search_result
+    assert search_result is not None
+    return (
+        stock.geometry,
+        stock.material,
+        stock.lineage,
+        stock,
+        search_result.config,
+        search_result,
+        action,
+        transition,
+    )
+
+
+def test_portable_source_mirrors_have_unique_v2_and_explicit_source_schema_ids() -> None:
+    expected = (
+        ("yieldforge.m8-portable-polygon.v2", "yieldforge.canonical-polygon.v1"),
+        ("yieldforge.m8-portable-material-identity.v2", "yieldforge.material-identity.v1"),
+        ("yieldforge.m8-portable-remnant-lineage.v2", "yieldforge.remnant-lineage.v1"),
+        ("yieldforge.m8-portable-remnant-stock.v2", "yieldforge.remnant-stock.v1"),
+        (
+            "yieldforge.m8-portable-layout-search-config.v2",
+            "yieldforge.m7-layout-fit-search-config.v1",
+        ),
+        (
+            "yieldforge.m8-portable-layout-search-result.v2",
+            "yieldforge.m7-layout-fit-search-result.v1",
+        ),
+        ("yieldforge.m8-portable-layout-action.v2", "yieldforge.m7-layout-action.v1"),
+        (
+            "yieldforge.m8-portable-common-transition.v2",
+            "yieldforge.m8-common-transition-fact.v1",
+        ),
+    )
+    observed = tuple(
+        (
+            item.model_dump(mode="python").get("schema_version"),
+            item.model_dump(mode="python").get("source_schema_version"),
+        )
+        for item in _portable_source_mirrors()
+    )
+
+    assert observed == expected
+    assert len({schema for schema, _ in observed}) == len(observed)
+    assert {schema for schema, _ in observed}.isdisjoint({source for _, source in observed})
+
+
+def test_portable_source_mirrors_reject_source_v1_as_dispatch_schema() -> None:
+    for item in _portable_source_mirrors():
+        raw = item.model_dump(mode="python")
+        source_schema = raw.get("source_schema_version", raw["schema_version"])
+        raw["schema_version"] = source_schema
+
+        with pytest.raises(ValidationError):
+            type(item).model_validate(raw, strict=True)
 
 
 def test_root_preserves_preinitial_and_postinitial_state_boundaries() -> None:
@@ -1068,11 +1242,11 @@ def test_selected_standard_candidate_must_be_policy_minimum_after_rehash() -> No
                     "frontier_ref": None,
                     "candidate_scalar_refs": (),
                     "translation_batch_refs": (),
-                    "exact_replay_reason": "standard_minimum_contract_test",
+                    "exact_replay_reason": "unsupported_representation",
                 },
             ),
             "evidence_mode": "exact_replay",
-            "exact_replay_reason": "standard_minimum_contract_test",
+            "exact_replay_reason": "exact_survivor_unsupported_representation",
         }
     )
     common["portable_transition"]["event"].update(
@@ -1188,7 +1362,7 @@ def test_exact_search_no_fit_still_requires_common_branch_action() -> None:
     _rehash_fact(root)
     _rehash_bundle(raw)
 
-    with pytest.raises(ValidationError, match="certified branch action"):
+    with pytest.raises(ValidationError, match="unchecked branch action"):
         M8UncheckedFactBundleV2.model_validate(raw, strict=True)
 
 
@@ -1287,11 +1461,11 @@ def test_influence_translation_must_share_common_registered_configuration(
                     "frontier_ref": None,
                     "candidate_scalar_refs": (),
                     "translation_batch_refs": (),
-                    "exact_replay_reason": "influence_configuration_test",
+                    "exact_replay_reason": "unsupported_representation",
                 },
             ),
             "evidence_mode": "exact_replay",
-            "exact_replay_reason": "influence_configuration_test",
+            "exact_replay_reason": "exact_survivor_unsupported_representation",
         }
     )
     if binding == "search":
@@ -1510,14 +1684,29 @@ def test_common_translation_candidate_must_belong_to_frontier_scalar_set() -> No
 
 def test_counted_common_requires_complete_candidate_translation_set() -> None:
     raw = _two_candidate_bundle_raw(include_second_translation=False)
-    with pytest.raises(ValidationError, match="complete candidate translation"):
-        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+    common = raw["common_lemmas"][0]
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_incomplete_evidence"
+    assert error["ctx"] == {
+        "fact_sha256": common["fact_sha256"],
+        "dependency_sha256": common["inventory_classifications"][0]["frontier_ref"],
+    }
 
 
 def test_scalar_no_fit_requires_complete_rejection_candidate_set() -> None:
     raw = _two_candidate_bundle_raw(include_second_translation=True)
-    with pytest.raises(ValidationError, match="complete rejection candidate"):
-        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+    influence = raw["influence_facts"][0]
+    common = raw["common_lemmas"][0]
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_incomplete_evidence"
+    assert error["ctx"] == {
+        "fact_sha256": influence["fact_sha256"],
+        "dependency_sha256": common["fact_sha256"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -1657,9 +1846,9 @@ def test_common_exact_survivor_is_explicit_even_with_counted_evidence() -> None:
     common = raw["common_lemmas"][0]
     classification = common["inventory_classifications"][0]
     classification["classification"] = "exact_survivor"
-    classification["exact_replay_reason"] = "unsupported_representation"
+    classification["exact_replay_reason"] = "counted_search_survivor"
     common["evidence_mode"] = "exact_replay"
-    common["exact_replay_reason"] = "unsupported_representation"
+    common["exact_replay_reason"] = "exact_survivor_counted_search"
     _rehash_fact(common)
     influence = raw["influence_facts"][0]
     influence["common_lemma_ref"] = common["fact_sha256"]
@@ -1674,10 +1863,195 @@ def test_common_exact_survivor_is_explicit_even_with_counted_evidence() -> None:
     assert loaded.common_lemmas[0].inventory_classifications[0].classification == "exact_survivor"
 
 
-@pytest.mark.parametrize("empty_inventory", [False, True])
-def test_explicit_exact_replay_allows_unsupported_frontier_capture(
-    empty_inventory: bool,
+def _frontier_exact_replay_raw(
+    *,
+    item_reason: str,
+    common_reason: str,
+) -> dict[str, Any]:
+    raw = _bundle().model_dump(mode="python")
+    common = raw["common_lemmas"][0]
+    classification = common["inventory_classifications"][0]
+    classification.update(
+        {
+            "classification": "exact_survivor",
+            "translation_batch_refs": (),
+            "exact_replay_reason": item_reason,
+        }
+    )
+    common.update(
+        {
+            "evidence_mode": "exact_replay",
+            "translation_batch_refs": (),
+            "exact_replay_reason": common_reason,
+        }
+    )
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    raw["translation_batches"] = ()
+    _rehash_bundle(raw)
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("item_reason", "common_reason"),
+    [
+        ("frontier_survvor", "exact_survivor_frontier"),
+        ("frontier_survivor", "exact_survivor_frontiers"),
+    ],
+)
+def test_exact_replay_reasons_reject_unregistered_codes(
+    item_reason: str,
+    common_reason: str,
 ) -> None:
+    raw = _frontier_exact_replay_raw(
+        item_reason=item_reason,
+        common_reason=common_reason,
+    )
+
+    with pytest.raises(ValidationError, match="Input should be"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_common_exact_replay_summary_must_match_item_reason_aggregation() -> None:
+    raw = _frontier_exact_replay_raw(
+        item_reason="frontier_survivor",
+        common_reason="exact_survivor_unsupported_representation",
+    )
+
+    with pytest.raises(ValidationError, match="exact-replay reason summary"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_exact_survivor_reason_must_match_its_evidence_path() -> None:
+    raw = _bundle().model_dump(mode="python")
+    common = raw["common_lemmas"][0]
+    classification = common["inventory_classifications"][0]
+    classification.update(
+        {
+            "classification": "exact_survivor",
+            "exact_replay_reason": "frontier_survivor",
+        }
+    )
+    common.update(
+        {
+            "evidence_mode": "exact_replay",
+            "exact_replay_reason": "exact_survivor_frontier",
+        }
+    )
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="reason differs from its evidence path"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_common_exact_replay_uses_mixed_summary_for_multiple_item_reason_codes() -> None:
+    raw = _frontier_exact_replay_raw(
+        item_reason="frontier_survivor",
+        common_reason="exact_survivor_frontier",
+    )
+    common = raw["common_lemmas"][0]
+    second_remnant_id = "yfrm-" + "7" * 24
+    inventory = (
+        *common["portable_transition"]["cursor_before"]["inventory"],
+        _inventory_item(second_remnant_id, seed="7"),
+    )
+    transition = common["portable_transition"]
+    transition["cursor_before"]["inventory"] = inventory
+    transition["cursor_after"]["inventory"] = inventory
+    transition["event"]["inventory_before"] = inventory
+    transition["event"]["inventory_after"] = inventory
+    common["cursor_before_inventory_remnant_ids"] = (
+        "yfrm-" + "6" * 24,
+        second_remnant_id,
+    )
+    common["cursor_after_inventory_remnant_ids"] = common["cursor_before_inventory_remnant_ids"]
+    second_classification = deepcopy(common["inventory_classifications"][0])
+    second_classification.update(
+        {
+            "remnant_id": second_remnant_id,
+            "frontier_ref": None,
+            "candidate_scalar_refs": (),
+            "exact_replay_reason": "unsupported_representation",
+        }
+    )
+    common["inventory_classifications"] = (
+        *common["inventory_classifications"],
+        second_classification,
+    )
+    common["exact_replay_reason"] = "exact_survivor_mixed"
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    loaded = M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+    assert loaded.common_lemmas[0].exact_replay_reason == "exact_survivor_mixed"
+
+
+def test_common_exact_replay_requires_one_or_more_exact_survivors() -> None:
+    raw = _frontier_exact_replay_raw(
+        item_reason="frontier_survivor",
+        common_reason="exact_survivor_frontier",
+    )
+    common = raw["common_lemmas"][0]
+    common.update(
+        {
+            "candidate_scalar_refs": (),
+            "frontier_refs": (),
+            "inventory_classifications": (),
+            "cursor_before_inventory_remnant_ids": (),
+            "cursor_after_inventory_remnant_ids": (),
+        }
+    )
+    transition = common["portable_transition"]
+    transition["cursor_before"]["inventory"] = ()
+    transition["cursor_after"]["inventory"] = ()
+    transition["event"]["inventory_before"] = ()
+    transition["event"]["inventory_after"] = ()
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence.update(
+        {
+            "common_lemma_ref": common["fact_sha256"],
+            "inventory_delta": {"removed_remnant_ids": (), "added_remnant_ids": ()},
+            "classification": "state_rejoin",
+            "evidence_mode": "state_rejoin",
+            "rejection_evidence": (),
+        }
+    )
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    raw["candidate_scalar_facts"] = ()
+    raw["frontier_facts"] = ()
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="one or more exact survivors"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_explicit_exact_replay_allows_unsupported_frontier_capture() -> None:
     raw = _bundle().model_dump(mode="python")
     common = raw["common_lemmas"][0]
     common.update(
@@ -1686,29 +2060,19 @@ def test_explicit_exact_replay_allows_unsupported_frontier_capture(
             "frontier_refs": (),
             "translation_batch_refs": (),
             "evidence_mode": "exact_replay",
-            "exact_replay_reason": "unsupported_portable_frontier",
+            "exact_replay_reason": "exact_survivor_unsupported_representation",
         }
     )
-    if empty_inventory:
-        common["cursor_before_inventory_remnant_ids"] = ()
-        common["cursor_after_inventory_remnant_ids"] = ()
-        common["inventory_classifications"] = ()
-        transition = common["portable_transition"]
-        transition["cursor_before"]["inventory"] = ()
-        transition["cursor_after"]["inventory"] = ()
-        transition["event"]["inventory_before"] = ()
-        transition["event"]["inventory_after"] = ()
-    else:
-        common["inventory_classifications"] = (
-            {
-                **common["inventory_classifications"][0],
-                "classification": "exact_survivor",
-                "frontier_ref": None,
-                "candidate_scalar_refs": (),
-                "translation_batch_refs": (),
-                "exact_replay_reason": "unsupported_portable_frontier",
-            },
-        )
+    common["inventory_classifications"] = (
+        {
+            **common["inventory_classifications"][0],
+            "classification": "exact_survivor",
+            "frontier_ref": None,
+            "candidate_scalar_refs": (),
+            "translation_batch_refs": (),
+            "exact_replay_reason": "unsupported_representation",
+        },
+    )
     _rehash_fact(common)
     influence = raw["influence_facts"][0]
     influence.update(
@@ -1758,7 +2122,8 @@ def _exact_remnant_bundle_raw() -> dict[str, Any]:
             "selected_stock": deepcopy(transition["event"]["inventory_before"][0]["remnant"]),
             "selected_remnant_id": remnant_id,
             "search_result": {
-                "schema_version": "yieldforge.m7-layout-fit-search-result.v1",
+                "schema_version": "yieldforge.m8-portable-layout-search-result.v2",
+                "source_schema_version": "yieldforge.m7-layout-fit-search-result.v1",
                 "status": "fit",
                 "candidate_id": "candidate-a",
                 "remnant_id": remnant_id,
@@ -1805,12 +2170,12 @@ def _exact_remnant_bundle_raw() -> dict[str, Any]:
             "selected_decision_key": (f"action_id={catalog_action_id}",),
             "selected_immediate_net_cost_bits": _f(5.0),
             "evidence_mode": "exact_replay",
-            "exact_replay_reason": "remnant_winner_requires_exact_replay",
+            "exact_replay_reason": "exact_survivor_counted_search",
             "inventory_classifications": (
                 {
                     **common["inventory_classifications"][0],
                     "classification": "exact_survivor",
-                    "exact_replay_reason": "remnant_winner_requires_exact_replay",
+                    "exact_replay_reason": "counted_search_survivor",
                 },
             ),
         }
@@ -1850,14 +2215,7 @@ def test_exact_remnant_winner_requires_matching_exact_survivor_classification() 
     raw = _exact_remnant_bundle_raw()
     common = raw["common_lemmas"][0]
     classification = common["inventory_classifications"][0]
-    classification.update(
-        {
-            "classification": "scalar_no_fit",
-            "translation_batch_refs": (),
-            "exact_replay_reason": None,
-        }
-    )
-    common["translation_batch_refs"] = ()
+    classification["material_matches"] = False
     _rehash_fact(common)
     influence = raw["influence_facts"][0]
     influence["common_lemma_ref"] = common["fact_sha256"]
@@ -1866,7 +2224,6 @@ def test_exact_remnant_winner_requires_matching_exact_survivor_classification() 
     root["common_lemma_refs"] = (common["fact_sha256"],)
     root["influence_fact_refs"] = (influence["fact_sha256"],)
     _rehash_fact(root)
-    raw["translation_batches"] = ()
     _rehash_bundle(raw)
 
     with pytest.raises(ValidationError, match="selected remnant.*exact survivor"):
@@ -1925,11 +2282,11 @@ def test_standard_candidates_and_references_use_profile_order_not_hash_order() -
                     "frontier_ref": None,
                     "candidate_scalar_refs": (),
                     "translation_batch_refs": (),
-                    "exact_replay_reason": "profile_order_contract_test",
+                    "exact_replay_reason": "unsupported_representation",
                 },
             ),
             "evidence_mode": "exact_replay",
-            "exact_replay_reason": "profile_order_contract_test",
+            "exact_replay_reason": "exact_survivor_unsupported_representation",
         }
     )
     common["portable_transition"]["event"].update(
@@ -2217,12 +2574,12 @@ def test_common_rejects_duplicate_standard_candidate_or_catalog_identity(
                     "frontier_ref": None,
                     "candidate_scalar_refs": (),
                     "translation_batch_refs": (),
-                    "exact_replay_reason": "duplicate_standard_identity_contract_test",
+                    "exact_replay_reason": "unsupported_representation",
                 },
             ),
             "evidence_mode": "exact_replay",
             "translation_batch_refs": (),
-            "exact_replay_reason": "duplicate_standard_identity_contract_test",
+            "exact_replay_reason": "exact_survivor_unsupported_representation",
         }
     )
     common["portable_transition"]["event"].update(
@@ -2420,11 +2777,11 @@ def test_influence_rejection_scalar_must_share_complete_common_partition() -> No
                     "frontier_ref": None,
                     "candidate_scalar_refs": (),
                     "translation_batch_refs": (),
-                    "exact_replay_reason": "branch_partition_test",
+                    "exact_replay_reason": "unsupported_representation",
                 },
             ),
             "evidence_mode": "exact_replay",
-            "exact_replay_reason": "branch_partition_test",
+            "exact_replay_reason": "exact_survivor_unsupported_representation",
         }
     )
     _rehash_fact(common)
@@ -2452,7 +2809,7 @@ def test_influence_rejection_scalar_must_share_complete_common_partition() -> No
             "influence",
             "branch_materialized_action_id",
             "yfm7a-" + "e" * 24,
-            "certified branch action",
+            "unchecked branch action",
         ),
         ("root", "final_state_sha256", SHA_D, "terminal state"),
     ],

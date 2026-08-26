@@ -13,7 +13,8 @@ import re
 import struct
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, ClassVar, Literal, Self
+from enum import StrEnum
+from typing import Annotated, ClassVar, Literal, NoReturn, Self
 
 from pydantic import (
     AfterValidator,
@@ -24,6 +25,7 @@ from pydantic import (
     StrictStr,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 from yieldforge.baseline.contracts import BaselineContractModel
 
@@ -34,6 +36,52 @@ _ACTION_ID_PATTERN = r"^yfm7a-[0-9a-f]{24}$"
 _STREAM_ID_PATTERN = r"^yfts-[0-9a-f]{24}$"
 _UTC_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$")
 _F64_PATTERN = re.compile(r"^f64:[0-9a-f]{16}$")
+
+
+class _M8StructuralErrorCode(StrEnum):
+    """Stable machine-readable codes for unchecked bundle structure failures."""
+
+    BUNDLE_HASH_MISMATCH = "m8_bundle_hash_mismatch"
+    FIXED_LAYER_ORDER = "m8_fixed_layer_order"
+    DUPLICATE_FACT = "m8_duplicate_fact"
+    DUPLICATE_IDENTITY = "m8_duplicate_identity"
+    CONTEXT_MISMATCH = "m8_context_mismatch"
+    DANGLING_REFERENCE = "m8_dangling_reference"
+    PARTITION_MISMATCH = "m8_partition_mismatch"
+    EVENT_ORDER_MISMATCH = "m8_event_order_mismatch"
+    CURSOR_CHAIN_MISMATCH = "m8_cursor_chain_mismatch"
+    INCOMPLETE_EVIDENCE = "m8_incomplete_evidence"
+    CONFIGURATION_MISMATCH = "m8_configuration_mismatch"
+    STANDARD_PROFILE_MISMATCH = "m8_standard_profile_mismatch"
+    POLICY_MINIMUM_MISMATCH = "m8_policy_minimum_mismatch"
+    REPLAY_CONTEXT_MISMATCH = "m8_replay_context_mismatch"
+    ACTION_BINDING_MISMATCH = "m8_action_binding_mismatch"
+    TRANSLATION_MISMATCH = "m8_translation_mismatch"
+    STATE_CHAIN_MISMATCH = "m8_state_chain_mismatch"
+    UNUSED_FACT = "m8_unused_fact"
+    ROOT_CONTEXT_MISMATCH = "m8_root_context_mismatch"
+
+
+def _raise_structural_error(
+    code: _M8StructuralErrorCode,
+    message: str,
+    *,
+    fact_sha256: str | None = None,
+    bundle_sha256: str | None = None,
+    dependency_sha256: str | None = None,
+) -> NoReturn:
+    """Raise one stable first-failure error with an attributable semantic owner."""
+
+    if (fact_sha256 is None) == (bundle_sha256 is None):
+        raise RuntimeError("structural error requires exactly one fact or bundle identity")
+    context = (
+        {"fact_sha256": fact_sha256}
+        if fact_sha256 is not None
+        else {"bundle_sha256": bundle_sha256}
+    )
+    if dependency_sha256 is not None:
+        context["dependency_sha256"] = dependency_sha256
+    raise PydanticCustomError(code.value, message, context)
 
 
 def encode_canonical_f64(value: float) -> str:
@@ -564,7 +612,12 @@ class M8PortableCostLedgerV2(BaselineContractModel):
 class M8PortablePolygonV2(BaselineContractModel):
     """Exact canonical polygon bytes plus their frozen identity and area."""
 
-    schema_version: Literal["yieldforge.canonical-polygon.v1"] = "yieldforge.canonical-polygon.v1"
+    schema_version: Literal["yieldforge.m8-portable-polygon.v2"] = (
+        "yieldforge.m8-portable-polygon.v2"
+    )
+    source_schema_version: Literal["yieldforge.canonical-polygon.v1"] = (
+        "yieldforge.canonical-polygon.v1"
+    )
     wkb_hex: StrictStr = Field(min_length=2, pattern=r"^[0-9a-f]+$")
     polygon_sha256: M8RawSha256
     area_bits: M8CanonicalF64
@@ -581,7 +634,12 @@ class M8PortablePolygonV2(BaselineContractModel):
 class M8PortableMaterialIdentityV2(BaselineContractModel):
     """Exact M0 material-compatibility identity carried by a portable remnant."""
 
-    schema_version: Literal["yieldforge.material-identity.v1"] = "yieldforge.material-identity.v1"
+    schema_version: Literal["yieldforge.m8-portable-material-identity.v2"] = (
+        "yieldforge.m8-portable-material-identity.v2"
+    )
+    source_schema_version: Literal["yieldforge.material-identity.v1"] = (
+        "yieldforge.material-identity.v1"
+    )
     material_code: StrictStr = Field(min_length=1)
     grade: StrictStr = Field(min_length=1)
     thickness: StrictStr = Field(min_length=1)
@@ -593,7 +651,12 @@ class M8PortableMaterialIdentityV2(BaselineContractModel):
 class M8PortableRemnantLineageV2(BaselineContractModel):
     """Complete immutable lineage fields from one M7 remnant."""
 
-    schema_version: Literal["yieldforge.remnant-lineage.v1"] = "yieldforge.remnant-lineage.v1"
+    schema_version: Literal["yieldforge.m8-portable-remnant-lineage.v2"] = (
+        "yieldforge.m8-portable-remnant-lineage.v2"
+    )
+    source_schema_version: Literal["yieldforge.remnant-lineage.v1"] = (
+        "yieldforge.remnant-lineage.v1"
+    )
     root_stock_id: StrictStr = Field(min_length=1)
     parent_remnant_id: StrictStr | None = Field(default=None, pattern=_REMNANT_ID_PATTERN)
     ancestor_remnant_ids: tuple[StrictStr, ...]
@@ -624,7 +687,10 @@ class M8PortableRemnantLineageV2(BaselineContractModel):
 class M8PortableRemnantStockV2(BaselineContractModel):
     """Complete portable form of one exact M7 remnant stock object."""
 
-    schema_version: Literal["yieldforge.remnant-stock.v1"] = "yieldforge.remnant-stock.v1"
+    schema_version: Literal["yieldforge.m8-portable-remnant-stock.v2"] = (
+        "yieldforge.m8-portable-remnant-stock.v2"
+    )
+    source_schema_version: Literal["yieldforge.remnant-stock.v1"] = "yieldforge.remnant-stock.v1"
     remnant_id: StrictStr = Field(pattern=_REMNANT_ID_PATTERN)
     geometry: M8PortablePolygonV2
     material: M8PortableMaterialIdentityV2
@@ -672,7 +738,10 @@ class M8PortablePlacedPartV2(BaselineContractModel):
 class M8PortableLayoutSearchConfigV2(BaselineContractModel):
     """Frozen registered complete-layout translation-search settings."""
 
-    schema_version: Literal["yieldforge.m7-layout-fit-search-config.v1"] = (
+    schema_version: Literal["yieldforge.m8-portable-layout-search-config.v2"] = (
+        "yieldforge.m8-portable-layout-search-config.v2"
+    )
+    source_schema_version: Literal["yieldforge.m7-layout-fit-search-config.v1"] = (
         "yieldforge.m7-layout-fit-search-config.v1"
     )
     grid_columns: StrictInt = Field(ge=2)
@@ -688,7 +757,10 @@ class M8PortableLayoutSearchConfigV2(BaselineContractModel):
 class M8PortableLayoutSearchResultV2(BaselineContractModel):
     """Exact M7 layout-search result embedded in action evidence."""
 
-    schema_version: Literal["yieldforge.m7-layout-fit-search-result.v1"] = (
+    schema_version: Literal["yieldforge.m8-portable-layout-search-result.v2"] = (
+        "yieldforge.m8-portable-layout-search-result.v2"
+    )
+    source_schema_version: Literal["yieldforge.m7-layout-fit-search-result.v1"] = (
         "yieldforge.m7-layout-fit-search-result.v1"
     )
     status: Literal["fit", "no_witness_within_registered_search"]
@@ -758,7 +830,12 @@ class M8PortableAccountingV2(BaselineContractModel):
 class M8PortableLayoutActionV2(BaselineContractModel):
     """Complete portable semantic preimage of one M7 materialized action."""
 
-    schema_version: Literal["yieldforge.m7-layout-action.v1"] = "yieldforge.m7-layout-action.v1"
+    schema_version: Literal["yieldforge.m8-portable-layout-action.v2"] = (
+        "yieldforge.m8-portable-layout-action.v2"
+    )
+    source_schema_version: Literal["yieldforge.m7-layout-action.v1"] = (
+        "yieldforge.m7-layout-action.v1"
+    )
     action_id: StrictStr = Field(pattern=_ACTION_ID_PATTERN)
     content_sha256: M8Sha256
     problem_id: StrictStr = Field(pattern=r"^yfm7p-[0-9a-f]{24}$")
@@ -925,7 +1002,10 @@ class M8PortablePolicyRankV2(BaselineContractModel):
 class M8PortableCommonTransitionV2(BaselineContractModel):
     """Typed portable semantic preimage of the exact legacy common fact."""
 
-    schema_version: Literal["yieldforge.m8-common-transition-fact.v1"] = (
+    schema_version: Literal["yieldforge.m8-portable-common-transition.v2"] = (
+        "yieldforge.m8-portable-common-transition.v2"
+    )
+    source_schema_version: Literal["yieldforge.m8-common-transition-fact.v1"] = (
         "yieldforge.m8-common-transition-fact.v1"
     )
     replay_input_id: StrictStr = Field(min_length=1)
@@ -998,6 +1078,33 @@ class M8PortableCommonTransitionV2(BaselineContractModel):
         return self
 
 
+type M8InventoryExactReplayReasonV2 = Literal[
+    "frontier_survivor",
+    "counted_search_survivor",
+    "unsupported_representation",
+]
+type M8CommonExactReplayReasonV2 = Literal[
+    "exact_survivor_frontier",
+    "exact_survivor_counted_search",
+    "exact_survivor_unsupported_representation",
+    "exact_survivor_mixed",
+]
+
+
+def _exact_replay_reason_summary(
+    reasons: tuple[M8InventoryExactReplayReasonV2, ...],
+) -> M8CommonExactReplayReasonV2:
+    unique = set(reasons)
+    if len(unique) > 1:
+        return "exact_survivor_mixed"
+    reason = next(iter(unique))
+    if reason == "frontier_survivor":
+        return "exact_survivor_frontier"
+    if reason == "counted_search_survivor":
+        return "exact_survivor_counted_search"
+    return "exact_survivor_unsupported_representation"
+
+
 class M8CommonInventoryClassificationV2(BaselineContractModel):
     """Complete portable classification of one common-cursor inventory item."""
 
@@ -1012,7 +1119,7 @@ class M8CommonInventoryClassificationV2(BaselineContractModel):
     frontier_ref: M8Sha256 | None
     candidate_scalar_refs: tuple[M8Sha256, ...]
     translation_batch_refs: tuple[M8Sha256, ...]
-    exact_replay_reason: StrictStr | None = Field(default=None, min_length=1)
+    exact_replay_reason: M8InventoryExactReplayReasonV2 | None = None
 
     @model_validator(mode="after")
     def require_classification_shape(self) -> Self:
@@ -1049,10 +1156,21 @@ class M8CommonInventoryClassificationV2(BaselineContractModel):
                 and self.exact_replay_reason is None
             )
         else:
-            frontier_shape = (self.frontier_ref is None) == (not self.candidate_scalar_refs)
-            valid = frontier_shape and self.exact_replay_reason is not None
+            evidence_shape = (
+                self.frontier_ref is not None,
+                bool(self.candidate_scalar_refs),
+                bool(self.translation_batch_refs),
+            )
+            expected_reason: M8InventoryExactReplayReasonV2 | None = {
+                (True, True, False): "frontier_survivor",
+                (True, True, True): "counted_search_survivor",
+                (False, False, False): "unsupported_representation",
+            }.get(evidence_shape)
+            valid = expected_reason is not None and self.exact_replay_reason == expected_reason
         if not valid:
-            raise ValueError("inventory classification evidence mode is incomplete")
+            raise ValueError(
+                "inventory classification reason differs from its evidence path or is incomplete"
+            )
         return self
 
 
@@ -1110,7 +1228,7 @@ class M8CommonTransitionLemmaV2(_M8FactV2):
     inventory_classifications: tuple[M8CommonInventoryClassificationV2, ...]
     evidence_mode: Literal["frontier_no_fit", "counted_no_fit", "exact_replay"]
     translation_batch_refs: tuple[M8Sha256, ...]
-    exact_replay_reason: StrictStr | None = Field(default=None, min_length=1)
+    exact_replay_reason: M8CommonExactReplayReasonV2 | None = None
 
     @model_validator(mode="after")
     def require_common_evidence_mode_and_time(self) -> Self:
@@ -1201,8 +1319,20 @@ class M8CommonTransitionLemmaV2(_M8FactV2):
             ):
                 raise ValueError("counted-no-fit common evidence requires translation batches only")
         elif self.evidence_mode == "exact_replay":
-            if self.exact_replay_reason is None:
-                raise ValueError("exact-replay common evidence must be explicit")
+            survivor_reasons = tuple(
+                item.exact_replay_reason
+                for item in self.inventory_classifications
+                if item.classification == "exact_survivor" and item.exact_replay_reason is not None
+            )
+            if not survivor_reasons:
+                raise ValueError(
+                    "exact-replay common evidence requires one or more exact survivors"
+                )
+            expected_reason = _exact_replay_reason_summary(survivor_reasons)
+            if self.exact_replay_reason != expected_reason:
+                raise ValueError(
+                    "common exact-replay reason summary differs from exact-survivor reasons"
+                )
         elif (
             classifications - {"scalar_no_fit"}
             or self.translation_batch_refs
@@ -1555,7 +1685,7 @@ class M8InfluenceFactV2(_M8FactV2):
             self.branch_catalog_action_id != self.common_catalog_action_id
             or self.branch_materialized_action_id != self.common_materialized_action_id
         ):
-            raise ValueError("certified branch action must equal the common selected action")
+            raise ValueError("unchecked branch action must equal the common selected action")
         return self
 
 
@@ -1668,11 +1798,41 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
     def _root_order(item: M8ActionRootV2) -> tuple[str, str, str]:
         return (item.stream_id, item.action_id, item.fact_sha256)
 
+    def _shallow_hash_input(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "bundle_kind": self.bundle_kind,
+            "provenance": self.provenance,
+            "translation_batches": tuple(
+                {"fact_sha256": item.fact_sha256} for item in self.translation_batches
+            ),
+            "candidate_scalar_facts": tuple(
+                {"fact_sha256": item.fact_sha256} for item in self.candidate_scalar_facts
+            ),
+            "frontier_facts": tuple(
+                {"fact_sha256": item.fact_sha256} for item in self.frontier_facts
+            ),
+            "standard_candidate_facts": tuple(
+                {"fact_sha256": item.fact_sha256} for item in self.standard_candidate_facts
+            ),
+            "common_lemmas": tuple(
+                {"fact_sha256": item.fact_sha256} for item in self.common_lemmas
+            ),
+            "influence_facts": tuple(
+                {"fact_sha256": item.fact_sha256} for item in self.influence_facts
+            ),
+            "action_roots": tuple({"fact_sha256": item.fact_sha256} for item in self.action_roots),
+        }
+
     @model_validator(mode="after")
     def require_fixed_layers_and_reachability(self) -> Self:
-        expected_hash = m8_bundle_sha256(self.model_dump(mode="json"))
+        expected_hash = m8_bundle_sha256(self._shallow_hash_input())
         if self.bundle_sha256 != expected_hash:
-            raise ValueError("M8 bundle SHA-256 does not match ordered fact roots")
+            _raise_structural_error(
+                _M8StructuralErrorCode.BUNDLE_HASH_MISMATCH,
+                "M8 bundle SHA-256 does not match ordered fact roots",
+                bundle_sha256=self.bundle_sha256,
+            )
 
         ordered_layers: tuple[tuple[tuple[_M8FactV2, ...], object], ...] = (
             (self.translation_batches, self._fact_order),
@@ -1684,8 +1844,18 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
             (self.action_roots, self._root_order),
         )
         for entries, order_key in ordered_layers:
-            if entries != tuple(sorted(entries, key=order_key)):  # type: ignore[arg-type]
-                raise ValueError("M8 fixed-layer facts differ from deterministic order")
+            expected_entries = tuple(sorted(entries, key=order_key))  # type: ignore[arg-type]
+            if entries != expected_entries:
+                first_misordered = next(
+                    item
+                    for item, expected in zip(entries, expected_entries, strict=True)
+                    if item != expected
+                )
+                _raise_structural_error(
+                    _M8StructuralErrorCode.FIXED_LAYER_ORDER,
+                    "M8 fixed-layer facts differ from deterministic order",
+                    fact_sha256=first_misordered.fact_sha256,
+                )
 
         layers = (
             self.translation_batches,
@@ -1699,67 +1869,102 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
         all_entries = tuple(item for layer in layers for item in layer)
         all_hashes = tuple(item.fact_sha256 for item in all_entries)
         if len(all_hashes) != len(set(all_hashes)):
-            raise ValueError("M8 bundle contains duplicate serialized fact entries")
+            seen_hashes: set[str] = set()
+            duplicate_hash = ""
+            for item in all_entries:
+                if item.fact_sha256 in seen_hashes:
+                    duplicate_hash = item.fact_sha256
+                    break
+                seen_hashes.add(item.fact_sha256)
+            _raise_structural_error(
+                _M8StructuralErrorCode.DUPLICATE_FACT,
+                "M8 bundle contains duplicate serialized fact entries",
+                fact_sha256=duplicate_hash,
+            )
 
-        identity_sets: tuple[tuple[object, ...], ...] = (
+        identity_layers: tuple[tuple[tuple[_M8FactV2, object], ...], ...] = (
             tuple(
                 (
-                    item.semantic_runtime_sha256,
-                    item.stream_id,
-                    item.event_position,
-                    item.remnant_id,
-                    item.candidate_id,
+                    item,
+                    (
+                        item.semantic_runtime_sha256,
+                        item.stream_id,
+                        item.event_position,
+                        item.remnant_id,
+                        item.candidate_id,
+                    ),
                 )
                 for item in self.translation_batches
             ),
             tuple(
                 (
-                    item.semantic_runtime_sha256,
-                    item.stream_id,
-                    item.problem_id,
-                    item.candidate_set_id,
-                    item.candidate_id,
+                    item,
+                    (
+                        item.semantic_runtime_sha256,
+                        item.stream_id,
+                        item.problem_id,
+                        item.candidate_set_id,
+                        item.candidate_id,
+                    ),
                 )
                 for item in self.candidate_scalar_facts
             ),
             tuple(
                 (
-                    item.semantic_runtime_sha256,
-                    item.stream_id,
-                    item.problem_id,
-                    item.candidate_set_id,
+                    item,
+                    (
+                        item.semantic_runtime_sha256,
+                        item.stream_id,
+                        item.problem_id,
+                        item.candidate_set_id,
+                    ),
                 )
                 for item in self.frontier_facts
             ),
             tuple(
                 (
-                    item.semantic_runtime_sha256,
-                    item.stream_id,
-                    item.event_position,
-                    item.profile_position,
+                    item,
+                    (
+                        item.semantic_runtime_sha256,
+                        item.stream_id,
+                        item.event_position,
+                        item.profile_position,
+                    ),
                 )
                 for item in self.standard_candidate_facts
             ),
             tuple(
-                (item.semantic_runtime_sha256, item.stream_id, item.event_position)
+                (item, (item.semantic_runtime_sha256, item.stream_id, item.event_position))
                 for item in self.common_lemmas
             ),
             tuple(
                 (
-                    item.semantic_runtime_sha256,
-                    item.stream_id,
-                    item.event_position,
-                    item.root_action_id,
+                    item,
+                    (
+                        item.semantic_runtime_sha256,
+                        item.stream_id,
+                        item.event_position,
+                        item.root_action_id,
+                    ),
                 )
                 for item in self.influence_facts
             ),
             tuple(
-                (item.semantic_runtime_sha256, item.stream_id, item.action_id)
+                (item, (item.semantic_runtime_sha256, item.stream_id, item.action_id))
                 for item in self.action_roots
             ),
         )
-        if any(len(items) != len(set(items)) for items in identity_sets):
-            raise ValueError("M8 bundle contains duplicate semantic fact identities")
+        for identity_layer in identity_layers:
+            seen_identities: dict[object, _M8FactV2] = {}
+            for item, identity in identity_layer:
+                if identity in seen_identities:
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.DUPLICATE_IDENTITY,
+                        "M8 bundle contains duplicate semantic fact identities",
+                        fact_sha256=item.fact_sha256,
+                        dependency_sha256=seen_identities[identity].fact_sha256,
+                    )
+                seen_identities[identity] = item
 
         context = (
             self.provenance.semantic_runtime_sha256,
@@ -1767,7 +1972,11 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
         )
         for item in all_entries:
             if (item.semantic_runtime_sha256, item.stream_id) != context:
-                raise ValueError("M8 bundle fact has cross-runtime or cross-stream context")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.CONTEXT_MISMATCH,
+                    "M8 bundle fact has cross-runtime or cross-stream context",
+                    fact_sha256=item.fact_sha256,
+                )
 
         translations = {item.fact_sha256: item for item in self.translation_batches}
         scalars = {item.fact_sha256: item for item in self.candidate_scalar_facts}
@@ -1777,41 +1986,66 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
         influences = {item.fact_sha256: item for item in self.influence_facts}
 
         for frontier in self.frontier_facts:
-            try:
-                referenced = tuple(scalars[ref] for ref in frontier.candidate_scalar_refs)
-            except KeyError as error:
-                raise ValueError("M8 frontier has a dangling candidate-scalar reference") from error
+            missing_scalar_ref = next(
+                (ref for ref in frontier.candidate_scalar_refs if ref not in scalars),
+                None,
+            )
+            if missing_scalar_ref is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.DANGLING_REFERENCE,
+                    "M8 frontier has a dangling candidate-scalar reference",
+                    fact_sha256=frontier.fact_sha256,
+                    dependency_sha256=missing_scalar_ref,
+                )
+            referenced = tuple(scalars[ref] for ref in frontier.candidate_scalar_refs)
             self._require_dependency_context(frontier, referenced)
-            if any(
+            partition_mismatch = next(
                 (
-                    item.problem_id,
-                    item.problem_sha256,
-                    item.candidate_set_id,
-                    item.candidate_set_sha256,
-                    item.material_partition,
-                    item.fit_config_sha256,
+                    item
+                    for item in referenced
+                    if (
+                        item.problem_id,
+                        item.problem_sha256,
+                        item.candidate_set_id,
+                        item.candidate_set_sha256,
+                        item.material_partition,
+                        item.fit_config_sha256,
+                    )
+                    != (
+                        frontier.problem_id,
+                        frontier.problem_sha256,
+                        frontier.candidate_set_id,
+                        frontier.candidate_set_sha256,
+                        frontier.material_partition,
+                        frontier.fit_config_sha256,
+                    )
+                ),
+                None,
+            )
+            if partition_mismatch is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.PARTITION_MISMATCH,
+                    "M8 frontier scalar partition bindings differ",
+                    fact_sha256=frontier.fact_sha256,
+                    dependency_sha256=partition_mismatch.fact_sha256,
                 )
-                != (
-                    frontier.problem_id,
-                    frontier.problem_sha256,
-                    frontier.candidate_set_id,
-                    frontier.candidate_set_sha256,
-                    frontier.material_partition,
-                    frontier.fit_config_sha256,
-                )
-                for item in referenced
-            ):
-                raise ValueError("M8 frontier scalar partition bindings differ")
 
         previous_by_stream: dict[str, M8CommonTransitionLemmaV2] = {}
         for common in self.common_lemmas:
             previous = previous_by_stream.get(common.stream_id)
             if previous is None:
                 if common.previous_common_lemma_ref is not None:
-                    raise ValueError("M8 first common lemma must use baseline fallback cursor")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.EVENT_ORDER_MISMATCH,
+                        "M8 first common lemma must use baseline fallback cursor",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=common.previous_common_lemma_ref,
+                    )
                 if common.baseline_fallback_cursor_sha256 != common.cursor_before_sha256:
-                    raise ValueError(
-                        "M8 first common lemma baseline fallback differs from cursor before"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.CURSOR_CHAIN_MISMATCH,
+                        "M8 first common lemma baseline fallback differs from cursor before",
+                        fact_sha256=common.fact_sha256,
                     )
             else:
                 if (
@@ -1819,21 +2053,39 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or common.previous_common_lemma_ref != previous.fact_sha256
                     or common.baseline_fallback_cursor_sha256 is not None
                 ):
-                    raise ValueError(
-                        "M8 common lemma previous reference skips or reverses event order"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.EVENT_ORDER_MISMATCH,
+                        "M8 common lemma previous reference skips or reverses event order",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=previous.fact_sha256,
                     )
                 if common.cursor_before_sha256 != previous.cursor_after_sha256:
-                    raise ValueError("M8 common lemma cursor chain is discontinuous")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.CURSOR_CHAIN_MISMATCH,
+                        "M8 common lemma cursor chain is discontinuous",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=previous.fact_sha256,
+                    )
                 if (
                     common.cursor_before_inventory_remnant_ids
                     != previous.cursor_after_inventory_remnant_ids
                 ):
-                    raise ValueError("M8 common lemma inventory chain is discontinuous")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.CURSOR_CHAIN_MISMATCH,
+                        "M8 common lemma inventory chain is discontinuous",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=previous.fact_sha256,
+                    )
                 if (
                     common.portable_transition.cursor_before
                     != previous.portable_transition.cursor_after
                 ):
-                    raise ValueError("M8 common lemma full portable cursor chain is discontinuous")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.CURSOR_CHAIN_MISMATCH,
+                        "M8 common lemma full portable cursor chain is discontinuous",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=previous.fact_sha256,
+                    )
             previous_by_stream[common.stream_id] = common
 
             common_dependencies: list[_M8FactV2] = []
@@ -1844,16 +2096,34 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 (common.standard_candidate_refs, standards, "standard-candidate"),
                 (common.translation_batch_refs, translations, "translation-batch"),
             ):
-                try:
-                    resolved = [index[ref] for ref in refs]
-                    common_dependencies.extend(resolved)
-                    if label in {"standard-candidate", "translation-batch"}:
-                        event_dependencies.extend(resolved)
-                except KeyError as error:
-                    raise ValueError(f"M8 common lemma has a dangling {label} reference") from error
+                missing_ref = next((ref for ref in refs if ref not in index), None)
+                if missing_ref is not None:
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.DANGLING_REFERENCE,
+                        f"M8 common lemma has a dangling {label} reference",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=missing_ref,
+                    )
+                resolved = [index[ref] for ref in refs]
+                common_dependencies.extend(resolved)
+                if label in {"standard-candidate", "translation-batch"}:
+                    event_dependencies.extend(resolved)
             self._require_dependency_context(common, tuple(common_dependencies))
-            if any(item.event_position != common.event_position for item in event_dependencies):
-                raise ValueError("M8 common lemma dependency has out-of-order event context")
+            out_of_order_dependency = next(
+                (
+                    item
+                    for item in event_dependencies
+                    if item.event_position != common.event_position
+                ),
+                None,
+            )
+            if out_of_order_dependency is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.EVENT_ORDER_MISMATCH,
+                    "M8 common lemma dependency has out-of-order event context",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=out_of_order_dependency.fact_sha256,
+                )
 
             scalar_items = tuple(scalars[ref] for ref in common.candidate_scalar_refs)
             frontier_items = tuple(frontiers[ref] for ref in common.frontier_refs)
@@ -1864,39 +2134,72 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 common.candidate_set_sha256,
                 common.fit_config_sha256,
             )
-            if any(
+            partition_dependency = next(
                 (
-                    item.problem_id,
-                    item.problem_sha256,
-                    item.candidate_set_id,
-                    item.candidate_set_sha256,
-                    item.fit_config_sha256,
+                    item
+                    for item in (*scalar_items, *frontier_items)
+                    if (
+                        item.problem_id,
+                        item.problem_sha256,
+                        item.candidate_set_id,
+                        item.candidate_set_sha256,
+                        item.fit_config_sha256,
+                    )
+                    != common_partition
+                ),
+                None,
+            )
+            if partition_dependency is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.PARTITION_MISMATCH,
+                    "M8 common candidate partition bindings differ",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=partition_dependency.fact_sha256,
                 )
-                != common_partition
-                for item in (*scalar_items, *frontier_items)
-            ):
-                raise ValueError("M8 common candidate partition bindings differ")
             translation_items = tuple(translations[ref] for ref in common.translation_batch_refs)
-            if any(
-                item.fit_config_sha256 != common.fit_config_sha256
-                or item.search_config_sha256 != common.search_config_sha256
-                for item in translation_items
-            ):
-                raise ValueError("M8 common translation configuration bindings differ")
+            configuration_dependency = next(
+                (
+                    item
+                    for item in translation_items
+                    if item.fit_config_sha256 != common.fit_config_sha256
+                    or item.search_config_sha256 != common.search_config_sha256
+                ),
+                None,
+            )
+            if configuration_dependency is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.CONFIGURATION_MISMATCH,
+                    "M8 common translation configuration bindings differ",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=configuration_dependency.fact_sha256,
+                )
             for classification in common.inventory_classifications:
                 frontier = frontiers.get(classification.frontier_ref or "")
                 if frontier is None:
+                    if classification.frontier_ref is not None:
+                        _raise_structural_error(
+                            _M8StructuralErrorCode.DANGLING_REFERENCE,
+                            "M8 common inventory has a dangling frontier reference",
+                            fact_sha256=common.fact_sha256,
+                            dependency_sha256=classification.frontier_ref,
+                        )
                     if (
                         classification.classification != "exact_survivor"
-                        or classification.frontier_ref is not None
                         or classification.candidate_scalar_refs
                     ):
-                        raise ValueError("M8 common inventory has a dangling frontier reference")
+                        _raise_structural_error(
+                            _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                            "M8 common inventory lacks its required frontier reference",
+                            fact_sha256=common.fact_sha256,
+                        )
                     scalar_candidate_ids: set[str] = set()
                 else:
                     if classification.candidate_scalar_refs != frontier.candidate_scalar_refs:
-                        raise ValueError(
-                            "M8 common inventory lacks the complete frontier scalar set"
+                        _raise_structural_error(
+                            _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                            "M8 common inventory lacks the complete frontier scalar set",
+                            fact_sha256=common.fact_sha256,
+                            dependency_sha256=frontier.fact_sha256,
                         )
                     scalar_candidate_ids = {
                         scalars[reference].candidate_id
@@ -1906,51 +2209,125 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 for reference in classification.translation_batch_refs:
                     translation = translations.get(reference)
                     if translation is None:
-                        raise ValueError("M8 common inventory has a dangling translation reference")
+                        _raise_structural_error(
+                            _M8StructuralErrorCode.DANGLING_REFERENCE,
+                            "M8 common inventory has a dangling translation reference",
+                            fact_sha256=common.fact_sha256,
+                            dependency_sha256=reference,
+                        )
                     if (
                         translation.remnant_id != classification.remnant_id
                         or translation.event_position != common.event_position
                     ):
-                        raise ValueError("M8 common inventory translation identity differs")
+                        _raise_structural_error(
+                            _M8StructuralErrorCode.TRANSLATION_MISMATCH,
+                            "M8 common inventory translation identity differs",
+                            fact_sha256=common.fact_sha256,
+                            dependency_sha256=translation.fact_sha256,
+                        )
                     if (
                         scalar_candidate_ids
                         and translation.candidate_id not in scalar_candidate_ids
                     ):
-                        raise ValueError(
-                            "M8 common translation candidate is absent from frontier scalars"
+                        _raise_structural_error(
+                            _M8StructuralErrorCode.PARTITION_MISMATCH,
+                            "M8 common translation candidate is absent from frontier scalars",
+                            fact_sha256=common.fact_sha256,
+                            dependency_sha256=translation.fact_sha256,
                         )
                     translation_candidate_ids.add(translation.candidate_id)
-                if (
-                    classification.classification == "counted_no_fit"
-                    and translation_candidate_ids != scalar_candidate_ids
-                ):
-                    raise ValueError(
-                        "M8 counted common lacks the complete candidate translation set"
+                counted_evidence = classification.classification == "counted_no_fit" or (
+                    classification.exact_replay_reason == "counted_search_survivor"
+                )
+                if counted_evidence and translation_candidate_ids != scalar_candidate_ids:
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                        "M8 counted common lacks the complete candidate translation set",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=classification.frontier_ref,
                     )
 
             standard_items = tuple(standards[ref] for ref in common.standard_candidate_refs)
             if len(standard_items) != common.portable_transition.event.standard_action_count:
-                raise ValueError(
-                    "M8 common standard action count differs from its complete profile set"
+                _raise_structural_error(
+                    _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                    "M8 common standard action count differs from its complete profile set",
+                    fact_sha256=common.fact_sha256,
                 )
             expected_profiles = tuple(range(len(standard_items)))
             if tuple(item.profile_position for item in standard_items) != expected_profiles:
-                raise ValueError("M8 common lemma lacks complete ordered standard candidates")
-            if any(item.policy_name != common.policy_name for item in standard_items):
-                raise ValueError("M8 common standard candidates use a different policy")
+                misplaced_standard = next(
+                    item
+                    for item, position in zip(standard_items, expected_profiles, strict=True)
+                    if item.profile_position != position
+                )
+                _raise_structural_error(
+                    _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                    "M8 common lemma lacks complete ordered standard candidates",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=misplaced_standard.fact_sha256,
+                )
+            wrong_policy_standard = next(
+                (item for item in standard_items if item.policy_name != common.policy_name),
+                None,
+            )
+            if wrong_policy_standard is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.STANDARD_PROFILE_MISMATCH,
+                    "M8 common standard candidates use a different policy",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=wrong_policy_standard.fact_sha256,
+                )
             standard_candidate_ids = tuple(item.candidate_id for item in standard_items)
             standard_catalog_ids = tuple(item.catalog_action_id for item in standard_items)
             if len(standard_candidate_ids) != len(set(standard_candidate_ids)) or len(
                 standard_catalog_ids
             ) != len(set(standard_catalog_ids)):
-                raise ValueError(
+                seen_candidates: dict[str, M8StandardCandidateFactV2] = {}
+                seen_catalogs: dict[str, M8StandardCandidateFactV2] = {}
+                duplicate_standard: M8StandardCandidateFactV2 | None = None
+                conflicting_standard: M8StandardCandidateFactV2 | None = None
+                for item in standard_items:
+                    conflicting_standard = seen_candidates.get(item.candidate_id) or (
+                        seen_catalogs.get(item.catalog_action_id)
+                    )
+                    if conflicting_standard is not None:
+                        duplicate_standard = item
+                        break
+                    seen_candidates[item.candidate_id] = item
+                    seen_catalogs[item.catalog_action_id] = item
+                if duplicate_standard is None or conflicting_standard is None:  # pragma: no cover
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.DUPLICATE_IDENTITY,
+                        "M8 common standard candidates contain duplicate identities",
+                        fact_sha256=common.fact_sha256,
+                    )
+                _raise_structural_error(
+                    _M8StructuralErrorCode.DUPLICATE_IDENTITY,
                     "M8 common standard candidates contain duplicate candidate or catalog "
-                    "identities"
+                    "identities",
+                    fact_sha256=duplicate_standard.fact_sha256,
+                    dependency_sha256=conflicting_standard.fact_sha256,
                 )
-            if scalar_items and {item.candidate_id for item in standard_items} != {
-                item.candidate_id for item in scalar_items
-            }:
-                raise ValueError("M8 common standard and scalar candidate sets differ")
+            standard_by_candidate = {item.candidate_id: item for item in standard_items}
+            scalar_by_candidate = {item.candidate_id: item for item in scalar_items}
+            if scalar_items and set(standard_by_candidate) != set(scalar_by_candidate):
+                asymmetric_candidate = next(
+                    candidate_id
+                    for candidate_id in (*standard_by_candidate, *scalar_by_candidate)
+                    if (candidate_id in standard_by_candidate)
+                    != (candidate_id in scalar_by_candidate)
+                )
+                asymmetric_fact = (
+                    standard_by_candidate.get(asymmetric_candidate)
+                    or scalar_by_candidate[asymmetric_candidate]
+                )
+                _raise_structural_error(
+                    _M8StructuralErrorCode.PARTITION_MISMATCH,
+                    "M8 common standard and scalar candidate sets differ",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=asymmetric_fact.fact_sha256,
+                )
             ranked_standards = tuple(
                 (
                     _policy_rank_value(item.policy_name, item.comparison_key),
@@ -1960,7 +2337,12 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
             )
             minimum_standard_ref = min(ranked_standards, key=lambda item: item[0])[1]
             if common.minimum_standard_candidate_ref != minimum_standard_ref:
-                raise ValueError("M8 selected standard candidate is not the policy minimum")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.POLICY_MINIMUM_MISMATCH,
+                    "M8 minimum standard reference is not the policy minimum standard profile",
+                    fact_sha256=common.fact_sha256,
+                    dependency_sha256=common.minimum_standard_candidate_ref,
+                )
             minimum_standard = standards[common.minimum_standard_candidate_ref]
             transition = common.portable_transition
             if transition.event.action.kind == "open_standard_sheet":
@@ -1974,15 +2356,21 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or minimum_standard.comparison_key != common.selected_comparison_key
                     or minimum_standard.decision_key != common.selected_decision_key
                 ):
-                    raise ValueError(
-                        "M8 common selected action differs from its standard candidate"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STANDARD_PROFILE_MISMATCH,
+                        "M8 common selected action differs from its standard candidate",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=minimum_standard.fact_sha256,
                     )
                 if (
                     minimum_standard.immediate_net_cost_bits
                     != common.selected_immediate_net_cost_bits
                 ):
-                    raise ValueError(
-                        "M8 common selected immediate cost differs from its standard candidate"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STANDARD_PROFILE_MISMATCH,
+                        "M8 common selected immediate cost differs from its standard candidate",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=minimum_standard.fact_sha256,
                     )
                 selected_context = transition.selected_context
                 if (
@@ -2001,8 +2389,11 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or minimum_standard.known_order_lookahead_term_bits
                     != selected_context.known_order_lookahead_term_bits
                 ):
-                    raise ValueError(
-                        "M8 selected standard profile differs from its portable policy context"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STANDARD_PROFILE_MISMATCH,
+                        "M8 selected standard profile differs from its portable policy context",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=minimum_standard.fact_sha256,
                     )
                 action = transition.event.action
                 accounting = action.accounting
@@ -2023,8 +2414,11 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     != accounting.area_tolerance_bits
                     or minimum_standard.returned_remnant_count != len(action.returned_remnants)
                 ):
-                    raise ValueError(
-                        "M8 selected standard profile differs from its portable action accounting"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STANDARD_PROFILE_MISMATCH,
+                        "M8 selected standard profile differs from its portable action accounting",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=minimum_standard.fact_sha256,
                     )
                 event_costs = transition.event.delta_costs
                 if (
@@ -2037,9 +2431,12 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or minimum_standard.terminal_scrap_credit_bits
                     != event_costs.terminal_scrap_credit_bits
                 ):
-                    raise ValueError(
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STANDARD_PROFILE_MISMATCH,
                         "M8 selected standard profile differs from shared portable event cost "
-                        "components"
+                        "components",
+                        fact_sha256=common.fact_sha256,
+                        dependency_sha256=minimum_standard.fact_sha256,
                     )
                 # Policy storage prices retained children; event storage prices elapsed
                 # pre-event inventory. The policy immediate cost is therefore bound to
@@ -2047,15 +2444,29 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
             if common.replay_input_id != self.provenance.replay_input_id or (
                 common.replay_input_sha256 != self.provenance.replay_input_sha256
             ):
-                raise ValueError("M8 common lemma replay context differs from bundle provenance")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.REPLAY_CONTEXT_MISMATCH,
+                    "M8 common lemma replay context differs from bundle provenance",
+                    fact_sha256=common.fact_sha256,
+                )
 
         for influence in self.influence_facts:
             common = commons.get(influence.common_lemma_ref)
             if common is None:
-                raise ValueError("M8 influence has a dangling common-lemma reference")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.DANGLING_REFERENCE,
+                    "M8 influence has a dangling common-lemma reference",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=influence.common_lemma_ref,
+                )
             self._require_dependency_context(influence, (common,))
             if influence.event_position != common.event_position:
-                raise ValueError("M8 influence common reference is out of event order")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.EVENT_ORDER_MISMATCH,
+                    "M8 influence common reference is out of event order",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=common.fact_sha256,
+                )
             expected_candidate_ids = {
                 standards[reference].candidate_id for reference in common.standard_candidate_refs
             }
@@ -2076,7 +2487,12 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 len(rejection_pairs) != len(set(rejection_pairs))
                 or set(rejection_pairs) != expected_rejection_pairs
             ):
-                raise ValueError("M8 influence lacks the complete rejection candidate set")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                    "M8 influence lacks the complete rejection candidate set",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=common.fact_sha256,
+                )
             search_candidates: dict[tuple[str, str], set[str]] = {}
             for evidence in influence.search_evidence:
                 search_candidates.setdefault((evidence.direction, evidence.remnant_id), set()).add(
@@ -2089,19 +2505,32 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     for candidates in search_candidates.values()
                 )
             ):
-                raise ValueError("M8 influence lacks the complete search candidate set")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                    "M8 influence lacks the complete search candidate set",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=common.fact_sha256,
+                )
             if any(
                 item.candidate_id not in expected_candidate_ids
                 for item in influence.competitor_evidence
             ):
-                raise ValueError("M8 influence competitor candidate is outside the event set")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.PARTITION_MISMATCH,
+                    "M8 influence competitor candidate is outside the event set",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=common.fact_sha256,
+                )
             scalar_refs = tuple(item.candidate_scalar_ref for item in influence.rejection_evidence)
-            try:
-                scalar_items = tuple(scalars[ref] for ref in scalar_refs)
-            except KeyError as error:
-                raise ValueError(
-                    "M8 influence has a dangling candidate-scalar reference"
-                ) from error
+            missing_scalar_ref = next((ref for ref in scalar_refs if ref not in scalars), None)
+            if missing_scalar_ref is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.DANGLING_REFERENCE,
+                    "M8 influence has a dangling candidate-scalar reference",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=missing_scalar_ref,
+                )
+            scalar_items = tuple(scalars[ref] for ref in scalar_refs)
             self._require_dependency_context(influence, scalar_items)
             for evidence, scalar in zip(influence.rejection_evidence, scalar_items, strict=True):
                 if (
@@ -2115,19 +2544,28 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or evidence.layout_width_bits != scalar.layout_width_bits
                     or evidence.layout_height_bits != scalar.layout_height_bits
                 ):
-                    raise ValueError(
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.PARTITION_MISMATCH,
                         "M8 influence rejection scalar partition differs from "
-                        "referenced scalar identity or scalar measurements"
+                        "referenced scalar identity or scalar measurements",
+                        fact_sha256=influence.fact_sha256,
+                        dependency_sha256=scalar.fact_sha256,
                     )
             translation_refs = tuple(
                 search.translation_batch_ref for search in influence.search_evidence
             )
-            try:
-                translation_items = tuple(translations[ref] for ref in translation_refs)
-            except KeyError as error:
-                raise ValueError(
-                    "M8 influence has a dangling translation-batch reference"
-                ) from error
+            missing_translation_ref = next(
+                (ref for ref in translation_refs if ref not in translations),
+                None,
+            )
+            if missing_translation_ref is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.DANGLING_REFERENCE,
+                    "M8 influence has a dangling translation-batch reference",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=missing_translation_ref,
+                )
+            translation_items = tuple(translations[ref] for ref in translation_refs)
             self._require_dependency_context(influence, translation_items)
             translation_by_ref = {item.fact_sha256: item for item in translation_items}
             for search in influence.search_evidence:
@@ -2144,7 +2582,12 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or search.budget_truncated != translation.budget_truncated
                     or translation.event_position != influence.event_position
                 ):
-                    raise ValueError("M8 influence translation configuration bindings differ")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.CONFIGURATION_MISMATCH,
+                        "M8 influence translation configuration bindings differ",
+                        fact_sha256=influence.fact_sha256,
+                        dependency_sha256=translation.fact_sha256,
+                    )
                 maximum_candidates = search.search_config.maximum_candidates
                 if (
                     translation.budget_truncated
@@ -2156,7 +2599,12 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     not translation.budget_truncated
                     and translation.generated_candidate_count > maximum_candidates
                 ):
-                    raise ValueError("M8 influence translation exceeds its registered budget")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.TRANSLATION_MISMATCH,
+                        "M8 influence translation exceeds its registered budget",
+                        fact_sha256=influence.fact_sha256,
+                        dependency_sha256=translation.fact_sha256,
+                    )
                 if search.result == "no_witness_within_registered_search":
                     sequence_matches = search.evaluated_candidate_count == len(
                         translation.translations
@@ -2168,7 +2616,12 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                         == translation.translations[search.evaluated_candidate_count - 1]
                     )
                 if not sequence_matches:
-                    raise ValueError("M8 influence search differs from translation sequence")
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.TRANSLATION_MISMATCH,
+                        "M8 influence search differs from translation sequence",
+                        fact_sha256=influence.fact_sha256,
+                        dependency_sha256=translation.fact_sha256,
+                    )
             fit_searches = {
                 (search.direction, search.remnant_id, search.candidate_id)
                 for search in influence.search_evidence
@@ -2183,16 +2636,30 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 not in fit_searches
                 for competitor in influence.competitor_evidence
             ):
-                raise ValueError("M8 influence competitor lacks a matching fit search")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                    "M8 influence competitor lacks a matching fit search",
+                    fact_sha256=influence.fact_sha256,
+                )
             if any(
                 competitor.policy_name != common.policy_name
                 for competitor in influence.competitor_evidence
             ):
-                raise ValueError("M8 influence competitor uses a different policy")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.POLICY_MINIMUM_MISMATCH,
+                    "M8 influence competitor uses a different policy",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=common.fact_sha256,
+                )
             if influence.common_catalog_action_id != common.selected_catalog_action_id or (
                 influence.common_materialized_action_id != common.selected_materialized_action_id
             ):
-                raise ValueError("M8 influence common action binding differs from its lemma")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.ACTION_BINDING_MISMATCH,
+                    "M8 influence common action binding differs from its lemma",
+                    fact_sha256=influence.fact_sha256,
+                    dependency_sha256=common.fact_sha256,
+                )
 
         reachable: set[str] = set()
 
@@ -2215,47 +2682,130 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 range(root.start_event_position + 1, root.stop_event_position)
             )
             if len(root.common_lemma_refs) != len(expected_positions):
-                raise ValueError("M8 action root lacks ordered complete event coverage")
-            try:
-                root_commons = tuple(commons[ref] for ref in root.common_lemma_refs)
-                root_influences = tuple(influences[ref] for ref in root.influence_fact_refs)
-            except KeyError as error:
-                raise ValueError("M8 action root contains a dangling event reference") from error
+                _raise_structural_error(
+                    _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                    "M8 action root lacks ordered complete event coverage",
+                    fact_sha256=root.fact_sha256,
+                )
+            dangling_event_ref = next(
+                (ref for ref in root.common_lemma_refs if ref not in commons),
+                next((ref for ref in root.influence_fact_refs if ref not in influences), None),
+            )
+            if dangling_event_ref is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.DANGLING_REFERENCE,
+                    "M8 action root contains a dangling event reference",
+                    fact_sha256=root.fact_sha256,
+                    dependency_sha256=dangling_event_ref,
+                )
+            root_commons = tuple(commons[ref] for ref in root.common_lemma_refs)
+            root_influences = tuple(influences[ref] for ref in root.influence_fact_refs)
             if (
                 tuple(item.event_position for item in root_commons) != expected_positions
                 or tuple(item.event_position for item in root_influences) != expected_positions
             ):
-                raise ValueError("M8 action root lacks ordered complete event coverage")
-            if any(
-                influence.common_lemma_ref != common.fact_sha256
-                for common, influence in zip(root_commons, root_influences, strict=True)
-            ):
-                raise ValueError("M8 action root common/influence event bindings differ")
-            if any(influence.root_action_id != root.action_id for influence in root_influences):
-                raise ValueError("M8 influence branch differs from its root action")
+                misplaced_dependency = next(
+                    (
+                        item
+                        for item, position in zip(root_commons, expected_positions, strict=True)
+                        if item.event_position != position
+                    ),
+                    next(
+                        (
+                            item
+                            for item, position in zip(
+                                root_influences,
+                                expected_positions,
+                                strict=True,
+                            )
+                            if item.event_position != position
+                        ),
+                        None,
+                    ),
+                )
+                _raise_structural_error(
+                    _M8StructuralErrorCode.EVENT_ORDER_MISMATCH,
+                    "M8 action root lacks ordered complete event coverage",
+                    fact_sha256=root.fact_sha256,
+                    dependency_sha256=(
+                        misplaced_dependency.fact_sha256
+                        if misplaced_dependency is not None
+                        else None
+                    ),
+                )
+            mismatched_influence = next(
+                (
+                    influence
+                    for common, influence in zip(root_commons, root_influences, strict=True)
+                    if influence.common_lemma_ref != common.fact_sha256
+                ),
+                None,
+            )
+            if mismatched_influence is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.ACTION_BINDING_MISMATCH,
+                    "M8 action root common/influence event bindings differ",
+                    fact_sha256=root.fact_sha256,
+                    dependency_sha256=mismatched_influence.fact_sha256,
+                )
+            foreign_branch = next(
+                (item for item in root_influences if item.root_action_id != root.action_id),
+                None,
+            )
+            if foreign_branch is not None:
+                _raise_structural_error(
+                    _M8StructuralErrorCode.ACTION_BINDING_MISMATCH,
+                    "M8 influence branch differs from its root action",
+                    fact_sha256=root.fact_sha256,
+                    dependency_sha256=foreign_branch.fact_sha256,
+                )
             if root_influences:
                 if root_influences[0].state_before_sha256 != root.initial_state_after_sha256:
-                    raise ValueError(
-                        "M8 action root post-initial state differs from influence chain"
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STATE_CHAIN_MISMATCH,
+                        "M8 action root post-initial state differs from influence chain",
+                        fact_sha256=root.fact_sha256,
+                        dependency_sha256=root_influences[0].fact_sha256,
                     )
                 if root_influences[-1].state_after_sha256 != root.final_state_sha256:
-                    raise ValueError("M8 action root terminal state differs from influence chain")
-                if any(
-                    previous.state_after_sha256 != current.state_before_sha256
-                    for previous, current in zip(
-                        root_influences,
-                        root_influences[1:],
-                        strict=False,
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STATE_CHAIN_MISMATCH,
+                        "M8 action root terminal state differs from influence chain",
+                        fact_sha256=root.fact_sha256,
+                        dependency_sha256=root_influences[-1].fact_sha256,
                     )
-                ):
-                    raise ValueError("M8 action root influence state chain is discontinuous")
+                discontinuous_influence = next(
+                    (
+                        current
+                        for previous, current in zip(
+                            root_influences,
+                            root_influences[1:],
+                            strict=False,
+                        )
+                        if previous.state_after_sha256 != current.state_before_sha256
+                    ),
+                    None,
+                )
+                if discontinuous_influence is not None:
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.STATE_CHAIN_MISMATCH,
+                        "M8 action root influence state chain is discontinuous",
+                        fact_sha256=root.fact_sha256,
+                        dependency_sha256=discontinuous_influence.fact_sha256,
+                    )
             elif root.initial_state_after_sha256 != root.final_state_sha256:
-                raise ValueError(
-                    "empty M8 action root must preserve its post-initial terminal state"
+                _raise_structural_error(
+                    _M8StructuralErrorCode.STATE_CHAIN_MISMATCH,
+                    "empty M8 action root must preserve its post-initial terminal state",
+                    fact_sha256=root.fact_sha256,
                 )
             self._require_dependency_context(root, (*root_commons, *root_influences))
             if root.suffix_sha256 != self.provenance.suffix_sha256:
-                raise ValueError("M8 action root suffix differs from bundle provenance")
+                _raise_structural_error(
+                    _M8StructuralErrorCode.REPLAY_CONTEXT_MISMATCH,
+                    "M8 action root suffix differs from bundle provenance",
+                    fact_sha256=root.fact_sha256,
+                )
             reachable.add(root.fact_sha256)
             for common in root_commons:
                 visit_common(common.fact_sha256)
@@ -2269,24 +2819,64 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
         serialized = set(all_hashes)
         unused = serialized - reachable
         if unused:
-            raise ValueError("M8 bundle contains unused fixed-layer facts")
-        root_contexts = {
-            (
-                root.baseline_action_id,
-                root.baseline_catalog_action_id,
-                root.start_event_position,
-                root.stop_event_position,
-                root.suffix_sha256,
-                root.start_state_sha256,
-                root.common_lemma_refs,
+            first_unused = next(
+                item.fact_sha256 for item in all_entries if item.fact_sha256 in unused
             )
-            for root in self.action_roots
-        }
-        if len(root_contexts) != 1:
-            raise ValueError("M8 action roots differ from one root suffix/baseline context")
-        root_catalog_ids = tuple(root.catalog_action_id for root in self.action_roots)
-        if len(root_catalog_ids) != len(set(root_catalog_ids)):
-            raise ValueError("M8 action roots contain duplicate catalog action IDs")
+            _raise_structural_error(
+                _M8StructuralErrorCode.UNUSED_FACT,
+                "M8 bundle contains unused fixed-layer facts",
+                fact_sha256=first_unused,
+            )
+        first_root = self.action_roots[0]
+        first_root_context = (
+            first_root.baseline_action_id,
+            first_root.baseline_catalog_action_id,
+            first_root.start_event_position,
+            first_root.stop_event_position,
+            first_root.suffix_sha256,
+            first_root.start_state_sha256,
+            first_root.common_lemma_refs,
+        )
+        conflicting_root = next(
+            (
+                root
+                for root in self.action_roots[1:]
+                if (
+                    root.baseline_action_id,
+                    root.baseline_catalog_action_id,
+                    root.start_event_position,
+                    root.stop_event_position,
+                    root.suffix_sha256,
+                    root.start_state_sha256,
+                    root.common_lemma_refs,
+                )
+                != first_root_context
+            ),
+            None,
+        )
+        if conflicting_root is not None:
+            _raise_structural_error(
+                _M8StructuralErrorCode.ROOT_CONTEXT_MISMATCH,
+                "M8 action roots differ from one root suffix/baseline context",
+                fact_sha256=conflicting_root.fact_sha256,
+                dependency_sha256=first_root.fact_sha256,
+            )
+        seen_catalog_ids: dict[str, M8ActionRootV2] = {}
+        duplicate_catalog_root = None
+        first_catalog_root = None
+        for root in self.action_roots:
+            if root.catalog_action_id in seen_catalog_ids:
+                duplicate_catalog_root = root
+                first_catalog_root = seen_catalog_ids[root.catalog_action_id]
+                break
+            seen_catalog_ids[root.catalog_action_id] = root
+        if duplicate_catalog_root is not None and first_catalog_root is not None:
+            _raise_structural_error(
+                _M8StructuralErrorCode.DUPLICATE_IDENTITY,
+                "M8 action roots contain duplicate catalog action IDs",
+                fact_sha256=duplicate_catalog_root.fact_sha256,
+                dependency_sha256=first_catalog_root.fact_sha256,
+            )
         return self
 
     @staticmethod
@@ -2295,8 +2885,21 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
         dependencies: tuple[_M8FactV2, ...],
     ) -> None:
         expected = (owner.semantic_runtime_sha256, owner.stream_id)
-        if any((item.semantic_runtime_sha256, item.stream_id) != expected for item in dependencies):
-            raise ValueError("M8 fact dependency has cross-runtime or cross-stream context")
+        mismatched_dependency = next(
+            (
+                item
+                for item in dependencies
+                if (item.semantic_runtime_sha256, item.stream_id) != expected
+            ),
+            None,
+        )
+        if mismatched_dependency is not None:
+            _raise_structural_error(
+                _M8StructuralErrorCode.CONTEXT_MISMATCH,
+                "M8 fact dependency has cross-runtime or cross-stream context",
+                fact_sha256=owner.fact_sha256,
+                dependency_sha256=mismatched_dependency.fact_sha256,
+            )
 
 
 __all__ = [
