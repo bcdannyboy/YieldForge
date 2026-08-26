@@ -51,7 +51,7 @@ The extra margin is required so normal machine noise does not turn an engineerin
 - Modify: `yf/src/yieldforge/oracle/certificates.py`
 - Modify: `yf/src/yieldforge/oracle/sparse.py`
 - Modify: `yf/src/yieldforge/oracle/checker.py`
-- Modify: `yf/src/yieldforge/experiment/m8_certificate_gate.py`
+- Modify: `yf/src/yieldforge/oracle/experiment.py`
 - Modify: the existing YieldForge CLI registration module located with `rg "m8-certificate" yf/src`
 
 **Step 1: Write the failing timing-contract tests**
@@ -105,7 +105,7 @@ Profile one `no_signal` stream and one `regime_shift` stream. Save the reports u
 ```bash
 cd yf
 uv run pytest tests/oracle/test_m8_profiling.py -q
-git add yf/src/yieldforge/oracle/profiling.py yf/src/yieldforge/oracle/compiled.py yf/src/yieldforge/oracle/certificates.py yf/src/yieldforge/oracle/sparse.py yf/src/yieldforge/oracle/checker.py yf/src/yieldforge/experiment/m8_certificate_gate.py yf/tests/oracle/test_m8_profiling.py
+git add yf/src/yieldforge/oracle/profiling.py yf/src/yieldforge/oracle/compiled.py yf/src/yieldforge/oracle/certificates.py yf/src/yieldforge/oracle/sparse.py yf/src/yieldforge/oracle/checker.py yf/src/yieldforge/oracle/experiment.py yf/tests/oracle/test_m8_profiling.py
 git commit -m "perf: profile M8 certificate phases"
 ```
 
@@ -473,7 +473,7 @@ git commit -m "feat: select deterministic M8 coverage"
 
 **Files:**
 
-- Modify: `yf/src/yieldforge/experiment/m8_certificate_gate.py`
+- Modify: `yf/src/yieldforge/oracle/experiment.py`
 - Modify: the M8 CLI module
 - Create: `yf/tests/experiment/test_m8_factored_gate.py`
 - Modify: M8 schemas and strict-load tests
@@ -519,7 +519,7 @@ Strict-load the canonical v3 artifact `yfm8proof-b296ba919c07d55ece14c6db` witho
 ```bash
 cd yf
 uv run pytest tests/experiment/test_m8_factored_gate.py tests/experiment/test_m8_certificate_gate.py -q
-git add yf/src/yieldforge/experiment/m8_certificate_gate.py yf/tests/experiment/test_m8_factored_gate.py
+git add yf/src/yieldforge/oracle/experiment.py yf/tests/experiment/test_m8_factored_gate.py
 git commit -m "feat: run factored M8 certificate gate"
 ```
 
