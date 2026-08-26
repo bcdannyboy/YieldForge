@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import sys
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -862,6 +863,163 @@ def _two_event_bundle_raw() -> dict[str, Any]:
     raw["standard_candidate_facts"] = (*raw["standard_candidate_facts"], standard)
     raw["common_lemmas"] = (first_common, common)
     raw["influence_facts"] = (*raw["influence_facts"], influence)
+    _rehash_bundle(raw)
+    return raw
+
+
+def _late_start_chain_bundle_raw(event_count: int) -> dict[str, Any]:
+    if event_count < 2:
+        raise ValueError("late-start chain requires at least two events")
+
+    raw = _bundle().model_dump(mode="python")
+    base_translation = raw["translation_batches"][0]
+    base_standard = raw["standard_candidate_facts"][0]
+    base_common = raw["common_lemmas"][0]
+    base_influence = raw["influence_facts"][0]
+    base_root = raw["action_roots"][0]
+    origin = datetime(2026, 8, 1, tzinfo=UTC)
+
+    def timestamp(position: int) -> str:
+        return encode_canonical_utc(origin + timedelta(minutes=position))
+
+    def cursor_sha(position: int) -> str:
+        digest = hashlib.sha256(f"late-start-cursor:{position}".encode()).hexdigest()
+        return f"sha256:{digest}"
+
+    translations: list[dict[str, Any]] = []
+    standards: list[dict[str, Any]] = []
+    commons: list[dict[str, Any]] = []
+    previous_common: dict[str, Any] | None = None
+    previous_cursor_after: dict[str, Any] | None = None
+
+    for position in range(1, event_count + 1):
+        translation = deepcopy(base_translation)
+        translation["event_position"] = position
+        _rehash_fact(translation)
+        translations.append(translation)
+
+        standard = deepcopy(base_standard)
+        standard["event_position"] = position
+        _rehash_fact(standard)
+        standards.append(standard)
+
+        common = deepcopy(base_common)
+        event_id = f"yfm7e-{position:024x}"
+        before_sha = cursor_sha(position - 1)
+        after_sha = cursor_sha(position)
+        before_time = timestamp(position - 1)
+        after_time = timestamp(position)
+        before_cursor = (
+            deepcopy(previous_cursor_after)
+            if previous_cursor_after is not None
+            else deepcopy(common["portable_transition"]["cursor_before"])
+        )
+        before_cursor.update(
+            {
+                "next_event_position": position,
+                "current_time": before_time,
+                "timestamp_group_sequence": position - 1,
+                "previous_release": before_time,
+            }
+        )
+        after_cursor = deepcopy(common["portable_transition"]["cursor_after"])
+        after_cursor.update(
+            {
+                "next_event_position": position + 1,
+                "current_time": after_time,
+                "timestamp_group_sequence": position,
+                "previous_release": after_time,
+            }
+        )
+        common.update(
+            {
+                "event_position": position,
+                "event_id": event_id,
+                "cursor_before_sha256": before_sha,
+                "cursor_after_sha256": after_sha,
+                "event_occurred_at": after_time,
+                "storage_interval_start": before_time,
+                "storage_interval_end": after_time,
+                "cursor_current_time": after_time,
+                "cursor_previous_release": after_time,
+                "previous_common_lemma_ref": (
+                    previous_common["fact_sha256"] if previous_common is not None else None
+                ),
+                "baseline_fallback_cursor_sha256": (
+                    None if previous_common is not None else before_sha
+                ),
+                "minimum_standard_candidate_ref": standard["fact_sha256"],
+                "standard_candidate_refs": (standard["fact_sha256"],),
+                "translation_batch_refs": (translation["fact_sha256"],),
+                "inventory_classifications": (
+                    {
+                        **common["inventory_classifications"][0],
+                        "translation_batch_refs": (translation["fact_sha256"],),
+                    },
+                ),
+            }
+        )
+        transition = common["portable_transition"]
+        transition.update(
+            {
+                "event_position": position,
+                "event_id": event_id,
+                "cursor_before_sha256": before_sha,
+                "cursor_before": before_cursor,
+                "cursor_after_sha256": after_sha,
+                "cursor_after": after_cursor,
+            }
+        )
+        transition["event"].update(
+            {
+                "sequence": position,
+                "event_id": event_id,
+                "binding_id": f"yfm7b-{position:024x}",
+                "occurred_at": after_time,
+                "timestamp_group_sequence": position,
+                "storage_interval_start": before_time,
+                "storage_interval_end": after_time,
+                "inventory_before": deepcopy(before_cursor["inventory"]),
+                "inventory_after": deepcopy(after_cursor["inventory"]),
+                "cumulative_costs": deepcopy(after_cursor["cumulative_costs"]),
+            }
+        )
+        _rehash_fact(common)
+        commons.append(common)
+        previous_common = common
+        previous_cursor_after = after_cursor
+
+    influence = deepcopy(base_influence)
+    influence.update(
+        {
+            "event_position": event_count,
+            "common_lemma_ref": commons[-1]["fact_sha256"],
+        }
+    )
+    _rehash_fact(influence)
+
+    root = deepcopy(base_root)
+    root.update(
+        {
+            "start_event_position": event_count - 1,
+            "stop_event_position": event_count + 1,
+            "common_lemma_refs": (commons[-1]["fact_sha256"],),
+            "influence_fact_refs": (influence["fact_sha256"],),
+        }
+    )
+    _rehash_fact(root)
+
+    raw.update(
+        {
+            "translation_batches": tuple(
+                sorted(translations, key=lambda item: item["fact_sha256"])
+            ),
+            "standard_candidate_facts": tuple(standards),
+            "common_lemmas": tuple(commons),
+            "influence_facts": (influence,),
+            "action_roots": (root,),
+        }
+    )
     _rehash_bundle(raw)
     return raw
 
@@ -2491,6 +2649,17 @@ def test_common_chain_requires_full_portable_cursor_continuity() -> None:
 
     with pytest.raises(ValidationError, match="full portable cursor chain"):
         M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_late_start_common_chain_strict_loads_beyond_python_recursion_limit() -> None:
+    event_count = sys.getrecursionlimit() + 50
+    raw = _late_start_chain_bundle_raw(event_count)
+
+    loaded = M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+    assert len(loaded.common_lemmas) == event_count
+    assert loaded.action_roots[0].start_event_position == event_count - 1
+    assert loaded.action_roots[0].common_lemma_refs == (loaded.common_lemmas[-1].fact_sha256,)
 
 
 def test_common_selected_cost_must_match_selected_standard_profile() -> None:

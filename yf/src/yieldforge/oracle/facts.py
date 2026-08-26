@@ -2664,18 +2664,24 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
         reachable: set[str] = set()
 
         def visit_common(reference: str) -> None:
-            if reference in reachable:
-                return
-            common = commons[reference]
-            reachable.add(reference)
-            if common.previous_common_lemma_ref is not None:
-                visit_common(common.previous_common_lemma_ref)
-            reachable.update(common.candidate_scalar_refs)
-            reachable.update(common.frontier_refs)
-            reachable.update(common.standard_candidate_refs)
-            reachable.update(common.translation_batch_refs)
-            for frontier_ref in common.frontier_refs:
-                reachable.update(frontiers[frontier_ref].candidate_scalar_refs)
+            pending: list[tuple[str, bool]] = [(reference, False)]
+            while pending:
+                current_reference, dependencies_pending = pending.pop()
+                if not dependencies_pending and current_reference in reachable:
+                    continue
+                common = commons[current_reference]
+                if dependencies_pending:
+                    reachable.update(common.candidate_scalar_refs)
+                    reachable.update(common.frontier_refs)
+                    reachable.update(common.standard_candidate_refs)
+                    reachable.update(common.translation_batch_refs)
+                    for frontier_ref in common.frontier_refs:
+                        reachable.update(frontiers[frontier_ref].candidate_scalar_refs)
+                    continue
+                reachable.add(current_reference)
+                pending.append((current_reference, True))
+                if common.previous_common_lemma_ref is not None:
+                    pending.append((common.previous_common_lemma_ref, False))
 
         for root in self.action_roots:
             expected_positions = tuple(
