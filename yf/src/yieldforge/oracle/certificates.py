@@ -57,6 +57,10 @@ from yieldforge.oracle.compiled import (
     compile_rejection_problem,
     compile_translation_rejections,
 )
+from yieldforge.oracle.concurrency import (
+    activate_m8_local_trusted_audit,
+    require_m8_translation_audit_processes,
+)
 from yieldforge.oracle.frontier import certify_frontier_impossible
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
@@ -585,13 +589,17 @@ def _synthesize_scalar_no_fit_searches(
             rust_generated = False
         else:
             translations = generated.translation_batches
-            with profile_phase("translation_count_audit"):
+            with (
+                activate_m8_local_trusted_audit(),
+                profile_phase("translation_count_audit"),
+            ):
                 audited_counts = audit_layout_translation_batch(
                     remnant=prepared_remnant,
                     layouts=layouts,
                     expected=translations,
                     fit_config=runtime.replay_input.fit_config,
                     search_config=runtime.replay_input.search_config,
+                    process_count=require_m8_translation_audit_processes(),
                 )
             for batch, audited in zip(translations, audited_counts, strict=True):
                 if (

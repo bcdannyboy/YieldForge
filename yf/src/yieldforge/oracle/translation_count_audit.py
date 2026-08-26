@@ -261,10 +261,12 @@ def audit_layout_translation_batch(
     expected: tuple[LayoutTranslationCandidates, ...],
     fit_config: RemnantFitConfig,
     search_config: LayoutFitSearchConfig,
-    process_count: int = 4,
+    process_count: int,
 ) -> tuple[TranslationCountAudit, ...]:
     """Audit a large immutable batch in measured forked workers."""
 
+    if type(process_count) is not int or process_count <= 0:
+        raise ValueError("M8 translation audit process count must be a positive integer")
     if len(layouts) != len(expected) or not layouts:
         raise ValueError("M8 translation-count audit batch is not aligned")
     calls = tuple(

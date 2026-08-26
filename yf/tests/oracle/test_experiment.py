@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import multiprocessing
 import os
 import signal
@@ -711,6 +712,7 @@ def test_distributed_phase_never_signals_a_completed_worker_group(
 def test_distributed_generator_worker_round_trips_one_real_cell() -> None:
     from tests.oracle.fixtures import two_problem_runtime
     from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
 
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     cell = experiment._ExecutionCell(  # noqa: SLF001
@@ -722,7 +724,14 @@ def test_distributed_generator_worker_round_trips_one_real_cell() -> None:
 
     (result,) = experiment._run_process_phase(  # noqa: SLF001
         experiment._generate_cell_worker,  # noqa: SLF001
-        ((cell, runtime.rules, runtime.jagua_executable),),
+        (
+            (
+                cell,
+                runtime.rules,
+                runtime.jagua_executable,
+                M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+            ),
+        ),
         process_count=1,
     )
 
@@ -734,6 +743,7 @@ def test_distributed_generator_worker_round_trips_one_real_cell() -> None:
 def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
     from tests.oracle.fixtures import two_problem_runtime
     from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
 
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     cell = experiment._ExecutionCell(  # noqa: SLF001
@@ -746,6 +756,7 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
         cell,
         runtime.rules,
         runtime.jagua_executable,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
     )
     audit_bindings = experiment._freeze_audit_bindings(  # noqa: SLF001
         experiment._audit_candidates_for_cell(  # noqa: SLF001
@@ -762,6 +773,7 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
                 runtime.rules,
                 runtime.jagua_executable,
                 generated.sparse.proofs,
+                M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
             ),
         ),
         process_count=1,
@@ -774,6 +786,7 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
                 runtime.rules,
                 runtime.jagua_executable,
                 audit_bindings,
+                M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
             ),
         ),
         process_count=1,
@@ -786,6 +799,7 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
                 runtime.rules,
                 runtime.jagua_executable,
                 tuple(item.proof for item in sampled.sampled),
+                M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
             ),
         ),
         process_count=1,
@@ -831,6 +845,7 @@ def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:
 def test_distributed_cell_assembly_rejects_cross_regime_worker_result() -> None:
     from tests.oracle.fixtures import two_problem_runtime
     from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
 
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     cell = experiment._ExecutionCell(  # noqa: SLF001
@@ -843,6 +858,7 @@ def test_distributed_cell_assembly_rejects_cross_regime_worker_result() -> None:
         cell,
         runtime.rules,
         runtime.jagua_executable,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
     )
     wrong_regime = next(
         regime for regime in TemporalRegime if regime is not generated.regime
@@ -867,6 +883,7 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
 
     cells = tuple(
         SimpleNamespace(stream=(SimpleNamespace(regime=regime),))
@@ -971,14 +988,14 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
         cells,
         rules=object(),
         jagua_executable=Path("jagua"),
-        process_count=8,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
     )
 
     assert operations == [
-        ("_generate_cell_worker", 6, 8),
-        ("_check_cell_worker", 6, 8),
-        ("_sample_audit_generator_worker", 6, 8),
-        ("_sample_audit_checker_worker", 6, 8),
+        ("_generate_cell_worker", 6, 4),
+        ("_check_cell_worker", 6, 4),
+        ("_sample_audit_generator_worker", 6, 4),
+        ("_sample_audit_checker_worker", 6, 4),
         ("_reference_audit_action_worker", 12, 6),
     ]
     assert phase_regimes == [
@@ -992,6 +1009,125 @@ def test_distributed_cell_phases_use_separate_pools_and_measure_wall_time(
     assert result.audit_wall_seconds == 7.0
     assert result.total_wall_seconds == 13.0
     assert result.measured_process_count == 6
+    assert result.cell_phase_process_count == 4
+    assert result.translation_audit_processes_per_cell == 2
+    assert result.reference_phase_process_count == 6
+    assert result.peak_compute_count == 8
+
+
+def test_nested_worker_entrypoints_activate_requested_audit_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import current_m8_translation_audit_processes
+
+    cell = SimpleNamespace(stream=(SimpleNamespace(regime=tuple(TemporalRegime)[0]),))
+    request = object()
+    sparse = SimpleNamespace(proofs=(object(),))
+    binding = SimpleNamespace(catalog_action_id="m7-standard:audit")
+    seen: list[tuple[str, int | None]] = []
+
+    monkeypatch.setattr(experiment, "_request_for_cell", lambda *args, **kwargs: request)
+    monkeypatch.setattr(
+        experiment,
+        "_measure_proof_phase",
+        lambda operation: (operation(), 0.1),
+    )
+
+    def sparse_score(_request):  # type: ignore[no-untyped-def]
+        seen.append(("generator", current_m8_translation_audit_processes()))
+        return sparse
+
+    def check(_request, proofs):  # type: ignore[no-untyped-def]
+        seen.append(("checker", current_m8_translation_audit_processes()))
+        return tuple(SimpleNamespace(valid=True) for _proof in proofs)
+
+    def sampled_score(_request, *, action_ids):  # type: ignore[no-untyped-def]
+        seen.append(("audit_generator", current_m8_translation_audit_processes()))
+        return tuple(
+            SimpleNamespace(score=SimpleNamespace(action_id=action_id), proof=object())
+            for action_id in action_ids
+        )
+
+    monkeypatch.setattr(experiment, "score_sparse_event", sparse_score)
+    monkeypatch.setattr(experiment, "check_action_proofs", check)
+    monkeypatch.setattr(experiment, "score_certificate_actions", sampled_score)
+
+    experiment._generate_cell_worker(cell, object(), Path("jagua"), 2)  # noqa: SLF001
+    experiment._check_cell_worker(  # noqa: SLF001
+        cell,
+        object(),
+        Path("jagua"),
+        sparse.proofs,
+        2,
+    )
+    sampled = experiment._sample_audit_generator_worker(  # noqa: SLF001
+        cell,
+        object(),
+        Path("jagua"),
+        (binding,),
+        2,
+    )
+    experiment._sample_audit_checker_worker(  # noqa: SLF001
+        cell,
+        object(),
+        Path("jagua"),
+        tuple(item.proof for item in sampled.sampled),
+        2,
+    )
+
+    assert seen == [
+        ("generator", 2),
+        ("checker", 2),
+        ("audit_generator", 2),
+        ("checker", 2),
+    ]
+    assert current_m8_translation_audit_processes() is None
+
+
+def test_reference_worker_has_no_nested_audit_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import current_m8_translation_audit_processes
+
+    regime = tuple(TemporalRegime)[0]
+    cell = SimpleNamespace(stream=(SimpleNamespace(regime=regime),))
+    monkeypatch.setattr(
+        experiment,
+        "_request_for_cell",
+        lambda *args, **kwargs: object(),
+    )
+
+    def reference_score(_request, *, action_id):  # type: ignore[no-untyped-def]
+        assert current_m8_translation_audit_processes() is None
+        return SimpleNamespace(action_id=action_id)
+
+    monkeypatch.setattr(experiment, "score_reference_action", reference_score)
+    monkeypatch.setattr(
+        experiment,
+        "_measure_proof_phase",
+        lambda operation: (operation(), 0.1),
+    )
+
+    result = experiment._reference_audit_action_worker(  # noqa: SLF001
+        cell,
+        object(),
+        Path("jagua"),
+        "m7-standard:audit",
+    )
+
+    assert result.score.action_id == "m7-standard:audit"
+
+
+def test_sparse_prefix_execution_has_no_public_worker_override() -> None:
+    from yieldforge.oracle.experiment import execute_sparse_prefix_proof
+
+    assert not {
+        "process_count",
+        "worker_count",
+        "translation_audit_processes",
+    } & set(inspect.signature(execute_sparse_prefix_proof).parameters)
 
 
 @pytest.mark.parametrize("failure", ["missing", "duplicate"])

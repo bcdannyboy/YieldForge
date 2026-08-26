@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from shapely import box
 
@@ -14,6 +16,37 @@ from yieldforge.oracle.translation_count_audit import (
     audit_layout_translation_batch,
     audit_layout_translation_counts,
 )
+
+
+def _forked_batch_inputs():  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    binding = runtime.replay_input.instances[1]
+    problem = next(
+        item
+        for item in runtime.replay_input.problems
+        if item.problem_id == binding.problem_id
+    )
+    candidate = runtime.runtime_candidates[binding.problem_id].candidates[0]
+    item = inventory_item(
+        box(0.0, 0.0, 10.0, 10.0),
+        material=binding.material,
+        token="count-audit-forked-batch",
+    )
+    prepared_remnant = prepare_remnant_geometry(item.remnant)
+    layout = prepare_layout_footprint(
+        problem.problem,
+        candidate,
+        runtime.replay_input.fit_config,
+    )
+    exact = generate_layout_translations(
+        item.remnant,
+        candidate,
+        fit_config=runtime.replay_input.fit_config,
+        search_config=runtime.replay_input.search_config,
+        prepared_layout=layout,
+        prepared_remnant=prepared_remnant,
+    )
+    return runtime, prepared_remnant, layout, exact
 
 
 @pytest.mark.parametrize(
@@ -114,33 +147,7 @@ def test_vectorized_count_audit_matches_impossible_bounds() -> None:
 
 
 def test_count_audit_batch_matches_registered_generator_in_forked_workers() -> None:
-    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
-    binding = runtime.replay_input.instances[1]
-    problem = next(
-        item
-        for item in runtime.replay_input.problems
-        if item.problem_id == binding.problem_id
-    )
-    candidate = runtime.runtime_candidates[binding.problem_id].candidates[0]
-    item = inventory_item(
-        box(0.0, 0.0, 10.0, 10.0),
-        material=binding.material,
-        token="count-audit-forked-batch",
-    )
-    prepared_remnant = prepare_remnant_geometry(item.remnant)
-    layout = prepare_layout_footprint(
-        problem.problem,
-        candidate,
-        runtime.replay_input.fit_config,
-    )
-    exact = generate_layout_translations(
-        item.remnant,
-        candidate,
-        fit_config=runtime.replay_input.fit_config,
-        search_config=runtime.replay_input.search_config,
-        prepared_layout=layout,
-        prepared_remnant=prepared_remnant,
-    )
+    runtime, prepared_remnant, layout, exact = _forked_batch_inputs()
 
     audited = audit_layout_translation_batch(
         remnant=prepared_remnant,
@@ -162,3 +169,70 @@ def test_count_audit_batch_matches_registered_generator_in_forked_workers() -> N
     )
     assert all(result.evaluated_candidate_count == len(exact.translations) for result in audited)
     assert all(result.budget_truncated == exact.budget_truncated for result in audited)
+
+
+def test_count_audit_batch_results_are_identical_at_widths_one_two_and_four() -> None:
+    runtime, prepared_remnant, layout, exact = _forked_batch_inputs()
+
+    results = tuple(
+        audit_layout_translation_batch(
+            remnant=prepared_remnant,
+            layouts=(layout,) * 32,
+            expected=(exact,) * 32,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            process_count=width,
+        )
+        for width in (1, 2, 4)
+    )
+
+    assert results[0] == results[1] == results[2]
+
+
+def test_count_audit_width_one_stays_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import translation_count_audit
+
+    runtime, prepared_remnant, layout, exact = _forked_batch_inputs()
+    monkeypatch.setattr(
+        translation_count_audit,
+        "get_context",
+        lambda _method: pytest.fail("width one must not create an audit pool"),
+    )
+
+    audited = audit_layout_translation_batch(
+        remnant=prepared_remnant,
+        layouts=(layout,) * 32,
+        expected=(exact,) * 32,
+        fit_config=runtime.replay_input.fit_config,
+        search_config=runtime.replay_input.search_config,
+        process_count=1,
+    )
+
+    assert len(audited) == 32
+
+
+def test_count_audit_batch_has_no_implicit_process_width() -> None:
+    parameter = inspect.signature(audit_layout_translation_batch).parameters[
+        "process_count"
+    ]
+
+    assert parameter.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("process_count", (False, True, 0))
+def test_count_audit_batch_rejects_invalid_process_width(
+    process_count: object,
+) -> None:
+    runtime, prepared_remnant, layout, exact = _forked_batch_inputs()
+
+    with pytest.raises(ValueError, match="positive integer"):
+        audit_layout_translation_batch(
+            remnant=prepared_remnant,
+            layouts=(layout,) * 32,
+            expected=(exact,) * 32,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            process_count=process_count,  # type: ignore[arg-type]
+        )

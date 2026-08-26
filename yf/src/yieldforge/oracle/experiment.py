@@ -38,6 +38,11 @@ from yieldforge.baseline.replay import (
 )
 from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
 from yieldforge.oracle.checker import M8ProofCheckResult, check_action_proofs
+from yieldforge.oracle.concurrency import (
+    M8_GATE3_CONCURRENCY_BUDGET,
+    M8ConcurrencyBudget,
+    activate_m8_translation_audit_processes,
+)
 from yieldforge.oracle.contracts import M8ActionScore
 from yieldforge.oracle.profiling import (
     M8ProfileReport,
@@ -979,17 +984,19 @@ def _generate_cell_worker(
     cell: _ExecutionCell,
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
+    translation_audit_processes: int,
 ) -> _SparsePreflightResult:
     """Generate one complete cell proof batch in an owned worker process."""
 
-    request = _request_for_cell(
-        cell,
-        rules=rules,
-        jagua_executable=jagua_executable,
-    )
-    sparse, sparse_elapsed = _measure_proof_phase(
-        lambda: score_sparse_event(request)
-    )
+    with activate_m8_translation_audit_processes(translation_audit_processes):
+        request = _request_for_cell(
+            cell,
+            rules=rules,
+            jagua_executable=jagua_executable,
+        )
+        sparse, sparse_elapsed = _measure_proof_phase(
+            lambda: score_sparse_event(request)
+        )
     return _SparsePreflightResult(
         cell=cell,
         sparse=sparse,
@@ -1002,17 +1009,19 @@ def _check_cell_worker(
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
     proofs: tuple[M8ActionProof, ...],
+    translation_audit_processes: int,
 ) -> _FullCheckerResult:
     """Check one complete proof batch in a fresh owned worker process."""
 
-    request = _request_for_cell(
-        cell,
-        rules=rules,
-        jagua_executable=jagua_executable,
-    )
-    checks, elapsed = _measure_proof_phase(
-        lambda: check_action_proofs(request, proofs)
-    )
+    with activate_m8_translation_audit_processes(translation_audit_processes):
+        request = _request_for_cell(
+            cell,
+            rules=rules,
+            jagua_executable=jagua_executable,
+        )
+        checks, elapsed = _measure_proof_phase(
+            lambda: check_action_proofs(request, proofs)
+        )
     return _FullCheckerResult(
         regime=cell.stream[0].regime,
         checks=checks,
@@ -1025,18 +1034,20 @@ def _sample_audit_generator_worker(
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
     audit_bindings: tuple[M8AuditActionBinding, ...],
+    translation_audit_processes: int,
 ) -> _SampleAuditGeneratorResult:
     """Regenerate one frozen per-regime certificate batch in a fresh process."""
 
-    request = _request_for_cell(
-        cell,
-        rules=rules,
-        jagua_executable=jagua_executable,
-    )
-    action_ids = tuple(item.catalog_action_id for item in audit_bindings)
-    sampled, certificate_elapsed = _measure_proof_phase(
-        lambda: score_certificate_actions(request, action_ids=action_ids)
-    )
+    with activate_m8_translation_audit_processes(translation_audit_processes):
+        request = _request_for_cell(
+            cell,
+            rules=rules,
+            jagua_executable=jagua_executable,
+        )
+        action_ids = tuple(item.catalog_action_id for item in audit_bindings)
+        sampled, certificate_elapsed = _measure_proof_phase(
+            lambda: score_certificate_actions(request, action_ids=action_ids)
+        )
     if tuple(item.score.action_id for item in sampled) != action_ids:
         raise ValueError("M8 sampled generator worker returned different actions")
     return _SampleAuditGeneratorResult(
@@ -1051,17 +1062,19 @@ def _sample_audit_checker_worker(
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
     proofs: tuple[M8ActionProof, ...],
+    translation_audit_processes: int,
 ) -> _SampleAuditCheckerResult:
     """Check one frozen per-regime proof batch in a separate fresh process."""
 
-    request = _request_for_cell(
-        cell,
-        rules=rules,
-        jagua_executable=jagua_executable,
-    )
-    checks, elapsed = _measure_proof_phase(
-        lambda: check_action_proofs(request, proofs)
-    )
+    with activate_m8_translation_audit_processes(translation_audit_processes):
+        request = _request_for_cell(
+            cell,
+            rules=rules,
+            jagua_executable=jagua_executable,
+        )
+        checks, elapsed = _measure_proof_phase(
+            lambda: check_action_proofs(request, proofs)
+        )
     if len(checks) != len(proofs):
         raise ValueError("M8 sampled checker worker returned a different action count")
     return _SampleAuditCheckerResult(
@@ -1513,6 +1526,10 @@ class _DistributedCellExecution:
     cells: tuple[M8CertificateProofCell, ...]
     audit_bindings: tuple[M8AuditActionBinding, ...]
     measured_process_count: int
+    cell_phase_process_count: int
+    translation_audit_processes_per_cell: int
+    reference_phase_process_count: int
+    peak_compute_count: int
     generator_wall_seconds: float
     checker_wall_seconds: float
     audit_wall_seconds: float
@@ -1524,14 +1541,14 @@ def _execute_distributed_cells(
     *,
     rules,  # type: ignore[no-untyped-def]
     jagua_executable: Path,
-    process_count: int,
+    budget: M8ConcurrencyBudget,
     progress=None,  # type: ignore[no-untyped-def]
 ) -> _DistributedCellExecution:
     """Run generation, checking, and three split audit phases in fresh pools."""
 
     if len(execution_cells) != len(TemporalRegime):
         raise ValueError("M8 distributed execution requires all six regime cells")
-    cell_process_count = min(process_count, len(execution_cells))
+    cell_process_count = min(budget.cell_phase_processes, len(execution_cells))
     total_started = perf_counter()
 
     if progress is not None:
@@ -1544,9 +1561,15 @@ def _execute_distributed_cells(
         _run_process_phase(
             _generate_cell_worker,
             tuple(
-                (cell, rules, jagua_executable) for cell in execution_cells
+                (
+                    cell,
+                    rules,
+                    jagua_executable,
+                    budget.translation_audit_processes_per_cell,
+                )
+                for cell in execution_cells
             ),
-            process_count=process_count,
+            process_count=cell_process_count,
         )
     )
     generator_wall_seconds = max(
@@ -1591,10 +1614,11 @@ def _execute_distributed_cells(
             rules,
             jagua_executable,
             audit_by_cell[regime],
+            budget.translation_audit_processes_per_cell,
         )
         for regime in audit_regime_schedule
     )
-    audit_process_count = min(process_count, len(audit_cell_tasks))
+    audit_process_count = min(budget.cell_phase_processes, len(audit_cell_tasks))
 
     if progress is not None:
         progress(
@@ -1611,10 +1635,11 @@ def _execute_distributed_cells(
                     rules,
                     jagua_executable,
                     item.sparse.proofs,
+                    budget.translation_audit_processes_per_cell,
                 )
                 for item in generated
             ),
-            process_count=process_count,
+            process_count=cell_process_count,
         )
     )
     checker_wall_seconds = max(
@@ -1643,7 +1668,7 @@ def _execute_distributed_cells(
     sampled = _run_process_phase(
         _sample_audit_generator_worker,
         audit_cell_tasks,
-        process_count=process_count,
+        process_count=audit_process_count,
     )
     sampled_generator_wall_seconds = max(
         0.000001,
@@ -1672,14 +1697,15 @@ def _execute_distributed_cells(
         _sample_audit_checker_worker,
         tuple(
             (
-                    generated_by_regime[sampled_item.regime].cell,
-                    rules,
-                    jagua_executable,
-                    tuple(item.proof for item in sampled_item.sampled),
-                )
+                generated_by_regime[sampled_item.regime].cell,
+                rules,
+                jagua_executable,
+                tuple(item.proof for item in sampled_item.sampled),
+                budget.translation_audit_processes_per_cell,
+            )
             for sampled_item in sampled
         ),
-        process_count=process_count,
+        process_count=audit_process_count,
     )
     sampled_checker_wall_seconds = max(
         0.000001,
@@ -1698,25 +1724,30 @@ def _execute_distributed_cells(
             f"wall_seconds={sampled_checker_wall_seconds}"
         )
 
+    reference_tasks = tuple(
+        (
+            generated_by_regime[regime].cell,
+            rules,
+            jagua_executable,
+            binding.catalog_action_id,
+        )
+        for regime in audit_regime_schedule
+        for binding in audit_by_cell[regime]
+    )
+    reference_process_count = min(
+        budget.reference_phase_processes,
+        len(reference_tasks),
+    )
     if progress is not None:
         progress(
             "phase_start regime=all phase=distributed_audit_reference "
-            f"processes={audit_process_count} actions={len(frozen_audit)}"
+            f"processes={reference_process_count} actions={len(frozen_audit)}"
         )
     phase_started = perf_counter()
     reference_actions = _run_process_phase(
         _reference_audit_action_worker,
-        tuple(
-            (
-                generated_by_regime[regime].cell,
-                rules,
-                jagua_executable,
-                binding.catalog_action_id,
-            )
-            for regime in audit_regime_schedule
-            for binding in audit_by_cell[regime]
-        ),
-        process_count=audit_process_count,
+        reference_tasks,
+        process_count=reference_process_count,
     )
     references = _assemble_reference_audit_actions(
         reference_actions,
@@ -1745,7 +1776,11 @@ def _execute_distributed_cells(
         references=references,
         audit_by_cell=audit_by_cell,
     )
-    measured_process_count = max(cell_process_count, audit_process_count)
+    measured_process_count = max(
+        cell_process_count,
+        audit_process_count,
+        reference_process_count,
+    )
     if progress is not None:
         progress(
             "phase_complete regime=all phase=distributed_audit "
@@ -1778,6 +1813,12 @@ def _execute_distributed_cells(
         cells=cells,
         audit_bindings=frozen_audit,
         measured_process_count=measured_process_count,
+        cell_phase_process_count=cell_process_count,
+        translation_audit_processes_per_cell=(
+            budget.translation_audit_processes_per_cell
+        ),
+        reference_phase_process_count=reference_process_count,
+        peak_compute_count=budget.peak_compute,
         generator_wall_seconds=generator_wall_seconds,
         checker_wall_seconds=checker_wall_seconds,
         audit_wall_seconds=audit_wall_seconds,
@@ -1892,7 +1933,7 @@ def execute_sparse_prefix_proof(
         execution_cells,
         rules=rules,
         jagua_executable=executable,
-        process_count=_WORKER_COUNT,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
         progress=progress,
     )
     measured_total_wall = max(
