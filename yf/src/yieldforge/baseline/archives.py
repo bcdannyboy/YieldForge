@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from yieldforge.baseline.contracts import (
     M2ArchiveReference,
@@ -11,7 +13,7 @@ from yieldforge.baseline.contracts import (
     M7CandidateSetEvidence,
     ReusableGeometryProblem,
 )
-from yieldforge.baseline.geometry import prepare_layout_footprint
+from yieldforge.baseline.geometry import PreparedLayoutFootprint, prepare_layout_footprint
 from yieldforge.domain import Candidate
 from yieldforge.experiments.calibration import (
     GeometryCalibrationResult,
@@ -36,11 +38,69 @@ _CONFIRMATION_RESULT_PATH = (
 
 
 @dataclass(frozen=True)
+class VerifiedCandidateRejectionLayout:
+    """Portable rejection-only geometry retained from exact archive verification.
+
+    Candidate geometry is reusable across temporal events, but material identity is
+    not: M6 binds material at each event. The explicit scope prevents callers from
+    treating a source sheet type as an M0 material-compatibility identity.
+    """
+
+    problem_id: str
+    problem_sha256: str
+    candidate_set_id: str
+    candidate_set_sha256: str
+    candidate_id: str
+    source_transform_sha256: str
+    fit_config_sha256: str
+    layout_area: float
+    layout_width: float
+    layout_height: float
+    layout_bounds: tuple[float, float, float, float]
+    material_binding_scope: Literal["temporal_event"] = "temporal_event"
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.problem_id,
+                self.problem_sha256,
+                self.candidate_set_id,
+                self.candidate_set_sha256,
+                self.candidate_id,
+                self.source_transform_sha256,
+                self.fit_config_sha256,
+            )
+        ):
+            raise ValueError("verified rejection layout identities must be nonempty")
+        if any(
+            not math.isfinite(value)
+            for value in (
+                self.layout_area,
+                self.layout_width,
+                self.layout_height,
+                *self.layout_bounds,
+            )
+        ):
+            raise ValueError("verified rejection layout measurements must be finite")
+        if self.layout_area <= 0 or self.layout_width <= 0 or self.layout_height <= 0:
+            raise ValueError("verified rejection layout measurements must be positive")
+        min_x, min_y, max_x, max_y = self.layout_bounds
+        if max_x < min_x or max_y < min_y:
+            raise ValueError("verified rejection layout bounds must be ordered")
+        if (
+            self.layout_width != float(max_x - min_x)
+            or self.layout_height != float(max_y - min_y)
+        ):
+            raise ValueError("verified rejection layout dimensions differ from bounds")
+
+
+@dataclass(frozen=True)
 class VerifiedProblemCandidates:
     """Runtime candidate layouts paired with portable verified evidence."""
 
     evidence: M7CandidateSetEvidence
     candidates: tuple[Candidate, ...]
+    rejection_layouts: tuple[VerifiedCandidateRejectionLayout, ...] = ()
 
 
 def _references_from_result(
@@ -102,23 +162,53 @@ def _candidate_geometry_content(candidate: Candidate) -> dict[str, object]:
     return payload
 
 
-def _is_valid_exact_layout(
+def _prepare_valid_exact_layout(
     problem: ReusableGeometryProblem,
     candidate: Candidate,
-) -> bool:
-    config = RemnantFitConfig()
+    config: RemnantFitConfig,
+) -> PreparedLayoutFootprint | None:
     try:
         prepared = prepare_layout_footprint(problem.problem, candidate, config)
     except ValueError:
-        return False
+        return None
     min_x, min_y, max_x, max_y = prepared.bounds
     tolerance = config.coordinate_tolerance
-    return (
+    valid = (
         min_x >= -tolerance
         and min_y >= -tolerance
         and max_x <= candidate.width + tolerance
         and max_x <= problem.problem.sheet_length + tolerance
         and max_y <= problem.problem.strip_height + tolerance
+    )
+    return prepared if valid else None
+
+
+def _rejection_layout(
+    *,
+    problem: ReusableGeometryProblem,
+    evidence: M7CandidateSetEvidence,
+    candidate: Candidate,
+    prepared: PreparedLayoutFootprint,
+    fit_config: RemnantFitConfig,
+) -> VerifiedCandidateRejectionLayout:
+    min_x, min_y, max_x, max_y = tuple(float(value) for value in prepared.bounds)
+    transform_payload = {
+        "schema_version": "yieldforge.m7-candidate-transform.v1",
+        "candidate_id": candidate.candidate_id,
+        "placements": [item.model_dump(mode="json") for item in candidate.placements],
+    }
+    return VerifiedCandidateRejectionLayout(
+        problem_id=problem.problem_id,
+        problem_sha256=problem.content_sha256,
+        candidate_set_id=evidence.candidate_set_id,
+        candidate_set_sha256=evidence.content_sha256,
+        candidate_id=candidate.candidate_id,
+        source_transform_sha256=f"sha256:{semantic_sha256(transform_payload)}",
+        fit_config_sha256=f"sha256:{semantic_sha256(fit_config.model_dump(mode='json'))}",
+        layout_area=float(prepared.geometry.area),
+        layout_width=float(max_x - min_x),
+        layout_height=float(max_y - min_y),
+        layout_bounds=(min_x, min_y, max_x, max_y),
     )
 
 
@@ -195,10 +285,19 @@ def verify_problem_candidates(
             unique[candidate.candidate_id] = candidate
     if not unique:
         raise ValueError("candidate archive set contains zero candidates")
+    fit_config = RemnantFitConfig()
+    prepared_by_id = {
+        candidate_id: _prepare_valid_exact_layout(
+            problem,
+            unique[candidate_id],
+            fit_config,
+        )
+        for candidate_id in sorted(unique)
+    }
     rejected_candidate_ids = tuple(
         candidate_id
-        for candidate_id in sorted(unique)
-        if not _is_valid_exact_layout(problem, unique[candidate_id])
+        for candidate_id, prepared in prepared_by_id.items()
+        if prepared is None
     )
     rejected = set(rejected_candidate_ids)
     candidates = tuple(unique[item] for item in sorted(unique) if item not in rejected)
@@ -229,11 +328,26 @@ def verify_problem_candidates(
         candidate_ids=tuple(item.candidate_id for item in candidates),
         rejected_candidate_ids=rejected_candidate_ids,
     )
-    return VerifiedProblemCandidates(evidence=evidence, candidates=candidates)
+    rejection_layouts = tuple(
+        _rejection_layout(
+            problem=problem,
+            evidence=evidence,
+            candidate=candidate,
+            prepared=prepared_by_id[candidate.candidate_id],  # type: ignore[arg-type]
+            fit_config=fit_config,
+        )
+        for candidate in candidates
+    )
+    return VerifiedProblemCandidates(
+        evidence=evidence,
+        candidates=candidates,
+        rejection_layouts=rejection_layouts,
+    )
 
 
 __all__ = [
     "M2ArchiveReference",
+    "VerifiedCandidateRejectionLayout",
     "VerifiedProblemCandidates",
     "canonical_m2_archive_references",
     "verify_problem_candidates",

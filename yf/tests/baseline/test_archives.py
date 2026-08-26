@@ -12,6 +12,7 @@ from yieldforge.baseline.archives import (
     verify_problem_candidates,
 )
 from yieldforge.baseline.contracts import ReusableGeometryProblem
+from yieldforge.baseline.geometry import prepare_layout_footprint
 from yieldforge.domain import (
     Candidate,
     CandidateBatch,
@@ -27,6 +28,7 @@ from yieldforge.domain import (
 )
 from yieldforge.experiments.calibration import CalibrationCandidateObservation
 from yieldforge.experiments.contracts import semantic_sha256
+from yieldforge.reuse.contracts import RemnantFitConfig
 from yieldforge.temporal_benchmark.contracts import CandidateArchiveRequirement
 
 
@@ -188,6 +190,61 @@ def test_problem_verification_requires_four_archives_and_deduplicates_layouts(
         "cand-shared",
     )
     assert verified.evidence.candidate_set_id == (f"yfm7c-{verified.evidence.content_sha256[7:31]}")
+
+
+def test_problem_verification_retains_exact_rejection_layouts(tmp_path: Path) -> None:
+    problem, references = _archives(tmp_path)
+
+    verified = verify_problem_candidates(problem, references, tmp_path)
+
+    assert tuple(item.candidate_id for item in verified.rejection_layouts) == tuple(
+        item.candidate_id for item in verified.candidates
+    )
+    for retained, candidate in zip(
+        verified.rejection_layouts,
+        verified.candidates,
+        strict=True,
+    ):
+        fresh = prepare_layout_footprint(
+            problem.problem,
+            candidate,
+            RemnantFitConfig(),
+        )
+        min_x, min_y, max_x, max_y = fresh.bounds
+        assert retained.problem_id == problem.problem_id
+        assert retained.problem_sha256 == problem.content_sha256
+        assert retained.candidate_set_id == verified.evidence.candidate_set_id
+        assert retained.candidate_set_sha256 == verified.evidence.content_sha256
+        assert retained.candidate_id == candidate.candidate_id
+        assert retained.layout_area == float(fresh.geometry.area)
+        assert retained.layout_width == float(max_x - min_x)
+        assert retained.layout_height == float(max_y - min_y)
+        assert retained.layout_bounds == tuple(float(value) for value in fresh.bounds)
+        assert retained.material_binding_scope == "temporal_event"
+        assert retained.source_transform_sha256.startswith("sha256:")
+        assert retained.fit_config_sha256.startswith("sha256:")
+
+
+def test_problem_verification_prepares_each_unique_candidate_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.baseline import archives
+
+    problem, references = _archives(tmp_path)
+    original = archives.prepare_layout_footprint
+    calls: list[str] = []
+
+    def counted(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(args[1].candidate_id)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(archives, "prepare_layout_footprint", counted)
+
+    verified = verify_problem_candidates(problem, references, tmp_path)
+
+    assert calls == ["cand-3", "cand-shared"]
+    assert len(verified.rejection_layouts) == len(calls)
 
 
 def test_problem_verification_records_and_excludes_invalid_exact_layouts(
