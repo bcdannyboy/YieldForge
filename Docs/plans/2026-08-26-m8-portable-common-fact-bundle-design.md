@@ -47,6 +47,8 @@ One lemma binds:
 - previous lemma hash, or the baseline fallback cursor hash for the first event;
 - the existing portable `M8CommonTransitionFact` payload;
 - event problem and candidate-set identities; and
+- the complete ordered standard-candidate action profiles and policy contexts needed to prove the
+  selected standard action is the policy minimum; and
 - one evidence mode:
   - `frontier_no_fit`;
   - `counted_no_fit`; or
@@ -59,7 +61,8 @@ never serialized or used as no-fit authority.
 ### Branch-influence fact
 
 One influence fact binds a common lemma, exact branch state before/after, inventory delta, action
-bindings, classification, and the existing rejection/search evidence. Its modes are:
+bindings, classification, and the complete rejection/search/competitor evidence that currently
+exists only as the preimage of an influence digest. Its modes are:
 
 - `scalar_no_fit`;
 - `policy_dominated_exact_check`;
@@ -82,16 +85,24 @@ Every node uses a full SHA-256 reference over a domain-separated canonical paylo
 
 `sha256("yieldforge.m8.fact.v2\0" + fact_kind + "\0" + canonical_payload)`
 
-Semantic hashes exclude timings, paths, timestamps, process IDs, and insertion order. Counts are
+Semantic hashes exclude durations, profiling/artifact timestamps, paths, process IDs, and insertion
+order. Outcome-defining datetimes such as event `occurred_at`, storage intervals, `current_time`, and
+`previous_release` remain mandatory semantic inputs and use canonical datetime encoding. Counts are
 strict integers. Floating-point values used as fact evidence are encoded canonically by exact f64
 bits rather than presentation-dependent decimal text.
 
 ## Generator boundary
 
-The new builder captures common facts and their evidence before process-local capabilities are
-released. It may use the frozen Jagua binary to propose translation batches, but its result remains
-typed as unchecked. For the portable pipeline, the generator does not need to repeat the same
-independent source-sequence audit that the fresh checker will perform.
+The new builder captures common and influence facts before their current process-local payloads are
+released or reduced to digests. It may use the frozen Jagua binary to propose translation batches,
+but its result remains typed as unchecked. For the portable pipeline, the generator does not need to
+repeat the same independent source-sequence audit that the fresh checker will perform.
+
+Unchecked generation uses a producer-only transition record and producer-only branch traversal. It
+never creates a `ValidatedCommonTransition`, enters the trusted common registry, or calls a public
+API that implies accepted proof. Shared pure calculations may be factored beneath trusted and
+unchecked wrappers, but only the trusted wrapper can issue current v1 capabilities and only the
+fresh checker can authorize a v2 bundle.
 
 The existing `score_sparse_event()` and `check_action_proofs()` behavior remains unchanged. New
 bundle APIs are explicit so no caller can mistake unchecked generator output for accepted proof.
@@ -104,14 +115,16 @@ A fresh checker process:
    bindings;
 2. independently reconstructs the current-event catalog once;
 3. verifies candidate/frontier membership from frozen runtime evidence;
-4. independently verifies scalar no-fit implications;
-5. audits supplied counted-no-fit translation sequences and counts without using Jagua collision
+4. independently validates the complete standard candidate profiles/contexts and proves the
+   selected action is the frozen policy minimum;
+5. independently verifies scalar no-fit implications and elimination of every remnant competitor;
+6. audits supplied counted-no-fit translation sequences and counts without using Jagua collision
    classifications;
-6. invokes exact M7 replay only for an explicit fallback node;
-7. algebraically reconciles policy rank, selected action, event, costs, lineage, and cursors;
-8. creates checker-owned process-local common capabilities;
-9. traverses every action root and reconciles terminal state/cost; and
-10. releases every capability before exit.
+7. invokes exact M7 replay only for an explicit fallback node;
+8. algebraically reconciles policy rank, selected action, event, costs, lineage, and cursors;
+9. creates checker-owned process-local common capabilities;
+10. traverses every action root and reconciles terminal state/cost; and
+11. releases every capability before exit.
 
 For fully fact-certified nodes, the checker must not call the generator, `certify_event_passivity`,
 or `_derive_m8_common_transition_fact*`. Independence tests patch these entry points to fail.
@@ -133,6 +146,10 @@ The distributed runner must reject a budget whose cell workers multiplied by aud
 the total slots. It records the outer and nested counts separately. A process-scoped execution
 context supplies the audit width; the audit function has no silent four-worker default.
 
+The frozen v3 `measured_process_count` field remains `6`: it is explicitly the maximum top-level
+width across all phases, including the six-worker reference phase. Nested width and peak compute are
+new Gate-3 telemetry only and do not silently change the immutable v3 schema.
+
 ## Error handling
 
 The bundle fails closed on:
@@ -141,6 +158,9 @@ The bundle fails closed on:
 - dangling, duplicate, unused, out-of-order, cross-runtime, or cross-stream references;
 - noncanonical numeric encoding;
 - altered scalar, count, translation, rank, cursor, event, action, state, or cost evidence;
+- altered semantic event, storage-interval, current-time, or previous-release datetime evidence,
+  including self-consistent mutations with recomputed enclosing hashes;
+- a self-consistent selected action that is not the minimum of the complete standard candidate set;
 - implicit exact replay;
 - evaluation bindings or an opened-evaluation marker;
 - worker-budget violations; or
