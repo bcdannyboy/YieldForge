@@ -2154,6 +2154,166 @@ def test_common_selected_cost_must_match_selected_standard_profile() -> None:
         M8UncheckedFactBundleV2.model_validate(raw, strict=True)
 
 
+def test_common_requires_every_standard_profile_declared_by_portable_event() -> None:
+    raw = _bundle().model_dump(mode="python")
+    common = raw["common_lemmas"][0]
+    common["portable_transition"]["event"].update(
+        {"action_set_size": 2, "standard_action_count": 2}
+    )
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="standard action count"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+@pytest.mark.parametrize("duplicate_field", ["candidate_id", "catalog_action_id"])
+def test_common_rejects_duplicate_standard_candidate_or_catalog_identity(
+    duplicate_field: str,
+) -> None:
+    raw = _bundle().model_dump(mode="python")
+    first = raw["standard_candidate_facts"][0]
+    second = deepcopy(first)
+    second.update(
+        {
+            "profile_position": 1,
+            "candidate_id": "candidate-b",
+            "catalog_action_id": "m7-standard:candidate-b",
+            "materialized_action_id": None,
+            "purchase_cost_bits": _f(13.0),
+            "immediate_net_cost_bits": _f(13.0),
+        }
+    )
+    if duplicate_field == "candidate_id":
+        second["candidate_id"] = first["candidate_id"]
+    else:
+        second["catalog_action_id"] = first["catalog_action_id"]
+    second["comparison_key"] = _rank_key(
+        13.0,
+        candidate_id=second["candidate_id"],
+        catalog_action_id=second["catalog_action_id"],
+    )
+    second["decision_key"] = (f"action_id={second['catalog_action_id']}",)
+    _rehash_fact(second)
+    raw["standard_candidate_facts"] = (first, second)
+
+    common = raw["common_lemmas"][0]
+    common.update(
+        {
+            "candidate_scalar_refs": (),
+            "frontier_refs": (),
+            "standard_candidate_refs": (first["fact_sha256"], second["fact_sha256"]),
+            "inventory_classifications": (
+                {
+                    **common["inventory_classifications"][0],
+                    "classification": "exact_survivor",
+                    "frontier_ref": None,
+                    "candidate_scalar_refs": (),
+                    "translation_batch_refs": (),
+                    "exact_replay_reason": "duplicate_standard_identity_contract_test",
+                },
+            ),
+            "evidence_mode": "exact_replay",
+            "translation_batch_refs": (),
+            "exact_replay_reason": "duplicate_standard_identity_contract_test",
+        }
+    )
+    common["portable_transition"]["event"].update(
+        {"action_set_size": 2, "standard_action_count": 2}
+    )
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence.update(
+        {
+            "common_lemma_ref": common["fact_sha256"],
+            "classification": "exact_transition",
+            "evidence_mode": "exact_transition",
+            "rejection_evidence": (),
+        }
+    )
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    raw["translation_batches"] = ()
+    raw["candidate_scalar_facts"] = ()
+    raw["frontier_facts"] = ()
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="duplicate candidate or catalog identities"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_common_selected_standard_profile_binds_portable_policy_width() -> None:
+    raw = _bundle().model_dump(mode="python")
+    common = raw["common_lemmas"][0]
+    transition = common["portable_transition"]
+    transition["selected_context"]["candidate_width_bits"] = _f(6.0)
+    transition["action_binding"]["context"]["candidate_width_bits"] = _f(6.0)
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="standard profile.*policy context"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_common_selected_standard_profile_binds_portable_action_accounting() -> None:
+    raw = _bundle().model_dump(mode="python")
+    common = raw["common_lemmas"][0]
+    accounting = common["portable_transition"]["event"]["action"]["accounting"]
+    accounting["parent_remnant_area_bits"] = _f(11.0)
+    accounting["placed_area_bits"] = _f(11.0)
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="standard profile.*action accounting"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_common_selected_standard_profile_binds_shared_event_cost_components() -> None:
+    raw = _bundle().model_dump(mode="python")
+    standard = raw["standard_candidate_facts"][0]
+    standard["purchase_cost_bits"] = _f(99.0)
+    _rehash_fact(standard)
+    common = raw["common_lemmas"][0]
+    common["minimum_standard_candidate_ref"] = standard["fact_sha256"]
+    common["standard_candidate_refs"] = (standard["fact_sha256"],)
+    _rehash_fact(common)
+    influence = raw["influence_facts"][0]
+    influence["common_lemma_ref"] = common["fact_sha256"]
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["common_lemma_refs"] = (common["fact_sha256"],)
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="shared portable event cost components"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
 def test_rehashed_portable_common_action_cannot_cross_problem_context() -> None:
     raw = _bundle().model_dump(mode="python")
     common = raw["common_lemmas"][0]
@@ -2202,6 +2362,37 @@ def test_influence_rejection_must_bind_referenced_scalar_identity() -> None:
     _rehash_bundle(raw)
 
     with pytest.raises(ValidationError, match="scalar identity|complete rejection"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_influence_rejects_duplicate_rejection_preimage_with_different_reason() -> None:
+    raw = _bundle().model_dump(mode="python")
+    influence = raw["influence_facts"][0]
+    first = influence["rejection_evidence"][0]
+    second = deepcopy(first)
+    second["reason"] = "footprint_width_exceeds_remnant"
+    influence["rejection_evidence"] = (first, second)
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="rejection evidence.*unique"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_influence_rejection_binds_copied_scalar_measurements() -> None:
+    raw = _bundle().model_dump(mode="python")
+    influence = raw["influence_facts"][0]
+    influence["rejection_evidence"][0]["layout_width_bits"] = _f(6.0)
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="scalar measurements"):
         M8UncheckedFactBundleV2.model_validate(raw, strict=True)
 
 

@@ -1439,8 +1439,6 @@ class M8InfluenceFactV2(_M8FactV2):
                 item.direction,
                 item.remnant_id,
                 item.candidate_id,
-                item.candidate_scalar_ref,
-                item.reason or "",
             )
             for item in self.rejection_evidence
         )
@@ -1931,16 +1929,24 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     )
 
             standard_items = tuple(standards[ref] for ref in common.standard_candidate_refs)
+            if len(standard_items) != common.portable_transition.event.standard_action_count:
+                raise ValueError(
+                    "M8 common standard action count differs from its complete profile set"
+                )
             expected_profiles = tuple(range(len(standard_items)))
             if tuple(item.profile_position for item in standard_items) != expected_profiles:
                 raise ValueError("M8 common lemma lacks complete ordered standard candidates")
             if any(item.policy_name != common.policy_name for item in standard_items):
                 raise ValueError("M8 common standard candidates use a different policy")
-            standard_identities = tuple(
-                (item.candidate_id, item.catalog_action_id) for item in standard_items
-            )
-            if len(standard_identities) != len(set(standard_identities)):
-                raise ValueError("M8 common standard candidates contain duplicate identities")
+            standard_candidate_ids = tuple(item.candidate_id for item in standard_items)
+            standard_catalog_ids = tuple(item.catalog_action_id for item in standard_items)
+            if len(standard_candidate_ids) != len(set(standard_candidate_ids)) or len(
+                standard_catalog_ids
+            ) != len(set(standard_catalog_ids)):
+                raise ValueError(
+                    "M8 common standard candidates contain duplicate candidate or catalog "
+                    "identities"
+                )
             if scalar_items and {item.candidate_id for item in standard_items} != {
                 item.candidate_id for item in scalar_items
             }:
@@ -1956,7 +1962,8 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
             if common.minimum_standard_candidate_ref != minimum_standard_ref:
                 raise ValueError("M8 selected standard candidate is not the policy minimum")
             minimum_standard = standards[common.minimum_standard_candidate_ref]
-            if common.portable_transition.event.action.kind == "open_standard_sheet":
+            transition = common.portable_transition
+            if transition.event.action.kind == "open_standard_sheet":
                 if (
                     minimum_standard.materialized_action_id is None
                     or minimum_standard.catalog_action_id != common.selected_catalog_action_id
@@ -1977,6 +1984,66 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     raise ValueError(
                         "M8 common selected immediate cost differs from its standard candidate"
                     )
+                selected_context = transition.selected_context
+                if (
+                    minimum_standard.catalog_action_id != selected_context.action_id
+                    or minimum_standard.action_kind != selected_context.kind
+                    or minimum_standard.candidate_id != selected_context.candidate_id
+                    or minimum_standard.candidate_width_bits
+                    != selected_context.candidate_width_bits
+                    or minimum_standard.selected_stock_id != selected_context.selected_stock_id
+                    or minimum_standard.immediate_net_cost_bits
+                    != selected_context.immediate_net_cost_bits
+                    or minimum_standard.selected_remnant_age_hours_bits
+                    != selected_context.selected_remnant_age_hours_bits
+                    or minimum_standard.returned_regularity_bits
+                    != selected_context.returned_regularity_bits
+                    or minimum_standard.known_order_lookahead_term_bits
+                    != selected_context.known_order_lookahead_term_bits
+                ):
+                    raise ValueError(
+                        "M8 selected standard profile differs from its portable policy context"
+                    )
+                action = transition.event.action
+                accounting = action.accounting
+                if (
+                    minimum_standard.materialized_action_id != action.action_id
+                    or minimum_standard.candidate_id != action.candidate_id
+                    or minimum_standard.action_kind != action.kind
+                    or minimum_standard.parent_remnant_area_bits
+                    != accounting.parent_remnant_area_bits
+                    or minimum_standard.placed_area_bits != accounting.placed_area_bits
+                    or minimum_standard.process_loss_area_bits != accounting.process_loss_area_bits
+                    or minimum_standard.retained_child_area_bits
+                    != accounting.retained_child_area_bits
+                    or minimum_standard.scrap_area_bits != accounting.scrap_area_bits
+                    or minimum_standard.reconciliation_delta_bits
+                    != accounting.reconciliation_delta_bits
+                    or minimum_standard.accounting_area_tolerance_bits
+                    != accounting.area_tolerance_bits
+                    or minimum_standard.returned_remnant_count != len(action.returned_remnants)
+                ):
+                    raise ValueError(
+                        "M8 selected standard profile differs from its portable action accounting"
+                    )
+                event_costs = transition.event.delta_costs
+                if (
+                    minimum_standard.purchase_cost_bits != event_costs.purchase_cost_bits
+                    or minimum_standard.return_handling_cost_bits
+                    != event_costs.return_handling_cost_bits
+                    or minimum_standard.retrieval_handling_cost_bits
+                    != event_costs.retrieval_handling_cost_bits
+                    or minimum_standard.scrap_proceeds_bits != event_costs.scrap_proceeds_bits
+                    or minimum_standard.terminal_scrap_credit_bits
+                    != event_costs.terminal_scrap_credit_bits
+                ):
+                    raise ValueError(
+                        "M8 selected standard profile differs from shared portable event cost "
+                        "components"
+                    )
+                # Policy storage prices retained children; event storage prices elapsed
+                # pre-event inventory. The policy immediate cost is therefore bound to
+                # selected_context above, not to the replay event's net/storage costs.
             if common.replay_input_id != self.provenance.replay_input_id or (
                 common.replay_input_sha256 != self.provenance.replay_input_sha256
             ):
@@ -1996,17 +2063,18 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 *(("removed", item) for item in influence.inventory_delta.removed_remnant_ids),
                 *(("added", item) for item in influence.inventory_delta.added_remnant_ids),
             }
-            rejection_candidates: dict[tuple[str, str], set[str]] = {}
-            for evidence in influence.rejection_evidence:
-                rejection_candidates.setdefault(
-                    (evidence.direction, evidence.remnant_id), set()
-                ).add(evidence.candidate_id)
-            if rejection_candidates and (
-                set(rejection_candidates) != expected_delta
-                or any(
-                    candidates != expected_candidate_ids
-                    for candidates in rejection_candidates.values()
-                )
+            rejection_pairs = tuple(
+                (evidence.direction, evidence.remnant_id, evidence.candidate_id)
+                for evidence in influence.rejection_evidence
+            )
+            expected_rejection_pairs = {
+                (direction, remnant_id, candidate_id)
+                for direction, remnant_id in expected_delta
+                for candidate_id in expected_candidate_ids
+            }
+            if rejection_pairs and (
+                len(rejection_pairs) != len(set(rejection_pairs))
+                or set(rejection_pairs) != expected_rejection_pairs
             ):
                 raise ValueError("M8 influence lacks the complete rejection candidate set")
             search_candidates: dict[tuple[str, str], set[str]] = {}
@@ -2043,10 +2111,13 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     or scalar.candidate_set_id != common.candidate_set_id
                     or scalar.candidate_set_sha256 != common.candidate_set_sha256
                     or scalar.fit_config_sha256 != common.fit_config_sha256
+                    or evidence.layout_area_bits != scalar.layout_area_bits
+                    or evidence.layout_width_bits != scalar.layout_width_bits
+                    or evidence.layout_height_bits != scalar.layout_height_bits
                 ):
                     raise ValueError(
                         "M8 influence rejection scalar partition differs from "
-                        "referenced scalar identity"
+                        "referenced scalar identity or scalar measurements"
                     )
             translation_refs = tuple(
                 search.translation_batch_ref for search in influence.search_evidence
