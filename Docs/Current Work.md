@@ -13,10 +13,11 @@ sealed evaluation boundary.
 
 ## Next step
 
-Add calibration-only coverage that actually exercises `exact_transition` and `policy_dominated`,
-then redesign common certificate/checker work so the matched sampled pipeline reaches the registered
-20x speedup. Re-run the same fail-closed gate and keep evaluation sealed until coverage, speed, and
-the seven-day held-out projection all pass.
+Prove or reject a survivor-specific policy-dominance bound on the frozen calibration cases. The
+bound must classify every possible remnant action against the exact compiled standard winner without
+placement search, or fail closed. Re-run the unchanged `no_signal` and `regime_shift` Gate 2 probes;
+do not build the fact-DAG schema until both exceed 10x with zero mismatch and an acceptably low
+authoritative fallback rate. Keep evaluation sealed.
 
 ## Evidence bridge completed
 
@@ -99,6 +100,13 @@ the seven-day held-out projection all pass.
   sampled certificate-plus-checker speedup was `1.123571x`, below `20x`; and the held-out projection
   was `127.766536` calendar days, above seven. Total wall time was `8298.220836` seconds with six
   measured processes. Evaluation remained sealed.
+- The first factored common-transition implementation retained verified rejection scalars, compiled
+  deterministic Pareto frontiers, and reproduced exact standard-only transitions. `no_signal`
+  improved its common phase from `108.969059` to `0.258885` process-seconds (`420.916851x`) with
+  428/428 proofs valid and zero fallbacks. `regime_shift` had scalar survivors in both common events,
+  fell back 2/2 times, and remained effectively unchanged at `1.002453x`; 459/459 proofs stayed valid
+  and reference-equal. Gate 2 is a no-go, so the fact DAG remains paused. See
+  [[M8 Gate 2 Fast Common Transition]].
 
 ## Experiment status
 

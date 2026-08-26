@@ -313,6 +313,7 @@ def test_private_prepared_batch_validates_each_semantic_remnant_once(
         runtime,
         event_positions=event_positions,
     ) as prepared:
+        preparation_decode_count = len(decoded)
         assert not hasattr(prepared, "remnant_measurements")
         for cached_item in (item, semantic_copy):
             for event_position in event_positions:
@@ -335,7 +336,7 @@ def test_private_prepared_batch_validates_each_semantic_remnant_once(
             for measurement in record.remnant_measurements.values()
         )
 
-    assert decoded == [item.remnant.geometry.wkb_hex]
+    assert decoded[preparation_decode_count:] == [item.remnant.geometry.wkb_hex]
 
 
 def test_private_prepared_batch_precomputes_each_layout_measurement_once(
@@ -528,6 +529,7 @@ def test_private_remnant_measurement_cache_fails_closed_on_content_mutation(
         runtime,
         event_positions=(0,),
     ) as prepared:
+        preparation_decode_count = decode_count
         compiled_module._compile_prepared_translation_rejections(  # noqa: SLF001
             runtime,
             prepared=prepared,
@@ -594,7 +596,7 @@ def test_private_remnant_measurement_cache_fails_closed_on_content_mutation(
             item=item,
         )
 
-    assert decode_count == 2
+    assert decode_count - preparation_decode_count == 2
 
 
 def test_prepared_layout_capability_transient_substitution_cannot_change_result() -> None:

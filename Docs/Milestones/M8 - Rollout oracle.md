@@ -159,3 +159,17 @@ reference both agree. The next bounded work is to add calibration-only cases tha
 missing witness classes and to eliminate repeated common certificate/checker work until the same
 hard gate reaches 20x and projects within seven days. Evaluation, savings claims, physical claims,
 and commercial claims remain out of scope.
+
+## Factored common-transition Gate 2 — 2026-08-25
+
+Retained candidate rejection scalars and deterministic Pareto frontiers are implemented. The fast
+common-transition path is exact and fail-closed: it cleared `no_signal` with a `420.916851x`
+common-phase speedup, 428/428 valid proofs, exact reference agreement, two frontier fast paths, and
+zero fallbacks. The representative `regime_shift` arm contained scalar survivors at both common
+transitions, so both correctly fell back to authoritative exact search. Its common phase improved
+only `1.002453x`, with 459/459 valid proofs and exact reference agreement.
+
+Gate 2 is therefore a no-go and the fact-DAG schema remains paused. The next algorithmic target is
+a complete survivor policy-dominance bound, followed by authoritative survivor-witness retention
+only if the bound cannot cover the hard calibration case. See [[M8 Gate 2 Fast Common Transition]].
+Evaluation remains sealed and no M8 advantage or savings result exists.

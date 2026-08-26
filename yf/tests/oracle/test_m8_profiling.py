@@ -54,6 +54,10 @@ def test_profile_counts_use_the_frozen_exact_counter_set() -> None:
         increment_profile_count("actions", 7)
         increment_profile_count("facts", 11)
         increment_profile_count("fallbacks", 13)
+        increment_profile_count("frontier_rejected_transitions", 17)
+        increment_profile_count("standard_only_materializations", 19)
+        increment_profile_count("full_authoritative_fallbacks", 23)
+        increment_profile_count("differential_mismatches", 29)
 
     assert profiler.report().counts == {
         "events": 2,
@@ -62,6 +66,10 @@ def test_profile_counts_use_the_frozen_exact_counter_set() -> None:
         "actions": 7,
         "facts": 11,
         "fallbacks": 13,
+        "frontier_rejected_transitions": 17,
+        "standard_only_materializations": 19,
+        "full_authoritative_fallbacks": 23,
+        "differential_mismatches": 29,
     }
 
 
@@ -104,6 +112,10 @@ def test_normalized_profile_json_is_independent_of_durations(monkeypatch) -> Non
             "facts": 0,
             "fallbacks": 0,
             "frontier_entries": 0,
+            "frontier_rejected_transitions": 0,
+            "standard_only_materializations": 0,
+            "full_authoritative_fallbacks": 0,
+            "differential_mismatches": 0,
         },
         "phase_tree": [{"children": [], "name": "pipeline"}],
         "schema_version": "yieldforge.m8-phase-profile.v1",

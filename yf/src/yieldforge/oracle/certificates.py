@@ -10,7 +10,8 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 
-from yieldforge.baseline.contracts import LayoutFitSearchResult
+from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
+from yieldforge.baseline.geometry import prepare_translation_rejection_remnant
 from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_policy_action
 from yieldforge.baseline.replay import (
     M7ActionDescriptor,
@@ -26,6 +27,7 @@ from yieldforge.baseline.replay import (
     apply_m7_frozen_action_evidence_with_commitments,
     enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
+    enumerate_m7_standard_only_catalog,
     m7_cursor_sha256,
     m7_semantic_runtime_sha256,
     m7_shared_fit_search_cache_key,
@@ -34,14 +36,21 @@ from yieldforge.baseline.replay import (
 )
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle.compiled import (
+    CompiledRejectionProblem,
     CompiledTranslationRejection,
     _compile_prepared_translation_rejections,
+    _prepared_rejection_problem,
+    _prepared_standard_winner,
     _PreparedTranslationLayoutBatch,
+    _registered_prepared_remnant_measurement,
+    compile_rejection_problem,
     compile_translation_rejections,
 )
+from yieldforge.oracle.frontier import certify_frontier_impossible
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
 from yieldforge.replay.contracts import InventoryItem
+from yieldforge.reuse.geometry import material_key
 
 
 def _item_ids(items: tuple[InventoryItem, ...]) -> tuple[str, ...]:
@@ -141,6 +150,47 @@ class M8CommonTransitionFact:
     policy_rank: PolicyRank
     semantic_runtime_sha256: str
     content_sha256: str
+
+
+@dataclass(frozen=True)
+class FastCommonRejectionWitness:
+    """Scalar-only proof that one inventory item cannot generate a fit query."""
+
+    remnant_id: str
+    candidate_ids: tuple[str, ...]
+    material_matches: bool
+    remnant_area: float
+    remnant_width: float
+    remnant_height: float
+    area_tolerance: float
+    coordinate_tolerance: float
+    impossible: bool
+    zero_generation: bool
+
+    def __post_init__(self) -> None:
+        if not self.remnant_id or not self.candidate_ids:
+            raise ValueError("M8 fast common rejection witness identities are incomplete")
+        if self.candidate_ids != tuple(sorted(set(self.candidate_ids))):
+            raise ValueError("M8 fast common rejection candidates must be sorted unique")
+        if not self.impossible or not self.zero_generation:
+            raise ValueError("M8 fast common witness must prove zero-generation rejection")
+
+
+@dataclass(frozen=True)
+class FastCommonTransitionResult:
+    """Exact common fact plus the scalar witnesses that enabled its fast path."""
+
+    fact: M8CommonTransitionFact
+    zero_generation_rejected_inventory: tuple[InventoryItem, ...]
+    witnesses: tuple[FastCommonRejectionWitness, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.zero_generation_rejected_inventory) != len(self.witnesses):
+            raise ValueError("M8 fast common witness count differs from inventory")
+        if tuple(
+            item.remnant.remnant_id for item in self.zero_generation_rejected_inventory
+        ) != tuple(item.remnant_id for item in self.witnesses):
+            raise ValueError("M8 fast common witnesses differ from inventory order")
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -279,38 +329,21 @@ def _common_fact_payload(
     }
 
 
-def _derive_m8_common_transition_fact_unprofiled(
+def _common_transition_fact_from_catalog(
     runtime: M7ReplayRuntime,
     *,
     cursor: M7ReplayCursor,
     semantic_runtime_sha256: str,
+    execution_runtime: M7ReplayRuntime,
+    catalog,  # type: ignore[no-untyped-def]
 ) -> M8CommonTransitionFact:
     event_position = cursor.next_event_position
-    for item in cursor.inventory:
-        compile_translation_rejections(
-            runtime,
-            event_position=event_position,
-            item=item,
-        )
-    authoritative_runtime = _fresh_runtime(runtime)
-    with profile_phase("action_catalog_enumeration"):
-        catalog = enumerate_m7_action_catalog(
-            authoritative_runtime,
-            cursor=cursor,
-            complete=False,
-        )
-    _require_common_search_caches_match_authoritative(
-        runtime,
-        authoritative_runtime=authoritative_runtime,
-        event_position=event_position,
-        inventory=cursor.inventory,
-    )
     selected = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
     descriptor = next(
         item for item in catalog.actions if item.action_id == selected.action_id
     )
     step = apply_m7_action_descriptor(
-        authoritative_runtime,
+        execution_runtime,
         cursor=cursor,
         catalog=catalog,
         descriptor=descriptor,
@@ -341,11 +374,308 @@ def _derive_m8_common_transition_fact_unprofiled(
     )
 
 
+def _derive_m8_common_transition_fact_authoritative(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    semantic_runtime_sha256: str,
+) -> M8CommonTransitionFact:
+    """Run the original cache-free common transition as the differential oracle."""
+
+    event_position = cursor.next_event_position
+    for item in cursor.inventory:
+        compile_translation_rejections(
+            runtime,
+            event_position=event_position,
+            item=item,
+        )
+    authoritative_runtime = _fresh_runtime(runtime)
+    with profile_phase("action_catalog_enumeration"):
+        catalog = enumerate_m7_action_catalog(
+            authoritative_runtime,
+            cursor=cursor,
+            complete=False,
+        )
+    _require_common_search_caches_match_authoritative(
+        runtime,
+        authoritative_runtime=authoritative_runtime,
+        event_position=event_position,
+        inventory=cursor.inventory,
+    )
+    return _common_transition_fact_from_catalog(
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        execution_runtime=authoritative_runtime,
+        catalog=catalog,
+    )
+
+
+def _zero_generation_rejection_witness(
+    runtime: M7ReplayRuntime,
+    *,
+    compiled: CompiledRejectionProblem,
+    event_position: int,
+    item: InventoryItem,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None,
+) -> FastCommonRejectionWitness | None:
+    binding = runtime.replay_input.instances[event_position]
+    measured = (
+        prepare_translation_rejection_remnant(item.remnant)
+        if prepared_layouts is None
+        else _registered_prepared_remnant_measurement(
+            prepared_layouts,
+            runtime,
+            item.remnant,
+        )
+    )
+    min_x, min_y, max_x, max_y = measured.bounds
+    remnant_width = float(max_x - min_x)
+    remnant_height = float(max_y - min_y)
+    fit_config = runtime.replay_input.fit_config
+    area_tolerance = max(
+        fit_config.coordinate_tolerance,
+        measured.area * fit_config.relative_area_tolerance,
+    )
+    material_matches = material_key(item.remnant.material) == material_key(binding.material)
+    query = {
+        "material_matches": material_matches,
+        "remnant_area": measured.area,
+        "remnant_width": remnant_width,
+        "remnant_height": remnant_height,
+        "area_tolerance": area_tolerance,
+        "coordinate_tolerance": fit_config.coordinate_tolerance,
+    }
+    impossible = certify_frontier_impossible(compiled.frontier, **query)
+    zero_generation = not material_matches or all(
+        scalar.width > remnant_width + fit_config.coordinate_tolerance
+        or scalar.height > remnant_height + fit_config.coordinate_tolerance
+        for scalar in compiled.frontier.members
+    )
+    if not impossible or not zero_generation:
+        return None
+    return FastCommonRejectionWitness(
+        remnant_id=item.remnant.remnant_id,
+        candidate_ids=tuple(
+            sorted(scalar.candidate_id for scalar in compiled.frontier.members)
+        ),
+        material_matches=material_matches,
+        remnant_area=measured.area,
+        remnant_width=remnant_width,
+        remnant_height=remnant_height,
+        area_tolerance=area_tolerance,
+        coordinate_tolerance=fit_config.coordinate_tolerance,
+        impossible=True,
+        zero_generation=True,
+    )
+
+
+def _is_zero_generation_no_fit(search: LayoutFitSearchResult) -> bool:
+    return (
+        search.status is LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH
+        and search.generated_candidate_count == 0
+        and search.duplicate_candidate_count == 0
+        and search.evaluated_candidate_count == 0
+        and not search.budget_truncated
+        and search.translation is None
+    )
+
+
+def _require_zero_generation_search_caches(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    inventory: tuple[InventoryItem, ...],
+) -> None:
+    """Reject stale cache claims without recomputing any placement search."""
+
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    for item in inventory:
+        if material_key(item.remnant.material) != material_key(binding.material):
+            continue
+        local_key = (
+            item.remnant.remnant_id,
+            binding.problem_id,
+            verified.evidence.candidate_set_id,
+        )
+        cached_local = runtime.fit_search_cache.get(local_key)
+        if cached_local is not None:
+            canonical = _canonical_searches(cached_local, label="fast common local")
+            _require_search_bindings(
+                runtime,
+                event_position=event_position,
+                item=item,
+                searches=canonical,
+                require_remnant_id=True,
+            )
+            if any(not _is_zero_generation_no_fit(search) for search in canonical):
+                raise ValueError(
+                    "M8 local fit-search cache value differs from zero-generation rejection"
+                )
+        if runtime.shared_fit_search_cache is None:
+            continue
+        cached_shared = runtime.shared_fit_search_cache.get(
+            m7_shared_fit_search_cache_key(
+                geometry=item.remnant.geometry,
+                fit_config=runtime.replay_input.fit_config,
+                search_config=runtime.replay_input.search_config,
+                problem_id=binding.problem_id,
+                candidate_set_id=verified.evidence.candidate_set_id,
+            )
+        )
+        if cached_shared is None:
+            continue
+        canonical = _canonical_searches(cached_shared, label="fast common shared")
+        _require_search_bindings(
+            runtime,
+            event_position=event_position,
+            item=item,
+            searches=canonical,
+            require_remnant_id=False,
+        )
+        if any(not _is_zero_generation_no_fit(search) for search in canonical):
+            raise ValueError(
+                "M8 shared fit-search cache value differs from zero-generation rejection"
+            )
+
+
+def _try_derive_m8_common_transition_fact_fast(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    semantic_runtime_sha256: str,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+) -> FastCommonTransitionResult | None:
+    """Use scalar proofs only when they preserve exact zero-search semantics."""
+
+    event_position = cursor.next_event_position
+    compiled_standard = (
+        None
+        if prepared_layouts is None
+        else _prepared_standard_winner(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
+    compiled = None
+    if cursor.inventory:
+        if prepared_layouts is None:
+            binding = runtime.replay_input.instances[event_position]
+            verified = runtime.runtime_candidates[binding.problem_id]
+            if (
+                not verified.rejection_layouts
+                or tuple(item.candidate_id for item in verified.rejection_layouts)
+                != tuple(item.candidate_id for item in verified.candidates)
+            ):
+                return None
+            compiled = compile_rejection_problem(runtime, event_position=event_position)
+        else:
+            compiled = _prepared_rejection_problem(
+                prepared_layouts,
+                runtime,
+                event_position=event_position,
+            )
+    witnesses = []
+    with profile_phase("frontier_rejection"):
+        for item in cursor.inventory:
+            if compiled is None:  # pragma: no cover - inventory establishes the frontier.
+                raise AssertionError("M8 fast common inventory lacks a rejection frontier")
+            witness = _zero_generation_rejection_witness(
+                runtime,
+                compiled=compiled,
+                event_position=event_position,
+                item=item,
+                prepared_layouts=prepared_layouts,
+            )
+            if witness is None:
+                return None
+            witnesses.append(witness)
+    _require_zero_generation_search_caches(
+        runtime,
+        event_position=event_position,
+        inventory=cursor.inventory,
+    )
+    execution_runtime = _fresh_runtime(runtime)
+    with profile_phase("standard_only_materialization"):
+        catalog = enumerate_m7_standard_only_catalog(
+            execution_runtime,
+            cursor=cursor,
+            zero_generation_rejected_inventory=cursor.inventory,
+            precomputed_standard_profiles=(
+                None
+                if compiled_standard is None
+                else compiled_standard.standard_profiles
+            ),
+        )
+    if compiled_standard is not None:
+        selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
+        descriptor = next(
+            item for item in catalog.actions if item.action_id == selection.action_id
+        )
+        if (
+            selection.action_id != compiled_standard.action_id
+            or selection.decision_key != compiled_standard.decision_key
+            or descriptor.candidate_id != compiled_standard.candidate_id
+        ):
+            raise ValueError("M8 prepared standard winner differs from exact profiles")
+    fact = _common_transition_fact_from_catalog(
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        execution_runtime=execution_runtime,
+        catalog=catalog,
+    )
+    return FastCommonTransitionResult(
+        fact=fact,
+        zero_generation_rejected_inventory=cursor.inventory,
+        witnesses=tuple(witnesses),
+    )
+
+
+def _derive_m8_common_transition_fact_unprofiled(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    semantic_runtime_sha256: str,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    differential: bool = False,
+) -> M8CommonTransitionFact:
+    fast = _try_derive_m8_common_transition_fact_fast(
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+        prepared_layouts=prepared_layouts,
+    )
+    if fast is None:
+        increment_profile_count("full_authoritative_fallbacks")
+        return _derive_m8_common_transition_fact_authoritative(
+            runtime,
+            cursor=cursor,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+        )
+    increment_profile_count("frontier_rejected_transitions")
+    increment_profile_count("standard_only_materializations")
+    if differential:
+        authoritative = _derive_m8_common_transition_fact_authoritative(
+            runtime,
+            cursor=cursor,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+        )
+        if fast.fact != authoritative:
+            increment_profile_count("differential_mismatches")
+            raise ValueError("M8 fast common transition differs from authoritative replay")
+    return fast.fact
+
+
 def _derive_m8_common_transition_fact(
     runtime: M7ReplayRuntime,
     *,
     cursor: M7ReplayCursor,
     semantic_runtime_sha256: str,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    differential: bool = False,
 ) -> M8CommonTransitionFact:
     """Profile one authoritative common transition without changing its semantics."""
 
@@ -354,6 +684,8 @@ def _derive_m8_common_transition_fact(
             runtime,
             cursor=cursor,
             semantic_runtime_sha256=semantic_runtime_sha256,
+            prepared_layouts=prepared_layouts,
+            differential=differential,
         )
     increment_profile_count("events")
     increment_profile_count("facts")
@@ -631,6 +963,8 @@ def build_validated_m8_common_transition_in_context(
     authority: M7AuthoritativeProofRuntime,
     *,
     cursor: M7ReplayCursor,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    differential: bool = False,
 ) -> ValidatedCommonTransition:
     """Derive one common capability inside an active shared proof runtime."""
 
@@ -639,6 +973,8 @@ def build_validated_m8_common_transition_in_context(
         authority.runtime,
         cursor=cursor,
         semantic_runtime_sha256=authority.semantic_sha256,
+        prepared_layouts=prepared_layouts,
+        differential=differential,
     )
     _validate_portable_common_transition_fact(
         authority.runtime,

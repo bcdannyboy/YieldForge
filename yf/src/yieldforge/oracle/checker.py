@@ -441,6 +441,7 @@ def _check_prepared_action_proofs(
         common = build_validated_m8_common_transition_in_context(
             context._authority,  # noqa: SLF001
             cursor=common_cursor,
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
         )
         try:
             fact = _validated_common_transition_fact(

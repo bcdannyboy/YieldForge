@@ -2424,6 +2424,119 @@ def enumerate_m7_action_catalog(
     )
 
 
+def enumerate_m7_standard_only_catalog(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    zero_generation_rejected_inventory: tuple[InventoryItem, ...],
+    precomputed_standard_profiles: tuple[M7StandardActionProfile, ...] | None = None,
+) -> M7ActionCatalog:
+    """Materialize the exact standard catalog after an external no-fit proof.
+
+    The caller must prove that every compatible remnant/candidate query is
+    rejected before translation generation.  Keeping that proof outside the M7
+    baseline avoids teaching the authoritative replay to trust M8 shortcuts,
+    while this helper preserves the exact event bookkeeping the authoritative
+    zero-generation searches would have emitted.
+    """
+
+    _validate_runtime(runtime)
+    if zero_generation_rejected_inventory != cursor.inventory:
+        raise ValueError("M7 standard-only rejection inventory differs from cursor")
+    position = cursor.next_event_position
+    if position < 0 or position >= len(runtime.replay_input.instances):
+        raise ValueError("M7 standard-only catalog position is outside the replay stream")
+    replay_input = runtime.replay_input
+    binding = replay_input.instances[position]
+    if binding.released_at != cursor.previous_release:
+        group_sequence = cursor.timestamp_group_sequence + 1
+        group_subsequence = 0
+    else:
+        group_sequence = cursor.timestamp_group_sequence
+        group_subsequence = cursor.timestamp_subsequence + 1
+    storage = _storage_cost(
+        cursor.inventory,
+        start=cursor.current_time,
+        end=binding.released_at,
+        rate=replay_input.rates.storage_cost_per_area_hour,
+    )
+    problem = next(
+        item for item in replay_input.problems if item.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    if precomputed_standard_profiles is None:
+        standards = _generate_actions(
+            binding=binding,
+            problem=problem,
+            verified=verified,
+            inventory=(),
+            rules=runtime.rules,
+            fit_config=replay_input.fit_config,
+            search_config=replay_input.search_config,
+            policy=replay_input.policy.name,
+            rates=replay_input.rates,
+            runtime_metrics=runtime.runtime_metrics,
+            standard_profile_cache=runtime.standard_profile_cache,
+            standard_profile_executor=runtime.standard_profile_executor,
+            jagua_executable=runtime.jagua_executable,
+            jagua_container_guard=replay_input.jagua_container_guard or 1.0,
+            jagua_differential_audit=runtime.jagua_differential_audit,
+            fit_search_cache=runtime.fit_search_cache,
+            shared_fit_search_cache=runtime.shared_fit_search_cache,
+            prepared_layout_cache=runtime.prepared_layout_cache,
+            retain_all_remnant_actions=False,
+        )
+        profiles = standards.standard_profiles
+    else:
+        profiles = precomputed_standard_profiles
+        if tuple(item.candidate_id for item in profiles) != tuple(
+            item.candidate_id for item in verified.candidates
+        ):
+            raise ValueError("M7 precomputed standard profiles differ from candidates")
+        for profile in profiles:
+            runtime.standard_profile_cache[(problem.problem_id, profile.candidate_id)] = profile
+    compatible_count = sum(
+        material_key(item.remnant.material) == material_key(binding.material)
+        for item in zero_generation_rejected_inventory
+    )
+    generated = GeneratedActionSet(
+        standard_profiles=profiles,
+        remnant_actions=(),
+        remnant_action_count=0,
+        fit_search_query_count=compatible_count * len(verified.candidates),
+        fit_search_generated_candidate_count=0,
+        fit_search_evaluated_candidate_count=0,
+        fit_search_budget_truncated_count=0,
+    )
+    contexts = _policy_contexts(
+        generated,
+        candidates=verified.candidates,
+        inventory=cursor.inventory,
+        occurred_at=binding.released_at,
+        rates=replay_input.rates,
+    )
+    actions = tuple(
+        M7ActionDescriptor(
+            action_id=f"m7-standard:{profile.candidate_id}",
+            kind=M7ActionKind.OPEN_STANDARD_SHEET,
+            candidate_id=profile.candidate_id,
+            selected_remnant_id=None,
+        )
+        for profile in generated.standard_profiles
+    )
+    return M7ActionCatalog(
+        event_position=position,
+        actions=actions,
+        contexts=contexts,
+        standard_action_count=len(generated.standard_profiles),
+        remnant_action_count=0,
+        storage_cost=storage,
+        timestamp_group_sequence=group_sequence,
+        timestamp_subsequence=group_subsequence,
+        generated=generated,
+    )
+
+
 def select_m7_fallback(
     catalog: M7ActionCatalog,
     *,
@@ -3081,6 +3194,7 @@ __all__ = [
     "build_m7_replay_input",
     "cursor_after_event",
     "enumerate_m7_action_catalog",
+    "enumerate_m7_standard_only_catalog",
     "enumerate_m7_single_remnant_competitor",
     "initial_m7_cursor",
     "m7_cursor_sha256",

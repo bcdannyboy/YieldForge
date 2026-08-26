@@ -6,6 +6,7 @@ import os
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 
 from yieldforge.baseline.geometry import (
@@ -21,6 +22,7 @@ from yieldforge.baseline.geometry import (
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
     M7ReplayRuntime,
+    M7StandardActionProfile,
     enumerate_m7_action_catalog,
     select_m7_fallback,
 )
@@ -43,6 +45,7 @@ class CompiledStandardWinner:
     action_id: str
     candidate_id: str
     decision_key: tuple[str, ...]
+    standard_profiles: tuple[M7StandardActionProfile, ...]
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,9 @@ _PreparedTranslationLayouts = tuple[
 _CompiledRejectionProblems = tuple[
     tuple[tuple[str, str], CompiledRejectionProblem], ...
 ]
+_CompiledStandardWinners = tuple[
+    tuple[tuple[str, str], CompiledStandardWinner], ...
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +119,7 @@ class _PreparedTranslationLayoutRecord:
     runtime_id: int
     layouts: _PreparedTranslationLayouts
     rejection_problems: _CompiledRejectionProblems
+    standard_winners: _CompiledStandardWinners
     remnant_measurements: dict[
         _PreparedRemnantSemanticKey,
         PreparedTranslationRejectionRemnant,
@@ -132,6 +139,7 @@ def _prepared_translation_layout_fingerprint(
     prepared: _PreparedTranslationLayoutBatch,
     layouts: _PreparedTranslationLayouts,
     rejection_problems: _CompiledRejectionProblems,
+    standard_winners: _CompiledStandardWinners,
 ) -> str:
     payload = {
         "schema_version": "yieldforge.m8-prepared-translation-layout-batch.v1",
@@ -158,6 +166,31 @@ def _prepared_translation_layout_fingerprint(
                 "compiled": asdict(compiled),
             }
             for key, compiled in rejection_problems
+        ),
+        "standard_winners": tuple(
+            {
+                "key": key,
+                "compiled": {
+                    "problem_id": compiled.problem_id,
+                    "problem_sha256": compiled.problem_sha256,
+                    "candidate_set_id": compiled.candidate_set_id,
+                    "candidate_set_sha256": compiled.candidate_set_sha256,
+                    "action_id": compiled.action_id,
+                    "candidate_id": compiled.candidate_id,
+                    "decision_key": compiled.decision_key,
+                    "standard_profiles": tuple(
+                        {
+                            "candidate_id": profile.candidate_id,
+                            "candidate_width": profile.candidate_width,
+                            "accounting": profile.accounting.model_dump(mode="json"),
+                            "returned_remnant_count": profile.returned_remnant_count,
+                            "returned_regularity": profile.returned_regularity,
+                        }
+                        for profile in compiled.standard_profiles
+                    ),
+                },
+            }
+            for key, compiled in standard_winners
         ),
     }
     return f"sha256:{semantic_sha256(payload)}"
@@ -255,6 +288,7 @@ def _require_prepared_translation_layout_record(
             prepared,
             registered.layouts,
             registered.rejection_problems,
+            registered.standard_winners,
         ):
             raise ValueError("M8 prepared translation layout batch integrity differs")
         _validate_prepared_remnant_measurements(registered, deep=True)
@@ -287,6 +321,29 @@ def _prepared_rejection_problem(
         return dict(registered.rejection_problems)[key]
     except KeyError as error:
         raise ValueError("M8 prepared rejection problem is absent from the batch") from error
+
+
+def _prepared_standard_winner(
+    prepared: _PreparedTranslationLayoutBatch,
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+) -> CompiledStandardWinner:
+    """Return one registry-owned standard winner compiled once for the batch."""
+
+    registered = _require_prepared_translation_layout_record(
+        prepared,
+        runtime,
+        deep=True,
+    )
+    key, _binding, _problem, _verified = _prepared_key_and_inputs(
+        runtime,
+        event_position=event_position,
+    )
+    try:
+        return dict(registered.standard_winners)[key]
+    except KeyError as error:
+        raise ValueError("M8 prepared standard winner is absent from the batch") from error
 
 
 def _prepared_remnant_semantic_key(
@@ -385,6 +442,7 @@ def _prepare_translation_layout_batch(
         tuple[PreparedTranslationRejectionLayout, ...],
     ] = {}
     rejection_by_key: dict[tuple[str, str], CompiledRejectionProblem] = {}
+    standard_by_key: dict[tuple[str, str], CompiledStandardWinner] = {}
     with profile_phase("standard_layout_materialization"):
         for event_position in event_positions:
             key, _binding, problem, verified = _prepared_key_and_inputs(
@@ -392,6 +450,12 @@ def _prepare_translation_layout_batch(
                 event_position=event_position,
             )
             if key not in layouts_by_key:
+                standard_by_key[key] = deepcopy(
+                    compile_standard_winner(
+                        runtime,
+                        event_position=event_position,
+                    )
+                )
                 rejection_by_key[key] = compile_rejection_problem(
                     runtime,
                     event_position=event_position,
@@ -408,6 +472,7 @@ def _prepare_translation_layout_batch(
                 )
     layouts = tuple(sorted(layouts_by_key.items()))
     rejection_problems = tuple(sorted(rejection_by_key.items()))
+    standard_winners = tuple(sorted(standard_by_key.items()))
     prepared = _PreparedTranslationLayoutBatch(_runtime_id=id(runtime))
     key = id(prepared)
 
@@ -423,6 +488,7 @@ def _prepare_translation_layout_batch(
         runtime_id=id(runtime),
         layouts=layouts,
         rejection_problems=rejection_problems,
+        standard_winners=standard_winners,
         remnant_measurements={},
         remnant_commitments={},
         remnant_snapshots={},
@@ -430,6 +496,7 @@ def _prepare_translation_layout_batch(
             prepared,
             layouts,
             rejection_problems,
+            standard_winners,
         ),
     )
     try:
@@ -658,6 +725,7 @@ def compile_standard_winner(
         action_id=descriptor.action_id,
         candidate_id=descriptor.candidate_id,
         decision_key=selection.decision_key,
+        standard_profiles=catalog.generated.standard_profiles,
     )
 
 

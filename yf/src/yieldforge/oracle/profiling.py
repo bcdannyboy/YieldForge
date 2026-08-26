@@ -19,6 +19,10 @@ M8ProfileCounter = Literal[
     "actions",
     "facts",
     "fallbacks",
+    "frontier_rejected_transitions",
+    "standard_only_materializations",
+    "full_authoritative_fallbacks",
+    "differential_mismatches",
 ]
 
 _COUNTER_NAMES: tuple[M8ProfileCounter, ...] = (
@@ -28,6 +32,10 @@ _COUNTER_NAMES: tuple[M8ProfileCounter, ...] = (
     "actions",
     "facts",
     "fallbacks",
+    "frontier_rejected_transitions",
+    "standard_only_materializations",
+    "full_authoritative_fallbacks",
+    "differential_mismatches",
 )
 _PHASE_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 

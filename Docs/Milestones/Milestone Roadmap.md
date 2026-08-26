@@ -63,3 +63,9 @@ proofs and matched all 12 frozen brute-reference actions with zero mismatch, but
 `1.123571x` versus the required `20x`, and held-out work projected to `127.766536` days versus the
 seven-day boundary. The next step is a calibration-only coverage and common-work redesign followed
 by the same fail-closed gate. No M8 oracle evaluation or savings result exists yet.
+
+The first factored common-transition Gate 2 is also complete. Exact Pareto rejection accelerated
+`no_signal` by `420.916851x`, but `regime_shift` produced scalar survivors at both common events and
+improved only `1.002453x` because both events required authoritative exact search. The v2 fact DAG is
+paused at this no-go. The next bounded task is a survivor policy-dominance proof, not evaluation or
+threshold relaxation.
