@@ -69,3 +69,12 @@ The first factored common-transition Gate 2 is also complete. Exact Pareto rejec
 improved only `1.002453x` because both events required authoritative exact search. The v2 fact DAG is
 paused at this no-go. The next bounded task is a survivor policy-dominance proof, not evaluation or
 threshold relaxation.
+
+The counted-no-fit redesign closes that bounded no-go. Per-candidate scalar proof classified all
+459 hard-arm searches no-fit, while the frozen Jagua boundary supplied only the exact translation
+counts required by M7 event identity; an independent source-sequence audit certifies those counts.
+The unchanged probes validated 887/887 proofs with exact common-fact and reference agreement and
+zero authoritative fallbacks. Aggregate common-transition wall time, including child-process work,
+improved `393.341866x` on `no_signal` and `13.255735x` on `regime_shift`, so Gate 2 passes and
+bounded v2 fact-DAG work may begin. The official six-cell `20x`/seven-day and witness-coverage gates
+remain open; evaluation and savings claims remain out of scope.

@@ -1,38 +1,60 @@
 # M8 Gate 2 — Fast common transition
 
-**Decision:** No-go on 2026-08-25. Do not proceed to the fact-DAG schema yet.
+**Decision:** Pass on 2026-08-26. The bounded fact-DAG design may proceed; evaluation remains
+sealed and the official M8 `20x`/seven-day gate has not been rerun.
 
 ## What was implemented
 
-The M8 common-transition path now evaluates the retained Pareto rejection frontier before launching
-exact remnant placement searches. It uses the fast path only when every inventory remnant is proven
-to reject every candidate before translation generation. The resulting standard-only catalog
-preserves the authoritative action, policy context, event identity, fit-search counts, inventory,
-and accounting exactly. Empty-inventory events use the same exact standard-only path.
+The M8 common-transition path first evaluates the retained Pareto rejection frontier. Proven
+zero-generation rejects use an exact standard-only or mixed catalog. A new mixed catalog searches
+only unresolved inventory while restoring the omitted zero-generation query counts, so its result
+remains exactly equal to the frozen lazy M7 catalog.
 
-Prepared proof contexts compile the frozen standard winner and its exact standard profiles once.
-Development differential mode recomputes the old authoritative transition and fails on the first
-mismatch. Area-only or otherwise uncertain scalar results fall back to the unchanged authoritative
-catalog; uncertainty is never promoted to rejection.
+The mixed catalog alone had zero coverage on `regime_shift`: both transitions still had one
+inventory remnant that survived the zero-generation frontier. A collision-free diagnostic then
+showed the actual boundary. All 459 candidate searches were independently impossible under the
+registered scalar geometry rules, but the frozen M7 search would still generate translation
+candidates before returning no witness. The expensive collision result was known; the exact
+generated, duplicate, evaluated, and truncation counts were missing from the event identity.
 
-The profiler now records frontier-rejected transitions, standard-only materializations,
-full-authoritative fallbacks, and differential mismatches separately.
+The final path therefore:
+
+1. independently proves every candidate no-fit with the registered scalar certificate;
+2. asks the content-bound frozen Jagua binary only to enumerate the registered translation batches;
+3. independently reconstructs the registered candidate-source sequence and audits Jagua's generated,
+   duplicate, evaluated, and truncation counts in forked workers;
+4. ignores Jagua's collision classifications and synthesizes exact no-witness search records only
+   after that audit passes;
+5. seeds those records into a fresh runtime and materializes the unchanged M7 catalog; and
+6. fails closed to Python generation or authoritative exact search when representation or proof
+   coverage is incomplete.
+
+Jagua supplies bookkeeping, not the no-fit conclusion. The profiler separately records mixed
+pruning, counted-no-fit transitions, exact survivors, fallbacks, and differential mismatches. A
+separate authoritative replay must also match the optimized common fact's event position, event ID,
+and content hash before the profile can publish.
 
 ## Gate 2 evidence
 
 Both probes used calibration seed `2026082300`, two events, the unchanged frozen M7 baseline and
 Jagua/Shapely boundary, and no evaluation access.
 
-| Probe | Old common CPU | New common CPU | Speedup | Frontier fast paths | Full fallbacks | Semantic result |
-|---|---:|---:|---:|---:|---:|---|
-| `no_signal` | 108.969059 s | 0.258885 s | 420.916851x | 2/2 | 0/2 | 428/428 valid; reference equal |
-| `regime_shift` | 1883.890537 s | 1879.281241 s | 1.002453x | 0/2 | 2/2 | 459/459 valid; reference equal |
+| Probe | Frozen common wall | Final common wall | Speedup | Fast classification | Full fallbacks | Semantic result |
+|---|---:|---:|---:|---|---:|---|
+| `no_signal` | 109.597188 s | 0.278631 s | 393.341866x | 2 frontier derivations | 0/2 | 428/428 valid; fact/reference equal |
+| `regime_shift` | 1927.855596 s | 145.435589 s | 13.255735x | 2 counted-no-fit derivations / 918 searches | 0/2 | 459/459 valid; fact/reference equal |
 
-The no-signal arm clears the required 10x heavy-path improvement with zero mismatch. The
-regime-shift arm does not: every common transition contains at least one scalar survivor, so the
-implementation correctly invokes the full authoritative search. Its total process time was
-3122.698090 seconds versus 3120.847244 seconds before the change, confirming that Gate 2 did not
-move materially on the representative hard case.
+Both arms now clear the required `10x` common-path improvement with zero checker failure, reference
+equality, exact common-fact identity, zero authoritative fallback, and no evaluation access. Wall
+time is the gate metric because it charges the four independent audit workers and Jagua child
+processes; the earlier parent-process CPU result was invalidated during review. The hard audit's
+three independent count reconstructions each took about 29–31 seconds. Full-profile elapsed time
+also includes an unoptimized authoritative differential replay and brute reference, so it is not the
+Gate 2 metric and is not evidence of the official M8 throughput target.
+
+The exact mixed-pruning intermediate probe remained a useful no-go: it classified zero hard-arm
+inventory items, fell back 2/2 times, and took `3146.917652` process-seconds. The counted-no-fit
+redesign, rather than mixed pruning itself, produced the hard-arm result.
 
 The local ignored evidence files and their SHA-256 hashes are:
 
@@ -44,31 +66,41 @@ The local ignored evidence files and their SHA-256 hashes are:
   `58dbfad2f262a99b0fe6c5351920bf62b0849b5ff5b9d01462eaa0301a5e2ec6`
 - `yf/var/experiments/m8-factored-profiles/regime_shift-fast2.json` —
   `2a46d8befa493755be4604115cd9ab12dd2be2f9bf0277e249f2ffb544a85330`
+- `yf/var/experiments/m8-factored-profiles/regime_shift-mixed1.json` —
+  `11ede147c96dc5cbaf8a9374ec978a22f33739a0038a88066d84adf18b81b189`
+- `yf/var/experiments/m8-factored-profiles/no_signal-counted-audited1.json` —
+  `60442e21b38f75a70fa9d2972b9f1ff23bc2916c62c5d10d2065ea2fa1a1a8a1`
+- `yf/var/experiments/m8-factored-profiles/regime_shift-counted-audited1.json` —
+  `ef7b4b759f9a9b610e9d77b8a2fbeda1f9c517a82c91fd4e6a26c3dd4083e376`
+
+The compact committed decision record is
+`yf/experiments/results/m8-gate2-counted-no-fit-evidence-v1.json`. The earlier `counted1` profiles
+are intentionally excluded: review showed that they neither independently audited Jagua's counts
+nor charged child-process work to the gate metric.
 
 ## Semantic diagnosis
 
-The frontier solves complete no-fit events, but it cannot decide a survivor. In `regime_shift`, at
-least one candidate passes the necessary material/area/width/height inequalities for every common
-transition. Deciding whether that candidate really fits still requires the registered exact
-translation/collision search, and deciding the frozen policy winner still requires its exact action
-evidence. The expensive work is therefore not redundant candidate rejection in this arm; it is the
-survivor proof itself.
+The original retained frontier answered a stricter question: whether M7 would reject before
+translation generation. It could not classify the hard remnant because M7 still owed diagnostic
+translation counts. Per-candidate scalar certification answered the decision question instead:
+every hard-arm candidate was no-fit, so no collision query could change the action set. A tested
+convex-hull translation relaxation was also prepared, but the calibration diagnostic assigned zero
+hard-arm candidates to it because scalar proof already covered all 459.
 
-This is a coverage boundary of the current mathematics, not a collision-backend failure and not a
-semantic mismatch.
+A Python-only attempt to reconstruct the frozen counts remained too slow and was stopped after more
+than eight minutes without publishing an artifact. An initial Jagua-count path was fast but failed
+review because its counts were not independently certified. The corrected path reconstructs the
+source sequence independently and parallelizes only that audit. One isolated hard transition then
+measured `73.766205` wall-seconds, including a `31.730960`-second independent audit. The official
+profile measured the two generator/checker derivations together at `145.435589` seconds.
 
 ## Next bounded redesign
 
-Before adding the v2 fact schema, derive and test a survivor-specific policy-dominance bound. It
-must compare an optimistic lower bound for every possible remnant action against the exact compiled
-standard winner under the frozen policy. Only a complete bound may skip exact search. If the bound
-cannot classify the hard calibration cases, the next alternative is to retain exact survivor
-witnesses at their authoritative M7 production boundary and prove safe reuse, then remeasure the
-same two probes.
-
-Gate 2 remains unchanged: zero semantic mismatches, at least 10x common-path improvement on both
-representative probes, and a low enough authoritative fallback rate for the official 20x/seven-day
-gate to remain plausible.
+Gate 2 now permits the next bounded phase: define the v2 fact-DAG schema around the exact common
+transition and its content-bound counted-no-fit evidence, then prove generator/checker reuse without
+weakening independent checking. The fact DAG must be benchmarked on calibration before the official
+six-cell gate is rerun. The official gate still requires the registered witness coverage, `20x`
+sampled speedup, and seven-day projection; this Gate 2 pass does not waive any of them.
 
 This is calibration software evidence only. It is not an oracle-advantage, material-savings,
 physical-feasibility, production-readiness, buyer-demand, or commercial result.

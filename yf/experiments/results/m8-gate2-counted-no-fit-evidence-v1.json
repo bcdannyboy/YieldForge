@@ -1,0 +1,70 @@
+{
+  "decision": "pass",
+  "decision_date": "2026-08-26",
+  "evaluation_accessed": false,
+  "gate": {
+    "metric": "aggregate wall_ns of the two common_transition_derivation phases",
+    "minimum_speedup": 10.0,
+    "reason": "wall time includes Jagua and independent-audit child-process work"
+  },
+  "guards": {
+    "child_process_time_included": true,
+    "common_fact_differential_audited": true,
+    "jagua_collision_classification_used": false,
+    "jagua_translation_sequence_independently_audited": true,
+    "unsupported_representation_fails_closed": true
+  },
+  "official_m8_gate_passed": false,
+  "profiles": [
+    {
+      "action_count": 428,
+      "checker_failure_count": 0,
+      "common_fact_content_sha256": "sha256:23d22f88842a1061b41e8e89480b35e129434a06c27196d2a999e04f81361fc1",
+      "common_fact_event_id": "yfm7e-2ff89f7f69a73306989a32a8",
+      "common_fact_exact_match": true,
+      "frozen_common_wall_ns": 109597188250,
+      "frozen_profile_path": "yf/var/experiments/m8-factored-profiles/no_signal.json",
+      "frozen_profile_sha256": "79bfe2873c1da5a351cbb396d8e03a9e67bcc700fae06865bcff06de1a3400a0",
+      "full_authoritative_fallbacks": 0,
+      "new_common_wall_ns": 278630875,
+      "new_profile_path": "yf/var/experiments/m8-factored-profiles/no_signal-counted-audited1.json",
+      "new_profile_sha256": "60442e21b38f75a70fa9d2972b9f1ff23bc2916c62c5d10d2065ea2fa1a1a8a1",
+      "profile_total_wall_ns": 578871555375,
+      "reference_matches": true,
+      "regime": "no_signal",
+      "speedup": 393.341865829,
+      "temporal_seed": 2026082300,
+      "valid_check_count": 428
+    },
+    {
+      "action_count": 459,
+      "checker_failure_count": 0,
+      "common_fact_content_sha256": "sha256:3218dad349341ccae9ca2e7dbff185979db1f6254ac97944c14277b6711e5f3c",
+      "common_fact_event_id": "yfm7e-1a58703f2bd77abd71486a40",
+      "common_fact_exact_match": true,
+      "frozen_common_wall_ns": 1927855595583,
+      "frozen_profile_path": "yf/var/experiments/m8-factored-profiles/regime_shift.json",
+      "frozen_profile_sha256": "58dbfad2f262a99b0fe6c5351920bf62b0849b5ff5b9d01462eaa0301a5e2ec6",
+      "full_authoritative_fallbacks": 0,
+      "new_common_wall_ns": 145435589292,
+      "new_profile_path": "yf/var/experiments/m8-factored-profiles/regime_shift-counted-audited1.json",
+      "new_profile_sha256": "ef7b4b759f9a9b610e9d77b8a2fbeda1f9c517a82c91fd4e6a26c3dd4083e376",
+      "profile_counted_no_fit_candidate_searches": 1377,
+      "profile_counted_no_fit_transitions": 3,
+      "profile_total_wall_ns": 2503636961667,
+      "reference_matches": true,
+      "regime": "regime_shift",
+      "speedup": 13.255734755,
+      "temporal_seed": 2026082300,
+      "valid_check_count": 459
+    }
+  ],
+  "schema_version": "yieldforge.m8-gate2-counted-no-fit-evidence.v1",
+  "scope": "two-event calibration Gate 2 only",
+  "unresolved_official_requirements": [
+    "six-cell calibration run",
+    "20x sampled speedup",
+    "seven-day projection",
+    "registered witness coverage"
+  ]
+}

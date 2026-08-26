@@ -6,18 +6,17 @@
 
 ## Current objective
 
-Redesign the M8 certificate gate against the immutable M7 baseline freeze after the completed first
-go/no-go proved semantic correctness but failed the coverage and runtime gates. Preserve complete
-action parity, baseline information masking, exact accounting, independent proof checking, and the
-sealed evaluation boundary.
+Design the M8 v2 fact DAG against the immutable M7 baseline freeze now that the bounded
+common-transition Gate 2 passes on both representative calibration arms. Preserve complete action
+parity, baseline information masking, exact accounting, independent proof checking, and the sealed
+evaluation boundary.
 
 ## Next step
 
-Prove or reject a survivor-specific policy-dominance bound on the frozen calibration cases. The
-bound must classify every possible remnant action against the exact compiled standard winner without
-placement search, or fail closed. Re-run the unchanged `no_signal` and `regime_shift` Gate 2 probes;
-do not build the fact-DAG schema until both exceed 10x with zero mismatch and an acceptably low
-authoritative fallback rate. Keep evaluation sealed.
+Specify and implement the smallest content-addressed fact DAG that reuses exact common-transition
+evidence between generator and checker without sharing mutable authority. Differentially validate
+its portable facts against the frozen M7 transition, then remeasure calibration before rerunning the
+official six-cell `20x`/seven-day gate. Keep evaluation sealed.
 
 ## Evidence bridge completed
 
@@ -107,6 +106,19 @@ authoritative fallback rate. Keep evaluation sealed.
   fell back 2/2 times, and remained effectively unchanged at `1.002453x`; 459/459 proofs stayed valid
   and reference-equal. Gate 2 is a no-go, so the fact DAG remains paused. See
   [[M8 Gate 2 Fast Common Transition]].
+- Exact mixed inventory pruning was implemented and verified, but the unchanged `regime_shift`
+  probe classified zero hard-arm remnants and still fell back 2/2 times. A collision-free diagnostic
+  then proved all 459 hard-arm candidate searches scalar impossible; the missing work was exact M7
+  translation-count bookkeeping, not collision classification.
+- Counted-no-fit synthesis now uses the scalar certificate as no-fit authority and the frozen Jagua
+  binary only to enumerate registered translations. A separate source-sequence audit certifies all
+  Jagua counts, wall timing charges its child workers, and an authoritative differential matches the
+  exact event identity. The final unchanged Gate 2 probes validated 428/428 `no_signal` and 459/459
+  `regime_shift` proofs, matched both independent references and exact common facts, used zero
+  authoritative fallbacks, and kept evaluation sealed. Common-transition wall time improved
+  `393.341866x` and `13.255735x`, respectively. Gate 2 passes; the v2 fact DAG may now proceed,
+  while the official M8 `20x`/seven-day and witness-coverage gates remain unresolved. See [[M8 Gate
+  2 Fast Common Transition]].
 
 ## Experiment status
 

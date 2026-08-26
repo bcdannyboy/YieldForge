@@ -441,6 +441,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "numpy" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "shapely" },
@@ -463,6 +464,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = "==0.116.1" },
+    { name = "numpy", specifier = "==2.5.2" },
     { name = "psycopg", extras = ["binary"], specifier = "==3.2.10" },
     { name = "pydantic", specifier = "==2.12.5" },
     { name = "shapely", specifier = "==2.1.2" },

@@ -11,7 +11,17 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 
 from yieldforge.baseline.contracts import LayoutFitSearchResult, LayoutFitSearchStatus
-from yieldforge.baseline.geometry import prepare_translation_rejection_remnant
+from yieldforge.baseline.geometry import (
+    certify_translation_impossible,
+    generate_layout_translations,
+    prepare_layout_footprint,
+    prepare_remnant_geometry,
+    prepare_translation_rejection_remnant,
+)
+from yieldforge.baseline.jagua import (
+    JaguaRepresentationError,
+    run_jagua_generated_prefilter,
+)
 from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_policy_action
 from yieldforge.baseline.replay import (
     M7ActionDescriptor,
@@ -26,6 +36,7 @@ from yieldforge.baseline.replay import (
     apply_m7_action_descriptor,
     apply_m7_frozen_action_evidence_with_commitments,
     enumerate_m7_action_catalog,
+    enumerate_m7_pruned_action_catalog,
     enumerate_m7_single_remnant_competitor,
     enumerate_m7_standard_only_catalog,
     m7_cursor_sha256,
@@ -49,6 +60,7 @@ from yieldforge.oracle.compiled import (
 from yieldforge.oracle.frontier import certify_frontier_impossible
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
+from yieldforge.oracle.translation_count_audit import audit_layout_translation_batch
 from yieldforge.replay.contracts import InventoryItem
 from yieldforge.reuse.geometry import material_key
 
@@ -178,10 +190,12 @@ class FastCommonRejectionWitness:
 
 @dataclass(frozen=True)
 class FastCommonTransitionResult:
-    """Exact common fact plus the scalar witnesses that enabled its fast path."""
+    """Exact common fact plus scalar rejects and exact-search survivors."""
 
     fact: M8CommonTransitionFact
     zero_generation_rejected_inventory: tuple[InventoryItem, ...]
+    counted_no_fit_inventory: tuple[InventoryItem, ...]
+    exact_survivor_inventory: tuple[InventoryItem, ...]
     witnesses: tuple[FastCommonRejectionWitness, ...]
 
     def __post_init__(self) -> None:
@@ -191,6 +205,18 @@ class FastCommonTransitionResult:
             item.remnant.remnant_id for item in self.zero_generation_rejected_inventory
         ) != tuple(item.remnant_id for item in self.witnesses):
             raise ValueError("M8 fast common witnesses differ from inventory order")
+        rejected_ids = {
+            item.remnant.remnant_id for item in self.zero_generation_rejected_inventory
+        }
+        counted_ids = {
+            item.remnant.remnant_id for item in self.counted_no_fit_inventory
+        }
+        survivor_ids = {item.remnant.remnant_id for item in self.exact_survivor_inventory}
+        if rejected_ids & counted_ids or rejected_ids & survivor_ids or counted_ids & survivor_ids:
+            raise ValueError("M8 fast common inventory classifications overlap")
+        cursor_ids = {item.remnant.remnant_id for item in self.fact.cursor_before.inventory}
+        if rejected_ids | counted_ids | survivor_ids != cursor_ids:
+            raise ValueError("M8 fast common classification does not cover inventory")
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -481,6 +507,157 @@ def _is_zero_generation_no_fit(search: LayoutFitSearchResult) -> bool:
     )
 
 
+def _zero_generation_searches(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+) -> tuple[LayoutFitSearchResult, ...]:
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    return tuple(
+        LayoutFitSearchResult(
+            status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
+            candidate_id=candidate.candidate_id,
+            remnant_id=item.remnant.remnant_id,
+            config=runtime.replay_input.search_config,
+            generated_candidate_count=0,
+            duplicate_candidate_count=0,
+            evaluated_candidate_count=0,
+            budget_truncated=False,
+            translation=None,
+        )
+        for candidate in verified.candidates
+    )
+
+
+def _synthesize_scalar_no_fit_searches(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+) -> tuple[LayoutFitSearchResult, ...] | None:
+    """Generate exact search counts when scalar geometry already proves no fit."""
+
+    binding = runtime.replay_input.instances[event_position]
+    if material_key(item.remnant.material) != material_key(binding.material):
+        return ()
+    problem = next(
+        problem
+        for problem in runtime.replay_input.problems
+        if problem.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    prepared_remnant = prepare_remnant_geometry(item.remnant)
+    layouts = tuple(
+        prepare_layout_footprint(
+            problem.problem,
+            candidate,
+            runtime.replay_input.fit_config,
+        )
+        for candidate in verified.candidates
+    )
+    certificates = tuple(
+        certify_translation_impossible(
+            layout,
+            item.remnant,
+            material=binding.material,
+            fit_config=runtime.replay_input.fit_config,
+        )
+        for layout in layouts
+    )
+    if any(not certificate.impossible for certificate in certificates):
+        return None
+    rust_generated = runtime.jagua_executable is not None and not any(
+        polygon.interiors for layout in layouts for polygon in layout.part_polygons
+    )
+    if rust_generated:
+        try:
+            generated = run_jagua_generated_prefilter(
+                runtime.jagua_executable,
+                remnant=prepared_remnant,
+                layouts=layouts,
+                fit_config=runtime.replay_input.fit_config,
+                search_config=runtime.replay_input.search_config,
+                container_guard=runtime.replay_input.jagua_container_guard or 1.0,
+            )
+        except JaguaRepresentationError:
+            rust_generated = False
+        else:
+            translations = generated.translation_batches
+            with profile_phase("translation_count_audit"):
+                audited_counts = audit_layout_translation_batch(
+                    remnant=prepared_remnant,
+                    layouts=layouts,
+                    expected=translations,
+                    fit_config=runtime.replay_input.fit_config,
+                    search_config=runtime.replay_input.search_config,
+                )
+            for batch, audited in zip(translations, audited_counts, strict=True):
+                if (
+                    batch.generated_candidate_count
+                    != audited.generated_candidate_count
+                    or batch.duplicate_candidate_count
+                    != audited.duplicate_candidate_count
+                    or len(batch.translations) != audited.evaluated_candidate_count
+                    or batch.budget_truncated != audited.budget_truncated
+                ):
+                    raise ValueError(
+                        "M8 Jagua translation counts differ from independent audit"
+                    )
+    if not rust_generated:
+        translations = tuple(
+            generate_layout_translations(
+                item.remnant,
+                candidate,
+                fit_config=runtime.replay_input.fit_config,
+                search_config=runtime.replay_input.search_config,
+                prepared_layout=layout,
+                prepared_remnant=prepared_remnant,
+            )
+            for candidate, layout in zip(verified.candidates, layouts, strict=True)
+        )
+    return tuple(
+        LayoutFitSearchResult(
+            status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
+            candidate_id=candidate.candidate_id,
+            remnant_id=item.remnant.remnant_id,
+            config=runtime.replay_input.search_config,
+            generated_candidate_count=batch.generated_candidate_count,
+            duplicate_candidate_count=batch.duplicate_candidate_count,
+            evaluated_candidate_count=len(batch.translations),
+            budget_truncated=batch.budget_truncated,
+            translation=None,
+        )
+        for candidate, batch in zip(verified.candidates, translations, strict=True)
+    )
+
+
+def _seed_fit_searches(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    item: InventoryItem,
+    searches: tuple[LayoutFitSearchResult, ...],
+) -> None:
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    _require_search_bindings(
+        runtime,
+        event_position=event_position,
+        item=item,
+        searches=searches,
+        require_remnant_id=True,
+    )
+    runtime.fit_search_cache[
+        (
+            item.remnant.remnant_id,
+            binding.problem_id,
+            verified.evidence.candidate_set_id,
+        )
+    ] = searches
+
+
 def _require_zero_generation_search_caches(
     runtime: M7ReplayRuntime,
     *,
@@ -547,7 +724,7 @@ def _try_derive_m8_common_transition_fact_fast(
     semantic_runtime_sha256: str,
     prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
 ) -> FastCommonTransitionResult | None:
-    """Use scalar proofs only when they preserve exact zero-search semantics."""
+    """Prune scalar rejects while preserving exact search for every survivor."""
 
     event_position = cursor.next_event_position
     compiled_standard = (
@@ -577,6 +754,10 @@ def _try_derive_m8_common_transition_fact_fast(
                 runtime,
                 event_position=event_position,
             )
+    rejected = []
+    counted_no_fit = []
+    counted_searches: dict[str, tuple[LayoutFitSearchResult, ...]] = {}
+    survivors = []
     witnesses = []
     with profile_phase("frontier_rejection"):
         for item in cursor.inventory:
@@ -590,26 +771,99 @@ def _try_derive_m8_common_transition_fact_fast(
                 prepared_layouts=prepared_layouts,
             )
             if witness is None:
-                return None
-            witnesses.append(witness)
+                with profile_phase("translation_count_synthesis"):
+                    searches = _synthesize_scalar_no_fit_searches(
+                        runtime,
+                        event_position=event_position,
+                        item=item,
+                    )
+                if searches is None:
+                    survivors.append(item)
+                else:
+                    counted_no_fit.append(item)
+                    counted_searches[item.remnant.remnant_id] = searches
+            else:
+                rejected.append(item)
+                witnesses.append(witness)
+    if survivors and not rejected and not counted_no_fit:
+        increment_profile_count("exact_survivor_inventory_items", len(survivors))
+        return None
     _require_zero_generation_search_caches(
         runtime,
         event_position=event_position,
-        inventory=cursor.inventory,
+        inventory=tuple(rejected),
     )
     execution_runtime = _fresh_runtime(runtime)
-    with profile_phase("standard_only_materialization"):
-        catalog = enumerate_m7_standard_only_catalog(
-            execution_runtime,
-            cursor=cursor,
-            zero_generation_rejected_inventory=cursor.inventory,
-            precomputed_standard_profiles=(
-                None
-                if compiled_standard is None
-                else compiled_standard.standard_profiles
-            ),
+    standard_profiles = (
+        None if compiled_standard is None else compiled_standard.standard_profiles
+    )
+    if counted_no_fit:
+        binding = execution_runtime.replay_input.instances[event_position]
+        verified = execution_runtime.runtime_candidates[binding.problem_id]
+        if standard_profiles is not None:
+            if tuple(item.candidate_id for item in standard_profiles) != tuple(
+                item.candidate_id for item in verified.candidates
+            ):
+                raise ValueError("M8 prepared standard profiles differ from candidates")
+            for profile in standard_profiles:
+                execution_runtime.standard_profile_cache[
+                    (binding.problem_id, profile.candidate_id)
+                ] = profile
+        for item in rejected:
+            if material_key(item.remnant.material) == material_key(binding.material):
+                _seed_fit_searches(
+                    execution_runtime,
+                    event_position=event_position,
+                    item=item,
+                    searches=_zero_generation_searches(
+                        execution_runtime,
+                        event_position=event_position,
+                        item=item,
+                    ),
+                )
+        for item in counted_no_fit:
+            _seed_fit_searches(
+                execution_runtime,
+                event_position=event_position,
+                item=item,
+                searches=counted_searches[item.remnant.remnant_id],
+            )
+        with profile_phase("counted_no_fit_materialization"):
+            catalog = enumerate_m7_action_catalog(
+                execution_runtime,
+                cursor=cursor,
+                complete=False,
+            )
+        _require_common_search_caches_match_authoritative(
+            runtime,
+            authoritative_runtime=execution_runtime,
+            event_position=event_position,
+            inventory=cursor.inventory,
         )
-    if compiled_standard is not None:
+    else:
+        with profile_phase("standard_only_materialization"):
+            if survivors:
+                catalog = enumerate_m7_pruned_action_catalog(
+                    execution_runtime,
+                    cursor=cursor,
+                    zero_generation_rejected_inventory=tuple(rejected),
+                    precomputed_standard_profiles=standard_profiles,
+                )
+            else:
+                catalog = enumerate_m7_standard_only_catalog(
+                    execution_runtime,
+                    cursor=cursor,
+                    zero_generation_rejected_inventory=tuple(rejected),
+                    precomputed_standard_profiles=standard_profiles,
+                )
+        if survivors:
+            _require_common_search_caches_match_authoritative(
+                runtime,
+                authoritative_runtime=execution_runtime,
+                event_position=event_position,
+                inventory=tuple(survivors),
+            )
+    if compiled_standard is not None and not survivors:
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
         descriptor = next(
             item for item in catalog.actions if item.action_id == selection.action_id
@@ -629,7 +883,9 @@ def _try_derive_m8_common_transition_fact_fast(
     )
     return FastCommonTransitionResult(
         fact=fact,
-        zero_generation_rejected_inventory=cursor.inventory,
+        zero_generation_rejected_inventory=tuple(rejected),
+        counted_no_fit_inventory=tuple(counted_no_fit),
+        exact_survivor_inventory=tuple(survivors),
         witnesses=tuple(witnesses),
     )
 
@@ -655,8 +911,31 @@ def _derive_m8_common_transition_fact_unprofiled(
             cursor=cursor,
             semantic_runtime_sha256=semantic_runtime_sha256,
         )
-    increment_profile_count("frontier_rejected_transitions")
-    increment_profile_count("standard_only_materializations")
+    increment_profile_count(
+        "frontier_rejected_inventory_items",
+        len(fast.zero_generation_rejected_inventory),
+    )
+    increment_profile_count(
+        "exact_survivor_inventory_items",
+        len(fast.exact_survivor_inventory),
+    )
+    increment_profile_count(
+        "counted_no_fit_inventory_items",
+        len(fast.counted_no_fit_inventory),
+    )
+    if fast.counted_no_fit_inventory:
+        binding = runtime.replay_input.instances[cursor.next_event_position]
+        candidate_count = len(runtime.runtime_candidates[binding.problem_id].candidates)
+        increment_profile_count("counted_no_fit_transitions")
+        increment_profile_count(
+            "counted_no_fit_candidate_searches",
+            len(fast.counted_no_fit_inventory) * candidate_count,
+        )
+    if fast.exact_survivor_inventory:
+        increment_profile_count("partially_pruned_transitions")
+    elif not fast.counted_no_fit_inventory:
+        increment_profile_count("frontier_rejected_transitions")
+        increment_profile_count("standard_only_materializations")
     if differential:
         authoritative = _derive_m8_common_transition_fact_authoritative(
             runtime,

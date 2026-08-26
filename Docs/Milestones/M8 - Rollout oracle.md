@@ -173,3 +173,30 @@ Gate 2 is therefore a no-go and the fact-DAG schema remains paused. The next alg
 a complete survivor policy-dominance bound, followed by authoritative survivor-witness retention
 only if the bound cannot cover the hard calibration case. See [[M8 Gate 2 Fast Common Transition]].
 Evaluation remains sealed and no M8 advantage or savings result exists.
+
+## Counted-no-fit Gate 2 pass — 2026-08-26
+
+Exact mixed-inventory pruning was implemented first and preserved the frozen M7 transition, but it
+classified zero hard-arm remnants and left `regime_shift` at 2/2 authoritative fallbacks. A
+calibration-only diagnostic then established that all 459 candidate searches were independently
+scalar impossible. The frontier's apparent survivors existed because exact M7 event identity still
+required generated, duplicate, evaluated, and truncation counts—not because collision remained
+undecided.
+
+The final counted-no-fit path uses the scalar certificate as no-fit authority and the content-bound
+frozen Jagua binary only to enumerate the registered translation batches. Jagua collision masks are
+ignored. An independent source-sequence reconstruction certifies every generated, duplicate,
+evaluated, and truncation count before exact no-witness search records are seeded into a fresh
+runtime. Any incomplete proof or unsupported representation fails closed.
+
+The unchanged two-event calibration probes now both pass Gate 2. `no_signal` validated 428/428
+proofs and improved aggregate common-transition wall time from `109.597188` to `0.278631` seconds
+(`393.341866x`). `regime_shift` validated 459/459 proofs and improved from `1927.855596` to
+`145.435589` seconds (`13.255735x`). Both authoritative common facts and independent references
+matched, checker failures and authoritative fallbacks were zero, child-process work was charged,
+and evaluation remained unopened.
+
+This pass permits bounded v2 fact-DAG implementation and calibration benchmarking. It does not pass
+the official M8 gate: the registered `20x` sampled-speedup, seven-day projection, and missing
+`exact_transition`/`policy_dominated` witness coverage still require a fresh six-cell run. No M8
+advantage or savings result exists.

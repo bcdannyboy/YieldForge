@@ -49,7 +49,9 @@ from yieldforge.oracle.proofs import M8ActionProof, M8EventClassification
 from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
 from yieldforge.oracle.sparse import (
     M8CertificateActionResult,
+    M8CommonFactDifferentialAudit,
     M8SparseResult,
+    audit_m8_common_transition_exactness,
     score_certificate_actions,
     score_sparse_event,
 )
@@ -1930,6 +1932,7 @@ def _profile_result_payload(
     checks: tuple[M8ProofCheckResult, ...],
     reference_action_id: str,
     reference_matches: bool,
+    common_fact_audit: M8CommonFactDifferentialAudit,
     profile: M8ProfileReport,
 ) -> dict[str, object]:
     semantic_hashes = {proof.semantic_runtime_sha256 for proof in sparse.proofs}
@@ -1948,6 +1951,10 @@ def _profile_result_payload(
         "checker_failure_count": sum(not check.valid for check in checks),
         "reference_action_id": reference_action_id,
         "reference_matches": reference_matches,
+        "common_fact_exact_match": True,
+        "common_fact_event_position": common_fact_audit.event_position,
+        "common_fact_event_id": common_fact_audit.event_id,
+        "common_fact_content_sha256": common_fact_audit.content_sha256,
         "profile": profile.model_dump(),
     }
 
@@ -2056,6 +2063,7 @@ def execute_certificate_profile(
         )
         sparse = score_sparse_event(request)
         checks = check_action_proofs(request, sparse.proofs)
+        common_fact_audit = audit_m8_common_transition_exactness(request)
         reference_action_id = sparse.decision.scores[0].action_id
         with profile_phase("reference_audit"):
             reference = score_reference_action(
@@ -2081,6 +2089,7 @@ def execute_certificate_profile(
         checks=checks,
         reference_action_id=reference_action_id,
         reference_matches=reference_matches,
+        common_fact_audit=common_fact_audit,
         profile=report,
     )
 

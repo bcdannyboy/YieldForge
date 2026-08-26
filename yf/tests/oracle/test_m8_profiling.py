@@ -58,6 +58,12 @@ def test_profile_counts_use_the_frozen_exact_counter_set() -> None:
         increment_profile_count("standard_only_materializations", 19)
         increment_profile_count("full_authoritative_fallbacks", 23)
         increment_profile_count("differential_mismatches", 29)
+        increment_profile_count("partially_pruned_transitions", 31)
+        increment_profile_count("frontier_rejected_inventory_items", 37)
+        increment_profile_count("exact_survivor_inventory_items", 41)
+        increment_profile_count("counted_no_fit_transitions", 43)
+        increment_profile_count("counted_no_fit_inventory_items", 47)
+        increment_profile_count("counted_no_fit_candidate_searches", 53)
 
     assert profiler.report().counts == {
         "events": 2,
@@ -70,6 +76,12 @@ def test_profile_counts_use_the_frozen_exact_counter_set() -> None:
         "standard_only_materializations": 19,
         "full_authoritative_fallbacks": 23,
         "differential_mismatches": 29,
+        "partially_pruned_transitions": 31,
+        "frontier_rejected_inventory_items": 37,
+        "exact_survivor_inventory_items": 41,
+        "counted_no_fit_transitions": 43,
+        "counted_no_fit_inventory_items": 47,
+        "counted_no_fit_candidate_searches": 53,
     }
 
 
@@ -116,9 +128,15 @@ def test_normalized_profile_json_is_independent_of_durations(monkeypatch) -> Non
             "standard_only_materializations": 0,
             "full_authoritative_fallbacks": 0,
             "differential_mismatches": 0,
+            "partially_pruned_transitions": 0,
+            "frontier_rejected_inventory_items": 0,
+            "exact_survivor_inventory_items": 0,
+            "counted_no_fit_transitions": 0,
+            "counted_no_fit_inventory_items": 0,
+            "counted_no_fit_candidate_searches": 0,
         },
         "phase_tree": [{"children": [], "name": "pipeline"}],
-        "schema_version": "yieldforge.m8-phase-profile.v1",
+        "schema_version": "yieldforge.m8-phase-profile.v2",
     }
 
 
@@ -208,6 +226,33 @@ def test_checker_emits_load_and_algebra_profile_phases() -> None:
 
     assert all(result.valid for result in results)
     assert {"checker_load", "checker_algebra"} <= _phase_names(
+        profiler.report().phases
+    )
+
+
+def test_common_fact_differential_audit_records_exact_portable_identity() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.profiling import activate_m8_profile
+    from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.sparse import audit_m8_common_transition_exactness
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+
+    with activate_m8_profile() as profiler:
+        audit = audit_m8_common_transition_exactness(request)
+
+    assert audit.event_position == 1
+    assert audit.event_id.startswith("yfm7e-")
+    assert audit.content_sha256.startswith("sha256:")
+    assert profiler.report().counts["differential_mismatches"] == 0
+    assert "common_fact_differential_audit" in _phase_names(
         profiler.report().phases
     )
 

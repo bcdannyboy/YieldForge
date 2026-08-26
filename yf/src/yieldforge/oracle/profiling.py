@@ -23,6 +23,12 @@ M8ProfileCounter = Literal[
     "standard_only_materializations",
     "full_authoritative_fallbacks",
     "differential_mismatches",
+    "partially_pruned_transitions",
+    "frontier_rejected_inventory_items",
+    "exact_survivor_inventory_items",
+    "counted_no_fit_transitions",
+    "counted_no_fit_inventory_items",
+    "counted_no_fit_candidate_searches",
 ]
 
 _COUNTER_NAMES: tuple[M8ProfileCounter, ...] = (
@@ -36,6 +42,12 @@ _COUNTER_NAMES: tuple[M8ProfileCounter, ...] = (
     "standard_only_materializations",
     "full_authoritative_fallbacks",
     "differential_mismatches",
+    "partially_pruned_transitions",
+    "frontier_rejected_inventory_items",
+    "exact_survivor_inventory_items",
+    "counted_no_fit_transitions",
+    "counted_no_fit_inventory_items",
+    "counted_no_fit_candidate_searches",
 )
 _PHASE_NAME = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
@@ -78,7 +90,7 @@ class M8ProfileReport:
     total_wall_ns: int
     phases: tuple[M8ProfilePhase, ...]
     _counts: tuple[tuple[M8ProfileCounter, int], ...]
-    schema_version: str = "yieldforge.m8-phase-profile.v1"
+    schema_version: str = "yieldforge.m8-phase-profile.v2"
 
     def __post_init__(self) -> None:
         if self.total_process_ns < 0 or self.total_wall_ns < 0:

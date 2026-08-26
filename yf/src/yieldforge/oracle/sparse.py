@@ -24,6 +24,7 @@ from yieldforge.baseline.replay import (
     select_m7_fallback,
 )
 from yieldforge.oracle.certificates import (
+    _derive_m8_common_transition_fact_unprofiled,
     _release_validated_common_transition,
     _validated_common_transition_fact,
     build_validated_m8_common_transition_in_context,
@@ -60,6 +61,15 @@ class M8SparseResult:
     decision: M8OracleDecision
     proofs: tuple[M8ActionProof, ...]
     metrics: M8SparseMetrics
+
+
+@dataclass(frozen=True)
+class M8CommonFactDifferentialAudit:
+    """Exact portable identity established against authoritative frozen M7 replay."""
+
+    event_position: int
+    event_id: str
+    content_sha256: str
 
 
 @dataclass(frozen=True)
@@ -431,6 +441,30 @@ def score_certificate_actions(
     with profile_phase("certificate_generation"):
         with _prepare_m8_generator_context(request) as context:
             return _score_prepared_certificate_actions(context, action_ids=action_ids)
+
+
+def audit_m8_common_transition_exactness(
+    request: M8OracleRequest,
+) -> M8CommonFactDifferentialAudit:
+    """Compare one fast common fact with fresh authoritative M7 replay."""
+
+    with _prepare_m8_generator_context(request) as context:
+        cursor = context._fallback_step.cursor  # noqa: SLF001
+        if cursor.next_event_position >= context._stop_event_position:  # noqa: SLF001
+            raise ValueError("M8 common-fact audit requires one visible future event")
+        with profile_phase("common_fact_differential_audit"):
+            fact = _derive_m8_common_transition_fact_unprofiled(
+                context._request.runtime,  # noqa: SLF001
+                cursor=cursor,
+                semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
+                prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+                differential=True,
+            )
+    return M8CommonFactDifferentialAudit(
+        event_position=fact.event_position,
+        event_id=fact.event_id,
+        content_sha256=fact.content_sha256,
+    )
 
 
 def _score_sparse_event_unprofiled(request: M8OracleRequest) -> M8SparseResult:
