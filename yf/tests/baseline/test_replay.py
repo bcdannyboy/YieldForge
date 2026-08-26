@@ -9,13 +9,17 @@ from pathlib import Path
 import pytest
 
 import yieldforge.baseline.replay as replay_module
-from yieldforge.baseline.archives import VerifiedProblemCandidates
+from yieldforge.baseline.archives import (
+    VerifiedProblemCandidates,
+    build_verified_candidate_rejection_layout,
+)
 from yieldforge.baseline.contracts import (
     M7CandidateArchiveEvidence,
     M7CandidateSetEvidence,
     ReusableGeometryProblem,
     TemporalInstanceBinding,
 )
+from yieldforge.baseline.geometry import prepare_layout_footprint
 from yieldforge.baseline.jagua import JaguaRepresentationError
 from yieldforge.baseline.policies import M7PolicyName, policy_identity
 from yieldforge.baseline.replay import (
@@ -157,7 +161,26 @@ def _verified(
         distinct_candidate_count=len(candidates),
         candidate_ids=candidate_ids,
     )
-    return VerifiedProblemCandidates(evidence=evidence, candidates=candidates)
+    fit_config = RemnantFitConfig()
+    rejection_layouts = tuple(
+        build_verified_candidate_rejection_layout(
+            problem=problem,
+            evidence=evidence,
+            candidate=candidate,
+            prepared=prepare_layout_footprint(
+                problem.problem,
+                candidate,
+                fit_config,
+            ),
+            fit_config=fit_config,
+        )
+        for candidate in candidates
+    )
+    return VerifiedProblemCandidates(
+        evidence=evidence,
+        candidates=candidates,
+        rejection_layouts=rejection_layouts,
+    )
 
 
 def _binding(

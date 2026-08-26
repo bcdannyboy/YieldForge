@@ -6,7 +6,7 @@ import os
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from yieldforge.baseline.geometry import (
     PreparedTranslationRejectionLayout,
@@ -25,7 +25,8 @@ from yieldforge.baseline.replay import (
     select_m7_fallback,
 )
 from yieldforge.experiments.contracts import semantic_sha256
-from yieldforge.oracle.profiling import profile_phase
+from yieldforge.oracle.frontier import ParetoFrontier, RejectionScalar, build_pareto_frontier
+from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.replay.contracts import InventoryItem, ReplayCostLedger
 from yieldforge.reuse.contracts import RemnantStock
 from yieldforge.reuse.geometry import material_key
@@ -50,6 +51,17 @@ class CompiledTranslationRejection:
     certificate: TranslationRejectionCertificate
 
 
+@dataclass(frozen=True)
+class CompiledRejectionProblem:
+    """One verified problem bound to its complete minimal rejection frontier."""
+
+    problem_id: str
+    problem_sha256: str
+    candidate_set_id: str
+    candidate_set_sha256: str
+    frontier: ParetoFrontier
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class _PreparedTranslationLayoutBatch:
     """Process-local capability for one registry-owned proof batch."""
@@ -65,6 +77,9 @@ class _PreparedTranslationLayoutBatch:
 
 _PreparedTranslationLayouts = tuple[
     tuple[tuple[str, str], tuple[PreparedTranslationRejectionLayout, ...]], ...
+]
+_CompiledRejectionProblems = tuple[
+    tuple[tuple[str, str], CompiledRejectionProblem], ...
 ]
 
 
@@ -97,6 +112,7 @@ class _PreparedTranslationLayoutRecord:
     owner_pid: int
     runtime_id: int
     layouts: _PreparedTranslationLayouts
+    rejection_problems: _CompiledRejectionProblems
     remnant_measurements: dict[
         _PreparedRemnantSemanticKey,
         PreparedTranslationRejectionRemnant,
@@ -115,6 +131,7 @@ _PREPARED_TRANSLATION_LAYOUT_REGISTRY: dict[
 def _prepared_translation_layout_fingerprint(
     prepared: _PreparedTranslationLayoutBatch,
     layouts: _PreparedTranslationLayouts,
+    rejection_problems: _CompiledRejectionProblems,
 ) -> str:
     payload = {
         "schema_version": "yieldforge.m8-prepared-translation-layout-batch.v1",
@@ -134,6 +151,13 @@ def _prepared_translation_layout_fingerprint(
                 ),
             }
             for key, candidate_layouts in layouts
+        ),
+        "rejection_problems": tuple(
+            {
+                "key": key,
+                "compiled": asdict(compiled),
+            }
+            for key, compiled in rejection_problems
         ),
     }
     return f"sha256:{semantic_sha256(payload)}"
@@ -230,6 +254,7 @@ def _require_prepared_translation_layout_record(
         if registered.layout_fingerprint != _prepared_translation_layout_fingerprint(
             prepared,
             registered.layouts,
+            registered.rejection_problems,
         ):
             raise ValueError("M8 prepared translation layout batch integrity differs")
         _validate_prepared_remnant_measurements(registered, deep=True)
@@ -243,6 +268,25 @@ def _registered_prepared_translation_layout_record(
     """Return only canonical registry-owned state for an active capability."""
 
     return _require_prepared_translation_layout_record(prepared, runtime)
+
+
+def _prepared_rejection_problem(
+    prepared: _PreparedTranslationLayoutBatch,
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+) -> CompiledRejectionProblem:
+    """Return one registry-owned frontier compiled once for the prepared batch."""
+
+    registered = _require_prepared_translation_layout_record(prepared, runtime)
+    key, _binding, _problem, _verified = _prepared_key_and_inputs(
+        runtime,
+        event_position=event_position,
+    )
+    try:
+        return dict(registered.rejection_problems)[key]
+    except KeyError as error:
+        raise ValueError("M8 prepared rejection problem is absent from the batch") from error
 
 
 def _prepared_remnant_semantic_key(
@@ -340,6 +384,7 @@ def _prepare_translation_layout_batch(
         tuple[str, str],
         tuple[PreparedTranslationRejectionLayout, ...],
     ] = {}
+    rejection_by_key: dict[tuple[str, str], CompiledRejectionProblem] = {}
     with profile_phase("standard_layout_materialization"):
         for event_position in event_positions:
             key, _binding, problem, verified = _prepared_key_and_inputs(
@@ -347,6 +392,10 @@ def _prepare_translation_layout_batch(
                 event_position=event_position,
             )
             if key not in layouts_by_key:
+                rejection_by_key[key] = compile_rejection_problem(
+                    runtime,
+                    event_position=event_position,
+                )
                 layouts_by_key[key] = tuple(
                     prepare_translation_rejection_layout(
                         prepare_layout_footprint(
@@ -358,6 +407,7 @@ def _prepare_translation_layout_batch(
                     for candidate in verified.candidates
                 )
     layouts = tuple(sorted(layouts_by_key.items()))
+    rejection_problems = tuple(sorted(rejection_by_key.items()))
     prepared = _PreparedTranslationLayoutBatch(_runtime_id=id(runtime))
     key = id(prepared)
 
@@ -372,10 +422,15 @@ def _prepare_translation_layout_batch(
         owner_pid=os.getpid(),
         runtime_id=id(runtime),
         layouts=layouts,
+        rejection_problems=rejection_problems,
         remnant_measurements={},
         remnant_commitments={},
         remnant_snapshots={},
-        layout_fingerprint=_prepared_translation_layout_fingerprint(prepared, layouts),
+        layout_fingerprint=_prepared_translation_layout_fingerprint(
+            prepared,
+            layouts,
+            rejection_problems,
+        ),
     )
     try:
         yield prepared
@@ -522,6 +577,51 @@ def compile_translation_rejections(
     )
 
 
+def compile_rejection_problem(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+) -> CompiledRejectionProblem:
+    """Compile retained verified scalars once for one future problem occurrence."""
+
+    if event_position < 0 or event_position >= len(runtime.replay_input.instances):
+        raise ValueError("M8 rejection event position is outside the stream")
+    binding = runtime.replay_input.instances[event_position]
+    problem = next(
+        item
+        for item in runtime.replay_input.problems
+        if item.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    candidate_ids = tuple(item.candidate_id for item in verified.candidates)
+    retained_ids = tuple(item.candidate_id for item in verified.rejection_layouts)
+    if not verified.rejection_layouts or retained_ids != candidate_ids:
+        raise ValueError("M8 retained rejection layouts do not cover verified candidates")
+    for retained in verified.rejection_layouts:
+        if (
+            retained.problem_id != problem.problem_id
+            or retained.problem_sha256 != problem.content_sha256
+            or retained.candidate_set_id != verified.evidence.candidate_set_id
+            or retained.candidate_set_sha256 != verified.evidence.content_sha256
+        ):
+            raise ValueError("M8 retained rejection layout binding differs")
+    with profile_phase("scalar_frontier_construction"):
+        frontier = build_pareto_frontier(
+            tuple(
+                RejectionScalar.from_verified(retained)
+                for retained in verified.rejection_layouts
+            )
+        )
+    increment_profile_count("frontier_entries", len(frontier.retained))
+    return CompiledRejectionProblem(
+        problem_id=problem.problem_id,
+        problem_sha256=problem.content_sha256,
+        candidate_set_id=verified.evidence.candidate_set_id,
+        candidate_set_sha256=verified.evidence.content_sha256,
+        frontier=frontier,
+    )
+
+
 def compile_standard_winner(
     runtime: M7ReplayRuntime,
     *,
@@ -563,7 +663,9 @@ def compile_standard_winner(
 
 __all__ = [
     "CompiledStandardWinner",
+    "CompiledRejectionProblem",
     "CompiledTranslationRejection",
+    "compile_rejection_problem",
     "compile_standard_winner",
     "compile_translation_rejections",
 ]

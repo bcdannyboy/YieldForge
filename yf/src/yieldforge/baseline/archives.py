@@ -183,7 +183,7 @@ def _prepare_valid_exact_layout(
     return prepared if valid else None
 
 
-def _rejection_layout(
+def build_verified_candidate_rejection_layout(
     *,
     problem: ReusableGeometryProblem,
     evidence: M7CandidateSetEvidence,
@@ -329,7 +329,7 @@ def verify_problem_candidates(
         rejected_candidate_ids=rejected_candidate_ids,
     )
     rejection_layouts = tuple(
-        _rejection_layout(
+        build_verified_candidate_rejection_layout(
             problem=problem,
             evidence=evidence,
             candidate=candidate,
@@ -349,6 +349,7 @@ __all__ = [
     "M2ArchiveReference",
     "VerifiedCandidateRejectionLayout",
     "VerifiedProblemCandidates",
+    "build_verified_candidate_rejection_layout",
     "canonical_m2_archive_references",
     "verify_problem_candidates",
 ]
