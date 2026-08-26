@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+_M8_FROZEN_MAX_COMPUTE_SLOTS = 8
+
 
 def _require_positive_integer(value: object, *, field: str) -> int:
     if type(value) is not int or value <= 0:
@@ -18,7 +20,7 @@ def _require_positive_integer(value: object, *, field: str) -> int:
 class M8ConcurrencyBudget:
     """Bound active compute while outer processes wait on nested audit work."""
 
-    total_compute_slots: int = 8
+    total_compute_slots: int = _M8_FROZEN_MAX_COMPUTE_SLOTS
     cell_phase_processes: int = 4
     translation_audit_processes_per_cell: int = 2
     reference_phase_processes: int = 6
@@ -31,6 +33,11 @@ class M8ConcurrencyBudget:
             "reference_phase_processes",
         ):
             _require_positive_integer(getattr(self, field), field=field)
+        if self.total_compute_slots > _M8_FROZEN_MAX_COMPUTE_SLOTS:
+            raise ValueError(
+                "M8 total compute slots exceed the frozen maximum of "
+                f"{_M8_FROZEN_MAX_COMPUTE_SLOTS}"
+            )
         if self.peak_nested_compute > self.total_compute_slots:
             raise ValueError("M8 nested compute exceeds the total compute-slot budget")
         if self.reference_phase_processes > self.total_compute_slots:

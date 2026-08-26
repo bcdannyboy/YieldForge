@@ -31,6 +31,46 @@ def test_gate3_budget_uses_four_by_two_and_six_reference_workers() -> None:
     assert M8_GATE3_CONCURRENCY_BUDGET.reference_phase_processes == 6
 
 
+@pytest.mark.parametrize("total_compute_slots", (9, 16))
+def test_budget_rejects_total_compute_slots_above_frozen_eight(
+    total_compute_slots: int,
+) -> None:
+    with pytest.raises(ValueError, match="frozen maximum of 8"):
+        M8ConcurrencyBudget(total_compute_slots=total_compute_slots)
+
+
+@pytest.mark.parametrize(
+    "update",
+    (
+        {
+            "total_compute_slots": 16,
+            "cell_phase_processes": 9,
+            "translation_audit_processes_per_cell": 1,
+        },
+        {
+            "total_compute_slots": 16,
+            "reference_phase_processes": 9,
+        },
+    ),
+)
+def test_larger_total_cannot_authorize_widths_above_eight(
+    update: dict[str, int],
+) -> None:
+    with pytest.raises(ValueError, match="frozen maximum of 8"):
+        M8ConcurrencyBudget(**update)
+
+
+def test_budget_allows_a_smaller_total_when_every_phase_fits() -> None:
+    budget = M8ConcurrencyBudget(
+        total_compute_slots=6,
+        cell_phase_processes=3,
+        translation_audit_processes_per_cell=2,
+        reference_phase_processes=6,
+    )
+
+    assert budget.peak_compute == 6
+
+
 @pytest.mark.parametrize(
     "field",
     (

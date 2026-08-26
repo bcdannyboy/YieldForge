@@ -8,6 +8,7 @@ from shapely import box
 from tests.oracle.fixtures import inventory_item, two_problem_runtime
 from yieldforge.baseline.contracts import LayoutFitSearchConfig
 from yieldforge.baseline.geometry import (
+    PreparedLayoutFootprint,
     generate_layout_translations,
     prepare_layout_footprint,
     prepare_remnant_geometry,
@@ -47,6 +48,56 @@ def _forked_batch_inputs():  # type: ignore[no-untyped-def]
         prepared_remnant=prepared_remnant,
     )
     return runtime, prepared_remnant, layout, exact
+
+
+def _heterogeneous_forked_batch_inputs():  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    binding = runtime.replay_input.instances[1]
+    candidate = runtime.runtime_candidates[binding.problem_id].candidates[0]
+    item = inventory_item(
+        box(0.0, 0.0, 10.0, 10.0),
+        material=binding.material,
+        token="count-audit-heterogeneous-batch",
+    )
+    prepared_remnant = prepare_remnant_geometry(item.remnant)
+    variants = tuple(
+        PreparedLayoutFootprint(
+            candidate_id=candidate.candidate_id,
+            geometry=geometry,
+            part_polygons=(geometry,),
+            vertices=tuple(
+                sorted(
+                    {
+                        (float(x), float(y))
+                        for x, y in tuple(geometry.exterior.coords)[:-1]
+                    }
+                )
+            ),
+            bounds=geometry.bounds,
+        )
+        for geometry in (
+            box(0.0, 0.0, 4.0, 10.0),
+            box(0.0, 0.0, 1.0, 1.0),
+            box(0.0, 0.0, 12.0, 1.0),
+            box(0.0, 0.0, 10.0, 10.0),
+        )
+    )
+    expected_variants = tuple(
+        generate_layout_translations(
+            item.remnant,
+            candidate,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            prepared_layout=layout,
+            prepared_remnant=prepared_remnant,
+        )
+        for layout in variants
+    )
+    layouts = tuple(variants[index % len(variants)] for index in range(32))
+    expected = tuple(
+        expected_variants[index % len(expected_variants)] for index in range(32)
+    )
+    return runtime, prepared_remnant, layouts, expected
 
 
 @pytest.mark.parametrize(
@@ -172,13 +223,13 @@ def test_count_audit_batch_matches_registered_generator_in_forked_workers() -> N
 
 
 def test_count_audit_batch_results_are_identical_at_widths_one_two_and_four() -> None:
-    runtime, prepared_remnant, layout, exact = _forked_batch_inputs()
+    runtime, prepared_remnant, layouts, expected = _heterogeneous_forked_batch_inputs()
 
     results = tuple(
         audit_layout_translation_batch(
             remnant=prepared_remnant,
-            layouts=(layout,) * 32,
-            expected=(exact,) * 32,
+            layouts=layouts,
+            expected=expected,
             fit_config=runtime.replay_input.fit_config,
             search_config=runtime.replay_input.search_config,
             process_count=width,
@@ -186,6 +237,7 @@ def test_count_audit_batch_results_are_identical_at_widths_one_two_and_four() ->
         for width in (1, 2, 4)
     )
 
+    assert len(set(results[0])) == 4
     assert results[0] == results[1] == results[2]
 
 
