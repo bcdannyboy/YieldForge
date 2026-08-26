@@ -25,6 +25,7 @@ from yieldforge.baseline.replay import (
     select_m7_fallback,
 )
 from yieldforge.experiments.contracts import semantic_sha256
+from yieldforge.oracle.profiling import profile_phase
 from yieldforge.replay.contracts import InventoryItem, ReplayCostLedger
 from yieldforge.reuse.contracts import RemnantStock
 from yieldforge.reuse.geometry import material_key
@@ -339,22 +340,23 @@ def _prepare_translation_layout_batch(
         tuple[str, str],
         tuple[PreparedTranslationRejectionLayout, ...],
     ] = {}
-    for event_position in event_positions:
-        key, _binding, problem, verified = _prepared_key_and_inputs(
-            runtime,
-            event_position=event_position,
-        )
-        if key not in layouts_by_key:
-            layouts_by_key[key] = tuple(
-                prepare_translation_rejection_layout(
-                    prepare_layout_footprint(
-                        problem.problem,
-                        candidate,
-                        runtime.replay_input.fit_config,
-                    )
-                )
-                for candidate in verified.candidates
+    with profile_phase("standard_layout_materialization"):
+        for event_position in event_positions:
+            key, _binding, problem, verified = _prepared_key_and_inputs(
+                runtime,
+                event_position=event_position,
             )
+            if key not in layouts_by_key:
+                layouts_by_key[key] = tuple(
+                    prepare_translation_rejection_layout(
+                        prepare_layout_footprint(
+                            problem.problem,
+                            candidate,
+                            runtime.replay_input.fit_config,
+                        )
+                    )
+                    for candidate in verified.candidates
+                )
     layouts = tuple(sorted(layouts_by_key.items()))
     prepared = _PreparedTranslationLayoutBatch(_runtime_id=id(runtime))
     key = id(prepared)

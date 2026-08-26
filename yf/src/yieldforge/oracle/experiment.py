@@ -39,6 +39,12 @@ from yieldforge.baseline.replay import (
 from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
 from yieldforge.oracle.checker import M8ProofCheckResult, check_action_proofs
 from yieldforge.oracle.contracts import M8ActionScore
+from yieldforge.oracle.profiling import (
+    M8ProfileReport,
+    activate_m8_profile,
+    increment_profile_count,
+    profile_phase,
+)
 from yieldforge.oracle.proofs import M8ActionProof, M8EventClassification
 from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
 from yieldforge.oracle.sparse import (
@@ -1832,17 +1838,23 @@ def execute_sparse_prefix_proof(
             f"phase_start regime=all phase=candidate_verification "
             f"problems={len(selected_problem_ids)}"
         )
-    for offset, problem_id in enumerate(selected_problem_ids, start=1):
-        problem = problem_by_id[problem_id]
-        verified[problem_id] = verify_problem_candidates(
-            problem,
-            tuple(references_by_task[problem.tasks_index]),  # type: ignore[arg-type]
-            archive_roots,
-        )
-        if progress is not None:
-            progress(
-                f"verified certificate candidate problem {offset}/{len(selected_problem_ids)}"
+    with profile_phase("candidate_verification"):
+        for offset, problem_id in enumerate(selected_problem_ids, start=1):
+            problem = problem_by_id[problem_id]
+            verified[problem_id] = verify_problem_candidates(
+                problem,
+                tuple(references_by_task[problem.tasks_index]),  # type: ignore[arg-type]
+                archive_roots,
             )
+            increment_profile_count(
+                "candidates",
+                len(verified[problem_id].candidates),
+            )
+            if progress is not None:
+                progress(
+                    "verified certificate candidate problem "
+                    f"{offset}/{len(selected_problem_ids)}"
+                )
     if progress is not None:
         progress(
             f"phase_complete regime=all phase=candidate_verification "
@@ -1908,7 +1920,190 @@ def execute_sparse_prefix_proof(
     )
 
 
-def publish_sparse_proof(
+def _profile_result_payload(
+    *,
+    regime: TemporalRegime,
+    temporal_seed: int,
+    stream_id: str,
+    event_count: int,
+    sparse: M8SparseResult,
+    checks: tuple[M8ProofCheckResult, ...],
+    reference_action_id: str,
+    reference_matches: bool,
+    profile: M8ProfileReport,
+) -> dict[str, object]:
+    semantic_hashes = {proof.semantic_runtime_sha256 for proof in sparse.proofs}
+    if len(semantic_hashes) != 1:
+        raise ValueError("M8 profile proof runtime bindings differ")
+    return {
+        "schema_version": "yieldforge.m8-certificate-profile.v1",
+        "regime": regime.value,
+        "temporal_seed": temporal_seed,
+        "stream_id": stream_id,
+        "event_count": event_count,
+        "evaluation_accessed": False,
+        "semantic_runtime_sha256": semantic_hashes.pop(),
+        "action_count": len(sparse.proofs),
+        "valid_check_count": sum(check.valid for check in checks),
+        "checker_failure_count": sum(not check.valid for check in checks),
+        "reference_action_id": reference_action_id,
+        "reference_matches": reference_matches,
+        "profile": profile.model_dump(),
+    }
+
+
+def execute_certificate_profile(
+    *,
+    index: M7CalibrationProblemView,
+    m0: M0ExperimentContract,
+    frozen: M7FrozenBaseline,
+    archive_roots: tuple[Path, ...],
+    jagua_executable: Path,
+    regime: TemporalRegime,
+    temporal_seed: int,
+    event_count: int,
+) -> dict[str, object]:
+    """Profile one explicit calibration-only M8 stream prefix in-process."""
+
+    if type(temporal_seed) is not int:
+        raise TypeError("M8 profile temporal seed must be an exact integer")
+    if type(event_count) is not int or not 2 <= event_count <= 24:
+        raise ValueError("M8 profile event count must be an exact integer from 2 to 24")
+    contract = build_registered_contract()
+    if (
+        (index.full_problem_index_id, index.full_problem_index_sha256)
+        != (frozen.problem_index_id, frozen.problem_index_sha256)
+        or (m0.contract_id, m0.content_sha256)
+        != (frozen.m0_contract_id, frozen.m0_contract_sha256)
+        or (index.m6_contract_id, index.m6_contract_sha256)
+        != (contract.contract_id, contract.content_sha256)
+        or index.evaluation_partition_opened
+    ):
+        raise ValueError("M8 profile inputs do not share the sealed calibration boundary")
+    executable = Path(jagua_executable)
+    metadata = executable.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("M8 profile Jagua runtime must be a regular file")
+    executable_sha = f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}"
+    if executable_sha != frozen.runtime.jagua_executable_sha256:
+        raise ValueError("M8 profile Jagua runtime differs from the M7 freeze")
+
+    calibration = select_calibration_instances(index)
+    matching = tuple(
+        item
+        for item in calibration
+        if item.regime is regime and item.temporal_seed == temporal_seed
+    )
+    stream_ids = tuple(sorted({item.stream_id for item in matching}))
+    if len(stream_ids) != 1:
+        raise ValueError("M8 profile selection must identify exactly one calibration stream")
+    stream = tuple(item for item in matching if item.stream_id == stream_ids[0])
+    if len(stream) != 24:
+        raise ValueError("M8 profile calibration stream does not contain 24 events")
+    selected_stream = stream[:event_count]
+
+    problem_by_id = {item.problem_id: item for item in index.problems}
+    selected_problem_ids = tuple(sorted({item.problem_id for item in selected_stream}))
+    references_by_task: dict[int, list[object]] = {}
+    for reference in canonical_m2_archive_references():
+        references_by_task.setdefault(reference.tasks_index, []).append(reference)
+
+    with activate_m8_profile() as profiler:
+        verified = {}
+        with profile_phase("candidate_verification"):
+            for problem_id in selected_problem_ids:
+                problem = problem_by_id[problem_id]
+                verified[problem_id] = verify_problem_candidates(
+                    problem,
+                    tuple(references_by_task[problem.tasks_index]),  # type: ignore[arg-type]
+                    archive_roots,
+                )
+                increment_profile_count(
+                    "candidates",
+                    len(verified[problem_id].candidates),
+                )
+
+        calibration_problem_ids = tuple(
+            sorted({item.problem_id for item in calibration})
+        )
+        frozen_by_problem = {
+            problem_id: (candidate_id, candidate_sha)
+            for problem_id, candidate_id, candidate_sha in zip(
+                calibration_problem_ids,
+                frozen.candidate_set_ids,
+                frozen.candidate_set_sha256s,
+                strict=True,
+            )
+        }
+        for problem_id, candidates in verified.items():
+            if (
+                candidates.evidence.candidate_set_id,
+                candidates.evidence.content_sha256,
+            ) != frozen_by_problem[problem_id]:
+                raise ValueError("M8 profile candidate evidence differs from the M7 freeze")
+
+        cell = _build_execution_cells(
+            index=index,
+            m0=m0,
+            frozen=frozen,
+            verified=verified,
+            selected_streams=[selected_stream],
+        )[0]
+        request = _request_for_cell(
+            cell,
+            rules=rule_set_from_m0(m0.remnant_eligibility),
+            jagua_executable=executable,
+        )
+        sparse = score_sparse_event(request)
+        checks = check_action_proofs(request, sparse.proofs)
+        reference_action_id = sparse.decision.scores[0].action_id
+        with profile_phase("reference_audit"):
+            reference = score_reference_action(
+                request,
+                action_id=reference_action_id,
+            )
+        expected_reference_cost = next(
+            score.final_net_cost
+            for score in sparse.decision.scores
+            if score.action_id == reference_action_id
+        )
+        reference_matches = reference.final_net_cost == expected_reference_cost
+
+    report = profiler.report()
+    if not all(check.valid for check in checks) or not reference_matches:
+        raise ValueError("M8 profile semantic verification failed")
+    return _profile_result_payload(
+        regime=regime,
+        temporal_seed=temporal_seed,
+        stream_id=stream_ids[0],
+        event_count=event_count,
+        sparse=sparse,
+        checks=checks,
+        reference_action_id=reference_action_id,
+        reference_matches=reference_matches,
+        profile=report,
+    )
+
+
+def publish_certificate_profile(output_path: Path, result: dict[str, object]) -> Path:
+    """Write one explicit profiling report without content-addressed gate promotion."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
+    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return path
+
+
+def _publish_sparse_proof_unprofiled(
     output_directory: Path,
     result: M8CertificateProofResult,
 ) -> Path:
@@ -1939,12 +2134,24 @@ def publish_sparse_proof(
     return path
 
 
+def publish_sparse_proof(
+    output_directory: Path,
+    result: M8CertificateProofResult,
+) -> Path:
+    """Publish one immutable result while exposing artifact-write timing."""
+
+    with profile_phase("artifact_write"):
+        return _publish_sparse_proof_unprofiled(output_directory, result)
+
+
 __all__ = [
     "M8AuditActionBinding",
     "M8CertificateProofCell",
     "M8CertificateProofResult",
     "audit_sample_sha256",
+    "execute_certificate_profile",
     "execute_sparse_prefix_proof",
     "finalize_certificate_proof",
+    "publish_certificate_profile",
     "publish_sparse_proof",
 ]

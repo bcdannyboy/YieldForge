@@ -36,6 +36,7 @@ from yieldforge.oracle.compiled import (
     _PreparedTranslationLayoutBatch,
 )
 from yieldforge.oracle.prepared import prepared_context_fingerprint
+from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8ActionProof, M8EventWitness, m8_suffix_sha256
 
 if TYPE_CHECKING:
@@ -188,10 +189,11 @@ def _prepare_m8_checker_context(
             cursor=request.cursor,
             visibility=request.visibility,
         )
-        catalog = enumerate_m7_action_catalog(
-            captured.runtime,
-            cursor=captured.cursor,
-        )
+        with profile_phase("action_catalog_enumeration"):
+            catalog = enumerate_m7_action_catalog(
+                captured.runtime,
+                cursor=captured.cursor,
+            )
         fallback = select_m7_fallback(
             catalog,
             policy=captured.runtime.replay_input.policy,
@@ -370,11 +372,13 @@ def _check_event(
         else:
             if witness.state_before_sha256 != m7_cursor_sha256(branch.cursor):
                 raise _ProofFailure("witness_mismatch")
-            catalog = enumerate_m7_action_catalog(
-                runtime,
-                cursor=branch.cursor,
-                complete=False,
-            )
+            with profile_phase("action_catalog_enumeration"):
+                catalog = enumerate_m7_action_catalog(
+                    runtime,
+                    cursor=branch.cursor,
+                    complete=False,
+                )
+            increment_profile_count("fallbacks")
             selected = select_m7_fallback(
                 catalog,
                 policy=runtime.replay_input.policy,
@@ -418,13 +422,14 @@ def _check_prepared_action_proofs(
     start_state_sha256 = m7_cursor_sha256(context._request.cursor)  # noqa: SLF001
     for proof in proofs:
         try:
-            branches.append(
-                _initialize_branch(
-                    context,
-                    proof,
-                    start_state_sha256=start_state_sha256,
+            with profile_phase("checker_load"):
+                branches.append(
+                    _initialize_branch(
+                        context,
+                        proof,
+                        start_state_sha256=start_state_sha256,
+                    )
                 )
-            )
             results.append(None)
         except _ProofFailure as error:
             branches.append(None)
@@ -446,12 +451,13 @@ def _check_prepared_action_proofs(
                 if branch is None:
                     continue
                 try:
-                    _check_event(
-                        context,
-                        branch,
-                        witness=branch.proof.witnesses[event_index],
-                        common=common,
-                    )
+                    with profile_phase("checker_algebra"):
+                        _check_event(
+                            context,
+                            branch,
+                            witness=branch.proof.witnesses[event_index],
+                            common=common,
+                        )
                 except (IndexError, _ProofFailure) as error:
                     code = error.code if isinstance(error, _ProofFailure) else "invalid_proof"
                     results[index] = _failed(code, branch)
@@ -465,15 +471,19 @@ def _check_prepared_action_proofs(
         if branch is None:
             continue
         try:
-            if branch.proof.final_state_sha256 != m7_cursor_sha256(branch.cursor):
-                raise _ProofFailure("terminal_mismatch")
-            terminal = run_m7_continuation(
-                context._request.runtime,  # noqa: SLF001
-                cursor=branch.cursor,
-                stop_event_position=context._stop_event_position,  # noqa: SLF001
-            )
-            if terminal.events or terminal.final_costs.net_cost != branch.proof.final_net_cost:
-                raise _ProofFailure("terminal_mismatch")
+            with profile_phase("checker_algebra"):
+                if branch.proof.final_state_sha256 != m7_cursor_sha256(branch.cursor):
+                    raise _ProofFailure("terminal_mismatch")
+                terminal = run_m7_continuation(
+                    context._request.runtime,  # noqa: SLF001
+                    cursor=branch.cursor,
+                    stop_event_position=context._stop_event_position,  # noqa: SLF001
+                )
+                if (
+                    terminal.events
+                    or terminal.final_costs.net_cost != branch.proof.final_net_cost
+                ):
+                    raise _ProofFailure("terminal_mismatch")
         except _ProofFailure as error:
             results[index] = _failed(error.code, branch)
         else:

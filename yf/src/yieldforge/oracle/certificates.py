@@ -39,6 +39,7 @@ from yieldforge.oracle.compiled import (
     _PreparedTranslationLayoutBatch,
     compile_translation_rejections,
 )
+from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
 from yieldforge.replay.contracts import InventoryItem
 
@@ -278,7 +279,7 @@ def _common_fact_payload(
     }
 
 
-def _derive_m8_common_transition_fact(
+def _derive_m8_common_transition_fact_unprofiled(
     runtime: M7ReplayRuntime,
     *,
     cursor: M7ReplayCursor,
@@ -292,11 +293,12 @@ def _derive_m8_common_transition_fact(
             item=item,
         )
     authoritative_runtime = _fresh_runtime(runtime)
-    catalog = enumerate_m7_action_catalog(
-        authoritative_runtime,
-        cursor=cursor,
-        complete=False,
-    )
+    with profile_phase("action_catalog_enumeration"):
+        catalog = enumerate_m7_action_catalog(
+            authoritative_runtime,
+            cursor=cursor,
+            complete=False,
+        )
     _require_common_search_caches_match_authoritative(
         runtime,
         authoritative_runtime=authoritative_runtime,
@@ -337,6 +339,25 @@ def _derive_m8_common_transition_fact(
         semantic_runtime_sha256=semantic_runtime_sha256,
         content_sha256=content_sha256,
     )
+
+
+def _derive_m8_common_transition_fact(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    semantic_runtime_sha256: str,
+) -> M8CommonTransitionFact:
+    """Profile one authoritative common transition without changing its semantics."""
+
+    with profile_phase("common_transition_derivation"):
+        fact = _derive_m8_common_transition_fact_unprofiled(
+            runtime,
+            cursor=cursor,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+        )
+    increment_profile_count("events")
+    increment_profile_count("facts")
+    return fact
 
 
 def build_m8_common_transition_fact(

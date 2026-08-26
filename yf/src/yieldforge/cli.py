@@ -73,10 +73,15 @@ from yieldforge.experiments.residual_geometry import (
     publish_m3_input_pack,
     publish_m3_result,
 )
-from yieldforge.oracle.experiment import execute_sparse_prefix_proof, publish_sparse_proof
+from yieldforge.oracle.experiment import (
+    execute_certificate_profile,
+    execute_sparse_prefix_proof,
+    publish_certificate_profile,
+    publish_sparse_proof,
+)
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 from yieldforge.temporal_benchmark.catalog import load_registered_catalog
-from yieldforge.temporal_benchmark.contracts import build_registered_contract
+from yieldforge.temporal_benchmark.contracts import TemporalRegime, build_registered_contract
 from yieldforge.temporal_benchmark.pilot import publish_pilot_result, run_lowering_pilot
 from yieldforge.temporal_benchmark.population import (
     build_population,
@@ -580,6 +585,39 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _profile_m8_certificate(args: argparse.Namespace) -> int:
+    """Profile one explicit calibration stream without opening evaluation."""
+
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    frozen = M7FrozenBaseline.model_validate_json(
+        args.frozen_baseline.read_bytes(), strict=True
+    )
+    index = build_registered_calibration_problem_view(
+        full_problem_index_id=frozen.problem_index_id,
+        full_problem_index_sha256=frozen.problem_index_sha256,
+    )
+    result = execute_certificate_profile(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        regime=args.regime,
+        temporal_seed=args.seed,
+        event_count=args.event_count,
+    )
+    result_path = publish_certificate_profile(args.output, result)
+    profile = cast(dict[str, object], result["profile"])
+    print(
+        "Published M8 certificate profile: "
+        f"regime={result['regime']} seed={result['temporal_seed']} "
+        f"events={result['event_count']} actions={result['action_count']} "
+        f"accounted_process_fraction={profile['accounted_process_fraction']} "
+        f"evaluation_accessed=false output={result_path}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -842,6 +880,26 @@ def build_parser() -> argparse.ArgumentParser:
     prove_m8.add_argument("--jagua-binary", type=Path, required=True)
     prove_m8.add_argument("--output", type=Path, required=True)
     prove_m8.set_defaults(handler=_prove_m8_sparse_oracle)
+
+    profile_m8 = benchmark_commands.add_parser(
+        "m8-certificate-profile",
+        help="profile one explicit calibration-only M8 certificate prefix",
+    )
+    profile_m8.add_argument("--m0", type=Path, required=True)
+    profile_m8.add_argument("--frozen-baseline", type=Path, required=True)
+    profile_m8.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    profile_m8.add_argument("--jagua-binary", type=Path, required=True)
+    profile_m8.add_argument("--regime", type=TemporalRegime, required=True)
+    profile_m8.add_argument("--seed", type=int, required=True)
+    profile_m8.add_argument("--event-count", type=int, required=True)
+    profile_m8.add_argument("--output", type=Path, required=True)
+    profile_m8.set_defaults(handler=_profile_m8_certificate)
     return parser
 
 

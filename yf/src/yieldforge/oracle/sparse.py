@@ -35,6 +35,7 @@ from yieldforge.oracle.compiled import (
 )
 from yieldforge.oracle.contracts import M8ActionScore, M8OracleDecision, build_oracle_decision
 from yieldforge.oracle.prepared import prepared_context_fingerprint
+from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import (
     M8ActionProof,
     M8EventWitness,
@@ -151,10 +152,11 @@ def _prepare_m8_generator_context(
             cursor=request.cursor,
             visibility=request.visibility,
         )
-        catalog = enumerate_m7_action_catalog(
-            captured.runtime,
-            cursor=captured.cursor,
-        )
+        with profile_phase("action_catalog_enumeration"):
+            catalog = enumerate_m7_action_catalog(
+                captured.runtime,
+                cursor=captured.cursor,
+            )
         fallback = select_m7_fallback(
             catalog,
             policy=captured.runtime.replay_input.policy,
@@ -290,11 +292,13 @@ def _advance_branch(
             branch.rejection_count += len(witness.influences)
         else:
             state_before = m7_cursor_sha256(branch.cursor)
-            branch_catalog = enumerate_m7_action_catalog(
-                runtime,
-                cursor=branch.cursor,
-                complete=False,
-            )
+            with profile_phase("action_catalog_enumeration"):
+                branch_catalog = enumerate_m7_action_catalog(
+                    runtime,
+                    cursor=branch.cursor,
+                    complete=False,
+                )
+            increment_profile_count("fallbacks")
             selection = select_m7_fallback(
                 branch_catalog,
                 policy=runtime.replay_input.policy,
@@ -370,20 +374,22 @@ def _score_prepared_certificate_actions(
             cursor=branch.cursor,
             stop_event_position=context._stop_event_position,  # noqa: SLF001
         )
-        proof = build_m8_action_proof(
-            action_id=branch.initial_step.event.action.action_id,
-            catalog_action_id=branch.descriptor.action_id,
-            baseline_action_id=context._fallback_step.event.action.action_id,  # noqa: SLF001
-            baseline_catalog_action_id=context._fallback_step.descriptor.action_id,  # noqa: SLF001
-            start_event_position=context._catalog.event_position,  # noqa: SLF001
-            stop_event_position=context._stop_event_position,  # noqa: SLF001
-            suffix_sha256=context._suffix_sha256,  # noqa: SLF001
-            semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
-            start_state_sha256=start_state_sha256,
-            witnesses=tuple(branch.witnesses),
-            final_net_cost=terminal.final_costs.net_cost,
-            final_state_sha256=m7_cursor_sha256(branch.cursor),
-        )
+        with profile_phase("fact_serialization"):
+            proof = build_m8_action_proof(
+                action_id=branch.initial_step.event.action.action_id,
+                catalog_action_id=branch.descriptor.action_id,
+                baseline_action_id=context._fallback_step.event.action.action_id,  # noqa: SLF001
+                baseline_catalog_action_id=context._fallback_step.descriptor.action_id,  # noqa: SLF001
+                start_event_position=context._catalog.event_position,  # noqa: SLF001
+                stop_event_position=context._stop_event_position,  # noqa: SLF001
+                suffix_sha256=context._suffix_sha256,  # noqa: SLF001
+                semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
+                start_state_sha256=start_state_sha256,
+                witnesses=tuple(branch.witnesses),
+                final_net_cost=terminal.final_costs.net_cost,
+                final_state_sha256=m7_cursor_sha256(branch.cursor),
+            )
+        increment_profile_count("actions")
         results.append(
             M8CertificateActionResult(
                 score=M8ActionScore(
@@ -409,8 +415,9 @@ def score_certificate_action(
 ) -> M8CertificateActionResult:
     """Generate one exact score and proof in one owned authoritative context."""
 
-    with _prepare_m8_generator_context(request) as context:
-        return _score_prepared_certificate_actions(context, action_ids=(action_id,))[0]
+    with profile_phase("certificate_generation"):
+        with _prepare_m8_generator_context(request) as context:
+            return _score_prepared_certificate_actions(context, action_ids=(action_id,))[0]
 
 
 def score_certificate_actions(
@@ -420,13 +427,12 @@ def score_certificate_actions(
 ) -> tuple[M8CertificateActionResult, ...]:
     """Generate one event-major proof batch for an exact frozen action subset."""
 
-    with _prepare_m8_generator_context(request) as context:
-        return _score_prepared_certificate_actions(context, action_ids=action_ids)
+    with profile_phase("certificate_generation"):
+        with _prepare_m8_generator_context(request) as context:
+            return _score_prepared_certificate_actions(context, action_ids=action_ids)
 
 
-def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
-    """Score every current action event-major and emit one exact proof per action."""
-
+def _score_sparse_event_unprofiled(request: M8OracleRequest) -> M8SparseResult:
     with _prepare_m8_generator_context(request) as context:
         action_results = _score_prepared_certificate_actions(context)
         decision = build_oracle_decision(
@@ -461,6 +467,13 @@ def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
                 ),
             ),
         )
+
+
+def score_sparse_event(request: M8OracleRequest) -> M8SparseResult:
+    """Score every current action event-major and emit one exact proof per action."""
+
+    with profile_phase("certificate_generation"):
+        return _score_sparse_event_unprofiled(request)
 
 
 __all__ = [
