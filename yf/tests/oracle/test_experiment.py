@@ -32,6 +32,25 @@ def _phase_spawn_descendant(pid_path: str) -> None:
     time.sleep(30)
 
 
+def _phase_fail_nested_audit_with_descendant(
+    pid_path: str,
+    audit_processes: int,
+) -> None:
+    from yieldforge.oracle.concurrency import (
+        activate_m8_translation_audit_processes,
+        require_m8_translation_audit_processes,
+    )
+
+    with activate_m8_translation_audit_processes(audit_processes):
+        if require_m8_translation_audit_processes() != audit_processes:
+            raise AssertionError("synthetic nested audit width differs")
+        child = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        Path(pid_path).write_text(str(child.pid))
+        raise RuntimeError("synthetic nested audit failure")
+
+
 def _phase_record_pid(pid_path: str) -> int:
     Path(pid_path).write_text(str(os.getpid()))
     return os.getpid()
@@ -668,6 +687,49 @@ def test_distributed_phase_timeout_terminates_worker_descendants(
             time.sleep(0.1)
         else:
             pytest.fail("M8 worker descendant survived phase timeout")
+    finally:
+        try:
+            os.kill(descendant_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_nested_audit_failure_restores_context_and_terminates_descendant(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import (
+        activate_m8_translation_audit_processes,
+        current_m8_translation_audit_processes,
+        require_m8_translation_audit_processes,
+    )
+
+    pid_path = tmp_path / "nested-audit-descendant.pid"
+    with activate_m8_translation_audit_processes(4):
+        assert require_m8_translation_audit_processes() == 4
+        with pytest.raises(RuntimeError, match="synthetic nested audit failure"):
+            with activate_m8_translation_audit_processes(2):
+                assert require_m8_translation_audit_processes() == 2
+                experiment._run_process_phase(  # noqa: SLF001
+                    _phase_fail_nested_audit_with_descendant,
+                    ((str(pid_path), 2),),
+                    process_count=1,
+                    timeout_seconds=5.0,
+                )
+        assert require_m8_translation_audit_processes() == 4
+    assert current_m8_translation_audit_processes() is None
+
+    assert pid_path.exists()
+    descendant_pid = int(pid_path.read_text())
+    try:
+        for _ in range(30):
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("M8 nested-audit descendant survived worker failure")
     finally:
         try:
             os.kill(descendant_pid, signal.SIGKILL)
