@@ -57,10 +57,9 @@ Evaluation result `yfm7eval-f2cb310c4b7e879d119e8f94` then executed the frozen p
 retrieved 38 remnants, and had mean net cost 29,733.304499. These are baseline measurements, not an
 oracle comparison or savings claim.
 
-M8 is prepared. Its approved design evaluates every exact current action over the complete remaining
-stream with frozen M7 as the hypothetical continuation, preferring the M7 action on exact ties. The
-primary arm uses sparse exact inventory deltas, compiled standard winners, safe no-fit certificates,
-and registered exact search for survivors; fixed horizons and candidate caps remain labeled
-sensitivities. A slow full-replay reference must show zero mismatch and at least 20x speedup on
-registered calibration prefixes, with a held-out projection no greater than seven days, before
-complete-stream work. No M8 oracle evaluation or savings result exists yet.
+M8's first go/no-go is complete. Artifact `yfm8proof-b296ba919c07d55ece14c6db` validated all 3,469
+proofs and matched all 12 frozen brute-reference actions with zero mismatch, but returned
+`redesign_certificate_proof`: two required witness classes were absent, sampled speedup was only
+`1.123571x` versus the required `20x`, and held-out work projected to `127.766536` days versus the
+seven-day boundary. The next step is a calibration-only coverage and common-work redesign followed
+by the same fail-closed gate. No M8 oracle evaluation or savings result exists yet.

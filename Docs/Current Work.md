@@ -6,16 +6,17 @@
 
 ## Current objective
 
-Complete the first M8 certificate gate against the immutable M7 baseline freeze using distributed
-exact execution. Preserve complete action parity, baseline information masking, exact accounting,
-independent proof checking, and the sealed evaluation boundary.
+Redesign the M8 certificate gate against the immutable M7 baseline freeze after the completed first
+go/no-go proved semantic correctness but failed the coverage and runtime gates. Preserve complete
+action parity, baseline information masking, exact accounting, independent proof checking, and the
+sealed evaluation boundary.
 
 ## Next step
 
-Verify independently bounded brute-reference action tasks, then rerun the distributed-exact
-calibration gate with per-regime certificate/checker batches and exact per-action reference tasks.
-Reassemble one deterministic artifact; keep evaluation sealed until exactness, coverage, 20x
-sampled speedup, and the seven-day projection gate all resolve.
+Add calibration-only coverage that actually exercises `exact_transition` and `policy_dominated`,
+then redesign common certificate/checker work so the matched sampled pipeline reaches the registered
+20x speedup. Re-run the same fail-closed gate and keep evaluation sealed until coverage, speed, and
+the seven-day held-out projection all pass.
 
 ## Evidence bridge completed
 
@@ -90,6 +91,14 @@ sampled speedup, and the seven-day projection gate all resolve.
   one worker's unchanged 1,800-second limit. Cleanup completed and no artifact was published. The
   12 frozen brute-reference actions now run as independently bounded tasks on six workers and are
   reassembled into exact two-action regime vectors before the audit can pass.
+- The independently bounded reference redesign completed the first M8 go/no-go and published strict
+  artifact `yfm8proof-b296ba919c07d55ece14c6db`. All 3,469 generated proofs passed the fresh
+  checker, and all 12 frozen sampled actions matched independent brute replay with zero mismatches.
+  The gate nevertheless returned `redesign_certificate_proof`: only `no_fit` and `state_rejoin`
+  witnesses occurred, leaving required `exact_transition` and `policy_dominated` coverage absent;
+  sampled certificate-plus-checker speedup was `1.123571x`, below `20x`; and the held-out projection
+  was `127.766536` calendar days, above seven. Total wall time was `8298.220836` seconds with six
+  measured processes. Evaluation remained sealed.
 
 ## Experiment status
 

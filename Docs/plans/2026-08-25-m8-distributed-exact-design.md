@@ -96,6 +96,18 @@ simultaneous workers, and gives every started branch its own unchanged 1,800-sec
 are reassembled into the six frozen per-regime action vectors before audit reconciliation; per-cell
 reference work time is the sum of its two independent branch times.
 
+The corrected canonical run completed. It published strict artifact
+`yfm8proof-b296ba919c07d55ece14c6db` after `8298.220836` wall seconds, with 3,469/3,469 valid proofs,
+zero full-checker failures, zero sampled-checker failures, and zero mismatches across the 12 exact
+reference actions. This validates the independent-action scheduling correction and closes the
+previous reference timeout.
+
+The resulting hard decision is `redesign_certificate_proof`. The calibration boundary produced no
+`exact_transition` or `policy_dominated` witness, sampled certificate-plus-checker work was only
+`1.123571x` faster than reference, and the held-out projection was `127.766536` days. Further work
+must address coverage and repeated common proof/check work; threshold relaxation and evaluation
+access are not authorized.
+
 ## Isolation and claim boundary
 
 Generator and checker pools never share mutable runtimes or private proof capabilities. Each worker

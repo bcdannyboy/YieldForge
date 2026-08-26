@@ -1,6 +1,6 @@
 # M8 — Rollout oracle
 
-**Status:** Implemented — audit generator/checker passed; independent reference-branch rerun is next
+**Status:** First go/no-go complete — exactness passed; certificate coverage/runtime redesign required
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -20,8 +20,8 @@ Rollout is not a mathematical upper bound and may miss value requiring coordinat
 - The rollout arm must receive the same candidate/action evidence while future access remains
   isolated from the baseline arm.
 - No oracle advantage or paired savings estimate exists. The certificate generator, independent
-  checker, exhaustive differential kernel, and calibration-only v2 gate are implemented; evaluation
-  remains sealed.
+  checker, exhaustive differential kernel, and calibration-only v3 gate are implemented; the first
+  gate artifact is complete and evaluation remains sealed.
 
 ## Planning boundary
 
@@ -121,3 +121,41 @@ gets the unchanged 1,800-second window from its confirmed start, then exact scor
 their frozen two-action regime vectors before audit reconciliation. Generator and checker batches
 remain per-regime because they already pass and benefit from shared common geometry. Evaluation
 remains sealed.
+
+## Completed first go/no-go — 2026-08-25
+
+The independent-action reference correction completed the full canonical gate and published
+`yf/experiments/results/m8-certificate-proof-yfm8proof-b296ba919c07d55ece14c6db.json`. Its strict
+identity is `yfm8proof-b296ba919c07d55ece14c6db` with content hash
+`sha256:b296ba919c07d55ece14c6dbb6ecbce1aa4a24e612dd1a251757e7a3b739739d`.
+
+The semantic and audit evidence passed:
+
+- all six calibration cells completed in `distributed_exact` mode;
+- 3,469/3,469 current actions produced valid proofs and a fresh checker reported zero failures;
+- the frozen 12-action audit reproduced with zero sampled-checker failures and zero brute-reference
+  mismatches;
+- all six regimes, registered action kinds, and registered future-event counts were covered;
+- six `state_rejoin` witnesses and 3,463 certified future events were recorded; and
+- evaluation remained unopened.
+
+The hard gate returned `redesign_certificate_proof`, not `pass_certificate_exact`:
+
+- only `no_fit` and `state_rejoin` occurred, so required `exact_transition` and
+  `policy_dominated` witness classes were absent and `exact_escape_count` was zero;
+- sampled certificate-plus-checker work took `10354.963529` process-seconds versus
+  `11634.541856` process-seconds for exact reference, only `1.123571x` faster than the registered
+  `20x` minimum; and
+- measured certificate throughput projected the 550,542 held-out actions to `127.766536` calendar
+  days, above the seven-day boundary.
+
+Generator wall time was `1501.688347` seconds, fresh-checker wall time was `1522.555951` seconds,
+audit wall time was `5202.790937` seconds, and total wall time was `8298.220836` seconds. The runner
+honored the six-process measured ceiling despite the configured eight-worker envelope.
+
+This result closes the first M8 go/no-go with a precise no-go for the present certificate
+architecture. It is not a failure of exact semantics: the independent checker and sampled brute
+reference both agree. The next bounded work is to add calibration-only cases that exercise the two
+missing witness classes and to eliminate repeated common certificate/checker work until the same
+hard gate reaches 20x and projects within seven days. Evaluation, savings claims, physical claims,
+and commercial claims remain out of scope.
