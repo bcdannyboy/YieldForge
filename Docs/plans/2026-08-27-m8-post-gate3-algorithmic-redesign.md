@@ -1,6 +1,6 @@
 # M8 Post-Gate-3 Algorithmic Traversal Redesign
 
-**Status:** Prepared after complete Gate 3 performance hold
+**Status:** Phase A root-level quotient census complete — no-go; batched/compiled spike next
 
 ## Objective
 
@@ -62,6 +62,14 @@ Go only if the key is proven sufficient to reconstruct every existing root commi
 
 Otherwise stop the quotient arm and proceed directly to a compiled/batched checker design. Do not
 relax the key to manufacture compression.
+
+**Executed result — 2026-08-27:** The persisted complete 887-root manifest was censused without
+opening evaluation. In `no_signal`, all 428 roots had unique initial-state, future-input,
+terminal-state, and combined replay commitments. In `regime_shift`, all 459 roots were likewise
+unique for every one of those keys. Duplicate groups, duplicate roots, and excess roots were zero;
+maximum class size was one in both regimes. Whole-root exact state quotienting is therefore a
+no-go. Do not weaken the state key. Proceed to a measured batched-suboperation or compiled pure
+verification spike.
 
 ### Phase B — one-arm executable spike
 

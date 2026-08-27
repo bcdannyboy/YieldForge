@@ -13,8 +13,11 @@ evaluation boundary.
 
 ## Next step
 
-Profile and redesign the remaining generator/checker action traversal mathematically before any
-six-cell execution. The fixed five-day projection requires the charged portable pipeline to fall
+Redesign the remaining generator/checker action traversal mathematically before any six-cell
+execution. A post-Gate-3 census found zero duplicate exact initial-state, future-input,
+terminal-state, or combined replay commitments across either 428-root or 459-root probe, so
+whole-root state quotienting is a no-go; target shared sub-operations or a compiled pure checker
+kernel instead. The fixed five-day projection requires the charged portable pipeline to fall
 from `686.535011` seconds to at most `30.261404` seconds, a further `22.686819x`; even the
 non-gating first-generation-plus-checker sensitivity at `475.393859` seconds needs `15.709577x`.
 Only after the absolute projection is viable should reference and portable timing be captured under

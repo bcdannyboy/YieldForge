@@ -242,3 +242,10 @@ the absolute five-day projection fails regardless. Official six-cell calibration
 authorized nor executed, evaluation remained unopened, and no M8 oracle-advantage, savings,
 physical, buyer, or commercial result exists. The bounded follow-on is
 [[2026-08-27-m8-post-gate3-algorithmic-redesign]].
+
+A first read-only structural census over the persisted 887-root manifest found every exact
+initial-state, future-input, terminal-state, and combined replay commitment unique within both
+regimes: 428 classes for 428 `no_signal` roots and 459 classes for 459 `regime_shift` roots. Exact
+whole-root quotienting therefore offers zero compression and is closed as a no-go. The next spike
+must batch shared sub-operations or compile the pure state-chain/cost verification kernel without
+weakening root identity.
