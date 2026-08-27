@@ -1584,6 +1584,24 @@ class _PortableCheckWorkerResult:
 
 
 @dataclass(frozen=True)
+class _PortableFactCheckedSource:
+    """Canonical first-generation bytes retained only after a successful check."""
+
+    first_generation: _PortableBundleIdentityWorkerResult
+    semantic_bundle_bytes: bytes
+    check: _PortableCheckWorkerResult
+
+    @property
+    def cell_identity(self) -> tuple[TemporalRegime, int, str, int]:
+        return (
+            self.first_generation.regime,
+            self.first_generation.temporal_seed,
+            self.first_generation.stream_id,
+            self.first_generation.event_count,
+        )
+
+
+@dataclass(frozen=True)
 class _PortableFactCellExecution:
     first_generation: _PortableBundleIdentityWorkerResult
     second_generation: _PortableBundleIdentityWorkerResult
@@ -1910,6 +1928,11 @@ def _run_process_phase(
                 if process.is_alive():
                     raise RuntimeError(
                         "M8 distributed worker did not exit after returning a result"
+                    )
+                if process.exitcode != 0:
+                    raise RuntimeError(
+                        "M8 distributed worker returned a result but exited nonzero "
+                        f"(exit_code={process.exitcode})"
                     )
                 if worker_status != "ok":
                     raise RuntimeError(
@@ -2954,6 +2977,36 @@ def _portable_profile_phase_count(report: M8ProfileReport, name: str) -> int:
     return count
 
 
+def _retain_portable_fact_checked_source(
+    generated: _PortableBundleWorkerResult,
+    checked: _PortableCheckWorkerResult,
+) -> _PortableFactCheckedSource:
+    """Bind canonical bytes to the independently reconciled successful checker."""
+
+    generated = _strict_portable_bundle_identity(generated, require_bytes=True)
+    if type(generated) is not _PortableBundleWorkerResult:
+        raise TypeError("M8 portable retained source requires exact canonical bytes")
+    generated, checked = _reconcile_portable_fact_handoff(generated, checked)
+    if type(generated) is not _PortableBundleWorkerResult:
+        raise TypeError("M8 portable retained source lost its canonical bytes")
+    if checked.check.total_exact_fallback_count != 0:
+        raise ValueError("M8 Gate-3 portable checker performed forbidden exact fallback")
+    required_phases = {
+        "fact_bundle_strict_load",
+        "fact_bundle_common_verification",
+        "fact_bundle_action_traversal",
+        "fact_bundle_cleanup",
+    }
+    if not required_phases <= _portable_profile_phase_names(checked.profile):
+        raise ValueError("M8 portable checker omitted required timing phases")
+    semantic_bundle_bytes = generated.semantic_bundle_bytes
+    return _PortableFactCheckedSource(
+        first_generation=_discard_portable_bundle_bytes(generated),
+        semantic_bundle_bytes=semantic_bundle_bytes,
+        check=checked,
+    )
+
+
 def _order_portable_worker_results(
     results: tuple[object, ...],
     execution_cells: tuple[_ExecutionCell, ...],
@@ -2978,7 +3031,7 @@ def _discard_portable_bundle_bytes(
     return _PortableBundleIdentityWorkerResult(**payload)
 
 
-def _execute_portable_fact_cells(
+def _capture_portable_fact_checked_sources(
     execution_cells: tuple[_ExecutionCell, ...],
     *,
     rules,  # type: ignore[no-untyped-def]
@@ -2987,7 +3040,126 @@ def _execute_portable_fact_cells(
     freeze_sha256: str,
     expected_jagua_sha256: str | None,
     budget: M8ConcurrencyBudget,
-) -> _PortableFactPipelineExecution:
+) -> tuple[_PortableFactCheckedSource, ...]:
+    """Run one fresh generation/check pair and retain only checked canonical bytes."""
+
+    if not execution_cells:
+        raise ValueError("M8 portable source capture requires a calibration cell")
+    controller_before = _strict_portable_registry_state(_portable_registry_state())
+    if not controller_before.is_clean:
+        raise ValueError("M8 portable source capture has live registries before spawn")
+    _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
+    outer_process_count = min(budget.cell_phase_processes, len(execution_cells))
+    common_tasks = tuple(
+        (
+            cell,
+            rules,
+            jagua_executable,
+            freeze_id,
+            freeze_sha256,
+            expected_jagua_sha256,
+            budget.translation_audit_processes_per_cell,
+        )
+        for cell in execution_cells
+    )
+    try:
+        generation_phase = _run_process_phase(
+            _generate_portable_fact_bundle_worker,
+            tuple((*task, True) for task in common_tasks),
+            process_count=outer_process_count,
+            report_payload_handoff=True,
+        )
+        if type(generation_phase) is not _ProcessPhaseExecution:
+            raise RuntimeError("M8 portable source generation omitted handoff telemetry")
+        generated = _order_portable_worker_results(
+            tuple(
+                _strict_portable_bundle_identity(item, require_bytes=True)
+                for item in generation_phase.results
+            ),
+            execution_cells,
+        )
+        retained_bundle_bytes = sum(
+            item.semantic_serialized_bytes for item in generated
+        )
+        if retained_bundle_bytes > _M8_GATE3_MAX_RETAINED_BUNDLE_BYTES:
+            raise ValueError("M8 portable retained bundles exceed the aggregate cap")
+
+        checker_tasks = tuple(
+            (
+                item.semantic_bundle_bytes,
+                cell,
+                rules,
+                jagua_executable,
+                freeze_id,
+                freeze_sha256,
+                expected_jagua_sha256,
+                budget.translation_audit_processes_per_cell,
+            )
+            for item, cell in zip(generated, execution_cells, strict=True)
+        )
+        checker_phase = _run_process_phase(
+            _check_portable_fact_bundle_worker,
+            checker_tasks,
+            process_count=outer_process_count,
+            report_payload_handoff=True,
+            aggregate_task_payload_byte_cap=(
+                _M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES
+            ),
+        )
+        if type(checker_phase) is not _ProcessPhaseExecution:
+            raise RuntimeError("M8 portable source checker omitted handoff telemetry")
+        checked = _order_portable_worker_results(
+            tuple(
+                _strict_portable_check_worker_result(item)
+                for item in checker_phase.results
+            ),
+            execution_cells,
+        )
+
+        retained_sources = []
+        for generated_item, checked_item in zip(generated, checked, strict=True):
+            retained_source = _retain_portable_fact_checked_source(
+                generated_item,
+                checked_item,
+            )
+            if (
+                retained_source.first_generation.worker_pid
+                == retained_source.check.worker_pid
+            ):
+                raise ValueError(
+                    "M8 portable source phases did not use distinct fresh workers"
+                )
+            retained_sources.append(retained_source)
+        _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
+    except BaseException as error:
+        controller_after_failure = _strict_portable_registry_state(
+            _portable_registry_state()
+        )
+        if not controller_after_failure.is_clean:
+            raise RuntimeError(
+                "M8 portable source capture leaked registries during failure"
+            ) from error
+        raise
+
+    controller_after = _strict_portable_registry_state(_portable_registry_state())
+    if not controller_after.is_clean:
+        raise RuntimeError("M8 portable source capture leaked registries")
+    return tuple(retained_sources)
+
+
+def _execute_portable_fact_cells_with_sources(
+    execution_cells: tuple[_ExecutionCell, ...],
+    *,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path | None,
+    freeze_id: str,
+    freeze_sha256: str,
+    expected_jagua_sha256: str | None,
+    budget: M8ConcurrencyBudget,
+) -> tuple[
+    _PortableFactPipelineExecution,
+    tuple[_PortableFactCheckedSource, ...],
+]:
     """Run two unchecked generations and one independent bytes-only check phase."""
 
     if not execution_cells:
@@ -3092,23 +3264,20 @@ def _execute_portable_fact_cells(
             execution_cells,
         )
 
-        required_phases = {
-            "fact_bundle_strict_load",
-            "fact_bundle_common_verification",
-            "fact_bundle_action_traversal",
-            "fact_bundle_cleanup",
-        }
         cell_results = []
+        retained_sources = []
         for first_item, second_item, checked_item in zip(
             first,
             second,
             checked,
             strict=True,
         ):
-            first_item, checked_item = _reconcile_portable_fact_handoff(
+            retained_source = _retain_portable_fact_checked_source(
                 first_item,
                 checked_item,
             )
+            first_item = retained_source.first_generation
+            checked_item = retained_source.check
             if (
                 len(
                     {
@@ -3120,19 +3289,14 @@ def _execute_portable_fact_cells(
                 != 3
             ):
                 raise ValueError("M8 portable phases did not use distinct fresh workers")
-            if checked_item.check.total_exact_fallback_count != 0:
-                raise ValueError(
-                    "M8 Gate-3 portable checker performed forbidden exact fallback"
-                )
-            if not required_phases <= _portable_profile_phase_names(checked_item.profile):
-                raise ValueError("M8 portable checker omitted required timing phases")
             cell_results.append(
                 _PortableFactCellExecution(
-                    first_generation=_discard_portable_bundle_bytes(first_item),
+                    first_generation=first_item,
                     second_generation=second_item,
                     check=checked_item,
                 )
             )
+            retained_sources.append(retained_source)
         _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
     except BaseException as error:
         controller_after_failure = _strict_portable_registry_state(
@@ -3148,7 +3312,7 @@ def _execute_portable_fact_cells(
     if not controller_after.is_clean:
         raise RuntimeError("M8 portable pipeline controller leaked registries")
     phases = (first_phase, second_phase, checker_phase)
-    return _PortableFactPipelineExecution(
+    pipeline = _PortableFactPipelineExecution(
         cells=tuple(cell_results),
         first_generation_phase_wall_seconds=first_wall,
         second_generation_phase_wall_seconds=second_wall,
@@ -3190,6 +3354,31 @@ def _execute_portable_fact_cells(
         controller_registry_state_before=controller_before,
         controller_registry_state_after=controller_after,
     )
+    return pipeline, tuple(retained_sources)
+
+
+def _execute_portable_fact_cells(
+    execution_cells: tuple[_ExecutionCell, ...],
+    *,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path | None,
+    freeze_id: str,
+    freeze_sha256: str,
+    expected_jagua_sha256: str | None,
+    budget: M8ConcurrencyBudget,
+) -> _PortableFactPipelineExecution:
+    """Compatibility path that deliberately discards private retained sources."""
+
+    pipeline, _retained_sources = _execute_portable_fact_cells_with_sources(
+        execution_cells,
+        rules=rules,
+        jagua_executable=jagua_executable,
+        freeze_id=freeze_id,
+        freeze_sha256=freeze_sha256,
+        expected_jagua_sha256=expected_jagua_sha256,
+        budget=budget,
+    )
+    return pipeline
 
 
 def _generate_cell_worker(
@@ -3250,13 +3439,36 @@ def _sample_audit_generator_worker(
 ) -> _SampleAuditGeneratorResult:
     """Regenerate one frozen per-regime certificate batch in a fresh process."""
 
+    return _gate3_v1_generator_worker(
+        cell,
+        rules,
+        jagua_executable,
+        tuple(item.catalog_action_id for item in audit_bindings),
+        translation_audit_processes,
+    )
+
+
+def _gate3_v1_generator_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path,
+    action_ids: tuple[str, ...],
+    translation_audit_processes: int,
+) -> _SampleAuditGeneratorResult:
+    """Generate the exact frozen Gate-3 v1 action vector in a fresh process."""
+
+    if type(action_ids) is not tuple or any(type(item) is not str for item in action_ids):
+        raise TypeError("M8 Gate-3 v1 action IDs must be an exact tuple of strings")
+    if not action_ids or len(action_ids) != len(set(action_ids)):
+        raise ValueError("M8 Gate-3 v1 action IDs must be unique nonempty values")
+    for action_id in action_ids:
+        _action_kind(action_id)
     with activate_m8_translation_audit_processes(translation_audit_processes):
         request = _request_for_cell(
             cell,
             rules=rules,
             jagua_executable=jagua_executable,
         )
-        action_ids = tuple(item.catalog_action_id for item in audit_bindings)
         sampled, certificate_elapsed = _measure_proof_phase(
             lambda: score_certificate_actions(request, action_ids=action_ids)
         )

@@ -102,6 +102,13 @@ def _phase_delayed_failure(delay_seconds: float) -> None:
     raise RuntimeError("delayed phase failure")
 
 
+def _phase_return_then_exit_nonzero() -> str:
+    timer = threading.Timer(0.05, lambda: os._exit(7))
+    timer.daemon = False
+    timer.start()
+    return "valid-payload"
+
+
 def _phase_force_portable_checker_exception(*args):  # type: ignore[no-untyped-def]
     from yieldforge.oracle import experiment
 
@@ -901,6 +908,18 @@ def test_distributed_phase_terminates_sibling_after_worker_failure() -> None:
     assert time.monotonic() - started < 2.0
 
 
+def test_distributed_phase_rejects_payload_from_nonzero_worker_exit() -> None:
+    from yieldforge.oracle import experiment
+
+    with pytest.raises(RuntimeError, match=r"exited nonzero \(exit_code=7\)"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_return_then_exit_nonzero,
+            ((),),
+            process_count=1,
+            timeout_seconds=5.0,
+        )
+
+
 def test_distributed_phase_terminates_workers_at_deadline() -> None:
     from yieldforge.oracle import experiment
 
@@ -1635,7 +1654,7 @@ def test_portable_fact_pipeline_repeats_generation_then_checks_in_a_fresh_proces
         replay_input=runtime.replay_input,
         verified=runtime.runtime_candidates,
     )
-    execution = experiment._execute_portable_fact_cells(  # noqa: SLF001
+    execution, retained_sources = experiment._execute_portable_fact_cells_with_sources(  # noqa: SLF001
         (cell,),
         rules=runtime.rules,
         jagua_executable=runtime.jagua_executable,
@@ -1646,7 +1665,9 @@ def test_portable_fact_pipeline_repeats_generation_then_checks_in_a_fresh_proces
     )
 
     assert len(execution.cells) == 1
+    assert len(retained_sources) == 1
     evidence = execution.cells[0]
+    retained = retained_sources[0]
     assert evidence.first_generation.bundle_sha256 == (
         evidence.second_generation.bundle_sha256
     )
@@ -1655,6 +1676,17 @@ def test_portable_fact_pipeline_repeats_generation_then_checks_in_a_fresh_proces
     )
     assert not hasattr(evidence.first_generation, "semantic_bundle_bytes")
     assert not hasattr(evidence.second_generation, "semantic_bundle_bytes")
+    assert retained.first_generation == evidence.first_generation
+    assert retained.check == evidence.check
+    assert len(retained.semantic_bundle_bytes) == (
+        retained.first_generation.semantic_serialized_bytes
+    )
+    assert retained.cell_identity == (
+        evidence.first_generation.regime,
+        evidence.first_generation.temporal_seed,
+        evidence.first_generation.stream_id,
+        evidence.first_generation.event_count,
+    )
     assert evidence.check.check.valid
     assert evidence.first_generation.worker_pid != evidence.second_generation.worker_pid
     assert evidence.check.worker_pid not in {
@@ -1667,6 +1699,106 @@ def test_portable_fact_pipeline_repeats_generation_then_checks_in_a_fresh_proces
     assert execution.checker_phase_wall_seconds > 0.0
     assert execution.worker_payload_handoff_wall_seconds >= 0.0
     assert execution.process_exit_validation_wall_seconds >= 0.0
+
+    generated = experiment._PortableBundleWorkerResult(  # noqa: SLF001
+        **vars(retained.first_generation),
+        semantic_bundle_bytes=retained.semantic_bundle_bytes,
+    )
+    unreconciled = replace(
+        retained.check,
+        bundle_sha256="sha256:" + "0" * 64,
+    )
+    with pytest.raises(ValueError, match="producer and checker metadata differ"):
+        experiment._retain_portable_fact_checked_source(  # noqa: SLF001
+            generated,
+            unreconciled,
+        )
+
+    fallback_check = retained.check.check.model_copy(
+        update={
+            "common_exact_fallback_count": 1,
+            "total_exact_fallback_count": 1,
+            "common_exact_fallback_wall_seconds": 0.1,
+            "total_exact_fallback_wall_seconds": 0.1,
+        }
+    )
+    with pytest.raises(ValueError, match="forbidden exact fallback"):
+        experiment._retain_portable_fact_checked_source(  # noqa: SLF001
+            generated,
+            replace(retained.check, check=fallback_check),
+        )
+
+
+def test_portable_fact_compatibility_wrapper_discards_private_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    pipeline = object()
+    retained_sources = (object(),)
+    monkeypatch.setattr(
+        experiment,
+        "_execute_portable_fact_cells_with_sources",
+        lambda *_args, **_kwargs: (pipeline, retained_sources),
+    )
+
+    result = experiment._execute_portable_fact_cells(  # noqa: SLF001
+        (object(),),  # type: ignore[arg-type]
+        rules=object(),
+        jagua_executable=None,
+        freeze_id="yfm7freeze-" + "b" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+        expected_jagua_sha256=None,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
+    )
+
+    assert result is pipeline
+    assert "retained_sources" not in experiment.M8PortableFactGate3Result.model_fields
+    assert "semantic_bundle_bytes" not in experiment.M8PortableFactGate3Result.model_fields
+
+
+def test_portable_fact_source_capture_runs_one_generation_and_one_checker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    operations = []
+    run_process_phase = experiment._run_process_phase  # noqa: SLF001
+
+    def recording_phase(operation, *args, **kwargs):  # type: ignore[no-untyped-def]
+        operations.append(operation)
+        return run_process_phase(operation, *args, **kwargs)
+
+    monkeypatch.setattr(experiment, "_run_process_phase", recording_phase)
+    (source,) = experiment._capture_portable_fact_checked_sources(  # noqa: SLF001
+        (cell,),
+        rules=runtime.rules,
+        jagua_executable=runtime.jagua_executable,
+        freeze_id="yfm7freeze-" + "b" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+        expected_jagua_sha256=None,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
+    )
+
+    assert operations == [
+        experiment._generate_portable_fact_bundle_worker,  # noqa: SLF001
+        experiment._check_portable_fact_bundle_worker,  # noqa: SLF001
+    ]
+    assert source.check.check.valid
+    assert source.check.check.total_exact_fallback_count == 0
+    assert source.first_generation.bundle_sha256 == source.check.bundle_sha256
+    assert not multiprocessing.active_children()
+    assert experiment._portable_registry_state().is_clean  # noqa: SLF001
 
 
 def test_portable_gate3_finalizer_rejects_small_pipeline_evidence() -> None:
@@ -2308,6 +2440,68 @@ def test_nested_worker_entrypoints_activate_requested_audit_width(
         ("checker", 2),
     ]
     assert current_m8_translation_audit_processes() is None
+
+
+def test_gate3_v1_generator_worker_accepts_exact_action_id_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import current_m8_translation_audit_processes
+
+    regime = tuple(TemporalRegime)[0]
+    cell = SimpleNamespace(stream=(SimpleNamespace(regime=regime),))
+    requested = []
+    action_ids = ("m7-standard:first", "m7-remnant:second")
+    monkeypatch.setattr(
+        experiment,
+        "_request_for_cell",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_measure_proof_phase",
+        lambda operation: (operation(), 0.25),
+    )
+
+    def sampled_score(_request, *, action_ids):  # type: ignore[no-untyped-def]
+        requested.append((action_ids, current_m8_translation_audit_processes()))
+        return tuple(
+            SimpleNamespace(score=SimpleNamespace(action_id=action_id), proof=object())
+            for action_id in action_ids
+        )
+
+    monkeypatch.setattr(experiment, "score_certificate_actions", sampled_score)
+
+    result = experiment._gate3_v1_generator_worker(  # noqa: SLF001
+        cell,
+        object(),
+        Path("jagua"),
+        action_ids,
+        2,
+    )
+
+    assert requested == [(action_ids, 2)]
+    assert result.regime is regime
+    assert tuple(item.score.action_id for item in result.sampled) == action_ids
+    assert result.elapsed_seconds == 0.25
+    assert current_m8_translation_audit_processes() is None
+
+    with pytest.raises(TypeError, match="exact tuple"):
+        experiment._gate3_v1_generator_worker(  # noqa: SLF001
+            cell,
+            object(),
+            Path("jagua"),
+            list(action_ids),  # type: ignore[arg-type]
+            2,
+        )
+    with pytest.raises(ValueError, match="unique nonempty"):
+        experiment._gate3_v1_generator_worker(  # noqa: SLF001
+            cell,
+            object(),
+            Path("jagua"),
+            (action_ids[0], action_ids[0]),
+            2,
+        )
 
 
 def test_reference_worker_has_no_nested_audit_context(

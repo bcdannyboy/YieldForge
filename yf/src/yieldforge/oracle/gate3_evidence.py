@@ -37,6 +37,10 @@ _PARENT_V3_PROOF_ID = "yfm8proof-b296ba919c07d55ece14c6db"
 _PARENT_V3_CONTENT_SHA256 = (
     "sha256:b296ba919c07d55ece14c6dbb6ecbce1aa4a24e612dd1a251757e7a3b739739d"
 )
+OFFICIAL_M8_PORTABLE_GATE3_ID = "yfm8gate3-ea8a12969396172d7dbc4774"
+OFFICIAL_M8_PORTABLE_GATE3_CONTENT_SHA256 = (
+    "sha256:ea8a12969396172d7dbc4774bd239532e2907e637ddb44b1d5505c7b9011d117"
+)
 _AUDIT_RANK_DOMAIN = b"yieldforge.m8.gate3.cost-blind-audit-rank.v2\0"
 _PARENT_ARTIFACT_BYTE_CAP = 16 * 1024 * 1024
 _HELD_OUT_ACTION_COUNT = 550_542
@@ -46,6 +50,10 @@ _SECONDS_PER_DAY = 86_400.0
 _REFERENCE_SLOT_COUNT = 8
 _MINIMUM_REFERENCE_SPEEDUP = 25.0
 _MAXIMUM_PROJECTED_DAYS = 5.0
+_GATE3_ROOT_COUNT_BY_REGIME = {
+    TemporalRegime.NO_SIGNAL: 428,
+    TemporalRegime.REGIME_SHIFT: 459,
+}
 
 type M8Gate3Regime = Literal[
     TemporalRegime.NO_SIGNAL,
@@ -111,6 +119,22 @@ def load_parent_v3_certificate_proof(path: Path) -> M8CertificateProofResult:
     if parent.proof_id != _PARENT_V3_PROOF_ID or parent.content_sha256 != _PARENT_V3_CONTENT_SHA256:
         raise ValueError("M8 Gate-3 parent-v3 artifact differs from the committed freeze")
     return parent
+
+
+def require_official_portable_gate3(
+    value: M8PortableFactGate3Result,
+    *,
+    label: str,
+) -> M8PortableFactGate3Result:
+    """Strict-load and pin the one committed timing artifact authorized for Gate 3."""
+
+    gate3 = _strict_model(value, M8PortableFactGate3Result, label=label)
+    if (
+        gate3.gate3_id != OFFICIAL_M8_PORTABLE_GATE3_ID
+        or gate3.content_sha256 != OFFICIAL_M8_PORTABLE_GATE3_CONTENT_SHA256
+    ):
+        raise ValueError("M8 Gate-3 portable artifact differs from the committed freeze")
+    return gate3
 
 
 class M8Gate3CheckedActionRoot(BaselineContractModel):
@@ -886,19 +910,65 @@ def normalized_gate3_action_semantic_sha256(
     return f"sha256:{semantic_sha256(payload)}"
 
 
+def gate3_checked_v2_output_sha256(
+    root_fact_sha256: str,
+    normalized: M8Gate3NormalizedActionRecord,
+    *,
+    checker_result_content_sha256: str,
+    checker_decision_id: str,
+    checker_decision_content_sha256: str,
+    checked_action_root_count: int,
+    checker_failure_code: str,
+) -> str:
+    """Commit one fresh v2 checker result, decision, and normalized root output."""
+
+    if not root_fact_sha256.startswith("sha256:") or len(root_fact_sha256) != 71:
+        raise ValueError("M8 Gate-3 checked-v2 output requires a SHA-256 root")
+    for label, value in (
+        ("checker result", checker_result_content_sha256),
+        ("checker decision", checker_decision_content_sha256),
+    ):
+        if not value.startswith("sha256:") or len(value) != 71:
+            raise ValueError(f"M8 Gate-3 checked-v2 output requires a SHA-256 {label}")
+    if not checker_decision_id.startswith("yfm8d-") or len(checker_decision_id) != 30:
+        raise ValueError("M8 Gate-3 checked-v2 output requires a decision ID")
+    if type(checked_action_root_count) is not int or checked_action_root_count <= 0:
+        raise ValueError("M8 Gate-3 checked-v2 output requires a positive checked-root count")
+    if checker_failure_code != "valid_action_decision":
+        raise ValueError("M8 Gate-3 checked-v2 output requires a valid checker result")
+    strict = _strict_model(
+        normalized,
+        M8Gate3NormalizedActionRecord,
+        label="M8 Gate-3 checked-v2 output",
+    )
+    payload = {
+        "schema_version": "yieldforge.m8-gate3-checked-v2-output.v2",
+        "root_fact_sha256": root_fact_sha256,
+        "checker_result_content_sha256": checker_result_content_sha256,
+        "checker_decision_id": checker_decision_id,
+        "checker_decision_content_sha256": checker_decision_content_sha256,
+        "checked_action_root_count": checked_action_root_count,
+        "checker_failure_code": checker_failure_code,
+        "normalized": strict.model_dump(mode="json"),
+    }
+    return f"sha256:{semantic_sha256(payload)}"
+
+
 class M8Gate3AuditComputationIdentity(BaselineContractModel):
-    """Bound external implementation, runtime, and output identity for one audit arm."""
+    """Bound primary implementation, runtime, and fresh-process output identity."""
 
     role: Literal["v1_generator", "v1_checker", "checked_v2", "reference"]
     implementation_id: StrictStr = Field(min_length=1)
     implementation_content_sha256: M8Sha256
+    harness_id: StrictStr = Field(min_length=1)
+    harness_content_sha256: M8Sha256
     runtime_id: StrictStr = Field(min_length=1)
     runtime_content_sha256: M8Sha256
     output_content_sha256: M8Sha256
     worker_exit_code: Literal[0] = 0
     evaluation_accessed: Literal[False] = False
-    evidence_scope: Literal["external_independent_output_artifact"] = (
-        "external_independent_output_artifact"
+    evidence_scope: Literal["fresh_process_distinct_primary_implementation_output"] = (
+        "fresh_process_distinct_primary_implementation_output"
     )
 
 
@@ -957,15 +1027,37 @@ class M8Gate3CheckedV2AuditRecord(BaselineContractModel):
 
     action: M8Gate3AuditSampleAction
     computation: M8Gate3AuditComputationIdentity
+    checker_result_content_sha256: M8Sha256
+    checker_decision_id: StrictStr = Field(pattern=r"^yfm8d-[0-9a-f]{24}$")
+    checker_decision_content_sha256: M8Sha256
+    checked_action_root_count: StrictInt = Field(gt=0)
+    checker_failure_code: Literal["valid_action_decision"] = "valid_action_decision"
     normalized: M8Gate3NormalizedActionRecord
 
     @model_validator(mode="after")
     def require_checked_v2_context(self) -> Self:
         if (
             self.computation.role != "checked_v2"
-            or self.computation.output_content_sha256 != self.action.root_fact_sha256
+            or self.computation.output_content_sha256
+            != gate3_checked_v2_output_sha256(
+                self.action.root_fact_sha256,
+                self.normalized,
+                checker_result_content_sha256=self.checker_result_content_sha256,
+                checker_decision_id=self.checker_decision_id,
+                checker_decision_content_sha256=self.checker_decision_content_sha256,
+                checked_action_root_count=self.checked_action_root_count,
+                checker_failure_code=self.checker_failure_code,
+            )
         ):
             raise ValueError("M8 Gate-3 checked-v2 computation identity differs")
+        if (
+            self.checker_decision_id != self.action.checker_decision_id
+            or self.checker_decision_content_sha256
+            != self.action.checker_decision_content_sha256
+            or self.checked_action_root_count
+            != _GATE3_ROOT_COUNT_BY_REGIME[self.action.regime]
+        ):
+            raise ValueError("M8 Gate-3 checked-v2 checker result differs from its root context")
         _require_normalized_root_context(self.action, self.normalized)
         return self
 
@@ -1005,7 +1097,7 @@ class M8Gate3ActionAuditComparison(BaselineContractModel):
     v1_checker: M8Gate3V1CheckerAuditRecord
     checked_v2: M8Gate3CheckedV2AuditRecord
     reference: M8Gate3ReferenceCostAttestation
-    independent_computations: StrictBool
+    distinct_primary_implementations: StrictBool
     proof_binding_match: StrictBool
     semantic_match: StrictBool
     cost_match: StrictBool
@@ -1030,7 +1122,7 @@ class M8Gate3ActionAuditComparison(BaselineContractModel):
             self.checked_v2.computation,
             self.reference.computation,
         )
-        independent = (
+        distinct_primary = (
             len({item.implementation_content_sha256 for item in computations}) == 4
             and len({item.output_content_sha256 for item in computations}) == 4
         )
@@ -1067,11 +1159,12 @@ class M8Gate3ActionAuditComparison(BaselineContractModel):
             == 1
         )
         if (
-            self.independent_computations != independent
+            self.distinct_primary_implementations != distinct_primary
             or self.proof_binding_match != proof_match
             or self.semantic_match != semantic_match
             or self.cost_match != cost_match
-            or self.all_match != (independent and proof_match and semantic_match and cost_match)
+            or self.all_match
+            != (distinct_primary and proof_match and semantic_match and cost_match)
         ):
             raise ValueError("M8 Gate-3 four-way comparison flags differ")
         return self
@@ -1097,9 +1190,35 @@ def _require_global_audit_computation_matrix(
                 }
             )
             != 1
+            or len(
+                {
+                    (item.harness_id, item.harness_content_sha256)
+                    for item in computations
+                }
+            )
+            != 1
             or len({(item.runtime_id, item.runtime_content_sha256) for item in computations}) != 1
         ):
             raise ValueError("M8 Gate-3 audit role implementation/runtime identities drift")
+    if (
+        len(
+            {
+                (item.harness_id, item.harness_content_sha256)
+                for computations in role_computations.values()
+                for item in computations
+            }
+        )
+        != 1
+        or len(
+            {
+                (item.runtime_id, item.runtime_content_sha256)
+                for computations in role_computations.values()
+                for item in computations
+            }
+        )
+        != 1
+    ):
+        raise ValueError("M8 Gate-3 audit shared harness/runtime identities drift")
     all_outputs = {
         item.output_content_sha256
         for computations in role_computations.values()
@@ -1123,7 +1242,7 @@ class M8Gate3AuditResult(BaselineContractModel):
         min_length=12,
         max_length=12,
     )
-    independence_mismatch_count: StrictInt = Field(ge=0, le=12)
+    primary_implementation_overlap_count: StrictInt = Field(ge=0, le=12)
     proof_binding_mismatch_count: StrictInt = Field(ge=0, le=12)
     semantic_mismatch_count: StrictInt = Field(ge=0, le=12)
     cost_mismatch_count: StrictInt = Field(ge=0, le=12)
@@ -1141,14 +1260,16 @@ class M8Gate3AuditResult(BaselineContractModel):
         if tuple(item.action for item in self.comparisons) != self.sample.actions:
             raise ValueError("M8 Gate-3 audit differs from its sample")
         _require_global_audit_computation_matrix(self.comparisons)
-        independence = sum(not item.independent_computations for item in self.comparisons)
+        primary_overlap = sum(
+            not item.distinct_primary_implementations for item in self.comparisons
+        )
         proof = sum(not item.proof_binding_match for item in self.comparisons)
         semantic = sum(not item.semantic_match for item in self.comparisons)
         cost = sum(not item.cost_match for item in self.comparisons)
-        total = independence + proof + semantic + cost
+        total = primary_overlap + proof + semantic + cost
         decision = "pass_proof_audit" if total == 0 else "redesign_proof"
         if (
-            self.independence_mismatch_count != independence
+            self.primary_implementation_overlap_count != primary_overlap
             or self.proof_binding_mismatch_count != proof
             or self.semantic_mismatch_count != semantic
             or self.cost_mismatch_count != cost
@@ -1231,7 +1352,7 @@ def finalize_gate3_audit(
             v2.computation,
             reference.computation,
         )
-        independent = (
+        distinct_primary = (
             len({item.implementation_content_sha256 for item in computations}) == 4
             and len({item.output_content_sha256 for item in computations}) == 4
         )
@@ -1271,16 +1392,20 @@ def finalize_gate3_audit(
                 v1_checker=checker,
                 checked_v2=v2,
                 reference=reference,
-                independent_computations=independent,
+                distinct_primary_implementations=distinct_primary,
                 proof_binding_match=proof_match,
                 semantic_match=semantic_match,
                 cost_match=cost_match,
-                all_match=independent and proof_match and semantic_match and cost_match,
+                all_match=(
+                    distinct_primary and proof_match and semantic_match and cost_match
+                ),
             )
         )
     comparison_tuple = tuple(comparisons)
     _require_global_audit_computation_matrix(comparison_tuple)
-    independence = sum(not item.independent_computations for item in comparison_tuple)
+    primary_overlap = sum(
+        not item.distinct_primary_implementations for item in comparison_tuple
+    )
     proof = sum(not item.proof_binding_match for item in comparison_tuple)
     semantic_count = sum(not item.semantic_match for item in comparison_tuple)
     cost = sum(not item.cost_match for item in comparison_tuple)
@@ -1289,14 +1414,14 @@ def finalize_gate3_audit(
         "sample": frozen.model_dump(mode="json"),
         "audited_action_count": 12,
         "comparisons": tuple(item.model_dump(mode="json") for item in comparison_tuple),
-        "independence_mismatch_count": independence,
+        "primary_implementation_overlap_count": primary_overlap,
         "proof_binding_mismatch_count": proof,
         "semantic_mismatch_count": semantic_count,
         "cost_mismatch_count": cost,
-        "total_mismatch_count": independence + proof + semantic_count + cost,
+        "total_mismatch_count": primary_overlap + proof + semantic_count + cost,
         "proof_decision": (
             "pass_proof_audit"
-            if independence + proof + semantic_count + cost == 0
+            if primary_overlap + proof + semantic_count + cost == 0
             else "redesign_proof"
         ),
         "reference_attestation_scope": "exact_final_net_cost_bits_only",
@@ -1310,14 +1435,14 @@ def finalize_gate3_audit(
         content_sha256=f"sha256:{digest}",
         sample=frozen,
         comparisons=comparison_tuple,
-        independence_mismatch_count=independence,
+        primary_implementation_overlap_count=primary_overlap,
         proof_binding_mismatch_count=proof,
         semantic_mismatch_count=semantic_count,
         cost_mismatch_count=cost,
-        total_mismatch_count=independence + proof + semantic_count + cost,
+        total_mismatch_count=primary_overlap + proof + semantic_count + cost,
         proof_decision=(
             "pass_proof_audit"
-            if independence + proof + semantic_count + cost == 0
+            if primary_overlap + proof + semantic_count + cost == 0
             else "redesign_proof"
         ),
     )
@@ -1596,23 +1721,34 @@ class M8Gate3MutationOutcome(BaselineContractModel):
     recipe_id: StrictStr = Field(pattern=r"^mutation-[0-9a-f]{24}$")
     recipe_sha256: M8Sha256
     target_content_sha256: M8Sha256
+    mutated_content_sha256: M8Sha256
     expected_failure_code: M8Gate3MutationFailureCode
     observed_failure_code: StrictStr | None = Field(default=None, min_length=1)
     rehash_required: StrictBool
     rehash_performed: StrictBool
     mutation_rejected: StrictBool
+    checker_failure_code: StrictStr | None = None
+    first_failing_fact_sha256: M8Sha256 | None = None
     worker_exit_code: StrictInt
+    worker_fork_limit: StrictInt = Field(ge=0, le=2)
+    worker_fork_count: StrictInt = Field(ge=0)
     surviving_descendant_count: StrictInt = Field(ge=0)
     surviving_registry_count: StrictInt = Field(ge=0)
     artifact_published: StrictBool
     evaluation_accessed: StrictBool
 
+    @model_validator(mode="after")
+    def require_bounded_worker_forks(self) -> Self:
+        if self.worker_fork_count > self.worker_fork_limit:
+            raise ValueError("M8 Gate-3 mutation worker fork count exceeds its frozen limit")
+        return self
+
 
 class M8Gate3MutationResult(BaselineContractModel):
     model_config = ConfigDict(revalidate_instances="always")
 
-    schema_version: Literal["yieldforge.m8-gate3-executed-mutations.v1"] = (
-        "yieldforge.m8-gate3-executed-mutations.v1"
+    schema_version: Literal["yieldforge.m8-gate3-executed-mutations.v2"] = (
+        "yieldforge.m8-gate3-executed-mutations.v2"
     )
     mutation_result_id: StrictStr = Field(pattern=r"^yfm8g3mutation-[0-9a-f]{24}$")
     content_sha256: M8Sha256
@@ -1628,10 +1764,12 @@ class M8Gate3MutationResult(BaselineContractModel):
     complete_manifest_reconciliation: StrictBool
     all_expected_failure_codes_match: StrictBool
     all_required_rehashes_performed: StrictBool
+    all_checker_failures_typed: StrictBool
     all_worker_exits_clean: StrictBool
     all_mutations_rejected: StrictBool
     surviving_descendant_count: StrictInt = Field(ge=0)
     surviving_registry_count: StrictInt = Field(ge=0)
+    worker_fork_count: StrictInt = Field(ge=0)
     artifact_published_count: StrictInt = Field(ge=0)
     evaluation_accessed: StrictBool
     mutation_decision: Literal["pass_executed_mutations", "redesign_proof"]
@@ -1659,13 +1797,32 @@ class M8Gate3MutationResult(BaselineContractModel):
         )
         rehashes = complete and all(
             item.rehash_required == recipes[item.recipe_id].rehash_required
+            and item.rehash_performed
+            == (item.mutated_content_sha256 != item.target_content_sha256)
             and (not item.rehash_required or item.rehash_performed)
+            for item in self.outcomes
+        )
+        typed_checker_failures = complete and all(
+            (
+                item.checker_failure_code == "m8_state_chain_mismatch"
+                and item.first_failing_fact_sha256 == item.mutated_content_sha256
+                and 1 <= item.worker_fork_limit <= 2
+                and item.worker_fork_count <= item.worker_fork_limit
+            )
+            if recipes[item.recipe_id].target_kind == "checked_action_root"
+            else (
+                item.checker_failure_code is None
+                and item.first_failing_fact_sha256 is None
+                and item.worker_fork_limit == 0
+                and item.worker_fork_count == 0
+            )
             for item in self.outcomes
         )
         exits = complete and all(item.worker_exit_code == 0 for item in self.outcomes)
         rejected = complete and all(item.mutation_rejected for item in self.outcomes)
         descendants = sum(item.surviving_descendant_count for item in self.outcomes)
         registries = sum(item.surviving_registry_count for item in self.outcomes)
+        forks = sum(item.worker_fork_count for item in self.outcomes)
         published = sum(item.artifact_published for item in self.outcomes)
         evaluation = any(item.evaluation_accessed for item in self.outcomes)
         decision = (
@@ -1673,6 +1830,7 @@ class M8Gate3MutationResult(BaselineContractModel):
             if complete
             and codes
             and rehashes
+            and typed_checker_failures
             and exits
             and rejected
             and descendants == 0
@@ -1688,10 +1846,12 @@ class M8Gate3MutationResult(BaselineContractModel):
             self.complete_manifest_reconciliation == complete,
             self.all_expected_failure_codes_match == codes,
             self.all_required_rehashes_performed == rehashes,
+            self.all_checker_failures_typed == typed_checker_failures,
             self.all_worker_exits_clean == exits,
             self.all_mutations_rejected == rejected,
             self.surviving_descendant_count == descendants,
             self.surviving_registry_count == registries,
+            self.worker_fork_count == forks,
             self.artifact_published_count == published,
             self.evaluation_accessed == evaluation,
             self.mutation_decision == decision,
@@ -1749,13 +1909,32 @@ def finalize_gate3_mutation_execution(
     )
     rehashes = complete and all(
         item.rehash_required == recipes[item.recipe_id].rehash_required
+        and item.rehash_performed
+        == (item.mutated_content_sha256 != item.target_content_sha256)
         and (not item.rehash_required or item.rehash_performed)
+        for item in ordered
+    )
+    typed_checker_failures = complete and all(
+        (
+            item.checker_failure_code == "m8_state_chain_mismatch"
+            and item.first_failing_fact_sha256 == item.mutated_content_sha256
+            and 1 <= item.worker_fork_limit <= 2
+            and item.worker_fork_count <= item.worker_fork_limit
+        )
+        if recipes[item.recipe_id].target_kind == "checked_action_root"
+        else (
+            item.checker_failure_code is None
+            and item.first_failing_fact_sha256 is None
+            and item.worker_fork_limit == 0
+            and item.worker_fork_count == 0
+        )
         for item in ordered
     )
     exits = complete and all(item.worker_exit_code == 0 for item in ordered)
     rejected = complete and all(item.mutation_rejected for item in ordered)
     descendants = sum(item.surviving_descendant_count for item in ordered)
     registries = sum(item.surviving_registry_count for item in ordered)
+    forks = sum(item.worker_fork_count for item in ordered)
     published = sum(item.artifact_published for item in ordered)
     evaluation = any(item.evaluation_accessed for item in ordered)
     decision = (
@@ -1763,6 +1942,7 @@ def finalize_gate3_mutation_execution(
         if complete
         and codes
         and rehashes
+        and typed_checker_failures
         and exits
         and rejected
         and descendants == 0
@@ -1772,7 +1952,7 @@ def finalize_gate3_mutation_execution(
         else "redesign_proof"
     )
     semantic = {
-        "schema_version": "yieldforge.m8-gate3-executed-mutations.v1",
+        "schema_version": "yieldforge.m8-gate3-executed-mutations.v2",
         "manifest": registered.model_dump(mode="json"),
         "harness_id": harness_id,
         "harness_content_sha256": harness_content_sha256,
@@ -1785,10 +1965,12 @@ def finalize_gate3_mutation_execution(
         "complete_manifest_reconciliation": complete,
         "all_expected_failure_codes_match": codes,
         "all_required_rehashes_performed": rehashes,
+        "all_checker_failures_typed": typed_checker_failures,
         "all_worker_exits_clean": exits,
         "all_mutations_rejected": rejected,
         "surviving_descendant_count": descendants,
         "surviving_registry_count": registries,
+        "worker_fork_count": forks,
         "artifact_published_count": published,
         "evaluation_accessed": evaluation,
         "mutation_decision": decision,
@@ -1810,10 +1992,12 @@ def finalize_gate3_mutation_execution(
         complete_manifest_reconciliation=complete,
         all_expected_failure_codes_match=codes,
         all_required_rehashes_performed=rehashes,
+        all_checker_failures_typed=typed_checker_failures,
         all_worker_exits_clean=exits,
         all_mutations_rejected=rejected,
         surviving_descendant_count=descendants,
         surviving_registry_count=registries,
+        worker_fork_count=forks,
         artifact_published_count=published,
         evaluation_accessed=evaluation,
         mutation_decision=decision,
@@ -1827,8 +2011,8 @@ def build_gate3_mutation_result(**_external_counts: object) -> NoReturn:
 
 
 class M8Gate3ReferenceTiming(BaselineContractModel):
-    schema_version: Literal["yieldforge.m8-gate3-reference-timing.v1"] = (
-        "yieldforge.m8-gate3-reference-timing.v1"
+    schema_version: Literal["yieldforge.m8-gate3-reference-timing.v2"] = (
+        "yieldforge.m8-gate3-reference-timing.v2"
     )
     timing_id: StrictStr = Field(pattern=r"^yfm8g3reftime-[0-9a-f]{24}$")
     content_sha256: M8Sha256
@@ -1837,6 +2021,7 @@ class M8Gate3ReferenceTiming(BaselineContractModel):
     action_id: StrictStr = Field(pattern=r"^yfm7a-[0-9a-f]{24}$")
     catalog_action_id: StrictStr = Field(min_length=1)
     root_fact_sha256: M8Sha256
+    is_baseline: StrictBool
     worker_seconds: StrictFloat = Field(gt=0.0)
     measurement_scope: Literal["external_reference_action_worker_monotonic_wall"] = (
         "external_reference_action_worker_monotonic_wall"
@@ -1863,6 +2048,7 @@ def build_gate3_reference_timing(
     action_id: str,
     catalog_action_id: str,
     root_fact_sha256: str,
+    is_baseline: bool,
     computation: M8Gate3AuditComputationIdentity,
     worker_seconds: float,
 ) -> M8Gate3ReferenceTiming:
@@ -1872,12 +2058,13 @@ def build_gate3_reference_timing(
         label="M8 reference timing",
     )
     semantic = {
-        "schema_version": "yieldforge.m8-gate3-reference-timing.v1",
+        "schema_version": "yieldforge.m8-gate3-reference-timing.v2",
         "computation": identity.model_dump(mode="json"),
         "regime": regime.value,
         "action_id": action_id,
         "catalog_action_id": catalog_action_id,
         "root_fact_sha256": root_fact_sha256,
+        "is_baseline": is_baseline,
         "worker_seconds": worker_seconds,
         "measurement_scope": "external_reference_action_worker_monotonic_wall",
     }
@@ -1890,8 +2077,32 @@ def build_gate3_reference_timing(
         action_id=action_id,
         catalog_action_id=catalog_action_id,
         root_fact_sha256=root_fact_sha256,
+        is_baseline=is_baseline,
         worker_seconds=worker_seconds,
     )
+
+
+def _stratified_reference_wall_seconds(
+    timings: tuple[M8Gate3ReferenceTiming, ...],
+    *,
+    slot_count: int,
+) -> float:
+    if type(slot_count) is not int or slot_count <= 0:
+        raise ValueError("M8 Gate-3 reference slot count must be positive")
+    expanded_worker_seconds = 0.0
+    for regime, population_count in _GATE3_ROOT_COUNT_BY_REGIME.items():
+        regime_timings = tuple(item for item in timings if item.regime is regime)
+        baselines = tuple(item for item in regime_timings if item.is_baseline)
+        nonbaselines = tuple(item for item in regime_timings if not item.is_baseline)
+        if len(baselines) != 1 or len(nonbaselines) != 5:
+            raise ValueError(
+                "M8 Gate-3 reference timings differ from the stratified sample"
+            )
+        expanded_worker_seconds += baselines[0].worker_seconds
+        expanded_worker_seconds += (population_count - 1) * (
+            sum(item.worker_seconds for item in nonbaselines) / len(nonbaselines)
+        )
+    return expanded_worker_seconds / slot_count
 
 
 class M8Gate3PerformanceSensitivity(BaselineContractModel):
@@ -1905,8 +2116,8 @@ class M8Gate3PerformanceSensitivity(BaselineContractModel):
 class M8Gate3PerformanceResult(BaselineContractModel):
     model_config = ConfigDict(revalidate_instances="always")
 
-    schema_version: Literal["yieldforge.m8-gate3-performance.v2"] = (
-        "yieldforge.m8-gate3-performance.v2"
+    schema_version: Literal["yieldforge.m8-gate3-performance.v4"] = (
+        "yieldforge.m8-gate3-performance.v4"
     )
     performance_id: StrictStr = Field(pattern=r"^yfm8g3perf-[0-9a-f]{24}$")
     content_sha256: M8Sha256
@@ -1924,6 +2135,9 @@ class M8Gate3PerformanceResult(BaselineContractModel):
     )
     reference_timing_order: Literal["audit_sample_action_order"] = "audit_sample_action_order"
     reference_action_worker_seconds_sum: StrictFloat = Field(gt=0.0)
+    reference_expansion: Literal[
+        "per_regime_one_baseline_plus_five_nonbaseline_population_weighted"
+    ] = "per_regime_one_baseline_plus_five_nonbaseline_population_weighted"
     charged_pipeline_wall_seconds: StrictFloat = Field(gt=0.0)
     projected_action_count: Literal[550542] = _HELD_OUT_ACTION_COUNT
     projected_mean_future_event_count: Literal[11.5] = _HELD_OUT_MEAN_FUTURE_EVENT_COUNT
@@ -1932,6 +2146,11 @@ class M8Gate3PerformanceResult(BaselineContractModel):
     reference_slot_count: Literal[8] = _REFERENCE_SLOT_COUNT
     reference_equal_8_slot_wall_seconds: StrictFloat = Field(gt=0.0)
     reference_equivalent_speedup: StrictFloat = Field(gt=0.0)
+    timing_environment_comparable: Literal[False] = False
+    reference_speedup_gating: Literal[False] = False
+    reference_speedup_scope: Literal[
+        "historical_portable_vs_fresh_reference_cross_run_diagnostic_only"
+    ] = "historical_portable_vs_fresh_reference_cross_run_diagnostic_only"
     minimum_reference_speedup: Literal[25.0] = _MINIMUM_REFERENCE_SPEEDUP
     maximum_projected_calendar_days: Literal[5.0] = _MAXIMUM_PROJECTED_DAYS
     sensitivity: M8Gate3PerformanceSensitivity
@@ -1940,8 +2159,12 @@ class M8Gate3PerformanceResult(BaselineContractModel):
         "hold_performance",
     ]
     claim_ceiling: Literal[
-        "abbreviated_calibration_software_performance_only_not_official_execution_or_m8_result"
-    ] = "abbreviated_calibration_software_performance_only_not_official_execution_or_m8_result"
+        "cross_run_speedup_diagnostic_and_historical_projection_only_not_authorizing_official_"
+        "execution_or_m8_result"
+    ] = (
+        "cross_run_speedup_diagnostic_and_historical_projection_only_not_authorizing_official_"
+        "execution_or_m8_result"
+    )
 
     @model_validator(mode="after")
     def require_performance_math_and_identity(self) -> Self:
@@ -1965,9 +2188,10 @@ class M8Gate3PerformanceResult(BaselineContractModel):
             * self.projection_safety_factor
             / _SECONDS_PER_DAY
         )
-        reference_wall = (
-            reference_sum / self.reference_action_count * 887
-        ) / self.reference_slot_count
+        reference_wall = _stratified_reference_wall_seconds(
+            self.reference_timings,
+            slot_count=self.reference_slot_count,
+        )
         speedup = reference_wall / self.charged_pipeline_wall_seconds
         sensitivity_days = (
             self.sensitivity.charged_wall_seconds
@@ -1978,12 +2202,10 @@ class M8Gate3PerformanceResult(BaselineContractModel):
             / _SECONDS_PER_DAY
         )
         sensitivity_speedup = reference_wall / self.sensitivity.charged_wall_seconds
-        decision = (
-            "pass_abbreviated_performance"
-            if speedup >= self.minimum_reference_speedup
-            and projected_days <= self.maximum_projected_calendar_days
-            else "hold_performance"
-        )
+        # The official portable timing was captured in an earlier run without a
+        # bound machine/load identity.  Its comparison to fresh reference timing
+        # is useful diagnostically, but cannot authorize the six-cell run.
+        decision = "hold_performance"
         if (
             self.reference_action_worker_seconds_sum != reference_sum
             or self.projected_held_out_calendar_days != projected_days
@@ -2047,8 +2269,16 @@ def finalize_gate3_performance(
     if set(indexed) != expected:
         raise ValueError("M8 Gate-3 reference timing differs from a sample action")
     ordered = tuple(indexed[_action_key(item)] for item in frozen.actions)
+    if any(
+        timing.is_baseline != action.is_baseline
+        for timing, action in zip(ordered, frozen.actions, strict=True)
+    ):
+        raise ValueError("M8 Gate-3 reference timing baseline strata differ")
     reference_sum = sum(item.worker_seconds for item in ordered)
-    reference_wall = (reference_sum / 12 * 887) / 8
+    reference_wall = _stratified_reference_wall_seconds(
+        ordered,
+        slot_count=_REFERENCE_SLOT_COUNT,
+    )
     charged = gate3.total_pipeline_wall_seconds
     projected = _projected_days(charged, roots.observed_action_event_count)
     speedup = reference_wall / charged
@@ -2062,7 +2292,7 @@ def finalize_gate3_performance(
         reference_equivalent_speedup=reference_wall / sensitivity_wall,
     )
     semantic = {
-        "schema_version": "yieldforge.m8-gate3-performance.v2",
+        "schema_version": "yieldforge.m8-gate3-performance.v4",
         "portable_gate3_id": gate3.gate3_id,
         "portable_gate3_content_sha256": gate3.content_sha256,
         "root_manifest_id": roots.manifest_id,
@@ -2074,6 +2304,9 @@ def finalize_gate3_performance(
         "reference_timings": tuple(item.model_dump(mode="json") for item in ordered),
         "reference_timing_order": "audit_sample_action_order",
         "reference_action_worker_seconds_sum": reference_sum,
+        "reference_expansion": (
+            "per_regime_one_baseline_plus_five_nonbaseline_population_weighted"
+        ),
         "charged_pipeline_wall_seconds": charged,
         "projected_action_count": _HELD_OUT_ACTION_COUNT,
         "projected_mean_future_event_count": _HELD_OUT_MEAN_FUTURE_EVENT_COUNT,
@@ -2082,16 +2315,18 @@ def finalize_gate3_performance(
         "reference_slot_count": _REFERENCE_SLOT_COUNT,
         "reference_equal_8_slot_wall_seconds": reference_wall,
         "reference_equivalent_speedup": speedup,
+        "timing_environment_comparable": False,
+        "reference_speedup_gating": False,
+        "reference_speedup_scope": (
+            "historical_portable_vs_fresh_reference_cross_run_diagnostic_only"
+        ),
         "minimum_reference_speedup": _MINIMUM_REFERENCE_SPEEDUP,
         "maximum_projected_calendar_days": _MAXIMUM_PROJECTED_DAYS,
         "sensitivity": sensitivity.model_dump(mode="json"),
-        "performance_decision": (
-            "pass_abbreviated_performance"
-            if speedup >= _MINIMUM_REFERENCE_SPEEDUP and projected <= _MAXIMUM_PROJECTED_DAYS
-            else "hold_performance"
-        ),
+        "performance_decision": "hold_performance",
         "claim_ceiling": (
-            "abbreviated_calibration_software_performance_only_not_official_execution_or_m8_result"
+            "cross_run_speedup_diagnostic_and_historical_projection_only_not_authorizing_"
+            "official_execution_or_m8_result"
         ),
     }
     digest = semantic_sha256(semantic)
@@ -2112,11 +2347,7 @@ def finalize_gate3_performance(
         reference_equal_8_slot_wall_seconds=reference_wall,
         reference_equivalent_speedup=speedup,
         sensitivity=sensitivity,
-        performance_decision=(
-            "pass_abbreviated_performance"
-            if speedup >= _MINIMUM_REFERENCE_SPEEDUP and projected <= _MAXIMUM_PROJECTED_DAYS
-            else "hold_performance"
-        ),
+        performance_decision="hold_performance",
     )
 
 
@@ -2199,6 +2430,7 @@ def _require_decision_bindings(
     mutations: M8Gate3MutationResult,
     performance: M8Gate3PerformanceResult | None,
 ) -> None:
+    require_official_portable_gate3(gate3, label="M8 Gate-3 decision")
     if parent.proof_id != _PARENT_V3_PROOF_ID or parent.content_sha256 != _PARENT_V3_CONTENT_SHA256:
         raise ValueError("M8 Gate-3 decision parent-v3 differs")
     _require_gate3_manifest_binding(gate3, roots)
@@ -2233,6 +2465,8 @@ def _require_decision_bindings(
             or performance.observed_action_event_count != roots.observed_action_event_count
             or tuple(_action_key(item) for item in performance.reference_timings)
             != tuple(_action_key(item) for item in sample.actions)
+            or tuple(item.is_baseline for item in performance.reference_timings)
+            != tuple(item.is_baseline for item in sample.actions)
             or tuple(item.computation for item in performance.reference_timings)
             != tuple(item.reference.computation for item in audit.comparisons)
             or performance.charged_pipeline_wall_seconds != gate3.total_pipeline_wall_seconds
@@ -2342,6 +2576,8 @@ def finalize_gate3_decision(
 
 
 __all__ = [
+    "OFFICIAL_M8_PORTABLE_GATE3_CONTENT_SHA256",
+    "OFFICIAL_M8_PORTABLE_GATE3_ID",
     "M8Gate3ActionAuditComparison",
     "M8Gate3AuditComputationIdentity",
     "M8Gate3AuditResult",
@@ -2378,6 +2614,8 @@ __all__ = [
     "freeze_gate3_audit_sample",
     "freeze_gate3_checked_root_manifest",
     "gate3_checked_root_sequence_sha256",
+    "gate3_checked_v2_output_sha256",
     "load_parent_v3_certificate_proof",
     "normalized_gate3_action_semantic_sha256",
+    "require_official_portable_gate3",
 ]

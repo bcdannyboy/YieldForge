@@ -81,6 +81,12 @@ from yieldforge.oracle.experiment import (
     publish_portable_fact_gate3,
     publish_sparse_proof,
 )
+from yieldforge.oracle.gate3_evidence import load_parent_v3_certificate_proof
+from yieldforge.oracle.gate3_execution import (
+    execute_gate3_decision,
+    load_portable_fact_gate3,
+    publish_gate3_decision,
+)
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 from yieldforge.temporal_benchmark.catalog import load_registered_catalog
 from yieldforge.temporal_benchmark.contracts import TemporalRegime, build_registered_contract
@@ -628,6 +634,49 @@ def _run_m8_portable_fact_gate3(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_m8_gate3_decision(args: argparse.Namespace) -> int:
+    """Execute proof/mutation gates plus the historical performance diagnostic."""
+
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    frozen = load_frozen_json(args.frozen_baseline, M7FrozenBaseline)
+    parent = load_parent_v3_certificate_proof(args.parent_v3)
+    portable = load_portable_fact_gate3(args.portable_gate3)
+    index = build_registered_calibration_problem_view(
+        full_problem_index_id=frozen.problem_index_id,
+        full_problem_index_sha256=frozen.problem_index_sha256,
+    )
+
+    def progress(message: str) -> None:
+        print(f"M8 complete Gate-3: {message}", flush=True)
+
+    result = execute_gate3_decision(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        parent_v3=parent,
+        portable_fact_gate3=portable,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        progress=progress,
+    )
+    result_path = publish_gate3_decision(args.output, result)
+    performance = result.performance
+    print(
+        "Published M8 complete Gate-3 decision: "
+        f"decision={result.decision_id} "
+        f"audit={result.audit.proof_decision} "
+        f"mutations={result.mutations.rejected_mutation_count}/16 "
+        f"performance={performance.performance_decision if performance else 'not_run'} "
+        f"speedup={performance.reference_equivalent_speedup if performance else 'n/a'} "
+        f"projected_days={performance.projected_held_out_calendar_days if performance else 'n/a'} "
+        f"six_cell_authorized={str(result.official_six_cell_calibration_authorized).lower()} "
+        f"evaluation_opened={str(result.evaluation_opened).lower()} "
+        f"output={result_path}",
+        flush=True,
+    )
+    return 0
+
+
 def _profile_m8_certificate(args: argparse.Namespace) -> int:
     """Profile one explicit calibration stream without opening evaluation."""
 
@@ -940,6 +989,28 @@ def build_parser() -> argparse.ArgumentParser:
     portable_m8.add_argument("--jagua-binary", type=Path, required=True)
     portable_m8.add_argument("--output", type=Path, required=True)
     portable_m8.set_defaults(handler=_run_m8_portable_fact_gate3)
+
+    gate3_m8 = benchmark_commands.add_parser(
+        "m8-gate3-decision",
+        help=(
+            "execute the frozen 12-action audit, 16 mutations, and historical "
+            "performance diagnostic"
+        ),
+    )
+    gate3_m8.add_argument("--m0", type=Path, required=True)
+    gate3_m8.add_argument("--frozen-baseline", type=Path, required=True)
+    gate3_m8.add_argument("--parent-v3", type=Path, required=True)
+    gate3_m8.add_argument("--portable-gate3", type=Path, required=True)
+    gate3_m8.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    gate3_m8.add_argument("--jagua-binary", type=Path, required=True)
+    gate3_m8.add_argument("--output", type=Path, required=True)
+    gate3_m8.set_defaults(handler=_run_m8_gate3_decision)
 
     profile_m8 = benchmark_commands.add_parser(
         "m8-certificate-profile",

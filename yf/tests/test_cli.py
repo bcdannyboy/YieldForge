@@ -263,6 +263,45 @@ def test_m8_portable_gate3_command_exposes_only_frozen_inputs() -> None:
     }
 
 
+def test_m8_gate3_decision_command_exposes_only_frozen_evidence_inputs() -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "m8-gate3-decision",
+            "--m0",
+            "m0.json",
+            "--frozen-baseline",
+            "freeze.json",
+            "--parent-v3",
+            "parent.json",
+            "--portable-gate3",
+            "portable.json",
+            "--archive-root",
+            "archives",
+            "--jagua-binary",
+            "jagua",
+            "--output",
+            "results",
+        ]
+    )
+
+    assert args.handler.__name__ == "_run_m8_gate3_decision"
+    assert set(vars(args)) == {
+        "command",
+        "benchmark_command",
+        "m0",
+        "frozen_baseline",
+        "parent_v3",
+        "portable_gate3",
+        "archive_root",
+        "jagua_binary",
+        "output",
+        "handler",
+    }
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     (
@@ -433,6 +472,101 @@ def test_m8_portable_gate3_uses_only_calibration_view_and_immutable_publisher(
     assert "total_seconds=5.75" in output
     assert "decision=pass_portable_fact_pipeline" in output
     assert f"output={output_path}" in output
+
+
+def test_m8_gate3_decision_keeps_evaluation_sealed_and_publishes_bound_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,  # type: ignore[no-untyped-def]
+) -> None:
+    from yieldforge import cli
+
+    m0 = object()
+    frozen = SimpleNamespace(
+        problem_index_id="yfm7i-" + "1" * 24,
+        problem_index_sha256="sha256:" + "2" * 64,
+    )
+    parent = object()
+    portable = object()
+    view = object()
+    performance = SimpleNamespace(
+        performance_decision="hold_performance",
+        reference_equivalent_speedup=3.0,
+        projected_held_out_calendar_days=113.0,
+    )
+    result = SimpleNamespace(
+        decision_id="yfm8g3decision-" + "3" * 24,
+        decision="hold_performance",
+        audit=SimpleNamespace(proof_decision="pass_proof_audit"),
+        mutations=SimpleNamespace(rejected_mutation_count=16),
+        performance=performance,
+        official_six_cell_calibration_authorized=False,
+        evaluation_opened=False,
+    )
+    output_directory = tmp_path / "results"
+    output_path = output_directory / "m8-gate3-decision-test.json"
+    executed: list[dict[str, object]] = []
+
+    def load(path: Path, model: object) -> object:
+        return m0 if model is cli.M0ExperimentContract else frozen
+
+    def execute(**kwargs):  # type: ignore[no-untyped-def]
+        executed.append(kwargs)
+        kwargs["progress"]("phase_complete phase=gate3_decision")
+        return result
+
+    monkeypatch.setattr(cli, "load_frozen_json", load)
+    monkeypatch.setattr(cli, "load_parent_v3_certificate_proof", lambda path: parent)
+    monkeypatch.setattr(cli, "load_portable_fact_gate3", lambda path: portable)
+    monkeypatch.setattr(
+        cli,
+        "build_registered_calibration_problem_view",
+        lambda **kwargs: view,
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_registered_problem_index",
+        lambda: pytest.fail("full problem index opened evaluation streams"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_evaluation",
+        lambda **kwargs: pytest.fail("evaluation execution was opened"),
+    )
+    monkeypatch.setattr(cli, "execute_gate3_decision", execute)
+    monkeypatch.setattr(
+        cli,
+        "publish_gate3_decision",
+        lambda output, value: output_path,
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m8-gate3-decision",
+                "--m0",
+                str(tmp_path / "m0.json"),
+                "--frozen-baseline",
+                str(tmp_path / "freeze.json"),
+                "--parent-v3",
+                str(tmp_path / "parent.json"),
+                "--portable-gate3",
+                str(tmp_path / "portable.json"),
+                "--archive-root",
+                str(tmp_path / "archives"),
+                "--jagua-binary",
+                str(tmp_path / "jagua"),
+                "--output",
+                str(output_directory),
+            ]
+        )
+        == 0
+    )
+    assert executed[0]["index"] is view
+    assert executed[0]["parent_v3"] is parent
+    assert executed[0]["portable_fact_gate3"] is portable
+    assert "six_cell_authorized=false" in capsys.readouterr().out
 
 
 def test_m8_command_builds_only_the_calibration_problem_view(

@@ -38,6 +38,7 @@ from yieldforge.oracle.gate3_evidence import (
     freeze_gate3_audit_sample,
     freeze_gate3_checked_root_manifest,
     gate3_checked_root_sequence_sha256,
+    gate3_checked_v2_output_sha256,
     load_parent_v3_certificate_proof,
     normalized_gate3_action_semantic_sha256,
 )
@@ -47,6 +48,17 @@ _PARENT_PATH = (
     Path(__file__).resolve().parents[2]
     / "experiments/results/m8-certificate-proof-yfm8proof-b296ba919c07d55ece14c6db.json"
 )
+_PORTABLE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "experiments/results/m8-portable-fact-gate3-yfm8gate3-ea8a12969396172d7dbc4774.json"
+)
+
+
+def _official_portable_gate3() -> experiment.M8PortableFactGate3Result:
+    return experiment.M8PortableFactGate3Result.model_validate_json(
+        _PORTABLE_PATH.read_bytes(),
+        strict=True,
+    )
 
 
 def _sha(value: str) -> str:
@@ -495,8 +507,10 @@ def _computation_identity(
         role=role,
         implementation_id=f"m8-gate3-{role}-implementation-v1",
         implementation_content_sha256=_sha(f"implementation:{role}"),
-        runtime_id=f"m8-gate3-{role}-runtime-v1",
-        runtime_content_sha256=_sha(f"runtime:{role}"),
+        harness_id="m8-gate3-audit-harness-v1",
+        harness_content_sha256=_sha("audit-harness"),
+        runtime_id="m8-gate3-runtime-v1",
+        runtime_content_sha256=_sha("runtime"),
         output_content_sha256=output_content_sha256,
         worker_exit_code=0,
         evaluation_accessed=False,
@@ -549,7 +563,29 @@ def _audit_inputs(sample):  # type: ignore[no-untyped-def]
                 action=action,
                 computation=_computation_identity(
                     "checked_v2",
-                    output_content_sha256=action.root_fact_sha256,
+                    output_content_sha256=gate3_checked_v2_output_sha256(
+                        action.root_fact_sha256,
+                        normalized,
+                        checker_result_content_sha256=_sha(
+                            f"checker-result:{action.regime.value}"
+                        ),
+                        checker_decision_id=action.checker_decision_id,
+                        checker_decision_content_sha256=(
+                            action.checker_decision_content_sha256
+                        ),
+                        checked_action_root_count=(
+                            428 if action.regime is TemporalRegime.NO_SIGNAL else 459
+                        ),
+                        checker_failure_code="valid_action_decision",
+                    ),
+                ),
+                checker_result_content_sha256=_sha(
+                    f"checker-result:{action.regime.value}"
+                ),
+                checker_decision_id=action.checker_decision_id,
+                checker_decision_content_sha256=action.checker_decision_content_sha256,
+                checked_action_root_count=(
+                    428 if action.regime is TemporalRegime.NO_SIGNAL else 459
                 ),
                 normalized=normalized,
             )
@@ -584,7 +620,7 @@ def test_four_way_audit_distinguishes_generator_checker_checked_v2_and_reference
         references,
     )
     assert result.proof_binding_mismatch_count == 0
-    assert result.independence_mismatch_count == 0
+    assert result.primary_implementation_overlap_count == 0
     assert result.semantic_mismatch_count == 0
     assert result.cost_mismatch_count == 0
     assert result.total_mismatch_count == 0
@@ -610,15 +646,35 @@ def test_four_way_audit_records_proof_semantic_and_canonical_cost_mismatches(
     influence = event.influences[0].model_copy(
         update={"evidence_sha256": _sha("different-influence")}
     )
+    mismatched_normalized = checked_v2[1].normalized.model_copy(
+        update={
+            "ordered_event_evidence": (
+                event.model_copy(update={"influences": (influence,)}),
+            )
+        }
+    )
     semantic_mismatch = checked_v2[1].model_copy(
         update={
-            "normalized": checked_v2[1].normalized.model_copy(
+            "normalized": mismatched_normalized,
+            "computation": checked_v2[1].computation.model_copy(
                 update={
-                    "ordered_event_evidence": (
-                        event.model_copy(update={"influences": (influence,)}),
+                    "output_content_sha256": gate3_checked_v2_output_sha256(
+                        checked_v2[1].action.root_fact_sha256,
+                        mismatched_normalized,
+                        checker_result_content_sha256=(
+                            checked_v2[1].checker_result_content_sha256
+                        ),
+                        checker_decision_id=checked_v2[1].checker_decision_id,
+                        checker_decision_content_sha256=(
+                            checked_v2[1].checker_decision_content_sha256
+                        ),
+                        checked_action_root_count=(
+                            checked_v2[1].checked_action_root_count
+                        ),
+                        checker_failure_code=checked_v2[1].checker_failure_code,
                     )
                 }
-            )
+            ),
         }
     )
     cost_mismatch = references[2].model_copy(
@@ -652,15 +708,15 @@ def test_four_way_audit_records_proof_semantic_and_canonical_cost_mismatches(
         )
         for item in checked_v2
     )
-    independent = finalize_gate3_audit(
+    overlapping = finalize_gate3_audit(
         sample,
         generators,
         checkers,
         copied_identities,
         references,
     )
-    assert independent.independence_mismatch_count == 12
-    assert independent.proof_decision == "redesign_proof"
+    assert overlapping.primary_implementation_overlap_count == 12
+    assert overlapping.proof_decision == "redesign_proof"
 
     wrong_counts = checkers[0].model_copy(update={"checked_event_count": 2})
     count_result = finalize_gate3_audit(
@@ -845,9 +901,20 @@ def _mutation_evidence(parent_v3, gate3, manifest, sample):  # type: ignore[no-u
             target_content_sha256=item.target_content_sha256,
             expected_failure_code=item.expected_failure_code,
             observed_failure_code=item.expected_failure_code,
+            mutated_content_sha256=(mutated_sha := _sha(f"mutated:{item.recipe_id}")),
             rehash_required=item.rehash_required,
             rehash_performed=item.rehash_required,
             mutation_rejected=True,
+            checker_failure_code=(
+                "m8_state_chain_mismatch"
+                if item.target_kind == "checked_action_root"
+                else None
+            ),
+            first_failing_fact_sha256=(
+                mutated_sha if item.target_kind == "checked_action_root" else None
+            ),
+            worker_fork_limit=(2 if item.target_kind == "checked_action_root" else 0),
+            worker_fork_count=0,
             worker_exit_code=0,
             surviving_descendant_count=0,
             surviving_registry_count=0,
@@ -890,8 +957,32 @@ def test_external_mutation_counts_cannot_pass_and_bound_execution_reconciles_man
     assert result.registered_recipe_count == 16
     assert result.complete_manifest_reconciliation is True
     assert result.all_expected_failure_codes_match is True
+    assert result.all_checker_failures_typed is True
     assert result.all_required_rehashes_performed is True
     assert result.all_worker_exits_clean is True
+    assert result.worker_fork_count == 0
+
+    action_index = next(
+        index
+        for index, recipe in enumerate(mutation_manifest.recipes)
+        if recipe.target_kind == "checked_action_root"
+    )
+    excessive_forks = outcomes[action_index].model_copy(
+        update={"worker_fork_count": 999}
+    )
+    forged_outcomes = tuple(
+        excessive_forks if index == action_index else item
+        for index, item in enumerate(outcomes)
+    )
+    with pytest.raises(ValueError, match="fork count exceeds"):
+        finalize_gate3_mutation_execution(
+            mutation_manifest,
+            harness_id="m8-gate3-mutation-harness-v1",
+            harness_content_sha256=_sha("harness"),
+            runtime_id="python-runtime-test",
+            runtime_content_sha256=_sha("runtime"),
+            outcomes=forged_outcomes,
+        )
     assert result.evaluation_accessed is False
     assert result.mutation_decision == "pass_executed_mutations"
 
@@ -979,6 +1070,7 @@ def _reference_timings(sample, seconds: float = 10.0):  # type: ignore[no-untype
             action_id=item.action_id,
             catalog_action_id=item.catalog_action_id,
             root_fact_sha256=item.root_fact_sha256,
+            is_baseline=item.is_baseline,
             computation=_computation_identity(
                 "reference",
                 output_content_sha256=_sha(
@@ -1004,7 +1096,7 @@ def test_performance_denominator_comes_from_manifest_and_timings_are_keyed_to_sa
         reference_timings=tuple(reversed(timings)),
     )
     expected_days = 4.0 / 887 * 550_542 * 11.5 * 2 / 86_400
-    expected_reference_wall = (sum(item.worker_seconds for item in timings) / 12 * 887) / 8
+    expected_reference_wall = 10.0 * 887 / 8
     assert result.observed_action_event_count == manifest.observed_action_event_count == 887
     assert tuple(
         (item.regime, item.catalog_action_id) for item in result.reference_timings
@@ -1012,7 +1104,9 @@ def test_performance_denominator_comes_from_manifest_and_timings_are_keyed_to_sa
     assert result.projected_held_out_calendar_days == expected_days
     assert result.reference_equal_8_slot_wall_seconds == expected_reference_wall
     assert result.reference_equivalent_speedup == expected_reference_wall / 4.0
-    assert result.performance_decision == "pass_abbreviated_performance"
+    assert result.performance_decision == "hold_performance"
+    assert result.timing_environment_comparable is False
+    assert result.reference_speedup_gating is False
     assert result.sensitivity.gating is False
 
     wrong = build_gate3_reference_timing(
@@ -1020,6 +1114,7 @@ def test_performance_denominator_comes_from_manifest_and_timings_are_keyed_to_sa
         action_id=timings[0].action_id,
         catalog_action_id=timings[0].catalog_action_id,
         root_fact_sha256=_sha("wrong-root"),
+        is_baseline=timings[0].is_baseline,
         computation=timings[0].computation,
         worker_seconds=timings[0].worker_seconds,
     )
@@ -1041,7 +1136,44 @@ def test_performance_denominator_comes_from_manifest_and_timings_are_keyed_to_sa
         )
 
 
-def test_performance_thresholds_are_inclusive_and_one_ulp_beyond_holds(
+def test_reference_projection_expands_each_regime_and_baseline_stratum(
+    gate3,
+    manifest,
+    sample,
+) -> None:  # type: ignore[no-untyped-def]
+    original = _reference_timings(sample)
+    seconds_by_stratum = {
+        (TemporalRegime.NO_SIGNAL, True): 1.0,
+        (TemporalRegime.NO_SIGNAL, False): 10.0,
+        (TemporalRegime.REGIME_SHIFT, True): 2.0,
+        (TemporalRegime.REGIME_SHIFT, False): 20.0,
+    }
+    timings = tuple(
+        build_gate3_reference_timing(
+            regime=timing.regime,
+            action_id=timing.action_id,
+            catalog_action_id=timing.catalog_action_id,
+            root_fact_sha256=timing.root_fact_sha256,
+            is_baseline=timing.is_baseline,
+            computation=timing.computation,
+            worker_seconds=seconds_by_stratum[(timing.regime, timing.is_baseline)],
+        )
+        for timing in original
+    )
+
+    result = finalize_gate3_performance(
+        gate3,
+        manifest,
+        sample,
+        reference_timings=timings,
+    )
+
+    assert result.reference_equal_8_slot_wall_seconds == (
+        1.0 + 427 * 10.0 + 2.0 + 458 * 20.0
+    ) / 8
+
+
+def test_performance_thresholds_are_inclusive_and_beyond_holds(
     parent_v3,
     gate3,
     manifest,
@@ -1056,7 +1188,7 @@ def test_performance_thresholds_are_inclusive_and_one_ulp_beyond_holds(
         reference_timings=_reference_timings(sample, exact_speed_timing),
     )
     assert exact_speed.reference_equivalent_speedup == 25.0
-    assert exact_speed.performance_decision == "pass_abbreviated_performance"
+    assert exact_speed.performance_decision == "hold_performance"
 
     below_speed = finalize_gate3_performance(
         gate3,
@@ -1064,7 +1196,7 @@ def test_performance_thresholds_are_inclusive_and_one_ulp_beyond_holds(
         sample,
         reference_timings=_reference_timings(
             sample,
-            math.nextafter(exact_speed_timing, 0.0),
+            exact_speed_timing * (1.0 - 1e-12),
         ),
     )
     assert below_speed.reference_equivalent_speedup < 25.0
@@ -1087,7 +1219,7 @@ def test_performance_thresholds_are_inclusive_and_one_ulp_beyond_holds(
         reference_timings=_reference_timings(exact_days_sample, 100.0),
     )
     assert exact_days.projected_held_out_calendar_days <= 5.0
-    assert exact_days.performance_decision == "pass_abbreviated_performance"
+    assert exact_days.performance_decision == "hold_performance"
 
     over_days_gate3 = _portable_gate3_result(
         total_pipeline_wall_seconds=math.nextafter(exact_days_wall, math.inf)
@@ -1122,19 +1254,19 @@ def _complete_evidence(parent_v3, gate3, manifest, sample):  # type: ignore[no-u
     return audit, mutations, performance
 
 
-def test_outer_decision_authorizes_only_complete_bound_evidence(
+def test_outer_decision_binds_official_evidence_and_holds_failed_performance(
     parent_v3,
-    gate3,
-    manifest,
-    sample,
 ) -> None:  # type: ignore[no-untyped-def]
+    gate3 = _official_portable_gate3()
+    manifest = _freeze_manifest(gate3, _checked_roots(gate3))
+    sample = freeze_gate3_audit_sample(parent_v3, manifest)
     audit, mutations, performance = _complete_evidence(
         parent_v3,
         gate3,
         manifest,
         sample,
     )
-    authorized = finalize_gate3_decision(
+    held = finalize_gate3_decision(
         parent_v3,
         gate3,
         manifest,
@@ -1143,13 +1275,13 @@ def test_outer_decision_authorizes_only_complete_bound_evidence(
         mutations,
         performance,
     )
-    assert authorized.decision == "authorize_official_six_cell_calibration"
-    assert authorized.official_six_cell_calibration_authorized is True
-    assert authorized.evaluation_opened is False
-    assert authorized.official_six_cell_executed is False
-    assert type(authorized.portable_fact_gate3) is experiment.M8PortableFactGate3Result
+    assert held.decision == "hold_performance"
+    assert held.official_six_cell_calibration_authorized is False
+    assert held.evaluation_opened is False
+    assert held.official_six_cell_executed is False
+    assert type(held.portable_fact_gate3) is experiment.M8PortableFactGate3Result
 
-    held = finalize_gate3_decision(
+    held_without_performance = finalize_gate3_decision(
         parent_v3,
         gate3,
         manifest,
@@ -1158,7 +1290,7 @@ def test_outer_decision_authorizes_only_complete_bound_evidence(
         mutations,
         None,
     )
-    assert held.decision == "hold_performance"
+    assert held_without_performance.decision == "hold_performance"
 
     timings = list(performance.reference_timings)
     different_output = timings[0].computation.model_copy(
@@ -1169,6 +1301,7 @@ def test_outer_decision_authorizes_only_complete_bound_evidence(
         action_id=timings[0].action_id,
         catalog_action_id=timings[0].catalog_action_id,
         root_fact_sha256=timings[0].root_fact_sha256,
+        is_baseline=timings[0].is_baseline,
         computation=different_output,
         worker_seconds=timings[0].worker_seconds,
     )
@@ -1213,10 +1346,10 @@ def _rehash_sample(sample: M8Gate3AuditSample, actions):  # type: ignore[no-unty
 
 def test_decision_refreezes_manifest_and_rejects_coherently_rehashed_higher_rank_substitution(
     parent_v3,
-    gate3,
-    manifest,
-    sample,
 ) -> None:  # type: ignore[no-untyped-def]
+    gate3 = _official_portable_gate3()
+    manifest = _freeze_manifest(gate3, _checked_roots(gate3))
+    sample = freeze_gate3_audit_sample(parent_v3, manifest)
     audit, mutations, performance = _complete_evidence(
         parent_v3,
         gate3,
