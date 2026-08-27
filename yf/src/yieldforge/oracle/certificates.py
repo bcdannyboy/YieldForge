@@ -756,6 +756,7 @@ class ValidatedCommonTransition:
 
 
 _VALIDATED_COMMON_PROVENANCE = object()
+_VALIDATED_COMMON_REGISTRATION_PROVENANCE = object()
 
 
 @dataclass
@@ -768,6 +769,7 @@ class _ValidatedCommonEntry:
     owns_snapshot: bool
     canonical_fact: M8CommonTransitionFact
     integrity_sha256: str
+    checker_token: object | None
 
 
 _VALIDATED_COMMON_REGISTRY: dict[
@@ -2475,6 +2477,14 @@ def _registered_common_entry(
         raise ValueError("M8 certifier requires a validated common transition capability")
     if registered.authority is not None:
         registered.authority._require_active_identity()  # noqa: SLF001
+        if registered.checker_token is not None:
+            from yieldforge.oracle.fact_checker import _require_checker_registration_token
+
+            _require_checker_registration_token(
+                registered.checker_token,  # type: ignore[arg-type]
+                registered.authority,
+                registered.canonical_fact,
+            )
     return registered
 
 
@@ -2482,9 +2492,13 @@ def _register_validated_common_transition(
     fact: M8CommonTransitionFact,
     snapshot: M7SemanticRuntimeSnapshot,
     *,
+    registration_provenance: object,
     authority: M7AuthoritativeProofRuntime | None = None,
     owns_snapshot: bool = True,
+    checker_token: object | None = None,
 ) -> ValidatedCommonTransition:
+    if registration_provenance is not _VALIDATED_COMMON_REGISTRATION_PROVENANCE:
+        raise ValueError("M8 common registration lacks internal provenance")
     canonical_fact = deepcopy(fact)
     binding_token = object()
     validated = ValidatedCommonTransition(
@@ -2515,8 +2529,39 @@ def _register_validated_common_transition(
             snapshot.runtime,
             canonical_fact,
         ),
+        checker_token=checker_token,
     )
     return validated
+
+
+def _register_checker_validated_common_transition(
+    fact: M8CommonTransitionFact,
+    authority: M7AuthoritativeProofRuntime,
+    *,
+    checker_token: object,
+) -> ValidatedCommonTransition:
+    """Checker-only v2 authority boundary guarded by an active private token."""
+
+    from yieldforge.oracle.fact_checker import _consume_checker_registration_token
+
+    authority.require_active(authority.runtime)
+    _consume_checker_registration_token(checker_token, authority, fact)  # type: ignore[arg-type]
+    result = None
+    try:
+        result = _register_validated_common_transition(
+            fact,
+            authority._snapshot,  # noqa: SLF001 - capability shares checker authority lifetime.
+            registration_provenance=_VALIDATED_COMMON_REGISTRATION_PROVENANCE,
+            authority=authority,
+            owns_snapshot=False,
+            checker_token=checker_token,
+        )
+        authority.require_active(authority.runtime)
+        return result
+    except BaseException:
+        if result is not None:
+            _release_validated_common_transition(result)
+        raise
 
 
 def _release_validated_common_transition(common: ValidatedCommonTransition) -> None:
@@ -2571,7 +2616,11 @@ def build_validated_m8_common_transition(
                 expected_sha256=snapshot.semantic_sha256,
                 operation="M8 common capability derivation",
             )
-        result = _register_validated_common_transition(fact, snapshot)
+        result = _register_validated_common_transition(
+            fact,
+            snapshot,
+            registration_provenance=_VALIDATED_COMMON_REGISTRATION_PROVENANCE,
+        )
         registered = True
         return result
     finally:
@@ -2605,6 +2654,7 @@ def build_validated_m8_common_transition_in_context(
     return _register_validated_common_transition(
         fact,
         authority._snapshot,  # noqa: SLF001 - capability shares the authority lifetime.
+        registration_provenance=_VALIDATED_COMMON_REGISTRATION_PROVENANCE,
         authority=authority,
         owns_snapshot=False,
     )
@@ -2639,7 +2689,11 @@ def validate_m8_common_transition_fact(
                 expected_sha256=snapshot.semantic_sha256,
                 operation="M8 common capability validation",
             )
-        result = _register_validated_common_transition(fact, snapshot)
+        result = _register_validated_common_transition(
+            fact,
+            snapshot,
+            registration_provenance=_VALIDATED_COMMON_REGISTRATION_PROVENANCE,
+        )
         registered = True
         return result
     finally:
