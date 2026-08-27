@@ -101,6 +101,14 @@ class C0FrontierResult:
     row_id: int
     all_impossible: bool
 
+    def __post_init__(self) -> None:
+        if type(self.row_id) is not int:
+            raise TypeError("C0 frontier result row id must be an exact Python integer")
+        if self.row_id < 0:
+            raise ValueError("C0 frontier result row id must be nonnegative")
+        if type(self.all_impossible) is not bool:
+            raise TypeError("C0 frontier result must be an exact Python boolean")
+
 
 def certify_frontier_impossible_batch(
     frontier: C0FrontierColumns,

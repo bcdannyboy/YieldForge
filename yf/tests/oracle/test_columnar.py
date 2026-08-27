@@ -80,6 +80,29 @@ def test_columnar_records_are_frozen_and_slotted() -> None:
         assert not hasattr(record, "__dict__")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("row_id", -1),
+        ("row_id", True),
+        ("row_id", 0.0),
+        ("row_id", np.int64(0)),
+        ("all_impossible", 0),
+        ("all_impossible", 1),
+        ("all_impossible", np.bool_(False)),
+    ),
+)
+def test_result_rejects_invalid_identity_or_boolean_fields(
+    field: str,
+    value: object,
+) -> None:
+    values: dict[str, object] = {"row_id": 0, "all_impossible": False}
+    values[field] = value
+
+    with pytest.raises((TypeError, ValueError)):
+        C0FrontierResult(**values)  # type: ignore[arg-type]
+
+
 def test_batch_matches_scalar_frontier_on_fixed_random_cases() -> None:
     randomizer = random.Random(20260827)
     scalar_frontier = build_pareto_frontier(
