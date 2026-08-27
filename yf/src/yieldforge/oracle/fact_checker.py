@@ -16,7 +16,7 @@ import re
 import weakref
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from time import perf_counter
@@ -24,6 +24,7 @@ from typing import ClassVar, Literal
 
 from pydantic import StrictBool, StrictFloat, StrictInt, StrictStr, ValidationError, model_validator
 
+from yieldforge.baseline.archives import VerifiedCandidateRejectionLayout
 from yieldforge.baseline.contracts import (
     BaselineContractModel,
     M7ActionKind,
@@ -72,6 +73,9 @@ from yieldforge.oracle.certificates import (
     _validated_common_transition_fact,
 )
 from yieldforge.oracle.compiled import (
+    _compile_prepared_translation_rejections,
+    _prepare_translation_layout_batch,
+    _PreparedTranslationLayoutBatch,
     _verified_rejection_layouts_cover_candidates,
     compile_rejection_problem,
     compile_translation_rejections,
@@ -396,6 +400,9 @@ class _CommonCheckState:
     standard_by_sha: dict[str, facts.M8StandardCandidateFactV2]
     translation_by_sha: dict[str, facts.M8PortableTranslationBatch]
     validated_scalar_sha256s: set[str] = field(default_factory=set)
+    validated_scalar_sources_by_sha: dict[str, VerifiedCandidateRejectionLayout] = field(
+        default_factory=dict
+    )
     validated_frontier_sha256s: set[str] = field(default_factory=set)
     compiled_by_partition: dict[tuple[str, str], object] = field(default_factory=dict)
     audited_counted_lemma_sha256s: set[str] = field(default_factory=set)
@@ -417,6 +424,11 @@ class _FullFactFailure(ValueError):
 @dataclass
 class _FullCheckState:
     common: _CommonCheckState
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None
+    influence_scalar_sources_by_partition: dict[
+        tuple[int, str, str, str],
+        dict[str, VerifiedCandidateRejectionLayout],
+    ] = field(default_factory=dict)
     checked_influence_sha256s: set[str] = field(default_factory=set)
     influence_transition_by_sha256: dict[str, tuple[str, str, M7ReplayCursor]] = field(
         default_factory=dict
@@ -1012,11 +1024,16 @@ def _validate_inventory_evidence(
                 item.candidate_id: item.fact_sha256 for item in portable_scalars
             }
             for portable in portable_scalars:
-                if portable.fact_sha256 in state.validated_scalar_sha256s:
-                    continue
                 source = expected_layouts.get(portable.candidate_id)
                 if source is None:
                     raise _CommonFactFailure("candidate_scalar_mismatch", portable.fact_sha256)
+                if portable.fact_sha256 in state.validated_scalar_sha256s:
+                    if state.validated_scalar_sources_by_sha.get(portable.fact_sha256) != source:
+                        raise _CommonFactFailure(
+                            "candidate_scalar_mismatch",
+                            portable.fact_sha256,
+                        )
+                    continue
                 expected_scalar = (
                     source.problem_id,
                     source.problem_sha256,
@@ -1044,6 +1061,7 @@ def _validate_inventory_evidence(
                 if observed_scalar != expected_scalar:
                     raise _CommonFactFailure("candidate_scalar_mismatch", portable.fact_sha256)
                 state.validated_scalar_sha256s.add(portable.fact_sha256)
+                state.validated_scalar_sources_by_sha[portable.fact_sha256] = source
             expected_members = tuple(
                 scalar_ref_by_candidate[item.candidate_id] for item in compiled.frontier.members
             )
@@ -1512,6 +1530,41 @@ def _derive_inventory_delta(
     return added, removed
 
 
+def _influence_scalar_source(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    candidate_id: str,
+    state: _FullCheckState,
+    owner_sha256: str,
+) -> VerifiedCandidateRejectionLayout:
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    partition_key = (
+        id(verified),
+        binding.problem_id,
+        verified.evidence.candidate_set_id,
+        verified.evidence.content_sha256,
+    )
+    sources_by_candidate = state.influence_scalar_sources_by_partition.get(partition_key)
+    if sources_by_candidate is None:
+        sources = tuple(verified.rejection_layouts)
+        source_candidate_ids = tuple(item.candidate_id for item in sources)
+        expected_candidate_ids = tuple(item.candidate_id for item in verified.candidates)
+        if (
+            not source_candidate_ids
+            or len(source_candidate_ids) != len(set(source_candidate_ids))
+            or source_candidate_ids != expected_candidate_ids
+        ):
+            raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
+        sources_by_candidate = {item.candidate_id: item for item in sources}
+        state.influence_scalar_sources_by_partition[partition_key] = sources_by_candidate
+    source = sources_by_candidate.get(candidate_id)
+    if source is None:
+        raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
+    return source
+
+
 def _validate_influence_scalar(
     runtime: M7ReplayRuntime,
     *,
@@ -1524,14 +1577,15 @@ def _validate_influence_scalar(
     portable = state.common.scalar_by_sha.get(scalar_ref)
     if portable is None or portable.candidate_id != expected_candidate_id:
         raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
-    binding = runtime.replay_input.instances[event_position]
-    verified = runtime.runtime_candidates[binding.problem_id]
-    source = next(
-        (item for item in verified.rejection_layouts if item.candidate_id == expected_candidate_id),
-        None,
+    source = _influence_scalar_source(
+        runtime,
+        event_position=event_position,
+        candidate_id=expected_candidate_id,
+        state=state,
+        owner_sha256=owner_sha256,
     )
-    if source is None:
-        raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
+    if state.common.validated_scalar_sources_by_sha.get(portable.fact_sha256) == source:
+        return portable
     expected = (
         source.problem_id,
         source.problem_sha256,
@@ -1559,6 +1613,7 @@ def _validate_influence_scalar(
     if observed != expected:
         raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
     state.common.validated_scalar_sha256s.add(portable.fact_sha256)
+    state.common.validated_scalar_sources_by_sha[portable.fact_sha256] = source
     return portable
 
 
@@ -1571,10 +1626,19 @@ def _validate_rejections_for_item(
     state: _FullCheckState,
     require_portable: bool,
 ) -> tuple[bool, ...]:
-    expected = compile_translation_rejections(
-        runtime,
-        event_position=influence.event_position,
-        item=item,
+    expected = (
+        compile_translation_rejections(
+            runtime,
+            event_position=influence.event_position,
+            item=item,
+        )
+        if state.prepared_layouts is None
+        else _compile_prepared_translation_rejections(
+            runtime,
+            prepared=state.prepared_layouts,
+            event_position=influence.event_position,
+            item=item,
+        )
     )
     expanded_by_candidate = {
         row.candidate_id: row
@@ -2462,6 +2526,7 @@ def check_m8_fact_bundle(
         with (
             activate_m8_local_trusted_audit(),
             authoritative_m7_proof_runtime(captured.oracle_request.runtime) as authority,
+            ExitStack() as checker_resources,
         ):
             try:
                 fallback, stop, _suffix = _validate_context(
@@ -2482,6 +2547,12 @@ def check_m8_fact_bundle(
             expected_positions = tuple(range(fallback.cursor.next_event_position, stop))
             if tuple(item.event_position for item in bundle.common_lemmas) != expected_positions:
                 raise _FullFactFailure("cursor_chain_mismatch", first_fact)
+            prepared_layouts = checker_resources.enter_context(
+                _prepare_translation_layout_batch(
+                    authority.runtime,
+                    event_positions=expected_positions,
+                )
+            )
             common_state = _CommonCheckState(
                 scalar_by_sha={item.fact_sha256: item for item in bundle.candidate_scalar_facts},
                 frontier_by_sha={item.fact_sha256: item for item in bundle.frontier_facts},
@@ -2490,7 +2561,10 @@ def check_m8_fact_bundle(
                 },
                 translation_by_sha={item.fact_sha256: item for item in bundle.translation_batches},
             )
-            state = _FullCheckState(common=common_state)
+            state = _FullCheckState(
+                common=common_state,
+                prepared_layouts=prepared_layouts,
+            )
             expected_jagua_sha256 = None
             if authority.runtime.jagua_executable is not None:
                 expected_jagua_sha256 = (

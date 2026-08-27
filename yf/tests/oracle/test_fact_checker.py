@@ -707,6 +707,203 @@ def test_full_checker_hot_loop_deep_checks_do_not_scale_with_action_roots(
     assert fact_checker._FULL_TRAVERSAL_GUARDS == guard_registry_before  # noqa: SLF001
 
 
+def test_full_checker_prepares_each_rejection_layout_once_per_partition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    assert (
+        sum(len(influence.rejection_evidence) for influence in generated.bundle.influence_facts) > 1
+    )
+    expected_candidate_ids: list[str] = []
+    seen_partitions: set[tuple[str, str]] = set()
+    for lemma in generated.bundle.common_lemmas:
+        binding = runtime.replay_input.instances[lemma.event_position]
+        verified = runtime.runtime_candidates[binding.problem_id]
+        partition = (binding.problem_id, verified.evidence.candidate_set_id)
+        if partition in seen_partitions:
+            continue
+        seen_partitions.add(partition)
+        expected_candidate_ids.extend(item.candidate_id for item in verified.candidates)
+
+    original = compiled.prepare_layout_footprint
+    constructed: list[str] = []
+
+    def counted(problem, candidate, config):  # type: ignore[no-untyped-def]
+        constructed.append(candidate.candidate_id)
+        return original(problem, candidate, config)
+
+    monkeypatch.setattr(compiled, "prepare_layout_footprint", counted)
+
+    result = fact_checker.check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert result.valid, result
+    assert constructed == expected_candidate_ids
+
+
+def test_influence_scalar_validation_is_memoized_but_still_checks_candidate_and_context() -> None:
+    from yieldforge.oracle import fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    influence = next(item for item in generated.bundle.influence_facts if item.rejection_evidence)
+    group = influence.rejection_evidence[0]
+    assert isinstance(group, facts.M8CandidateScalarGroupEvidenceV2)
+    scalar_ref = group.candidate_scalar_refs[0]
+    scalar = next(
+        item for item in generated.bundle.candidate_scalar_facts if item.fact_sha256 == scalar_ref
+    )
+    binding = runtime.replay_input.instances[influence.event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    iterations = 0
+
+    class CountedLayouts(tuple):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            nonlocal iterations
+            iterations += 1
+            return super().__iter__()
+
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        verified,
+        rejection_layouts=CountedLayouts(verified.rejection_layouts),
+    )
+    state = fact_checker._FullCheckState(  # noqa: SLF001
+        common=fact_checker._CommonCheckState(  # noqa: SLF001
+            scalar_by_sha={
+                item.fact_sha256: item for item in generated.bundle.candidate_scalar_facts
+            },
+            frontier_by_sha={},
+            standard_by_sha={},
+            translation_by_sha={},
+        )
+    )
+    kwargs = {
+        "runtime": runtime,
+        "event_position": influence.event_position,
+        "scalar_ref": scalar_ref,
+        "expected_candidate_id": scalar.candidate_id,
+        "state": state,
+        "owner_sha256": influence.fact_sha256,
+    }
+
+    first = fact_checker._validate_influence_scalar(**kwargs)  # noqa: SLF001
+    second = fact_checker._validate_influence_scalar(**kwargs)  # noqa: SLF001
+
+    assert first is scalar
+    assert second is scalar
+    assert iterations == 1
+    with pytest.raises(fact_checker._FullFactFailure) as candidate_error:  # noqa: SLF001
+        fact_checker._validate_influence_scalar(  # noqa: SLF001
+            **(kwargs | {"expected_candidate_id": "different-candidate"})
+        )
+    assert candidate_error.value.code == "influence_rejection_mismatch"
+    with pytest.raises(fact_checker._FullFactFailure) as context_error:  # noqa: SLF001
+        fact_checker._validate_influence_scalar(  # noqa: SLF001
+            **(kwargs | {"event_position": 0})
+        )
+    assert context_error.value.code == "influence_rejection_mismatch"
+
+
+@pytest.mark.parametrize("fail_during_traversal", (False, True))
+def test_full_checker_prepared_registry_is_scoped_across_common_and_action_phases(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_during_traversal: bool,
+) -> None:
+    from contextlib import contextmanager
+
+    from yieldforge.oracle import compiled, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    registry_before = dict(compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY)  # noqa: SLF001
+    original_prepare = compiled._prepare_translation_layout_batch  # noqa: SLF001
+    original_common = fact_checker._validate_one_common  # noqa: SLF001
+    original_influence = fact_checker._validate_one_influence  # noqa: SLF001
+    active_prepared_id: int | None = None
+    entered = 0
+    exited = 0
+    common_scope_states: list[bool] = []
+    influence_scope_states: list[bool] = []
+
+    @contextmanager
+    def tracked_prepare(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal active_prepared_id, entered, exited
+        entered += 1
+        try:
+            with original_prepare(*args, **kwargs) as prepared:
+                active_prepared_id = id(prepared)
+                yield prepared
+        finally:
+            exited += 1
+
+    def tracked_common(*args, **kwargs):  # type: ignore[no-untyped-def]
+        common_scope_states.append(
+            active_prepared_id in compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+        )
+        return original_common(*args, **kwargs)
+
+    def tracked_influence(*args, **kwargs):  # type: ignore[no-untyped-def]
+        influence_scope_states.append(
+            active_prepared_id in compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+        )
+        if fail_during_traversal:
+            raise RuntimeError("injected traversal failure inside prepared scope")
+        return original_influence(*args, **kwargs)
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_prepare_translation_layout_batch",
+        tracked_prepare,
+        raising=False,
+    )
+    monkeypatch.setattr(fact_checker, "_validate_one_common", tracked_common)
+    monkeypatch.setattr(fact_checker, "_validate_one_influence", tracked_influence)
+
+    result = fact_checker.check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert result.valid is (not fail_during_traversal)
+    assert result.failure_code == (
+        "internal_checker_failure" if fail_during_traversal else "valid_action_decision"
+    )
+    assert entered == exited == 1
+    assert common_scope_states and all(common_scope_states)
+    assert influence_scope_states and all(influence_scope_states)
+    assert compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY == registry_before  # noqa: SLF001
+
+
 def test_every_full_reachable_scalar_mutation_fails_stably_with_actual_owner() -> None:
     representatives = (
         ("myopic_geometry-zero-fit-equal-same-two", "state_rejoin"),
