@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,31 @@ import pytest
 from pydantic import ValidationError
 
 from yieldforge.temporal_benchmark.contracts import TemporalRegime
+
+
+def _phase_names_from_report(report) -> set[str]:  # type: ignore[no-untyped-def]
+    names: set[str] = set()
+
+    def visit(phases) -> None:  # type: ignore[no-untyped-def]
+        for phase in phases:
+            names.add(phase.name)
+            visit(phase.children)
+
+    visit(report.phases)
+    return names
+
+
+def _phase_occurrence_count(report, name: str) -> int:  # type: ignore[no-untyped-def]
+    count = 0
+
+    def visit(phases) -> None:  # type: ignore[no-untyped-def]
+        nonlocal count
+        for phase in phases:
+            count += phase.name == name
+            visit(phase.children)
+
+    visit(report.phases)
+    return count
 
 
 def _phase_test_operation(mode: str, value: int):  # type: ignore[no-untyped-def]
@@ -30,6 +57,14 @@ def _phase_spawn_descendant(pid_path: str) -> None:
     )
     Path(pid_path).write_text(str(child.pid))
     time.sleep(30)
+
+
+def _phase_leave_descendant_after_success(pid_path: str) -> int:
+    child = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+    )
+    Path(pid_path).write_text(str(child.pid))
+    return os.getpid()
 
 
 def _phase_fail_nested_audit_with_descendant(
@@ -56,9 +91,25 @@ def _phase_record_pid(pid_path: str) -> int:
     return os.getpid()
 
 
+def _phase_mark_complete(marker_path: str) -> int:
+    time.sleep(0.05)
+    Path(marker_path).write_text("complete")
+    return os.getpid()
+
+
 def _phase_delayed_failure(delay_seconds: float) -> None:
     time.sleep(delay_seconds)
     raise RuntimeError("delayed phase failure")
+
+
+def _phase_force_portable_checker_exception(*args):  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import experiment
+
+    def forced_exception(_request):  # type: ignore[no-untyped-def]
+        raise RuntimeError("forced Task6 checker exception")
+
+    experiment.check_m8_fact_bundle = forced_exception
+    return experiment._check_portable_fact_bundle_worker(*args)  # noqa: SLF001
 
 
 def _bindings():  # type: ignore[no-untyped-def]
@@ -189,6 +240,122 @@ def _finalize(  # type: ignore[no-untyped-def]
         checker_wall_seconds=checker_wall_seconds,
         audit_wall_seconds=audit_wall_seconds,
         total_wall_seconds=total_wall_seconds,
+    )
+
+
+def _portable_gate3_result():  # type: ignore[no-untyped-def]
+    from yieldforge.oracle import experiment
+
+    registry = experiment.M8PortableRegistryEvidence()
+
+    def cell(regime: TemporalRegime, digit: str, roots: int, byte_count: int):  # type: ignore[no-untyped-def]
+        timing = experiment.M8PortableFactPhaseTiming(
+            first_generation_worker_wall_seconds=0.4,
+            second_generation_worker_wall_seconds=0.5,
+            producer_bundle_serialization_wall_seconds=0.1,
+            producer_handoff_serialization_wall_seconds=0.1,
+            metadata_reconciliation_wall_seconds=0.05,
+            authority_reconstruction_wall_seconds=0.05,
+            checker_worker_wall_seconds=1.0,
+            checker_strict_load_inclusive_wall_seconds=0.1,
+            common_verification_inclusive_wall_seconds=0.2,
+            action_traversal_inclusive_wall_seconds=0.3,
+            exact_fallback_nested_exclusive_wall_seconds=0.0,
+            capability_cleanup_inclusive_wall_seconds=0.1,
+        )
+        fixed = 1 + 1 + 1 + 1 + 2 + 3 + roots
+        return experiment.M8PortableFactGate3Cell(
+            regime=regime,
+            temporal_seed=2026082300,
+            stream_id="yfts-" + digit * 24,
+            event_count=2,
+            first_bundle_sha256="sha256:" + digit * 64,
+            second_bundle_sha256="sha256:" + digit * 64,
+            first_semantic_bundle_bytes_sha256="sha256:" + digit * 64,
+            second_semantic_bundle_bytes_sha256="sha256:" + digit * 64,
+            semantic_serialized_bytes=byte_count,
+            repeated_semantic_serialized_bytes=byte_count,
+            fixed_layer_node_count=fixed,
+            translation_batch_count=1,
+            candidate_scalar_fact_count=1,
+            frontier_fact_count=1,
+            standard_candidate_fact_count=1,
+            common_lemma_count=2,
+            influence_fact_count=3,
+            generated_action_root_count=roots,
+            checked_common_lemma_count=2,
+            checked_influence_fact_count=3,
+            checked_action_root_count=roots,
+            decision_id="yfm8d-" + digit * 24,
+            decision_content_sha256="sha256:" + digit * 64,
+            producer_counted_inventory_evidence_row_count=3,
+            producer_counted_search_lemma_count=2,
+            counted_translation_audit_count=2,
+            counted_translation_audit_call_count=2,
+            influence_translation_audit_count=3,
+            common_exact_fallback_wall_seconds=0.0,
+            influence_exact_fallback_wall_seconds=0.0,
+            total_exact_fallback_wall_seconds=0.0,
+            timing=timing,
+            first_generator_registry_state=registry,
+            second_generator_registry_state=registry,
+            checker_registry_state=registry,
+        )
+
+    cells = (
+        cell(TemporalRegime.NO_SIGNAL, "1", 428, 1000),
+        cell(TemporalRegime.REGIME_SHIFT, "2", 459, 1100),
+    )
+    payload = {
+        "m0_contract_id": "yfm0-" + "1" * 24,
+        "m0_contract_sha256": "sha256:" + "1" * 64,
+        "m6_contract_id": "yfm6-" + "2" * 24,
+        "m6_contract_sha256": "sha256:" + "2" * 64,
+        "m6_population_id": "yftp-" + "3" * 24,
+        "m6_population_sha256": "sha256:" + "3" * 64,
+        "problem_index_id": "yfm7i-" + "4" * 24,
+        "problem_index_sha256": "sha256:" + "4" * 64,
+        "freeze_id": "yfm7freeze-" + "5" * 24,
+        "freeze_sha256": "sha256:" + "5" * 64,
+        "calibration_view_id": "yfm7cv-" + "6" * 24,
+        "calibration_view_sha256": "sha256:" + "6" * 64,
+        "cells": cells,
+        "semantic_serialized_bytes": 2100,
+        "fixed_layer_node_count": sum(item.fixed_layer_node_count for item in cells),
+        "generated_action_root_count": 887,
+        "checked_action_root_count": 887,
+        "total_exact_fallback_count": 0,
+        "total_exact_fallback_wall_seconds": 0.0,
+        "first_generation_phase_wall_seconds": 1.0,
+        "second_generation_phase_wall_seconds": 1.0,
+        "checker_phase_wall_seconds": 1.5,
+        "task_serialization_wall_seconds": 0.2,
+        "result_serialization_wall_seconds": 0.2,
+        "inbound_payload_handoff_wall_seconds": 0.1,
+        "outbound_payload_handoff_wall_seconds": 0.2,
+        "worker_payload_handoff_wall_seconds": 0.3,
+        "process_exit_validation_wall_seconds": 0.1,
+        "worker_task_payload_bytes": 300,
+        "worker_result_payload_bytes": 400,
+        "retained_first_generation_bundle_bytes": 2100,
+        "checker_task_payload_bytes": 300,
+        "total_pipeline_wall_seconds": 4.0,
+        "controller_registry_state_before": registry,
+        "controller_registry_state_after": registry,
+    }
+    draft = experiment.M8PortableFactGate3Result.model_construct(
+        gate3_id="yfm8gate3-" + "0" * 24,
+        content_sha256="sha256:" + "0" * 64,
+        **payload,
+    )
+    digest = experiment.semantic_sha256(
+        draft,
+        excluded_fields={"gate3_id", "content_sha256"},
+    )
+    return experiment.M8PortableFactGate3Result(
+        gate3_id=f"yfm8gate3-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        **payload,
     )
 
 
@@ -592,6 +759,133 @@ def test_distributed_phase_preserves_input_order_across_processes() -> None:
     assert all(pid != os.getpid() for _value, pid in results)
 
 
+def test_distributed_phase_can_report_explicit_worker_payload_handoff_timing() -> None:
+    from yieldforge.oracle import experiment
+
+    execution = experiment._run_process_phase(  # noqa: SLF001
+        _phase_test_operation,
+        (("return", 1), ("return", 2)),
+        process_count=2,
+        timeout_seconds=5.0,
+        report_payload_handoff=True,
+    )
+
+    assert tuple(value for value, _pid in execution.results) == (1, 2)
+    assert execution.inbound_payload_handoff_wall_seconds >= 0.0
+    assert execution.outbound_payload_handoff_wall_seconds >= 0.0
+    assert execution.worker_payload_handoff_wall_seconds == (
+        execution.inbound_payload_handoff_wall_seconds
+        + execution.outbound_payload_handoff_wall_seconds
+    )
+
+
+def test_distributed_phase_times_out_stalled_payload_handoff_and_joins_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    entered = threading.Event()
+
+    def stall_until_closed(connection, payload):  # type: ignore[no-untyped-def]
+        del payload
+        entered.set()
+        while not connection.closed:
+            time.sleep(0.01)
+
+    monkeypatch.setattr(experiment, "_send_connection_bytes", stall_until_closed)
+    with pytest.raises(TimeoutError, match="exceeded"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_test_operation,
+            (("return", 1),),
+            process_count=1,
+            timeout_seconds=1.0,
+        )
+    assert entered.is_set()
+    assert not any(
+        thread.name.startswith("m8-payload-sender-") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_distributed_phase_times_out_stalled_result_receive_and_joins_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    entered = threading.Event()
+
+    def stall_until_closed(connection, byte_cap, result_box):  # type: ignore[no-untyped-def]
+        del byte_cap, result_box
+        entered.set()
+        while not connection.closed:
+            time.sleep(0.01)
+
+    monkeypatch.setattr(experiment, "_receive_connection_bytes", stall_until_closed)
+    with pytest.raises(TimeoutError, match="result handoff"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_test_operation,
+            (("return", 1),),
+            process_count=1,
+            timeout_seconds=1.0,
+        )
+    assert entered.is_set()
+    assert not any(
+        thread.name.startswith("m8-payload-receiver-") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_distributed_phase_rejects_a_ready_handshake_after_startup_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    real_wait = experiment.wait
+    delayed = False
+
+    def delay_first_ready(connections, timeout):  # type: ignore[no-untyped-def]
+        nonlocal delayed
+        ready = real_wait(connections, timeout=timeout)
+        if ready and not delayed:
+            delayed = True
+            time.sleep(0.08)
+        return ready
+
+    monkeypatch.setattr(experiment, "wait", delay_first_ready)
+    with pytest.raises(TimeoutError, match="startup handshake"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_test_operation,
+            (("return", 1),),
+            process_count=1,
+            timeout_seconds=0.05,
+        )
+    assert not multiprocessing.active_children()
+
+
+def test_distributed_phase_rejects_a_result_header_after_task_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    real_monotonic = experiment.monotonic
+    marker = tmp_path / "worker-complete"
+
+    def jump_clock_after_worker_completion() -> float:
+        observed = real_monotonic()
+        return observed + 10.0 if marker.exists() else observed
+
+    monkeypatch.setattr(experiment, "monotonic", jump_clock_after_worker_completion)
+    with pytest.raises(TimeoutError, match="task exceeded"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_mark_complete,
+            ((str(marker),),),
+            process_count=1,
+            timeout_seconds=5.0,
+        )
+    assert not multiprocessing.active_children()
+
+
 def test_distributed_phase_terminates_sibling_after_worker_failure() -> None:
     from yieldforge.oracle import experiment
 
@@ -687,6 +981,36 @@ def test_distributed_phase_timeout_terminates_worker_descendants(
             time.sleep(0.1)
         else:
             pytest.fail("M8 worker descendant survived phase timeout")
+    finally:
+        try:
+            os.kill(descendant_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_distributed_phase_rejects_success_with_surviving_descendant(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    pid_path = tmp_path / "successful-descendant.pid"
+    with pytest.raises(RuntimeError, match="surviving process-group descendant"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_leave_descendant_after_success,
+            ((str(pid_path),),),
+            process_count=1,
+            timeout_seconds=5.0,
+        )
+    descendant_pid = int(pid_path.read_text())
+    try:
+        for _ in range(30):
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("M8 descendant survived a nominal worker success")
     finally:
         try:
             os.kill(descendant_pid, signal.SIGKILL)
@@ -800,6 +1124,845 @@ def test_distributed_generator_worker_round_trips_one_real_cell() -> None:
     assert result.cell.stream == cell.stream
     assert result.sparse.proofs
     assert result.elapsed_seconds > 0
+
+
+def test_portable_fact_workers_handoff_canonical_bytes_and_independent_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+    from yieldforge.oracle.facts import M8UncheckedFactBundleV2
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    freeze_id = "yfm7freeze-" + "b" * 24
+    freeze_sha256 = "sha256:" + "b" * 64
+    generated = experiment._generate_portable_fact_bundle_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+
+    assert type(generated.semantic_bundle_bytes) is bytes
+    assert not hasattr(generated, "bundle")
+    strict = M8UncheckedFactBundleV2.model_validate_json(
+        generated.semantic_bundle_bytes,
+        strict=True,
+    )
+    assert generated.bundle_sha256 == strict.bundle_sha256
+    assert generated.semantic_serialized_bytes == len(generated.semantic_bundle_bytes)
+    assert generated.fixed_layer_node_count == sum(
+        len(getattr(strict, layer))
+        for layer in (
+            "translation_batches",
+            "candidate_scalar_facts",
+            "frontier_facts",
+            "standard_candidate_facts",
+            "common_lemmas",
+            "influence_facts",
+            "action_roots",
+        )
+    )
+    assert generated.registry_state_after.is_clean
+    assert generated.registry_state_after.translation_audit_processes is None
+    assert set(vars(generated.registry_state_after).values()) == {0, None}
+
+    original_check = experiment.check_m8_fact_bundle
+    seen_checker_bytes = []
+
+    def observe_bytes(request):  # type: ignore[no-untyped-def]
+        seen_checker_bytes.append(request.semantic_bundle_bytes)
+        assert request.semantic_bundle_bytes is generated.semantic_bundle_bytes
+        return original_check(request)
+
+    monkeypatch.setattr(experiment, "check_m8_fact_bundle", observe_bytes)
+
+    checked = experiment._check_portable_fact_bundle_worker(  # noqa: SLF001
+        generated.semantic_bundle_bytes,
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+
+    assert checked.check.valid
+    assert seen_checker_bytes == [generated.semantic_bundle_bytes]
+    assert checked.bundle_sha256 == generated.bundle_sha256
+    assert checked.semantic_serialized_bytes == generated.semantic_serialized_bytes
+    assert checked.fixed_layer_node_count == generated.fixed_layer_node_count
+    assert checked.layer_counts == (
+        generated.translation_batch_count,
+        generated.candidate_scalar_fact_count,
+        generated.frontier_fact_count,
+        generated.standard_candidate_fact_count,
+        generated.common_lemma_count,
+        generated.influence_fact_count,
+        generated.action_root_count,
+    )
+    assert checked.metadata_reconciliation_wall_seconds >= 0.0
+    assert checked.check.total_exact_fallback_count == 0
+    assert checked.registry_state_after.is_clean
+    assert checked.registry_state_after.translation_audit_processes is None
+    assert set(vars(checked.registry_state_after).values()) == {0, None}
+    assert {
+        "fact_bundle_strict_load",
+        "fact_bundle_common_verification",
+        "fact_bundle_action_traversal",
+        "fact_bundle_cleanup",
+    } <= _phase_names_from_report(checked.profile)
+
+    with pytest.raises(TypeError, match="serialized bytes"):
+        experiment._check_portable_fact_bundle_worker(  # noqa: SLF001
+            strict,  # type: ignore[arg-type]
+            cell,
+            runtime.rules,
+            runtime.jagua_executable,
+            freeze_id,
+            freeze_sha256,
+            None,
+            M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+        )
+
+
+def test_portable_checker_rejects_oversized_transport_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    monkeypatch.setattr(
+        experiment,
+        "check_m8_fact_bundle",
+        lambda _request: pytest.fail("oversized bytes reached Task6"),
+    )
+    monkeypatch.setattr(experiment, "_M8_GATE3_MAX_BUNDLE_BYTES", 32)
+    oversized = b"x" * 33
+
+    with pytest.raises(ValueError, match="exceeds the frozen byte cap"):
+        experiment._check_portable_fact_bundle_worker(  # noqa: SLF001
+            oversized,
+            object(),  # type: ignore[arg-type]
+            object(),
+            Path("jagua"),
+            "yfm7freeze-" + "b" * 24,
+            "sha256:" + "b" * 64,
+            "sha256:" + "0" * 64,
+            2,
+        )
+
+
+def test_portable_fact_handoff_uses_distinct_fresh_generator_and_checker_processes() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    freeze_id = "yfm7freeze-" + "b" * 24
+    freeze_sha256 = "sha256:" + "b" * 64
+    (generated,) = experiment._run_process_phase(  # noqa: SLF001
+        experiment._generate_portable_fact_bundle_worker,  # noqa: SLF001
+        (
+            (
+                cell,
+                runtime.rules,
+                runtime.jagua_executable,
+                freeze_id,
+                freeze_sha256,
+                None,
+                M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+            ),
+        ),
+        process_count=1,
+    )
+    (checked,) = experiment._run_process_phase(  # noqa: SLF001
+        experiment._check_portable_fact_bundle_worker,  # noqa: SLF001
+        (
+            (
+                generated.semantic_bundle_bytes,
+                cell,
+                runtime.rules,
+                runtime.jagua_executable,
+                freeze_id,
+                freeze_sha256,
+                None,
+                M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+            ),
+        ),
+        process_count=1,
+    )
+
+    assert generated.worker_pid != os.getpid()
+    assert checked.worker_pid != os.getpid()
+    assert generated.worker_pid != checked.worker_pid
+    assert checked.check.valid
+    generator_fields = {item.name for item in fields(generated)}
+    assert {
+        "cell",
+        "request",
+        "bundle",
+        "proof",
+        "proofs",
+        "capability",
+        "capabilities",
+    }.isdisjoint(generator_fields)
+    assert type(generated.semantic_bundle_bytes) is bytes
+
+    with pytest.raises(ValueError, match="does not reconcile"):
+        experiment._reconcile_portable_fact_handoff(  # noqa: SLF001
+            replace(
+                generated,
+                fixed_layer_node_count=generated.fixed_layer_node_count + 1,
+            ),
+            checked,
+        )
+
+
+def test_portable_parent_strictly_revalidates_untrusted_worker_models() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    freeze_id = "yfm7freeze-" + "b" * 24
+    freeze_sha256 = "sha256:" + "b" * 64
+    generated = experiment._generate_portable_fact_bundle_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+    checked = experiment._check_portable_fact_bundle_worker(  # noqa: SLF001
+        generated.semantic_bundle_bytes,
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+
+    forged_check = replace(
+        checked,
+        check=checked.check.model_copy(update={"checked_common_lemma_count": -1}),
+    )
+    with pytest.raises(ValidationError):
+        experiment._reconcile_portable_fact_handoff(  # noqa: SLF001
+            generated,
+            forged_check,
+        )
+
+    forged_telemetry = object.__new__(type(generated.telemetry))
+    forged_telemetry.__dict__.update(vars(generated.telemetry))
+    forged_telemetry.__dict__["serialization_seconds"] = float("nan")
+    with pytest.raises(ValueError, match="serialization timing"):
+        experiment._reconcile_portable_fact_handoff(  # noqa: SLF001
+            replace(generated, telemetry=forged_telemetry),
+            checked,
+        )
+
+
+def test_full_fact_checker_reports_actual_counted_translation_audit_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from shapely import Polygon
+
+    from tests.oracle.fixtures import inventory_item, two_problem_runtime
+    from tests.oracle.test_fact_checker import _full_check_request
+    from yieldforge.baseline.policies import M7PolicyName
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle import fact_checker
+    from yieldforge.oracle.concurrency import activate_m8_translation_audit_processes
+    from yieldforge.oracle.fact_checker import check_m8_fact_bundle
+    from yieldforge.oracle.factored import (
+        M8UncheckedBundleRequest,
+        score_unchecked_fact_bundle,
+    )
+    from yieldforge.oracle.profiling import activate_m8_profile
+    from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+    from yieldforge.temporal_benchmark.contracts import FeasibilityRateManifest
+
+    runtime = two_problem_runtime(
+        first_width=9.0,
+        second_width=4.0,
+        policy=M7PolicyName.NET_COST,
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.0,
+            return_handling_cost_per_remnant=0.0,
+            retrieval_handling_cost_per_remnant=200.0,
+            scrap_credit_per_area=0.0,
+        ),
+    )
+    binding = runtime.replay_input.instances[1]
+    counted_inventory = inventory_item(
+        Polygon(((0, 0), (4, 0), (4, 1), (1, 1), (1, 10), (0, 10))),
+        material=binding.material,
+        token="gate3-counted-call",
+    )
+    oracle_request = M8OracleRequest(
+        runtime=runtime,
+        cursor=replace(
+            initial_m7_cursor(runtime.replay_input),
+            inventory=(counted_inventory,),
+        ),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=oracle_request,
+        freeze_id="yfm7freeze-" + "b" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+    calls = 0
+    original = fact_checker.audit_layout_translation_batch
+
+    def observe_call(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fact_checker, "audit_layout_translation_batch", observe_call)
+    with (
+        activate_m8_translation_audit_processes(2),
+        activate_m8_profile() as success_profiler,
+    ):
+        result = check_m8_fact_bundle(request)
+    success_profile = success_profiler.report()
+
+    assert result.valid
+    assert calls == 1
+    assert result.counted_translation_audit_count == 1
+    assert "counted_translation_audit_call_count" not in result.model_dump()
+    assert _phase_occurrence_count(
+        success_profile,
+        "counted_translation_audit_call",
+    ) == 1
+
+    def reject_call(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise ValueError("forced counted audit rejection")
+
+    monkeypatch.setattr(fact_checker, "audit_layout_translation_batch", reject_call)
+    with (
+        activate_m8_translation_audit_processes(2),
+        activate_m8_profile() as rejected_profiler,
+    ):
+        rejected = check_m8_fact_bundle(request)
+    rejected_profile = rejected_profiler.report()
+    assert not rejected.valid
+    assert rejected.failure_code == "translation_count_mismatch"
+    assert rejected.counted_translation_audit_count == 0
+    assert _phase_occurrence_count(
+        rejected_profile,
+        "counted_translation_audit_call",
+    ) == 1
+
+    def missing_process_count() -> int:
+        raise RuntimeError("M8 translation audit process count is not configured")
+
+    monkeypatch.setattr(
+        fact_checker,
+        "require_m8_translation_audit_processes",
+        missing_process_count,
+    )
+    with activate_m8_profile() as missing_context_profiler:
+        missing_context_result = check_m8_fact_bundle(request)
+    assert not missing_context_result.valid
+    assert missing_context_result.failure_code == "internal_checker_failure"
+    assert _phase_occurrence_count(
+        missing_context_profiler.report(),
+        "counted_translation_audit_call",
+    ) == 0
+
+
+def test_spawned_portable_checker_corrupt_bytes_fail_closed_without_artifact(
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    generated = experiment._generate_portable_fact_bundle_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        "yfm7freeze-" + "b" * 24,
+        "sha256:" + "b" * 64,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+    task = (
+        generated.semantic_bundle_bytes + b" ",
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        "yfm7freeze-" + "b" * 24,
+        "sha256:" + "b" * 64,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+
+    with pytest.raises(RuntimeError, match="failure_code=noncanonical_bundle"):
+        experiment._run_process_phase(  # noqa: SLF001
+            experiment._check_portable_fact_bundle_worker,  # noqa: SLF001
+            (task,),
+            process_count=1,
+        )
+    assert not multiprocessing.active_children()
+    assert experiment._portable_registry_state().is_clean  # noqa: SLF001
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_spawned_portable_checker_exception_fails_closed_without_artifact(
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    generated = experiment._generate_portable_fact_bundle_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        "yfm7freeze-" + "b" * 24,
+        "sha256:" + "b" * 64,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+    task = (
+        generated.semantic_bundle_bytes,
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        "yfm7freeze-" + "b" * 24,
+        "sha256:" + "b" * 64,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+
+    with pytest.raises(RuntimeError, match="forced Task6 checker exception"):
+        experiment._run_process_phase(  # noqa: SLF001
+            _phase_force_portable_checker_exception,
+            (task,),
+            process_count=1,
+        )
+    assert not multiprocessing.active_children()
+    assert experiment._portable_registry_state().is_clean  # noqa: SLF001
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_portable_pipeline_rejects_dirty_controller_before_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    dirty = replace(
+        experiment._PortableRegistryState(),  # noqa: SLF001
+        validated_common=1,
+    )
+    monkeypatch.setattr(experiment, "_portable_registry_state", lambda: dirty)
+    monkeypatch.setattr(
+        experiment,
+        "_run_process_phase",
+        lambda *_args, **_kwargs: pytest.fail("dirty controller started a worker"),
+    )
+
+    with pytest.raises(ValueError, match="controller.*live registries"):
+        experiment._execute_portable_fact_cells(  # noqa: SLF001
+            (object(),),  # type: ignore[arg-type]
+            rules=object(),
+            jagua_executable=Path("jagua"),
+            freeze_id="yfm7freeze-" + "b" * 24,
+            freeze_sha256="sha256:" + "b" * 64,
+            expected_jagua_sha256="sha256:" + "0" * 64,
+            budget=M8_GATE3_CONCURRENCY_BUDGET,
+        )
+
+
+def test_portable_fact_pipeline_repeats_generation_then_checks_in_a_fresh_process() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    execution = experiment._execute_portable_fact_cells(  # noqa: SLF001
+        (cell,),
+        rules=runtime.rules,
+        jagua_executable=runtime.jagua_executable,
+        freeze_id="yfm7freeze-" + "b" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+        expected_jagua_sha256=None,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
+    )
+
+    assert len(execution.cells) == 1
+    evidence = execution.cells[0]
+    assert evidence.first_generation.bundle_sha256 == (
+        evidence.second_generation.bundle_sha256
+    )
+    assert evidence.first_generation.semantic_bundle_bytes_sha256 == (
+        evidence.second_generation.semantic_bundle_bytes_sha256
+    )
+    assert not hasattr(evidence.first_generation, "semantic_bundle_bytes")
+    assert not hasattr(evidence.second_generation, "semantic_bundle_bytes")
+    assert evidence.check.check.valid
+    assert evidence.first_generation.worker_pid != evidence.second_generation.worker_pid
+    assert evidence.check.worker_pid not in {
+        evidence.first_generation.worker_pid,
+        evidence.second_generation.worker_pid,
+        os.getpid(),
+    }
+    assert execution.first_generation_phase_wall_seconds > 0.0
+    assert execution.second_generation_phase_wall_seconds > 0.0
+    assert execution.checker_phase_wall_seconds > 0.0
+    assert execution.worker_payload_handoff_wall_seconds >= 0.0
+    assert execution.process_exit_validation_wall_seconds >= 0.0
+
+
+def test_portable_gate3_finalizer_rejects_small_pipeline_evidence() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    execution_cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    one = experiment._execute_portable_fact_cells(  # noqa: SLF001
+        (execution_cell,),
+        rules=runtime.rules,
+        jagua_executable=runtime.jagua_executable,
+        freeze_id="yfm7freeze-" + "b" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+        expected_jagua_sha256=None,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
+    )
+    source = one.cells[0]
+
+    def probe(regime: TemporalRegime, digit: str):  # type: ignore[no-untyped-def]
+        identity = {
+            "regime": regime,
+            "temporal_seed": 2026082300,
+            "stream_id": "yfts-" + digit * 24,
+            "event_count": 2,
+        }
+        return replace(
+            source,
+            first_generation=replace(source.first_generation, **identity),
+            second_generation=replace(source.second_generation, **identity),
+            check=replace(source.check, **identity),
+        )
+
+    pipeline = replace(
+        one,
+        cells=(
+            probe(TemporalRegime.NO_SIGNAL, "1"),
+            probe(TemporalRegime.REGIME_SHIFT, "2"),
+        ),
+        outer_process_count=2,
+        peak_compute_count=4,
+        retained_first_generation_bundle_bytes=(
+            2 * source.first_generation.semantic_serialized_bytes
+        ),
+    )
+    with pytest.raises(ValueError, match="root count differs from the freeze"):
+        experiment.finalize_portable_fact_gate3(
+            m0_contract_id="yfm0-" + "1" * 24,
+            m0_contract_sha256="sha256:" + "1" * 64,
+            m6_contract_id="yfm6-" + "2" * 24,
+            m6_contract_sha256="sha256:" + "2" * 64,
+            m6_population_id="yftp-" + "3" * 24,
+            m6_population_sha256="sha256:" + "3" * 64,
+            problem_index_id="yfm7i-" + "4" * 24,
+            problem_index_sha256="sha256:" + "4" * 64,
+            freeze_id="yfm7freeze-" + "b" * 24,
+            freeze_sha256="sha256:" + "b" * 64,
+            calibration_view_id="yfm7cv-" + "5" * 24,
+            calibration_view_sha256="sha256:" + "5" * 64,
+            pipeline=pipeline,
+        )
+
+
+def test_portable_gate3_result_is_strict_separate_and_content_addressed() -> None:
+    from yieldforge.oracle import experiment
+
+    result = _portable_gate3_result()
+
+    assert result.parent_v3_proof_id == "yfm8proof-b296ba919c07d55ece14c6db"
+    assert result.generated_action_root_count == 887
+    assert tuple(item.generated_action_root_count for item in result.cells) == (428, 459)
+    assert result.evaluation_accessed is False
+    assert "nested_exclusive" in result.timing_semantics
+    assert experiment.M8PortableFactGate3Result.model_validate_json(
+        result.model_dump_json(),
+        strict=True,
+    ) == result
+
+    forged = result.model_copy(
+        update={
+            "cells": (
+                result.cells[0].model_copy(
+                    update={"decision_id": "yfm8d-" + "f" * 24}
+                ),
+                result.cells[1],
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="content identity"):
+        experiment.M8PortableFactGate3Result.model_validate_json(
+            forged.model_dump_json(),
+            strict=True,
+        )
+
+    impossible = result.model_dump(mode="python")
+    impossible["cells"][0]["timing"]["checker_worker_wall_seconds"] = 0.01
+    semantic = {
+        key: value
+        for key, value in impossible.items()
+        if key not in {"gate3_id", "content_sha256"}
+    }
+    digest = experiment.semantic_sha256(semantic)
+    impossible["gate3_id"] = f"yfm8gate3-{digest[:24]}"
+    impossible["content_sha256"] = f"sha256:{digest}"
+    with pytest.raises(ValidationError, match="checker phases exceed worker wall time"):
+        experiment.M8PortableFactGate3Result.model_validate(impossible, strict=True)
+
+    with pytest.raises(ValidationError, match="metadata does not reconcile"):
+        experiment.M8PortableFactGate3Cell.model_validate(
+            {
+                **result.cells[0].model_dump(mode="python"),
+                "counted_translation_audit_call_count": 3,
+            },
+            strict=True,
+        )
+
+
+def test_publish_portable_gate3_is_atomic_idempotent_and_immutable(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    result = _portable_gate3_result()
+    path = experiment.publish_portable_fact_gate3(tmp_path, result)
+
+    assert path.name == f"m8-portable-fact-gate3-{result.gate3_id}.json"
+    assert experiment.M8PortableFactGate3Result.model_validate_json(
+        path.read_bytes(),
+        strict=True,
+    ) == result
+    assert experiment.publish_portable_fact_gate3(tmp_path, result) == path
+    path.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="immutable and differs"):
+        experiment.publish_portable_fact_gate3(tmp_path, result)
+
+
+def test_publish_portable_gate3_removes_temporary_file_on_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    monkeypatch.setattr(
+        experiment.os,
+        "link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced link failure")),
+    )
+    with pytest.raises(OSError, match="forced link failure"):
+        experiment.publish_portable_fact_gate3(tmp_path, _portable_gate3_result())
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_portable_gate3_selector_opens_only_two_frozen_calibration_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.baseline.contracts import M7CalibrationProblemView
+    from yieldforge.oracle import experiment
+
+    bindings = []
+    for digit, regime in (("1", TemporalRegime.NO_SIGNAL), ("2", TemporalRegime.REGIME_SHIFT)):
+        bindings.extend(
+            SimpleNamespace(
+                regime=regime,
+                temporal_seed=2026082300,
+                stream_id="yfts-" + digit * 24,
+                sequence=position,
+                binding_id=f"yfm7b-{digit * 20}{position:04x}",
+            )
+            for position in range(24)
+        )
+        bindings.append(
+            SimpleNamespace(
+                regime=regime,
+                temporal_seed=2026082301,
+                stream_id="yfts-" + "f" * 24,
+                sequence=0,
+                binding_id="yfm7b-" + "f" * 24,
+            )
+        )
+    bindings.append(
+        SimpleNamespace(
+            regime=TemporalRegime.HIGH_MIX,
+            temporal_seed=2026082300,
+            stream_id="yfts-" + "e" * 24,
+            sequence=0,
+            binding_id="yfm7b-" + "e" * 24,
+        )
+    )
+    monkeypatch.setattr(
+        experiment,
+        "select_calibration_instances",
+        lambda _index: tuple(reversed(bindings)),
+    )
+
+    selected = experiment._select_portable_gate3_probe_streams(  # noqa: SLF001
+        M7CalibrationProblemView.model_construct(evaluation_partition_opened=False)
+    )
+
+    assert tuple(stream[0].regime for stream in selected) == (
+        TemporalRegime.NO_SIGNAL,
+        TemporalRegime.REGIME_SHIFT,
+    )
+    assert all(len(stream) == 2 for stream in selected)
+    assert all(item.temporal_seed == 2026082300 for stream in selected for item in stream)
+    assert all(
+        item.sequence in {0, 1}
+        for stream in selected
+        for item in stream
+    )
+    assert all(item.regime is not TemporalRegime.HIGH_MIX for stream in selected for item in stream)
+    with pytest.raises(TypeError, match="exact calibration view"):
+        experiment._select_portable_gate3_probe_streams(  # noqa: SLF001
+            SimpleNamespace(evaluation_partition_opened=False)
+        )
+
+
+def test_portable_gate3_callable_has_no_probe_or_worker_override() -> None:
+    from yieldforge.oracle.experiment import execute_portable_fact_gate3
+
+    parameters = inspect.signature(execute_portable_fact_gate3).parameters
+    assert {
+        "index",
+        "m0",
+        "frozen",
+        "archive_roots",
+        "jagua_executable",
+        "progress",
+    } == set(parameters)
+    assert {
+        "regime",
+        "seed",
+        "event_count",
+        "split",
+        "worker_count",
+        "allow_exact_replay",
+    }.isdisjoint(parameters)
+
+
+def test_portable_gate3_strictly_reloads_each_public_input_contract() -> None:
+    from tests.baseline.test_replay import _m0
+    from yieldforge.baseline.experiment import M7FrozenBaseline
+    from yieldforge.baseline.problems import (
+        build_registered_calibration_problem_view,
+        build_registered_problem_index,
+    )
+    from yieldforge.oracle.experiment import execute_portable_fact_gate3
+
+    full = build_registered_problem_index()
+    index = build_registered_calibration_problem_view(
+        full_problem_index_id=full.index_id,
+        full_problem_index_sha256=full.content_sha256,
+    )
+    m0 = _m0()
+    frozen = M7FrozenBaseline.model_validate_json(
+        (
+            Path(__file__).parents[2]
+            / "experiments"
+            / "results"
+            / "m7-frozen-baseline-v1.json"
+        ).read_bytes(),
+        strict=True,
+    )
+    common = {
+        "archive_roots": (),
+        "jagua_executable": Path("/unused/jagua"),
+    }
+
+    with pytest.raises(ValidationError):
+        execute_portable_fact_gate3(
+            index=index.model_copy(update={"evaluation_partition_opened": True}),
+            m0=m0,
+            frozen=frozen,
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        execute_portable_fact_gate3(
+            index=index,
+            m0=m0.model_copy(update={"contract_id": "yfm0-" + "0" * 24}),
+            frozen=frozen,
+            **common,
+        )
+    with pytest.raises(ValidationError):
+        execute_portable_fact_gate3(
+            index=index,
+            m0=m0,
+            frozen=frozen.model_copy(
+                update={"freeze_id": "yfm7freeze-" + "0" * 24}
+            ),
+            **common,
+        )
 
 
 def test_distributed_checker_and_audit_round_trip_in_fresh_processes() -> None:

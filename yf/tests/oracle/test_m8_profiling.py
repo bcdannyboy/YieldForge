@@ -230,6 +230,92 @@ def test_checker_emits_load_and_algebra_profile_phases() -> None:
     )
 
 
+def test_full_fact_checker_profiles_one_existing_execution_without_duplicate_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.baseline.replay import (
+        enumerate_m7_action_catalog,
+        initial_m7_cursor,
+        m7_cursor_sha256,
+        m7_semantic_runtime_sha256,
+    )
+    from yieldforge.oracle import fact_checker
+    from yieldforge.oracle.fact_checker import (
+        M8FactBundleCheckRequest,
+        check_m8_fact_bundle,
+    )
+    from yieldforge.oracle.factored import (
+        M8UncheckedBundleRequest,
+        score_unchecked_fact_bundle,
+    )
+    from yieldforge.oracle.profiling import activate_m8_profile
+    from yieldforge.oracle.proofs import m8_suffix_sha256
+    from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    oracle_request = M8OracleRequest(
+        runtime=runtime,
+        cursor=cursor,
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    freeze_id = "yfm7freeze-" + "b" * 24
+    freeze_sha256 = "sha256:" + "b" * 64
+    generated = score_unchecked_fact_bundle(
+        M8UncheckedBundleRequest(
+            oracle_request=oracle_request,
+            freeze_id=freeze_id,
+            freeze_sha256=freeze_sha256,
+        )
+    )
+    catalog = enumerate_m7_action_catalog(runtime, cursor=cursor)
+    visible = oracle_request.visibility.visible_suffix(
+        current_position=catalog.event_position,
+    )
+    stop = catalog.event_position + 1 + len(visible)
+    runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    request = M8FactBundleCheckRequest(
+        semantic_bundle_bytes=generated.semantic_bytes,
+        oracle_request=oracle_request,
+        expected_semantic_runtime_sha256=runtime_sha256,
+        expected_current_cursor_sha256=m7_cursor_sha256(cursor),
+        expected_catalog_event_position=catalog.event_position,
+        expected_catalog_action_ids=tuple(item.action_id for item in catalog.actions),
+        expected_stop_event_position=stop,
+        expected_suffix_sha256=m8_suffix_sha256(
+            semantic_runtime_sha256=runtime_sha256,
+            start_event_position=catalog.event_position,
+            stop_event_position=stop,
+            bindings=visible,
+        ),
+        expected_freeze_id=freeze_id,
+        expected_freeze_sha256=freeze_sha256,
+        allow_exact_replay=True,
+    )
+    calls = 0
+    original_load = fact_checker._canonical_load  # noqa: SLF001
+
+    def counted_load(semantic_bytes: bytes):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original_load(semantic_bytes)
+
+    monkeypatch.setattr(fact_checker, "_canonical_load", counted_load)
+    with activate_m8_profile() as profiler:
+        result = check_m8_fact_bundle(request)
+
+    assert result.valid
+    assert calls == 1
+    assert {
+        "fact_bundle_strict_load",
+        "fact_bundle_common_verification",
+        "fact_bundle_action_traversal",
+        "fact_bundle_cleanup",
+    } <= _phase_names(profiler.report().phases)
+
+
 def test_common_fact_differential_audit_records_exact_portable_identity() -> None:
     from tests.oracle.fixtures import two_problem_runtime
     from yieldforge.baseline.replay import initial_m7_cursor

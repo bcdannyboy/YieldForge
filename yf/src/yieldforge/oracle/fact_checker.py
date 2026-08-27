@@ -82,6 +82,7 @@ from yieldforge.oracle.concurrency import (
 )
 from yieldforge.oracle.contracts import M8OracleDecision, build_oracle_decision
 from yieldforge.oracle.frontier import certify_frontier_impossible
+from yieldforge.oracle.profiling import profile_phase
 from yieldforge.oracle.proofs import m8_suffix_sha256
 from yieldforge.oracle.reference import M8OracleRequest
 from yieldforge.oracle.translation_count_audit import audit_layout_translation_batch
@@ -1133,14 +1134,16 @@ def _validate_inventory_evidence(
                 for batch in batches
             )
             try:
-                audit_layout_translation_batch(
-                    remnant=prepared_remnant,
-                    layouts=layouts,
-                    expected=expected_batches,
-                    fit_config=runtime.replay_input.fit_config,
-                    search_config=runtime.replay_input.search_config,
-                    process_count=require_m8_translation_audit_processes(),
-                )
+                process_count = require_m8_translation_audit_processes()
+                with profile_phase("counted_translation_audit_call"):
+                    audit_layout_translation_batch(
+                        remnant=prepared_remnant,
+                        layouts=layouts,
+                        expected=expected_batches,
+                        fit_config=runtime.replay_input.fit_config,
+                        search_config=runtime.replay_input.search_config,
+                        process_count=process_count,
+                    )
             except (TypeError, ValueError) as error:
                 raise _CommonFactFailure("translation_count_mismatch", lemma.fact_sha256) from error
             state.audited_counted_lemma_sha256s.add(lemma.fact_sha256)
@@ -2413,7 +2416,8 @@ def check_m8_fact_bundle(
     try:
         captured, checker_cursor = _capture_full_request(request)
         try:
-            bundle = _canonical_load(captured.semantic_bundle_bytes)
+            with profile_phase("fact_bundle_strict_load"):
+                bundle = _canonical_load(captured.semantic_bundle_bytes)
         except _CommonFactFailure as error:
             raise _FullFactFailure(error.code, error.fact_sha256) from error
         first_fact = bundle.common_lemmas[0].fact_sha256 if bundle.common_lemmas else None
@@ -2457,22 +2461,23 @@ def check_m8_fact_bundle(
                 )
             common_cursor = fallback.cursor
             checked_facts = []
-            for lemma in bundle.common_lemmas:
-                try:
-                    fact, _audits, _fallbacks, _seconds = _validate_one_common(
-                        authority,
-                        lemma=lemma,
-                        cursor=common_cursor,
-                        bundle=bundle,
-                        state=common_state,
-                        allow_exact_replay=captured.allow_exact_replay,
-                        expected_jagua_sha256=expected_jagua_sha256,
-                    )
-                except _CommonFactFailure as error:
-                    raise _FullFactFailure(error.code, error.fact_sha256) from error
-                checked_facts.append(fact)
-                common_cursor = fact.step.cursor
-                checked_common += 1
+            with profile_phase("fact_bundle_common_verification"):
+                for lemma in bundle.common_lemmas:
+                    try:
+                        fact, _audits, _fallbacks, _seconds = _validate_one_common(
+                            authority,
+                            lemma=lemma,
+                            cursor=common_cursor,
+                            bundle=bundle,
+                            state=common_state,
+                            allow_exact_replay=captured.allow_exact_replay,
+                            expected_jagua_sha256=expected_jagua_sha256,
+                        )
+                    except _CommonFactFailure as error:
+                        raise _FullFactFailure(error.code, error.fact_sha256) from error
+                    checked_facts.append(fact)
+                    common_cursor = fact.step.cursor
+                    checked_common += 1
             _require_full_request_stable(request, captured, authority, fact_sha256=first_fact)
             common_fact_by_ref: dict[str, M8CommonTransitionFact] = {}
             decision: M8OracleDecision | None = None
@@ -2516,21 +2521,22 @@ def check_m8_fact_bundle(
                                 token,
                                 tuple(capabilities),
                             ) as traversal_guard:
-                                decision, checked_roots, checked_influences = (
-                                    _traverse_action_roots(
-                                        authority,
-                                        captured_request=captured,
-                                        traversal_guard=traversal_guard,
-                                        bundle=bundle,
-                                        catalog=catalog,
-                                        fallback=fallback,
-                                        checker_cursor=checker_cursor,
-                                        stop=stop,
-                                        common_fact_by_ref=common_fact_by_ref,
-                                        state=state,
-                                        first_fact=first_fact,
+                                with profile_phase("fact_bundle_action_traversal"):
+                                    decision, checked_roots, checked_influences = (
+                                        _traverse_action_roots(
+                                            authority,
+                                            captured_request=captured,
+                                            traversal_guard=traversal_guard,
+                                            bundle=bundle,
+                                            catalog=catalog,
+                                            fallback=fallback,
+                                            checker_cursor=checker_cursor,
+                                            stop=stop,
+                                            common_fact_by_ref=common_fact_by_ref,
+                                            state=state,
+                                            first_fact=first_fact,
+                                        )
                                     )
-                                )
                         except _FullFactFailure as error:
                             pending = error
                         except BaseException as error:
@@ -2539,14 +2545,15 @@ def check_m8_fact_bundle(
                                 first_fact,
                             )
                             pending.__cause__ = error
-                    try:
-                        _drain_common_capabilities(capabilities)
-                    except BaseException as error:
-                        pending = _FullFactFailure(
-                            "capability_registration_failure",
-                            first_fact,
-                        )
-                        pending.__cause__ = error
+                    with profile_phase("fact_bundle_cleanup"):
+                        try:
+                            _drain_common_capabilities(capabilities)
+                        except BaseException as error:
+                            pending = _FullFactFailure(
+                                "capability_registration_failure",
+                                first_fact,
+                            )
+                            pending.__cause__ = error
                     if pending is not None:
                         raise pending
             except BaseException as error:
