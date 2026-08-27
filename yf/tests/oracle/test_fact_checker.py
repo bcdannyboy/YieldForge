@@ -28,8 +28,11 @@ from yieldforge.baseline.replay import (
 from yieldforge.oracle import facts
 from yieldforge.oracle.concurrency import activate_m8_translation_audit_processes
 from yieldforge.oracle.fact_checker import (
+    M8CheckedFactBundleResult,
     M8CommonFactCheckRequest,
+    M8FactBundleCheckRequest,
     check_m8_common_fact_bundle,
+    check_m8_fact_bundle,
 )
 from yieldforge.oracle.factored import (
     M8UncheckedBundleRequest,
@@ -73,6 +76,26 @@ def _check_request(
         ),
         expected_freeze_id=unchecked.freeze_id,
         expected_freeze_sha256=unchecked.freeze_sha256,
+    )
+
+
+def _full_check_request(
+    unchecked: M8UncheckedBundleRequest,
+    semantic_bytes: bytes,
+) -> M8FactBundleCheckRequest:
+    common = _check_request(unchecked, semantic_bytes)
+    return M8FactBundleCheckRequest(
+        semantic_bundle_bytes=common.semantic_bundle_bytes,
+        oracle_request=common.oracle_request,
+        expected_semantic_runtime_sha256=common.expected_semantic_runtime_sha256,
+        expected_current_cursor_sha256=common.expected_current_cursor_sha256,
+        expected_catalog_event_position=common.expected_catalog_event_position,
+        expected_catalog_action_ids=common.expected_catalog_action_ids,
+        expected_stop_event_position=common.expected_stop_event_position,
+        expected_suffix_sha256=common.expected_suffix_sha256,
+        expected_freeze_id=common.expected_freeze_id,
+        expected_freeze_sha256=common.expected_freeze_sha256,
+        allow_exact_replay=True,
     )
 
 
@@ -174,6 +197,888 @@ def _unchecked_and_check_request() -> tuple[
     )
     generated = score_unchecked_fact_bundle(unchecked)
     return unchecked, _check_request(unchecked, generated.semantic_bytes)
+
+
+def test_full_checker_accepts_all_roots_only_after_fixed_layer_traversal() -> None:
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    oracle_request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=oracle_request,
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+
+    result = check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert result.valid
+    assert result.failure_code == "valid_action_decision"
+    assert result.decision is not None
+    assert result.checked_common_lemma_count == len(generated.bundle.common_lemmas)
+    assert result.checked_influence_fact_count == len(generated.bundle.influence_facts)
+    assert result.checked_action_root_count == len(generated.bundle.action_roots)
+    assert result.issued_common_capability_count == len(generated.bundle.common_lemmas)
+    assert result.authority_mode == "checked_fixed_layer_actions"
+
+
+def test_full_checker_rejects_rehashed_evidence_injected_into_exact_transition() -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "remnant_first-zero-fit-equal-same-two"
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=case.request,
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    payload = deepcopy(json.loads(generated.semantic_bytes))
+    exact = next(
+        item for item in payload["influence_facts"] if item["classification"] == "exact_transition"
+    )
+    scalar = payload["candidate_scalar_facts"][0]
+    exact["rejection_evidence"] = [
+        {
+            "direction": direction,
+            "remnant_id": remnant_id,
+            "candidate_id": scalar["candidate_id"],
+            "candidate_scalar_ref": scalar["fact_sha256"],
+            "impossible": False,
+            "reason": None,
+            "layout_area_bits": scalar["layout_area_bits"],
+            "remnant_area_bits": facts.encode_canonical_f64(1.0),
+            "layout_width_bits": scalar["layout_width_bits"],
+            "remnant_width_bits": facts.encode_canonical_f64(1.0),
+            "layout_height_bits": scalar["layout_height_bits"],
+            "remnant_height_bits": facts.encode_canonical_f64(1.0),
+            "area_tolerance_bits": facts.encode_canonical_f64(0.0),
+        }
+        for direction, remnant_id in (
+            ("added", exact["inventory_delta"]["added_remnant_ids"][0]),
+            ("removed", exact["inventory_delta"]["removed_remnant_ids"][0]),
+        )
+    ]
+    semantic_bytes = _rehash_payload(payload)
+    owner = next(
+        item["fact_sha256"]
+        for item in payload["influence_facts"]
+        if item["event_position"] == exact["event_position"]
+        and item["root_action_id"] == exact["root_action_id"]
+    )
+
+    result = check_m8_fact_bundle(_full_check_request(unchecked, semantic_bytes))
+
+    assert not result.valid
+    assert result.decision is None
+    assert result.failure_code == "influence_rejection_mismatch"
+    assert result.first_failing_fact_sha256 == owner
+
+
+def test_full_checker_exact_influence_reconstruction_disables_jagua_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from types import SimpleNamespace
+
+    from yieldforge.baseline import replay
+    from yieldforge.baseline.geometry import generate_layout_translations
+    from yieldforge.baseline.jagua import JaguaGeneratedPrefilterResult
+    from yieldforge.oracle import certificates, fact_checker
+
+    jagua_path = tmp_path / "jagua-spike"
+    jagua_path.write_bytes(b"frozen-test-binary")
+    jagua_path.chmod(0o700)
+    runtime = two_problem_runtime(
+        first_width=6.0,
+        second_width=4.0,
+        policy=M7PolicyName.MYOPIC_GEOMETRY,
+        collision_backend="jagua_rs_0_7_0_guarded_prefilter_shapely_witness",
+        jagua_executable=jagua_path,
+        event_count=2,
+        release_hour_step=0,
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+
+    def deterministic_prefilter(  # type: ignore[no-untyped-def]
+        _executable,
+        *,
+        remnant,
+        layouts,
+        fit_config,
+        search_config,
+        container_guard,
+    ):
+        assert container_guard == 1.0
+        batches = tuple(
+            generate_layout_translations(
+                SimpleNamespace(remnant_id=remnant.remnant_id),
+                SimpleNamespace(candidate_id=layout.candidate_id),
+                fit_config=fit_config,
+                search_config=search_config,
+                prepared_layout=layout,
+                prepared_remnant=remnant,
+            )
+            for layout in layouts
+        )
+        return JaguaGeneratedPrefilterResult(
+            translation_batches=batches,
+            collision_masks=tuple((False,) * len(batch.translations) for batch in batches),
+            guarded_query_count=sum(len(batch.translations) for batch in batches),
+            jagua_rejection_count=0,
+            build_microseconds=0,
+            generation_microseconds=0,
+            query_microseconds=0,
+            wall_seconds=0.0,
+        )
+
+    monkeypatch.setattr(certificates, "run_jagua_generated_prefilter", deterministic_prefilter)
+    monkeypatch.setattr(replay, "run_jagua_generated_prefilter", deterministic_prefilter)
+    generated = score_unchecked_fact_bundle(unchecked)
+    assert any(
+        item.evidence_mode == "policy_dominated_exact_check"
+        for item in generated.bundle.influence_facts
+    )
+    original = fact_checker.enumerate_m7_single_remnant_competitor
+
+    def require_shapely_only(exact_runtime, **kwargs):  # type: ignore[no-untyped-def]
+        def forbidden_jagua(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("influence reconstruction consulted Jagua classifications")
+
+        with monkeypatch.context() as local_patch:
+            local_patch.setattr(replay, "run_jagua_generated_prefilter", forbidden_jagua)
+            return original(exact_runtime, **kwargs)
+
+    monkeypatch.setattr(
+        fact_checker,
+        "enumerate_m7_single_remnant_competitor",
+        require_shapely_only,
+    )
+
+    result = check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert result.valid
+    assert result.decision is not None
+
+
+def test_full_checker_partial_registration_failure_drains_inside_active_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import certificates, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0, event_count=3)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    assert len(generated.bundle.common_lemmas) > 1
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+    token_registry_before = dict(fact_checker._CHECKER_REGISTRATION_TOKENS)  # noqa: SLF001
+    common_registry_before = dict(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+    original_register = fact_checker._register_checker_validated_common_transition  # noqa: SLF001
+    original_release = fact_checker._release_validated_common_transition  # noqa: SLF001
+    registration_count = 0
+    release_scope_states: list[bool] = []
+
+    def fail_second_registration(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal registration_count
+        registration_count += 1
+        if registration_count == 2:
+            raise RuntimeError("injected second capability registration failure")
+        return original_register(*args, **kwargs)
+
+    def record_release_scope(common):  # type: ignore[no-untyped-def]
+        release_scope_states.append(bool(fact_checker._CHECKER_REGISTRATION_TOKENS))  # noqa: SLF001
+        return original_release(common)
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_register_checker_validated_common_transition",
+        fail_second_registration,
+    )
+    monkeypatch.setattr(
+        fact_checker,
+        "_release_validated_common_transition",
+        record_release_scope,
+    )
+
+    result = check_m8_fact_bundle(request)
+
+    assert not result.valid
+    assert result.decision is None
+    assert result.failure_code == "capability_registration_failure"
+    assert registration_count == 2
+    assert release_scope_states == [True]
+    assert fact_checker._CHECKER_REGISTRATION_TOKENS == token_registry_before  # noqa: SLF001
+    assert certificates._VALIDATED_COMMON_REGISTRY == common_registry_before  # noqa: SLF001
+
+
+def test_full_checker_unexpected_traversal_failure_is_internal_not_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import certificates, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    token_registry_before = dict(fact_checker._CHECKER_REGISTRATION_TOKENS)  # noqa: SLF001
+    common_registry_before = dict(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+
+    def fail_traversal(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("injected influence traversal failure")
+
+    monkeypatch.setattr(fact_checker, "_validate_one_influence", fail_traversal)
+
+    result = check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert not result.valid
+    assert result.decision is None
+    assert result.failure_code == "internal_checker_failure"
+    assert fact_checker._CHECKER_REGISTRATION_TOKENS == token_registry_before  # noqa: SLF001
+    assert certificates._VALIDATED_COMMON_REGISTRY == common_registry_before  # noqa: SLF001
+
+
+def test_full_checker_revalidates_request_after_capability_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import certificates, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+    token_registry_before = dict(fact_checker._CHECKER_REGISTRATION_TOKENS)  # noqa: SLF001
+    common_registry_before = dict(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+    original_release = fact_checker._release_validated_common_transition  # noqa: SLF001
+
+    def mutate_request_during_release(common):  # type: ignore[no-untyped-def]
+        original_release(common)
+        object.__setattr__(request, "expected_suffix_sha256", "sha256:" + "f" * 64)
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_release_validated_common_transition",
+        mutate_request_during_release,
+    )
+
+    result = check_m8_fact_bundle(request)
+
+    assert not result.valid
+    assert result.decision is None
+    assert result.failure_code == "runtime_binding_mismatch"
+    assert fact_checker._CHECKER_REGISTRATION_TOKENS == token_registry_before  # noqa: SLF001
+    assert certificates._VALIDATED_COMMON_REGISTRY == common_registry_before  # noqa: SLF001
+
+
+def test_full_checker_result_contract_and_public_exports_are_fail_closed() -> None:
+    from yieldforge.oracle import checker, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    result = check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+    assert result.valid and result.decision is not None
+    payload = result.model_dump(mode="python")
+
+    for updates in (
+        {
+            "failure_code": "valid_common_facts",
+            "valid": False,
+            "decision": None,
+        },
+        {
+            "common_exact_fallback_wall_seconds": float("nan"),
+            "total_exact_fallback_wall_seconds": float("nan"),
+        },
+        {"issued_common_capability_count": 0},
+        {"checked_action_root_count": 0},
+    ):
+        with pytest.raises(ValueError):
+            M8CheckedFactBundleResult.model_validate(payload | updates, strict=True)
+
+    assert checker.M8FactBundleCheckRequest is M8FactBundleCheckRequest
+    assert checker.M8CheckedFactBundleResult is M8CheckedFactBundleResult
+    assert checker.check_m8_fact_bundle is check_m8_fact_bundle
+    assert {
+        "M8FactBundleCheckRequest",
+        "M8CheckedFactBundleResult",
+        "M8CheckedFactBundleFailureCode",
+        "check_m8_fact_bundle",
+    } <= set(fact_checker.__all__)
+    assert {
+        "M8FactBundleCheckRequest",
+        "M8CheckedFactBundleResult",
+        "M8CheckedFactBundleFailureCode",
+        "check_m8_fact_bundle",
+    } <= set(checker.__all__)
+
+
+def test_full_checker_hot_loop_deep_checks_do_not_scale_with_action_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import fact_checker
+
+    original_runtime_sha256 = fact_checker.m7_semantic_runtime_sha256
+    original_common_fact = fact_checker._validated_common_transition_fact  # noqa: SLF001
+    deep_hash_calls = 0
+    common_fact_calls = 0
+
+    def counted_runtime_sha256(runtime):  # type: ignore[no-untyped-def]
+        nonlocal deep_hash_calls
+        deep_hash_calls += 1
+        return original_runtime_sha256(runtime)
+
+    def counted_common_fact(runtime, common):  # type: ignore[no-untyped-def]
+        nonlocal common_fact_calls
+        common_fact_calls += 1
+        return original_common_fact(runtime, common)
+
+    monkeypatch.setattr(fact_checker, "m7_semantic_runtime_sha256", counted_runtime_sha256)
+    monkeypatch.setattr(
+        fact_checker,
+        "_validated_common_transition_fact",
+        counted_common_fact,
+    )
+
+    def check_with_inventory(count: int) -> tuple[int, int, int]:
+        nonlocal deep_hash_calls, common_fact_calls
+        runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+        material = runtime.replay_input.instances[0].material
+        cursor = replace(
+            initial_m7_cursor(runtime.replay_input),
+            inventory=tuple(
+                sorted(
+                    (
+                        inventory_item(
+                            Polygon(((0, 0), (10, 0), (10, 10), (0, 10))),
+                            material=material,
+                            token=f"full-hot-loop-{count}-{index}",
+                        )
+                        for index in range(count)
+                    ),
+                    key=lambda item: item.remnant.remnant_id,
+                )
+            ),
+        )
+        unchecked = M8UncheckedBundleRequest(
+            oracle_request=M8OracleRequest(
+                runtime=runtime,
+                cursor=cursor,
+                visibility=FullRealizedVisibility(runtime.replay_input.instances),
+            ),
+            freeze_id=_FREEZE_ID,
+            freeze_sha256=_FREEZE_SHA256,
+        )
+        generated = score_unchecked_fact_bundle(unchecked)
+        deep_hash_calls = 0
+        common_fact_calls = 0
+        result = check_m8_fact_bundle(
+            _full_check_request(unchecked, generated.semantic_bytes),
+        )
+        assert result.valid, result
+        assert result.decision is not None
+        return (
+            result.decision.scored_action_count,
+            deep_hash_calls,
+            common_fact_calls,
+        )
+
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(fact_checker._M8FullTraversalGuard(object()))  # noqa: SLF001
+    guard_registry_before = dict(fact_checker._FULL_TRAVERSAL_GUARDS)  # noqa: SLF001
+    small = check_with_inventory(0)
+    large = check_with_inventory(8)
+
+    assert small[0] == 2
+    assert large[0] >= 18
+    assert small[1:] == large[1:]
+    assert small[2] == 1
+    assert fact_checker._FULL_TRAVERSAL_GUARDS == guard_registry_before  # noqa: SLF001
+
+
+def test_every_full_reachable_scalar_mutation_fails_stably_with_actual_owner() -> None:
+    representatives = (
+        ("myopic_geometry-zero-fit-equal-same-two", "state_rejoin"),
+        ("myopic_geometry-zero-no-fit-equal-separated-two", "no_fit"),
+        ("myopic_geometry-zero-fit-equal-same-two", "policy_dominated"),
+        ("remnant_first-zero-fit-equal-same-two", "exact_transition"),
+    )
+    cases = {item.case_id: item for item in exhaustive_certificate_cases()}
+    checked_fields = 0
+    failures: list[str] = []
+    checked_root = False
+    for case_id, classification in representatives:
+        case = cases[case_id]
+        unchecked = M8UncheckedBundleRequest(
+            oracle_request=case.request,
+            freeze_id=_FREEZE_ID,
+            freeze_sha256=_FREEZE_SHA256,
+        )
+        generated = score_unchecked_fact_bundle(unchecked)
+        original = json.loads(generated.semantic_bytes)
+        source_index = next(
+            index
+            for index, item in enumerate(original["influence_facts"])
+            if item["classification"] == classification
+        )
+        targets = [("influence_facts", source_index)]
+        if not checked_root:
+            targets.append(("action_roots", 0))
+            checked_root = True
+        for layer_name, entry_index in targets:
+            original_entry = original[layer_name][entry_index]
+            for field_path, original_value in _semantic_field_paths(original_entry):
+                if isinstance(original_value, (dict, list)):
+                    continue
+                checked_fields += 1
+                payload = deepcopy(original)
+                entry = payload[layer_name][entry_index]
+                _set_semantic_path(
+                    entry,
+                    field_path,
+                    _mutated_semantic_value(field_path, original_value),
+                )
+                semantic_bytes = _rehash_payload(payload)
+                owner_sha256 = entry["fact_sha256"]
+                if layer_name == "influence_facts":
+                    allowed_owner_sha256s = {
+                        owner_sha256,
+                        *(
+                            root["fact_sha256"]
+                            for root in payload["action_roots"]
+                            if owner_sha256 in root["influence_fact_refs"]
+                        ),
+                    }
+                else:
+                    allowed_owner_sha256s = {
+                        root["fact_sha256"] for root in payload["action_roots"]
+                    }
+                request = replace(
+                    _full_check_request(unchecked, generated.semantic_bytes),
+                    semantic_bundle_bytes=semantic_bytes,
+                )
+                first = check_m8_fact_bundle(request)
+                second = check_m8_fact_bundle(request)
+                label = (
+                    f"{classification}:{layer_name}[{entry_index}].{'.'.join(map(str, field_path))}"
+                )
+                if first.valid:
+                    failures.append(f"{label}: unexpectedly valid")
+                elif first.decision is not None:
+                    failures.append(f"{label}: exposed a failed decision")
+                elif first.first_failing_fact_sha256 not in allowed_owner_sha256s:
+                    failures.append(f"{label}: unrelated owner {first.first_failing_fact_sha256}")
+                elif (
+                    second.failure_code != first.failure_code
+                    or second.first_failing_fact_sha256 != first.first_failing_fact_sha256
+                ):
+                    failures.append(f"{label}: unstable {first.failure_code}")
+
+    assert checked_fields >= 200
+    assert not failures, "\n".join(failures[:25])
+
+
+def _influence_exact_without_common_bundle():  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(
+        first_width=2.0,
+        second_width=4.0,
+        policy=M7PolicyName.REMNANT_FIRST,
+    )
+    material = runtime.replay_input.instances[0].material
+    cursor = replace(
+        initial_m7_cursor(runtime.replay_input),
+        inventory=(
+            inventory_item(
+                Polygon(((0, 0), (4, 0), (4, 10), (0, 10))),
+                material=material,
+                token="full-influence-exact-permission",
+            ),
+        ),
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=cursor,
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    return unchecked, score_unchecked_fact_bundle(unchecked)
+
+
+def test_full_checker_exact_permission_and_unique_fallback_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import fact_checker
+
+    unchecked, generated = _influence_exact_without_common_bundle()
+    exact_influence_ids = {
+        item.fact_sha256
+        for item in generated.bundle.influence_facts
+        if item.evidence_mode in {"policy_dominated_exact_check", "exact_transition"}
+    }
+    assert exact_influence_ids
+    assert all(item.evidence_mode != "exact_replay" for item in generated.bundle.common_lemmas)
+    denied_request = replace(
+        _full_check_request(unchecked, generated.semantic_bytes),
+        allow_exact_replay=False,
+    )
+    original_derive = fact_checker._derive_influence_classification  # noqa: SLF001
+    exact_derive_calls = 0
+
+    def reject_hidden_exact(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal exact_derive_calls
+        influence = kwargs["influence"]
+        if influence.evidence_mode in {
+            "policy_dominated_exact_check",
+            "exact_transition",
+        }:
+            exact_derive_calls += 1
+            raise AssertionError("denied influence reached exact reconstruction")
+        return original_derive(*args, **kwargs)
+
+    with monkeypatch.context() as denied_patch:
+        denied_patch.setattr(
+            fact_checker,
+            "_derive_influence_classification",
+            reject_hidden_exact,
+        )
+        denied = check_m8_fact_bundle(denied_request)
+
+    assert not denied.valid
+    assert denied.decision is None
+    assert denied.failure_code == "implicit_exact_replay"
+    assert denied.common_exact_fallback_count == 0
+    assert denied.influence_exact_fallback_count == 0
+    assert denied.total_exact_fallback_count == 0
+    assert exact_derive_calls == 0
+
+    allowed = check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert allowed.valid
+    assert allowed.decision is not None
+    assert allowed.common_exact_fallback_count == 0
+    assert allowed.influence_exact_fallback_count == len(exact_influence_ids)
+    assert allowed.total_exact_fallback_count == len(exact_influence_ids)
+    assert allowed.influence_exact_fallback_wall_seconds > 0.0
+    assert allowed.total_exact_fallback_wall_seconds > 0.0
+
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "myopic_geometry-zero-fit-equal-same-two"
+    )
+    combined_unchecked = M8UncheckedBundleRequest(
+        oracle_request=case.request,
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    combined_generated = score_unchecked_fact_bundle(combined_unchecked)
+    combined = check_m8_fact_bundle(
+        _full_check_request(combined_unchecked, combined_generated.semantic_bytes),
+    )
+    expected_common = sum(
+        item.evidence_mode == "exact_replay" for item in combined_generated.bundle.common_lemmas
+    )
+    expected_influence = len(
+        {
+            item.fact_sha256
+            for item in combined_generated.bundle.influence_facts
+            if item.evidence_mode in {"policy_dominated_exact_check", "exact_transition"}
+        }
+    )
+    assert combined.valid
+    assert combined.common_exact_fallback_count == expected_common
+    assert combined.influence_exact_fallback_count == expected_influence
+    assert combined.total_exact_fallback_count == expected_common + expected_influence
+
+
+def test_full_checker_preserves_exact_telemetry_after_later_terminal_failure() -> None:
+    unchecked, generated = _influence_exact_without_common_bundle()
+    payload = deepcopy(json.loads(generated.semantic_bytes))
+    catalog = enumerate_m7_action_catalog(
+        unchecked.oracle_request.runtime,
+        cursor=unchecked.oracle_request.cursor,
+    )
+    last_catalog_action_id = catalog.actions[-1].action_id
+    root = next(
+        item
+        for item in payload["action_roots"]
+        if item["catalog_action_id"] == last_catalog_action_id
+    )
+    root["final_net_cost_bits"] = _increment_f64(root["final_net_cost_bits"])
+    semantic_bytes = _rehash_payload(payload)
+    owner_sha256 = root["fact_sha256"]
+
+    result = check_m8_fact_bundle(
+        replace(
+            _full_check_request(unchecked, generated.semantic_bytes),
+            semantic_bundle_bytes=semantic_bytes,
+        )
+    )
+
+    assert not result.valid
+    assert result.decision is None
+    assert result.failure_code == "root_terminal_mismatch"
+    assert result.first_failing_fact_sha256 == owner_sha256
+    assert result.influence_exact_fallback_count > 0
+    assert result.influence_exact_fallback_wall_seconds > 0.0
+    assert result.total_exact_fallback_count == result.influence_exact_fallback_count
+
+
+def test_full_checker_is_independent_of_producer_capture_and_v1_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import certificates, checker, factored, reference, sparse
+
+    unchecked, generated = _influence_exact_without_common_bundle()
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+
+    def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("full fact checker invoked producer, capture, or v1 authority")
+
+    forbidden_paths = (
+        (factored, "score_unchecked_fact_bundle"),
+        (factored, "_prepare_m8_generator_context"),
+        (factored, "_capture_prepared_unchecked_traversal"),
+        (certificates, "certify_event_passivity"),
+        (certificates, "build_m8_common_transition_fact"),
+        (certificates, "build_validated_m8_common_transition"),
+        (certificates, "build_validated_m8_common_transition_in_context"),
+        (certificates, "_derive_m8_common_transition_fact"),
+        (certificates, "_derive_m8_common_transition_fact_unprofiled"),
+        (certificates, "_derive_m8_common_transition_fact_authoritative"),
+        (certificates, "_capture_unchecked_m8_common_transition"),
+        (certificates, "_capture_unchecked_event_passivity"),
+        (sparse, "score_sparse_event"),
+        (sparse, "_score_sparse_event_unprofiled"),
+        (reference, "score_reference_event"),
+        (reference, "score_reference_action"),
+        (reference, "score_reference_actions"),
+        (checker, "check_action_proofs"),
+        (checker, "check_action_proof"),
+        (checker, "_check_prepared_action_proofs"),
+    )
+    for module, name in forbidden_paths:
+        monkeypatch.setattr(module, name, forbidden)
+
+    result = check_m8_fact_bundle(request)
+
+    assert result.valid
+    assert result.decision is not None
+
+
+def test_full_checker_capability_scans_only_at_guard_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0, event_count=4)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    common_count = len(generated.bundle.common_lemmas)
+    influence_count = len(generated.bundle.influence_facts)
+    assert common_count == 3
+    assert influence_count > common_count
+    backing = fact_checker._VALIDATED_COMMON_REGISTRY  # noqa: SLF001
+
+    class CountingRegistry:
+        def __init__(self):
+            self.get_count = 0
+
+        def get(self, key, default=None):  # type: ignore[no-untyped-def]
+            self.get_count += 1
+            return backing.get(key, default)
+
+    counted = CountingRegistry()
+    monkeypatch.setattr(fact_checker, "_VALIDATED_COMMON_REGISTRY", counted)
+
+    result = check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert result.valid
+    assert result.decision is not None
+    assert counted.get_count == common_count * 3
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutation", "expected_code"),
+    (
+        (
+            "myopic_geometry-zero-fit-equal-same-two",
+            "classification_relabel",
+            "influence_classification_mismatch",
+        ),
+        (
+            "remnant_first-zero-fit-equal-same-two",
+            "exact_branch_action",
+            "influence_action_mismatch",
+        ),
+        (
+            "myopic_geometry-zero-fit-equal-same-two",
+            "competitor_rank",
+            "influence_competitor_mismatch",
+        ),
+        (
+            "myopic_geometry-zero-fit-equal-same-two",
+            "root_final_state",
+            "m8_state_chain_mismatch",
+        ),
+        (
+            "myopic_geometry-zero-fit-equal-same-two",
+            "root_final_cost",
+            "root_terminal_mismatch",
+        ),
+        (
+            "myopic_geometry-zero-fit-equal-same-two",
+            "swapped_root_refs",
+            "m8_action_binding_mismatch",
+        ),
+    ),
+)
+def test_correlated_legal_full_mutations_fail_with_stable_semantic_owner(
+    case_id: str,
+    mutation: str,
+    expected_code: str,
+) -> None:
+    case = next(item for item in exhaustive_certificate_cases() if item.case_id == case_id)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=case.request,
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    payload = deepcopy(json.loads(generated.semantic_bytes))
+    allowed_owners: set[str]
+    if mutation == "classification_relabel":
+        entry = next(
+            item for item in payload["influence_facts"] if item["classification"] == "state_rejoin"
+        )
+        entry["classification"] = "exact_transition"
+        entry["evidence_mode"] = "exact_transition"
+        semantic_bytes = _rehash_payload(payload)
+        allowed_owners = {entry["fact_sha256"]}
+    elif mutation == "exact_branch_action":
+        entry = next(
+            item
+            for item in payload["influence_facts"]
+            if item["classification"] == "exact_transition"
+        )
+        replacement = next(
+            item["catalog_action_id"]
+            for item in payload["action_roots"]
+            if item["catalog_action_id"] != entry["branch_catalog_action_id"]
+        )
+        entry["branch_catalog_action_id"] = replacement
+        semantic_bytes = _rehash_payload(payload)
+        allowed_owners = {entry["fact_sha256"]}
+    elif mutation == "competitor_rank":
+        entry = next(
+            item
+            for item in payload["influence_facts"]
+            if item["classification"] == "policy_dominated"
+        )
+        component = entry["competitor_evidence"][0]["comparison_key"][0]
+        component["f64_bits"] = _increment_f64(component["f64_bits"])
+        semantic_bytes = _rehash_payload(payload)
+        allowed_owners = {entry["fact_sha256"]}
+    elif mutation in {"root_final_state", "root_final_cost"}:
+        entry = payload["action_roots"][0]
+        if mutation == "root_final_state":
+            entry["final_state_sha256"] = "sha256:" + "f" * 64
+        else:
+            entry["final_net_cost_bits"] = _increment_f64(entry["final_net_cost_bits"])
+        semantic_bytes = _rehash_payload(payload)
+        allowed_owners = {entry["fact_sha256"]}
+    else:
+        first, second = payload["action_roots"][:2]
+        first["influence_fact_refs"], second["influence_fact_refs"] = (
+            second["influence_fact_refs"],
+            first["influence_fact_refs"],
+        )
+        semantic_bytes = _rehash_payload(payload)
+        allowed_owners = {
+            first["fact_sha256"],
+            second["fact_sha256"],
+            *first["influence_fact_refs"],
+            *second["influence_fact_refs"],
+        }
+    request = replace(
+        _full_check_request(unchecked, generated.semantic_bytes),
+        semantic_bundle_bytes=semantic_bytes,
+    )
+
+    first_result = check_m8_fact_bundle(request)
+    second_result = check_m8_fact_bundle(request)
+
+    assert not first_result.valid
+    assert first_result.decision is None
+    assert first_result.failure_code == expected_code
+    assert first_result.first_failing_fact_sha256 in allowed_owners
+    assert second_result.failure_code == first_result.failure_code
+    assert second_result.first_failing_fact_sha256 == first_result.first_failing_fact_sha256
 
 
 def _shift_utc(value: str, *, seconds: int = 1) -> str:

@@ -1,17 +1,20 @@
-"""Independent common-lemma checker for portable M8 fact bundles.
+"""Independent common and fixed-layer checker for portable M8 fact bundles.
 
 The bundle remains an unchecked transport object until this module binds it to an independently
 supplied calibration runtime, reconstructs every common transition, and retires every local
-capability.  Action-root and influence authorization intentionally belongs to the next layer.
+capability.  The explicit full-check API additionally reconstructs every influence and action root
+before exposing a bounded oracle decision; neither API claims an M8, savings, or commercial verdict.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import weakref
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
@@ -29,9 +32,11 @@ from yieldforge.baseline.contracts import (
 from yieldforge.baseline.geometry import (
     LayoutTranslationCandidates,
     certify_translation_impossible,
+    generate_layout_translations,
     prepare_layout_footprint,
     prepare_remnant_geometry,
     prepare_translation_rejection_remnant,
+    search_layout_translation,
 )
 from yieldforge.baseline.jagua import JaguaRepresentationError, run_jagua_generated_prefilter
 from yieldforge.baseline.policies import rank_policy_action
@@ -40,18 +45,23 @@ from yieldforge.baseline.replay import (
     M7ActionCatalog,
     M7AuthoritativeProofRuntime,
     M7ReplayCursor,
+    M7ReplayRuntime,
     M7StepResult,
     apply_m7_action_descriptor,
+    apply_m7_frozen_action_evidence,
     authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
+    enumerate_m7_single_remnant_competitor,
     enumerate_m7_standard_only_catalog,
     m7_cursor_sha256,
     m7_semantic_runtime_sha256,
+    run_m7_continuation,
     select_m7_fallback,
 )
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle import facts
 from yieldforge.oracle.certificates import (
+    _VALIDATED_COMMON_REGISTRY,
     M8CommonTransitionFact,
     ValidatedCommonTransition,
     _common_fact_payload,
@@ -59,15 +69,18 @@ from yieldforge.oracle.certificates import (
     _portable_search_config,
     _register_checker_validated_common_transition,
     _release_validated_common_transition,
+    _validated_common_transition_fact,
 )
 from yieldforge.oracle.compiled import (
     _verified_rejection_layouts_cover_candidates,
     compile_rejection_problem,
+    compile_translation_rejections,
 )
 from yieldforge.oracle.concurrency import (
     activate_m8_local_trusted_audit,
     require_m8_translation_audit_processes,
 )
+from yieldforge.oracle.contracts import M8OracleDecision, build_oracle_decision
 from yieldforge.oracle.frontier import certify_frontier_impossible
 from yieldforge.oracle.proofs import m8_suffix_sha256
 from yieldforge.oracle.reference import M8OracleRequest
@@ -116,6 +129,22 @@ M8CommonFactFailureCode = Literal[
     "m8_unused_fact",
     "m8_root_context_mismatch",
 ]
+
+M8CheckedFactBundleFailureCode = (
+    M8CommonFactFailureCode
+    | Literal[
+        "valid_action_decision",
+        "influence_classification_mismatch",
+        "influence_rejection_mismatch",
+        "influence_search_mismatch",
+        "influence_competitor_mismatch",
+        "influence_action_mismatch",
+        "influence_state_mismatch",
+        "root_catalog_mismatch",
+        "root_state_mismatch",
+        "root_terminal_mismatch",
+    ]
+)
 
 
 @dataclass(frozen=True)
@@ -236,6 +265,11 @@ class M8CommonFactCheckRequest:
             raise ValueError("M8 common checker out-of-band runtime or cursor drifted")
 
 
+@dataclass(frozen=True)
+class M8FactBundleCheckRequest(M8CommonFactCheckRequest):
+    """Separate full fixed-layer request; exact permission covers every declared fallback."""
+
+
 class M8CommonFactCheckResult(BaselineContractModel):
     """Common-only result; never an accepted action decision or Gate-3 verdict."""
 
@@ -265,6 +299,74 @@ class M8CommonFactCheckResult(BaselineContractModel):
             raise ValueError("valid M8 common facts cannot identify a failing fact")
         if self.valid and self.issued_common_capability_count != self.checked_common_lemma_count:
             raise ValueError("valid M8 common facts require one retired capability per lemma")
+        return self
+
+
+class M8CheckedFactBundleResult(BaselineContractModel):
+    """Accepted checked action decision only; never a Gate-3 or M8 hypothesis verdict."""
+
+    valid: StrictBool
+    decision: M8OracleDecision | None
+    checked_common_lemma_count: StrictInt
+    checked_influence_fact_count: StrictInt
+    checked_action_root_count: StrictInt
+    counted_translation_audit_count: StrictInt
+    influence_translation_audit_count: StrictInt
+    issued_common_capability_count: StrictInt
+    common_exact_fallback_count: StrictInt
+    influence_exact_fallback_count: StrictInt
+    total_exact_fallback_count: StrictInt
+    common_exact_fallback_wall_seconds: StrictFloat
+    influence_exact_fallback_wall_seconds: StrictFloat
+    total_exact_fallback_wall_seconds: StrictFloat
+    failure_code: M8CheckedFactBundleFailureCode
+    first_failing_fact_sha256: StrictStr | None = None
+    authority_mode: ClassVar[Literal["checked_fixed_layer_actions"]] = "checked_fixed_layer_actions"
+
+    @model_validator(mode="after")
+    def require_reconciled_result(self):  # type: ignore[no-untyped-def]
+        counts = (
+            self.checked_common_lemma_count,
+            self.checked_influence_fact_count,
+            self.checked_action_root_count,
+            self.counted_translation_audit_count,
+            self.influence_translation_audit_count,
+            self.issued_common_capability_count,
+            self.common_exact_fallback_count,
+            self.influence_exact_fallback_count,
+            self.total_exact_fallback_count,
+        )
+        seconds = (
+            self.common_exact_fallback_wall_seconds,
+            self.influence_exact_fallback_wall_seconds,
+            self.total_exact_fallback_wall_seconds,
+        )
+        if any(item < 0 for item in counts) or any(item < 0.0 for item in seconds):
+            raise ValueError("M8 full fact-checker measurements must be nonnegative")
+        if any(not math.isfinite(item) for item in seconds):
+            raise ValueError("M8 full fact-checker timings must be finite")
+        if self.failure_code == "valid_common_facts":
+            raise ValueError("M8 full fact-checker cannot emit the common-only success code")
+        if self.valid != (self.failure_code == "valid_action_decision"):
+            raise ValueError("M8 full fact-checker validity differs from its failure code")
+        if self.valid != (self.decision is not None):
+            raise ValueError("M8 full fact-checker decision exposure differs from validity")
+        if self.valid and self.first_failing_fact_sha256 is not None:
+            raise ValueError("valid M8 full facts cannot identify a failing fact")
+        if self.valid and (
+            self.issued_common_capability_count != self.checked_common_lemma_count
+            or self.decision is None
+            or self.checked_action_root_count != self.decision.scored_action_count
+        ):
+            raise ValueError("valid M8 full facts require complete capability and root coverage")
+        if self.total_exact_fallback_count != (
+            self.common_exact_fallback_count + self.influence_exact_fallback_count
+        ):
+            raise ValueError("M8 full exact fallback counts do not reconcile")
+        if self.total_exact_fallback_wall_seconds != (
+            self.common_exact_fallback_wall_seconds + self.influence_exact_fallback_wall_seconds
+        ):
+            raise ValueError("M8 full exact fallback timing does not reconcile")
         return self
 
 
@@ -300,6 +402,30 @@ class _CommonCheckState:
     exact_replay_fallback_wall_seconds: float = 0.0
 
 
+class _FullFactFailure(ValueError):
+    def __init__(
+        self,
+        code: M8CheckedFactBundleFailureCode,
+        fact_sha256: str | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.fact_sha256 = fact_sha256
+
+
+@dataclass
+class _FullCheckState:
+    common: _CommonCheckState
+    checked_influence_sha256s: set[str] = field(default_factory=set)
+    influence_transition_by_sha256: dict[str, tuple[str, str, M7ReplayCursor]] = field(
+        default_factory=dict
+    )
+    audited_influence_translation_sha256s: set[str] = field(default_factory=set)
+    influence_translation_audit_count: int = 0
+    influence_exact_fallback_sha256s: set[str] = field(default_factory=set)
+    influence_exact_fallback_wall_seconds: float = 0.0
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class _M8FactCheckerRegistrationToken:
     """Unforgeable process-local issuance lease owned solely by this checker."""
@@ -328,6 +454,38 @@ class _RegisteredCheckerToken:
 
 
 _CHECKER_REGISTRATION_TOKENS: dict[int, _RegisteredCheckerToken] = {}
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class _M8FullTraversalGuard:
+    """Unforgeable O(1) lease for one already-deep-checked root traversal."""
+
+    _binding: object = field(repr=False, compare=False)
+
+    def __init__(self, binding: object) -> None:
+        object.__setattr__(self, "_binding", binding)
+
+    def __reduce__(self) -> object:
+        raise TypeError("M8 full traversal guards cannot be serialized")
+
+
+@dataclass(frozen=True)
+class _RegisteredFullTraversalGuard:
+    reference: weakref.ReferenceType[_M8FullTraversalGuard]
+    binding: object
+    owner_pid: int
+    source_request: M8FactBundleCheckRequest
+    captured_request: M8FactBundleCheckRequest
+    source_claim_snapshot: tuple[object, ...]
+    captured_claim_snapshot: tuple[object, ...]
+    authority: M7AuthoritativeProofRuntime
+    checker_token: _M8FactCheckerRegistrationToken
+    runtime_replay_input: object
+    capabilities: tuple[ValidatedCommonTransition, ...]
+    capability_entries: tuple[object, ...]
+
+
+_FULL_TRAVERSAL_GUARDS: dict[int, _RegisteredFullTraversalGuard] = {}
 
 _FACT_LAYER_NAMES = frozenset(
     {
@@ -365,6 +523,14 @@ def _require_checker_registration_scope_token(
     token: _M8FactCheckerRegistrationToken,
     authority: M7AuthoritativeProofRuntime,
 ) -> None:
+    _require_checker_registration_scope_token_identity(token, authority)
+    authority.require_active(authority.runtime)
+
+
+def _require_checker_registration_scope_token_identity(
+    token: _M8FactCheckerRegistrationToken,
+    authority: M7AuthoritativeProofRuntime,
+) -> None:
     registered = _CHECKER_REGISTRATION_TOKENS.get(id(token))
     if (
         type(token) is not _M8FactCheckerRegistrationToken
@@ -377,7 +543,7 @@ def _require_checker_registration_scope_token(
         or registered.semantic_runtime_sha256 != authority.semantic_sha256
     ):
         raise ValueError("M8 checker common registration token is invalid or inactive")
-    authority.require_active(authority.runtime)
+    authority._require_active_identity(authority.runtime)  # noqa: SLF001
 
 
 def _consume_checker_registration_token(
@@ -434,6 +600,104 @@ def _checker_registration_scope(
         current = _CHECKER_REGISTRATION_TOKENS.get(key)
         if current is registered:
             _CHECKER_REGISTRATION_TOKENS.pop(key, None)
+
+
+def _require_full_traversal_guard(guard: _M8FullTraversalGuard) -> None:
+    registered = _FULL_TRAVERSAL_GUARDS.get(id(guard))
+    if (
+        type(guard) is not _M8FullTraversalGuard
+        or registered is None
+        or registered.reference() is not guard
+        or registered.binding is not guard._binding  # noqa: SLF001
+        or registered.owner_pid != os.getpid()
+    ):
+        raise ValueError("M8 full traversal guard is invalid or inactive")
+    source = registered.source_request
+    captured = registered.captured_request
+    if (
+        source._current_claim_snapshot() != registered.source_claim_snapshot  # noqa: SLF001
+        or captured._current_claim_snapshot() != registered.captured_claim_snapshot  # noqa: SLF001
+        or source.oracle_request.runtime is not source._runtime_reference  # noqa: SLF001
+        or source.oracle_request.cursor is not source._cursor_reference  # noqa: SLF001
+        or source.oracle_request.visibility is not source._visibility_reference  # noqa: SLF001
+        or captured.oracle_request.runtime is not captured._runtime_reference  # noqa: SLF001
+        or captured.oracle_request.cursor is not captured._cursor_reference  # noqa: SLF001
+        or captured.oracle_request.visibility is not captured._visibility_reference  # noqa: SLF001
+        or registered.authority.runtime.replay_input is not registered.runtime_replay_input
+    ):
+        raise ValueError("M8 full traversal request identity drifted")
+    _require_checker_registration_scope_token_identity(
+        registered.checker_token,
+        registered.authority,
+    )
+
+
+def _require_full_traversal_capabilities(guard: _M8FullTraversalGuard) -> None:
+    _require_full_traversal_guard(guard)
+    registered = _FULL_TRAVERSAL_GUARDS[id(guard)]
+    for capability, expected_entry in zip(
+        registered.capabilities,
+        registered.capability_entries,
+        strict=True,
+    ):
+        current = _VALIDATED_COMMON_REGISTRY.get(id(capability))
+        if (
+            current is not expected_entry
+            or current.reference() is not capability
+            or current.owner_pid != registered.owner_pid
+            or current.authority is not registered.authority
+            or current.checker_token is not registered.checker_token
+        ):
+            raise ValueError("M8 full traversal common capability is inactive")
+
+
+@contextmanager
+def _full_traversal_guard_scope(
+    source_request: M8FactBundleCheckRequest,
+    captured_request: M8FactBundleCheckRequest,
+    authority: M7AuthoritativeProofRuntime,
+    checker_token: _M8FactCheckerRegistrationToken,
+    capabilities: tuple[ValidatedCommonTransition, ...],
+) -> Iterator[_M8FullTraversalGuard]:
+    _require_full_request_stable(source_request, captured_request, authority)
+    capability_entries = tuple(
+        _VALIDATED_COMMON_REGISTRY.get(id(capability)) for capability in capabilities
+    )
+    if any(entry is None for entry in capability_entries):
+        raise ValueError("M8 full traversal common capability is inactive")
+    binding = object()
+    guard = _M8FullTraversalGuard(binding)
+    key = id(guard)
+
+    def discard(reference: weakref.ReferenceType[_M8FullTraversalGuard]) -> None:
+        registered = _FULL_TRAVERSAL_GUARDS.get(key)
+        if registered is not None and registered.reference is reference:
+            _FULL_TRAVERSAL_GUARDS.pop(key, None)
+
+    reference = weakref.ref(guard, discard)
+    registered = _RegisteredFullTraversalGuard(
+        reference=reference,
+        binding=binding,
+        owner_pid=os.getpid(),
+        source_request=source_request,
+        captured_request=captured_request,
+        source_claim_snapshot=source_request._current_claim_snapshot(),  # noqa: SLF001
+        captured_claim_snapshot=captured_request._current_claim_snapshot(),  # noqa: SLF001
+        authority=authority,
+        checker_token=checker_token,
+        runtime_replay_input=authority.runtime.replay_input,
+        capabilities=capabilities,
+        capability_entries=capability_entries,  # type: ignore[arg-type]
+    )
+    _FULL_TRAVERSAL_GUARDS[key] = registered
+    try:
+        _require_full_traversal_capabilities(guard)
+        yield guard
+        _require_full_traversal_capabilities(guard)
+    finally:
+        current = _FULL_TRAVERSAL_GUARDS.get(key)
+        if current is registered:
+            _FULL_TRAVERSAL_GUARDS.pop(key, None)
 
 
 def _canonical_load(semantic_bytes: bytes) -> facts.M8UncheckedFactBundleV2:
@@ -503,6 +767,47 @@ def _fail(
         issued_common_capability_count=issued,
         exact_replay_fallback_count=fallbacks,
         exact_replay_fallback_wall_seconds=float(fallback_seconds),
+        failure_code=code,
+        first_failing_fact_sha256=fact_sha256,
+    )
+
+
+def _full_result(
+    *,
+    valid: bool,
+    decision: M8OracleDecision | None,
+    code: M8CheckedFactBundleFailureCode,
+    state: _FullCheckState | None = None,
+    checked_common: int = 0,
+    checked_influences: int = 0,
+    checked_roots: int = 0,
+    issued: int = 0,
+    fact_sha256: str | None = None,
+) -> M8CheckedFactBundleResult:
+    common = state.common if state is not None else None
+    common_fallbacks = common.exact_replay_fallback_count if common is not None else 0
+    common_seconds = common.exact_replay_fallback_wall_seconds if common is not None else 0.0
+    influence_fallbacks = len(state.influence_exact_fallback_sha256s) if state is not None else 0
+    influence_seconds = state.influence_exact_fallback_wall_seconds if state is not None else 0.0
+    return M8CheckedFactBundleResult(
+        valid=valid,
+        decision=decision,
+        checked_common_lemma_count=checked_common,
+        checked_influence_fact_count=checked_influences,
+        checked_action_root_count=checked_roots,
+        counted_translation_audit_count=(
+            len(common.audited_counted_lemma_sha256s) if common is not None else 0
+        ),
+        influence_translation_audit_count=(
+            state.influence_translation_audit_count if state is not None else 0
+        ),
+        issued_common_capability_count=issued,
+        common_exact_fallback_count=common_fallbacks,
+        influence_exact_fallback_count=influence_fallbacks,
+        total_exact_fallback_count=common_fallbacks + influence_fallbacks,
+        common_exact_fallback_wall_seconds=float(common_seconds),
+        influence_exact_fallback_wall_seconds=float(influence_seconds),
+        total_exact_fallback_wall_seconds=float(common_seconds + influence_seconds),
         failure_code=code,
         first_failing_fact_sha256=fact_sha256,
     )
@@ -1139,6 +1444,670 @@ def _validate_one_common(
     )
 
 
+def _require_full_request_stable(
+    source: M8FactBundleCheckRequest,
+    captured: M8FactBundleCheckRequest,
+    authority: M7AuthoritativeProofRuntime | None = None,
+    *,
+    fact_sha256: str | None = None,
+) -> None:
+    try:
+        source.require_valid()
+        captured.require_valid()
+        if authority is not None:
+            authority.require_active(authority.runtime)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _FullFactFailure("runtime_binding_mismatch", fact_sha256) from error
+
+
+def _fresh_exact_runtime(runtime: M7ReplayRuntime) -> M7ReplayRuntime:
+    """Build one cache-free exact runtime without invoking producer/capture authority."""
+
+    return M7ReplayRuntime(
+        replay_input=runtime.replay_input,
+        runtime_candidates=runtime.runtime_candidates,
+        rules=runtime.rules,
+        standard_profile_cache={},
+        fit_search_cache={},
+        shared_fit_search_cache={},
+        prepared_layout_cache=OrderedDict(),
+        standard_profile_executor=runtime.standard_profile_executor,
+        jagua_executable=runtime.jagua_executable,
+        jagua_differential_audit=runtime.jagua_differential_audit,
+    )
+
+
+def _derive_inventory_delta(
+    common_cursor: M7ReplayCursor,
+    branch_cursor: M7ReplayCursor,
+    *,
+    owner_sha256: str,
+) -> tuple[tuple[object, ...], tuple[object, ...]]:
+    common_metadata = (
+        common_cursor.next_event_position,
+        common_cursor.current_time,
+        common_cursor.timestamp_group_sequence,
+        common_cursor.timestamp_subsequence,
+        common_cursor.previous_release,
+    )
+    branch_metadata = (
+        branch_cursor.next_event_position,
+        branch_cursor.current_time,
+        branch_cursor.timestamp_group_sequence,
+        branch_cursor.timestamp_subsequence,
+        branch_cursor.previous_release,
+    )
+    if common_metadata != branch_metadata:
+        raise _FullFactFailure("influence_state_mismatch", owner_sha256)
+    common_by_id = {item.remnant.remnant_id: item for item in common_cursor.inventory}
+    branch_by_id = {item.remnant.remnant_id: item for item in branch_cursor.inventory}
+    for remnant_id in set(common_by_id) & set(branch_by_id):
+        if common_by_id[remnant_id] != branch_by_id[remnant_id]:
+            raise _FullFactFailure("influence_state_mismatch", owner_sha256)
+    added = tuple(branch_by_id[key] for key in sorted(set(branch_by_id) - set(common_by_id)))
+    removed = tuple(common_by_id[key] for key in sorted(set(common_by_id) - set(branch_by_id)))
+    return added, removed
+
+
+def _validate_influence_scalar(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    scalar_ref: str,
+    expected_candidate_id: str,
+    state: _FullCheckState,
+    owner_sha256: str,
+) -> facts.M8CandidateScalarFactV2:
+    portable = state.common.scalar_by_sha.get(scalar_ref)
+    if portable is None or portable.candidate_id != expected_candidate_id:
+        raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
+    binding = runtime.replay_input.instances[event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    source = next(
+        (item for item in verified.rejection_layouts if item.candidate_id == expected_candidate_id),
+        None,
+    )
+    if source is None:
+        raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
+    expected = (
+        source.problem_id,
+        source.problem_sha256,
+        source.candidate_set_id,
+        source.candidate_set_sha256,
+        source.source_transform_sha256,
+        source.material_binding_scope,
+        source.fit_config_sha256,
+        facts.encode_canonical_f64(float(source.layout_area)),
+        facts.encode_canonical_f64(float(source.layout_width)),
+        facts.encode_canonical_f64(float(source.layout_height)),
+    )
+    observed = (
+        portable.problem_id,
+        portable.problem_sha256,
+        portable.candidate_set_id,
+        portable.candidate_set_sha256,
+        portable.source_transform_sha256,
+        portable.material_partition,
+        portable.fit_config_sha256,
+        portable.layout_area_bits,
+        portable.layout_width_bits,
+        portable.layout_height_bits,
+    )
+    if observed != expected:
+        raise _FullFactFailure("influence_rejection_mismatch", owner_sha256)
+    state.common.validated_scalar_sha256s.add(portable.fact_sha256)
+    return portable
+
+
+def _validate_rejections_for_item(
+    runtime: M7ReplayRuntime,
+    *,
+    influence: facts.M8InfluenceFactV2,
+    direction: Literal["added", "removed"],
+    item,  # type: ignore[no-untyped-def]
+    state: _FullCheckState,
+    require_portable: bool,
+) -> tuple[bool, ...]:
+    expected = compile_translation_rejections(
+        runtime,
+        event_position=influence.event_position,
+        item=item,
+    )
+    portable_by_candidate = {
+        row.candidate_id: row
+        for row in influence.rejection_evidence
+        if row.direction == direction and row.remnant_id == item.remnant.remnant_id
+    }
+    if require_portable and set(portable_by_candidate) != {row.candidate_id for row in expected}:
+        raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+    if not require_portable:
+        if portable_by_candidate:
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        return tuple(row.certificate.impossible for row in expected)
+    impossible = []
+    for row in expected:
+        portable = portable_by_candidate[row.candidate_id]
+        scalar = _validate_influence_scalar(
+            runtime,
+            event_position=influence.event_position,
+            scalar_ref=portable.candidate_scalar_ref,
+            expected_candidate_id=row.candidate_id,
+            state=state,
+            owner_sha256=influence.fact_sha256,
+        )
+        certificate = row.certificate
+        expected_values = (
+            direction,
+            item.remnant.remnant_id,
+            row.candidate_id,
+            scalar.fact_sha256,
+            certificate.impossible,
+            certificate.reason,
+            facts.encode_canonical_f64(float(certificate.layout_area)),
+            facts.encode_canonical_f64(float(certificate.remnant_area)),
+            facts.encode_canonical_f64(float(certificate.layout_width)),
+            facts.encode_canonical_f64(float(certificate.remnant_width)),
+            facts.encode_canonical_f64(float(certificate.layout_height)),
+            facts.encode_canonical_f64(float(certificate.remnant_height)),
+            facts.encode_canonical_f64(float(certificate.area_tolerance)),
+        )
+        observed_values = (
+            portable.direction,
+            portable.remnant_id,
+            portable.candidate_id,
+            portable.candidate_scalar_ref,
+            portable.impossible,
+            portable.reason,
+            portable.layout_area_bits,
+            portable.remnant_area_bits,
+            portable.layout_width_bits,
+            portable.remnant_width_bits,
+            portable.layout_height_bits,
+            portable.remnant_height_bits,
+            portable.area_tolerance_bits,
+        )
+        if observed_values != expected_values:
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        impossible.append(certificate.impossible)
+    return tuple(impossible)
+
+
+def _portable_search_config_values(config) -> tuple[object, ...]:  # type: ignore[no-untyped-def]
+    return (
+        config.grid_columns,
+        config.grid_rows,
+        config.maximum_candidates,
+        config.candidate_source_order,
+    )
+
+
+def _validate_exact_item_evidence(
+    runtime: M7ReplayRuntime,
+    *,
+    common_fact: M8CommonTransitionFact,
+    influence: facts.M8InfluenceFactV2,
+    direction: Literal["added", "removed"],
+    item,  # type: ignore[no-untyped-def]
+    state: _FullCheckState,
+    require_portable: bool,
+) -> Literal["no_fit", "policy_dominated", "exact_transition"]:
+    binding = runtime.replay_input.instances[influence.event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    problem = next(
+        source
+        for source in runtime.replay_input.problems
+        if source.problem_id == binding.problem_id
+    )
+    prepared_remnant = prepare_remnant_geometry(item.remnant)
+    layouts = tuple(
+        prepare_layout_footprint(
+            problem.problem,
+            candidate,
+            runtime.replay_input.fit_config,
+        )
+        for candidate in verified.candidates
+    )
+    batches = tuple(
+        generate_layout_translations(
+            item.remnant,
+            candidate,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            prepared_layout=layout,
+            prepared_remnant=prepared_remnant,
+        )
+        for candidate, layout in zip(verified.candidates, layouts, strict=True)
+    )
+    searches = tuple(
+        search_layout_translation(
+            item.remnant,
+            problem.problem,
+            candidate,
+            material=binding.material,
+            fit_config=runtime.replay_input.fit_config,
+            search_config=runtime.replay_input.search_config,
+            prepared_layout=layout,
+            prepared_remnant=prepared_remnant,
+            translation_candidates=batch,
+            collision_prefilter=None,
+        )
+        for candidate, layout, batch in zip(
+            verified.candidates,
+            layouts,
+            batches,
+            strict=True,
+        )
+    )
+    fresh = _fresh_exact_runtime(runtime)
+    cache_key = (
+        item.remnant.remnant_id,
+        binding.problem_id,
+        verified.evidence.candidate_set_id,
+    )
+    fresh.fit_search_cache[cache_key] = searches
+    competitor, context = enumerate_m7_single_remnant_competitor(
+        fresh,
+        event_position=influence.event_position,
+        item=item,
+        cursor_template=common_fact.cursor_before,
+    )
+    portable_rows = tuple(
+        row
+        for row in influence.search_evidence
+        if row.direction == direction and row.remnant_id == item.remnant.remnant_id
+    )
+    portable_by_candidate = {row.candidate_id: row for row in portable_rows}
+    if require_portable and set(portable_by_candidate) != {
+        candidate.candidate_id for candidate in verified.candidates
+    }:
+        raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+    if not require_portable and portable_rows:
+        raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+    if require_portable:
+        portable_batches = []
+        for candidate, search, expected_batch in zip(
+            verified.candidates,
+            searches,
+            batches,
+            strict=True,
+        ):
+            portable = portable_by_candidate[candidate.candidate_id]
+            selected = (
+                facts.M8TranslationPointV2(
+                    x_bits=facts.encode_canonical_f64(float(search.translation[0])),
+                    y_bits=facts.encode_canonical_f64(float(search.translation[1])),
+                )
+                if search.translation is not None
+                else None
+            )
+            expected_search = (
+                direction,
+                item.remnant.remnant_id,
+                search.candidate_id,
+                _portable_search_config_values(search.config),
+                search.generated_candidate_count,
+                search.duplicate_candidate_count,
+                search.evaluated_candidate_count,
+                search.budget_truncated,
+                search.status.value,
+                selected,
+            )
+            observed_search = (
+                portable.direction,
+                portable.remnant_id,
+                portable.candidate_id,
+                _portable_search_config_values(portable.search_config),
+                portable.generated_candidate_count,
+                portable.duplicate_candidate_count,
+                portable.evaluated_candidate_count,
+                portable.budget_truncated,
+                portable.result,
+                portable.selected_translation,
+            )
+            if observed_search != expected_search or (
+                _portable_search_config_values(portable.search_config)
+                != _portable_search_config_values(runtime.replay_input.search_config)
+            ):
+                raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+            batch = state.common.translation_by_sha.get(portable.translation_batch_ref)
+            if batch is None:
+                raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+            portable_batch = LayoutTranslationCandidates(
+                candidate_id=batch.candidate_id,
+                remnant_id=batch.remnant_id,
+                translations=tuple(
+                    (
+                        facts.decode_canonical_f64(point.x_bits),
+                        facts.decode_canonical_f64(point.y_bits),
+                    )
+                    for point in batch.translations
+                ),
+                generated_candidate_count=batch.generated_candidate_count,
+                duplicate_candidate_count=batch.duplicate_candidate_count,
+                budget_truncated=batch.budget_truncated,
+            )
+            if portable_batch != expected_batch:
+                raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+            portable_batches.append(
+                LayoutTranslationCandidates(
+                    candidate_id=batch.candidate_id,
+                    remnant_id=batch.remnant_id,
+                    translations=tuple(
+                        (
+                            facts.decode_canonical_f64(point.x_bits),
+                            facts.decode_canonical_f64(point.y_bits),
+                        )
+                        for point in batch.translations
+                    ),
+                    generated_candidate_count=batch.generated_candidate_count,
+                    duplicate_candidate_count=batch.duplicate_candidate_count,
+                    budget_truncated=batch.budget_truncated,
+                )
+            )
+        audit_refs = {row.translation_batch_ref for row in portable_rows}
+        if not audit_refs <= state.audited_influence_translation_sha256s:
+            try:
+                audit_layout_translation_batch(
+                    remnant=prepared_remnant,
+                    layouts=layouts,
+                    expected=tuple(portable_batches),
+                    fit_config=runtime.replay_input.fit_config,
+                    search_config=runtime.replay_input.search_config,
+                    process_count=require_m8_translation_audit_processes(),
+                )
+            except (TypeError, ValueError) as error:
+                raise _FullFactFailure(
+                    "influence_search_mismatch",
+                    influence.fact_sha256,
+                ) from error
+            state.audited_influence_translation_sha256s.update(audit_refs)
+            state.influence_translation_audit_count += 1
+
+    portable_competitors = tuple(
+        row
+        for row in influence.competitor_evidence
+        if row.direction == direction and row.selected_remnant_id == item.remnant.remnant_id
+    )
+    if not require_portable and portable_competitors:
+        raise _FullFactFailure("influence_competitor_mismatch", influence.fact_sha256)
+    if competitor is None or context is None:
+        if competitor is not None or context is not None or portable_competitors:
+            raise _FullFactFailure("influence_competitor_mismatch", influence.fact_sha256)
+        return "no_fit"
+    if competitor.evidence is None:
+        raise _FullFactFailure("influence_competitor_mismatch", influence.fact_sha256)
+    rank = rank_policy_action(runtime.replay_input.policy.name, context)
+    if require_portable:
+        if len(portable_competitors) != 1:
+            raise _FullFactFailure("influence_competitor_mismatch", influence.fact_sha256)
+        portable = portable_competitors[0]
+        expected_competitor = (
+            direction,
+            competitor.candidate_id,
+            competitor.action_id,
+            competitor.evidence.action_id,
+            competitor.evidence.content_sha256,
+            competitor.selected_remnant_id,
+            competitor.kind.value,
+            context.selected_stock_id,
+            facts.encode_canonical_f64(float(context.candidate_width)),
+            facts.encode_canonical_f64(float(context.immediate_net_cost)),
+            facts.encode_canonical_f64(float(context.selected_remnant_age_hours)),
+            facts.encode_canonical_f64(float(context.returned_regularity)),
+            facts.encode_canonical_f64(float(context.known_order_lookahead_term)),
+            rank.policy.value,
+            rank.comparison_key,
+            rank.decision_key,
+        )
+        observed_competitor = (
+            portable.direction,
+            portable.candidate_id,
+            portable.catalog_action_id,
+            portable.materialized_action_id,
+            portable.materialized_content_sha256,
+            portable.selected_remnant_id,
+            portable.action_kind,
+            portable.selected_stock_id,
+            portable.candidate_width_bits,
+            portable.immediate_net_cost_bits,
+            portable.selected_remnant_age_hours_bits,
+            portable.returned_regularity_bits,
+            portable.known_order_lookahead_term_bits,
+            portable.policy_name,
+            _rank_values(portable.comparison_key),
+            portable.decision_key,
+        )
+        if observed_competitor != expected_competitor:
+            raise _FullFactFailure("influence_competitor_mismatch", influence.fact_sha256)
+    if common_fact.policy_rank <= rank:
+        return "policy_dominated"
+    return "exact_transition"
+
+
+def _derive_influence_classification(
+    runtime: M7ReplayRuntime,
+    *,
+    common_fact: M8CommonTransitionFact,
+    influence: facts.M8InfluenceFactV2,
+    branch_cursor: M7ReplayCursor,
+    state: _FullCheckState,
+    require_portable_exact: bool,
+    declared_exact_mode: bool,
+) -> tuple[
+    Literal["state_rejoin", "no_fit", "policy_dominated", "exact_transition"],
+    tuple[object, ...],
+    tuple[object, ...],
+]:
+    if branch_cursor == common_fact.cursor_before:
+        return "state_rejoin", (), ()
+    added, removed = _derive_inventory_delta(
+        common_fact.cursor_before,
+        branch_cursor,
+        owner_sha256=influence.fact_sha256,
+    )
+    observed_delta = (
+        tuple(item.remnant.remnant_id for item in removed),
+        tuple(item.remnant.remnant_id for item in added),
+    )
+    expected_delta = (
+        influence.inventory_delta.removed_remnant_ids,
+        influence.inventory_delta.added_remnant_ids,
+    )
+    if observed_delta != expected_delta:
+        raise _FullFactFailure("influence_state_mismatch", influence.fact_sha256)
+    if not added and not removed:
+        return "exact_transition", added, removed
+    selected_stock_id = common_fact.step.action_binding.context.selected_stock_id
+    if selected_stock_id in {item.remnant.remnant_id for item in removed}:
+        return "exact_transition", added, removed
+    binding = runtime.replay_input.instances[influence.event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    if not _verified_rejection_layouts_cover_candidates(verified):
+        return "exact_transition", added, removed
+
+    item_classifications = []
+    for direction, items in (("added", added), ("removed", removed)):
+        for item in items:
+            rejections = _validate_rejections_for_item(
+                runtime,
+                influence=influence,
+                direction=direction,
+                item=item,
+                state=state,
+                require_portable=(influence.classification != "exact_transition"),
+            )
+            if rejections and all(rejections):
+                if any(
+                    row.direction == direction and row.remnant_id == item.remnant.remnant_id
+                    for row in influence.search_evidence
+                ):
+                    raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+                item_classifications.append("no_fit")
+                continue
+            if not declared_exact_mode:
+                raise _FullFactFailure(
+                    "influence_classification_mismatch",
+                    influence.fact_sha256,
+                )
+            item_classifications.append(
+                _validate_exact_item_evidence(
+                    runtime,
+                    common_fact=common_fact,
+                    influence=influence,
+                    direction=direction,
+                    item=item,
+                    state=state,
+                    require_portable=require_portable_exact,
+                )
+            )
+    if "exact_transition" in item_classifications:
+        return "exact_transition", added, removed
+    if "policy_dominated" in item_classifications:
+        return "policy_dominated", added, removed
+    return "no_fit", added, removed
+
+
+def _validate_one_influence(
+    authority: M7AuthoritativeProofRuntime,
+    *,
+    influence: facts.M8InfluenceFactV2,
+    common_fact: M8CommonTransitionFact,
+    branch_cursor: M7ReplayCursor,
+    state: _FullCheckState,
+    allow_exact_replay: bool,
+) -> M7ReplayCursor:
+    cached = state.influence_transition_by_sha256.get(influence.fact_sha256)
+    branch_sha256 = m7_cursor_sha256(branch_cursor)
+    if cached is not None:
+        if cached[0] != branch_sha256:
+            raise _FullFactFailure("influence_state_mismatch", influence.fact_sha256)
+        return cached[2]
+    if (
+        influence.event_position != branch_cursor.next_event_position
+        or influence.event_position != common_fact.event_position
+        or influence.state_before_sha256 != branch_sha256
+        or influence.common_catalog_action_id != common_fact.step.descriptor.action_id
+        or influence.common_materialized_action_id != common_fact.step.event.action.action_id
+    ):
+        raise _FullFactFailure("influence_state_mismatch", influence.fact_sha256)
+    if influence.classification == "exact_transition":
+        if influence.rejection_evidence:
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        if influence.search_evidence:
+            raise _FullFactFailure("influence_search_mismatch", influence.fact_sha256)
+        if influence.competitor_evidence:
+            raise _FullFactFailure("influence_competitor_mismatch", influence.fact_sha256)
+    exact_mode = influence.evidence_mode in {
+        "policy_dominated_exact_check",
+        "exact_transition",
+    }
+    if exact_mode and not allow_exact_replay:
+        raise _FullFactFailure("implicit_exact_replay", influence.fact_sha256)
+    started = 0.0
+    if exact_mode:
+        state.influence_exact_fallback_sha256s.add(influence.fact_sha256)
+        started = perf_counter()
+    try:
+        actual, _added, _removed = _derive_influence_classification(
+            authority.runtime,
+            common_fact=common_fact,
+            influence=influence,
+            branch_cursor=branch_cursor,
+            state=state,
+            require_portable_exact=(influence.classification != "exact_transition"),
+            declared_exact_mode=exact_mode,
+        )
+        if actual != influence.classification:
+            raise _FullFactFailure(
+                "influence_classification_mismatch",
+                influence.fact_sha256,
+            )
+        if actual == "state_rejoin":
+            if (
+                influence.inventory_delta.removed_remnant_ids
+                or influence.inventory_delta.added_remnant_ids
+                or influence.evidence_mode != "state_rejoin"
+            ):
+                raise _FullFactFailure(
+                    "influence_classification_mismatch",
+                    influence.fact_sha256,
+                )
+            next_cursor = apply_m7_frozen_action_evidence(
+                authority.runtime,
+                cursor=branch_cursor,
+                event_position=influence.event_position,
+                action=common_fact.step.event.action,
+            )
+            expected_materialized = common_fact.step.event.action.action_id
+        elif actual in {"no_fit", "policy_dominated"}:
+            expected_mode = (
+                "scalar_no_fit"
+                if actual == "no_fit" and not influence.search_evidence
+                else ("exact_transition" if actual == "no_fit" else "policy_dominated_exact_check")
+            )
+            if influence.evidence_mode != expected_mode:
+                raise _FullFactFailure(
+                    "influence_classification_mismatch",
+                    influence.fact_sha256,
+                )
+            next_cursor = apply_m7_frozen_action_evidence(
+                authority.runtime,
+                cursor=branch_cursor,
+                event_position=influence.event_position,
+                action=common_fact.step.event.action,
+            )
+            expected_materialized = common_fact.step.event.action.action_id
+        else:
+            if influence.evidence_mode != "exact_transition":
+                raise _FullFactFailure(
+                    "influence_classification_mismatch",
+                    influence.fact_sha256,
+                )
+            catalog = enumerate_m7_action_catalog(
+                authority.runtime,
+                cursor=branch_cursor,
+                complete=False,
+            )
+            selected = select_m7_fallback(
+                catalog,
+                policy=authority.runtime.replay_input.policy,
+            )
+            descriptor = next(
+                item for item in catalog.actions if item.action_id == selected.action_id
+            )
+            step = apply_m7_action_descriptor(
+                authority.runtime,
+                cursor=branch_cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=selected.decision_key,
+            )
+            if influence.branch_catalog_action_id != descriptor.action_id:
+                raise _FullFactFailure("influence_action_mismatch", influence.fact_sha256)
+            next_cursor = step.cursor
+            expected_materialized = step.event.action.action_id
+        if actual != "exact_transition" and (
+            influence.branch_catalog_action_id != common_fact.step.descriptor.action_id
+            or influence.branch_materialized_action_id != common_fact.step.event.action.action_id
+        ):
+            raise _FullFactFailure("influence_action_mismatch", influence.fact_sha256)
+        if influence.branch_materialized_action_id != expected_materialized:
+            raise _FullFactFailure("influence_action_mismatch", influence.fact_sha256)
+        after_sha256 = m7_cursor_sha256(next_cursor)
+        if influence.state_after_sha256 != after_sha256:
+            raise _FullFactFailure("influence_state_mismatch", influence.fact_sha256)
+        state.checked_influence_sha256s.add(influence.fact_sha256)
+        state.influence_transition_by_sha256[influence.fact_sha256] = (
+            branch_sha256,
+            after_sha256,
+            next_cursor,
+        )
+        return next_cursor
+    finally:
+        if exact_mode:
+            state.influence_exact_fallback_wall_seconds += perf_counter() - started
+
+
 def _validate_context(
     request: M8CommonFactCheckRequest,
     authority: M7AuthoritativeProofRuntime,
@@ -1223,6 +2192,421 @@ def _validate_context(
         decision_key=selected.decision_key,
     )
     return fallback, stop, suffix
+
+
+def _validate_action_root(
+    authority: M7AuthoritativeProofRuntime,
+    *,
+    captured_request: M8FactBundleCheckRequest,
+    traversal_guard: _M8FullTraversalGuard,
+    root: facts.M8ActionRootV2,
+    catalog: M7ActionCatalog,
+    fallback: M7StepResult,
+    checker_cursor: M7ReplayCursor,
+    stop: int,
+    common_refs: tuple[str, ...],
+    common_fact_by_ref: dict[str, M8CommonTransitionFact],
+    influence_by_ref: dict[str, facts.M8InfluenceFactV2],
+    state: _FullCheckState,
+) -> tuple[str, float]:
+    _require_full_traversal_guard(traversal_guard)
+    if (
+        root.semantic_runtime_sha256 != authority.semantic_sha256
+        or root.stream_id != authority.runtime.replay_input.stream_id
+        or root.start_event_position != catalog.event_position
+        or root.stop_event_position != stop
+        or root.suffix_sha256 != captured_request.expected_suffix_sha256
+        or root.start_state_sha256 != m7_cursor_sha256(checker_cursor)
+        or root.baseline_catalog_action_id != fallback.descriptor.action_id
+        or root.baseline_action_id != fallback.event.action.action_id
+        or root.common_lemma_refs != common_refs
+    ):
+        raise _FullFactFailure("root_catalog_mismatch", root.fact_sha256)
+    descriptors = tuple(
+        item for item in catalog.actions if item.action_id == root.catalog_action_id
+    )
+    if len(descriptors) != 1:
+        raise _FullFactFailure("root_catalog_mismatch", root.fact_sha256)
+    initial = apply_m7_action_descriptor(
+        authority.runtime,
+        cursor=checker_cursor,
+        catalog=catalog,
+        descriptor=descriptors[0],
+        decision_key=(f"m8_hypothetical_action_id={root.catalog_action_id}",),
+    )
+    if (
+        initial.event.action.action_id != root.action_id
+        or m7_cursor_sha256(initial.cursor) != root.initial_state_after_sha256
+    ):
+        raise _FullFactFailure("root_state_mismatch", root.fact_sha256)
+    branch_cursor = initial.cursor
+    for common_ref, influence_ref in zip(
+        root.common_lemma_refs,
+        root.influence_fact_refs,
+        strict=True,
+    ):
+        _require_full_traversal_guard(traversal_guard)
+        common_fact = common_fact_by_ref.get(common_ref)
+        influence = influence_by_ref.get(influence_ref)
+        if common_fact is None or influence is None or influence.common_lemma_ref != common_ref:
+            raise _FullFactFailure("m8_dangling_reference", root.fact_sha256)
+        if influence.root_action_id != root.action_id:
+            raise _FullFactFailure("m8_action_binding_mismatch", influence.fact_sha256)
+        branch_cursor = _validate_one_influence(
+            authority,
+            influence=influence,
+            common_fact=common_fact,
+            branch_cursor=branch_cursor,
+            state=state,
+            allow_exact_replay=captured_request.allow_exact_replay,
+        )
+        _require_full_traversal_guard(traversal_guard)
+    if branch_cursor.next_event_position != stop or (
+        m7_cursor_sha256(branch_cursor) != root.final_state_sha256
+    ):
+        raise _FullFactFailure("root_state_mismatch", root.fact_sha256)
+    terminal = run_m7_continuation(
+        authority.runtime,
+        cursor=branch_cursor,
+        stop_event_position=stop,
+    )
+    expected_cost_bits = facts.encode_canonical_f64(float(terminal.final_costs.net_cost))
+    if terminal.events or root.final_net_cost_bits != expected_cost_bits:
+        raise _FullFactFailure("root_terminal_mismatch", root.fact_sha256)
+    _require_full_traversal_guard(traversal_guard)
+    return root.catalog_action_id, facts.decode_canonical_f64(root.final_net_cost_bits)
+
+
+def _capture_full_request(
+    request: M8FactBundleCheckRequest,
+) -> tuple[M8FactBundleCheckRequest, M7ReplayCursor]:
+    try:
+        request.require_valid()
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _FullFactFailure("runtime_binding_mismatch") from error
+    construction_claims = request._claim_snapshot  # noqa: SLF001
+    (
+        semantic_bundle_bytes,
+        _construction_oracle_id,
+        expected_semantic_runtime_sha256,
+        expected_current_cursor_sha256,
+        expected_catalog_event_position,
+        expected_catalog_action_ids,
+        expected_stop_event_position,
+        expected_suffix_sha256,
+        expected_freeze_id,
+        expected_freeze_sha256,
+        allow_exact_replay,
+    ) = construction_claims
+    captured_oracle_request = M8OracleRequest(
+        runtime=request._runtime_reference,  # type: ignore[arg-type]  # noqa: SLF001
+        cursor=request._cursor_reference,  # type: ignore[arg-type]  # noqa: SLF001
+        visibility=request._visibility_reference,  # type: ignore[arg-type]  # noqa: SLF001
+    )
+    captured = M8FactBundleCheckRequest(
+        semantic_bundle_bytes=semantic_bundle_bytes,  # type: ignore[arg-type]
+        oracle_request=captured_oracle_request,
+        expected_semantic_runtime_sha256=expected_semantic_runtime_sha256,  # type: ignore[arg-type]
+        expected_current_cursor_sha256=expected_current_cursor_sha256,  # type: ignore[arg-type]
+        expected_catalog_event_position=expected_catalog_event_position,  # type: ignore[arg-type]
+        expected_catalog_action_ids=expected_catalog_action_ids,  # type: ignore[arg-type]
+        expected_stop_event_position=expected_stop_event_position,  # type: ignore[arg-type]
+        expected_suffix_sha256=expected_suffix_sha256,  # type: ignore[arg-type]
+        expected_freeze_id=expected_freeze_id,  # type: ignore[arg-type]
+        expected_freeze_sha256=expected_freeze_sha256,  # type: ignore[arg-type]
+        allow_exact_replay=allow_exact_replay,  # type: ignore[arg-type]
+    )
+    _require_full_request_stable(request, captured)
+    captured_claims = captured._claim_snapshot  # noqa: SLF001
+    if (
+        construction_claims[0:1] + construction_claims[2:]
+        != captured_claims[0:1] + captured_claims[2:]
+        or captured._runtime_reference is not request._runtime_reference  # noqa: SLF001
+        or captured._cursor_reference is not request._cursor_reference  # noqa: SLF001
+        or captured._visibility_reference is not request._visibility_reference  # noqa: SLF001
+    ):
+        raise _FullFactFailure("runtime_binding_mismatch")
+    before = m7_cursor_sha256(captured.oracle_request.cursor)
+    checker_cursor = deepcopy(captured.oracle_request.cursor)
+    after = m7_cursor_sha256(captured.oracle_request.cursor)
+    if (
+        before != captured.expected_current_cursor_sha256
+        or after != before
+        or m7_cursor_sha256(checker_cursor) != before
+    ):
+        raise _FullFactFailure("runtime_binding_mismatch")
+    return captured, checker_cursor
+
+
+def _traverse_action_roots(
+    authority: M7AuthoritativeProofRuntime,
+    *,
+    captured_request: M8FactBundleCheckRequest,
+    traversal_guard: _M8FullTraversalGuard,
+    bundle: facts.M8UncheckedFactBundleV2,
+    catalog: M7ActionCatalog,
+    fallback: M7StepResult,
+    checker_cursor: M7ReplayCursor,
+    stop: int,
+    common_fact_by_ref: dict[str, M8CommonTransitionFact],
+    state: _FullCheckState,
+    first_fact: str | None,
+) -> tuple[M8OracleDecision, int, int]:
+    expected_catalog_ids = tuple(item.action_id for item in catalog.actions)
+    root_by_catalog_id = {root.catalog_action_id: root for root in bundle.action_roots}
+    if len(root_by_catalog_id) != len(bundle.action_roots) or set(root_by_catalog_id) != set(
+        expected_catalog_ids
+    ):
+        owner = bundle.action_roots[0].fact_sha256 if bundle.action_roots else first_fact
+        raise _FullFactFailure("root_catalog_mismatch", owner)
+    common_refs = tuple(item.fact_sha256 for item in bundle.common_lemmas)
+    influence_by_ref = {item.fact_sha256: item for item in bundle.influence_facts}
+    scores = []
+    checked_roots = 0
+    for catalog_action_id in expected_catalog_ids:
+        root = root_by_catalog_id[catalog_action_id]
+        score = _validate_action_root(
+            authority,
+            captured_request=captured_request,
+            traversal_guard=traversal_guard,
+            root=root,
+            catalog=catalog,
+            fallback=fallback,
+            checker_cursor=checker_cursor,
+            stop=stop,
+            common_refs=common_refs,
+            common_fact_by_ref=common_fact_by_ref,
+            influence_by_ref=influence_by_ref,
+            state=state,
+        )
+        scores.append(score)
+        checked_roots += 1
+    checked_influences = len(state.checked_influence_sha256s)
+    if checked_influences != len(bundle.influence_facts):
+        missing = next(
+            item.fact_sha256
+            for item in bundle.influence_facts
+            if item.fact_sha256 not in state.checked_influence_sha256s
+        )
+        raise _FullFactFailure("m8_unused_fact", missing)
+    _require_full_traversal_guard(traversal_guard)
+    decision = build_oracle_decision(
+        baseline_action_id=fallback.descriptor.action_id,
+        expected_action_ids=expected_catalog_ids,
+        scores=tuple(scores),
+    )
+    _require_full_traversal_guard(traversal_guard)
+    return decision, checked_roots, checked_influences
+
+
+def check_m8_fact_bundle(
+    request: M8FactBundleCheckRequest,
+) -> M8CheckedFactBundleResult:
+    """Validate the complete fixed-layer bundle before exposing one checked decision."""
+
+    if type(request) is not M8FactBundleCheckRequest:
+        return _full_result(valid=False, decision=None, code="invalid_request")
+    checked_common = checked_influences = checked_roots = issued = 0
+    first_fact: str | None = None
+    state: _FullCheckState | None = None
+    capabilities: list[ValidatedCommonTransition] = []
+    try:
+        captured, checker_cursor = _capture_full_request(request)
+        try:
+            bundle = _canonical_load(captured.semantic_bundle_bytes)
+        except _CommonFactFailure as error:
+            raise _FullFactFailure(error.code, error.fact_sha256) from error
+        first_fact = bundle.common_lemmas[0].fact_sha256 if bundle.common_lemmas else None
+        with (
+            activate_m8_local_trusted_audit(),
+            authoritative_m7_proof_runtime(captured.oracle_request.runtime) as authority,
+        ):
+            try:
+                fallback, stop, _suffix = _validate_context(
+                    captured,
+                    authority,
+                    bundle,
+                    checker_cursor,
+                )
+            except _CommonFactFailure as error:
+                raise _FullFactFailure(error.code, error.fact_sha256) from error
+            catalog = enumerate_m7_action_catalog(authority.runtime, cursor=checker_cursor)
+            if (
+                catalog.event_position != captured.expected_catalog_event_position
+                or tuple(item.action_id for item in catalog.actions)
+                != captured.expected_catalog_action_ids
+            ):
+                raise _FullFactFailure("catalog_binding_mismatch", first_fact)
+            expected_positions = tuple(range(fallback.cursor.next_event_position, stop))
+            if tuple(item.event_position for item in bundle.common_lemmas) != expected_positions:
+                raise _FullFactFailure("cursor_chain_mismatch", first_fact)
+            common_state = _CommonCheckState(
+                scalar_by_sha={item.fact_sha256: item for item in bundle.candidate_scalar_facts},
+                frontier_by_sha={item.fact_sha256: item for item in bundle.frontier_facts},
+                standard_by_sha={
+                    item.fact_sha256: item for item in bundle.standard_candidate_facts
+                },
+                translation_by_sha={item.fact_sha256: item for item in bundle.translation_batches},
+            )
+            state = _FullCheckState(common=common_state)
+            expected_jagua_sha256 = None
+            if authority.runtime.jagua_executable is not None:
+                expected_jagua_sha256 = (
+                    "sha256:"
+                    + hashlib.sha256(authority.runtime.jagua_executable.read_bytes()).hexdigest()
+                )
+            common_cursor = fallback.cursor
+            checked_facts = []
+            for lemma in bundle.common_lemmas:
+                try:
+                    fact, _audits, _fallbacks, _seconds = _validate_one_common(
+                        authority,
+                        lemma=lemma,
+                        cursor=common_cursor,
+                        bundle=bundle,
+                        state=common_state,
+                        allow_exact_replay=captured.allow_exact_replay,
+                        expected_jagua_sha256=expected_jagua_sha256,
+                    )
+                except _CommonFactFailure as error:
+                    raise _FullFactFailure(error.code, error.fact_sha256) from error
+                checked_facts.append(fact)
+                common_cursor = fact.step.cursor
+                checked_common += 1
+            _require_full_request_stable(request, captured, authority, fact_sha256=first_fact)
+            common_fact_by_ref: dict[str, M8CommonTransitionFact] = {}
+            decision: M8OracleDecision | None = None
+            try:
+                with _checker_registration_scope(authority, tuple(checked_facts)) as token:
+                    pending: BaseException | None = None
+                    try:
+                        for lemma, fact in zip(
+                            bundle.common_lemmas,
+                            checked_facts,
+                            strict=True,
+                        ):
+                            capability = _register_checker_validated_common_transition(
+                                fact,
+                                authority,
+                                checker_token=token,
+                            )
+                            capabilities.append(capability)
+                            bound_fact = _validated_common_transition_fact(
+                                authority.runtime,
+                                capability,
+                            )
+                            if bound_fact != fact:
+                                raise ValueError(
+                                    "M8 registered common capability differs from checked fact"
+                                )
+                            common_fact_by_ref[lemma.fact_sha256] = bound_fact
+                            issued += 1
+                    except BaseException as error:
+                        pending = _FullFactFailure(
+                            "capability_registration_failure",
+                            first_fact,
+                        )
+                        pending.__cause__ = error
+                    if pending is None:
+                        try:
+                            with _full_traversal_guard_scope(
+                                request,
+                                captured,
+                                authority,
+                                token,
+                                tuple(capabilities),
+                            ) as traversal_guard:
+                                decision, checked_roots, checked_influences = (
+                                    _traverse_action_roots(
+                                        authority,
+                                        captured_request=captured,
+                                        traversal_guard=traversal_guard,
+                                        bundle=bundle,
+                                        catalog=catalog,
+                                        fallback=fallback,
+                                        checker_cursor=checker_cursor,
+                                        stop=stop,
+                                        common_fact_by_ref=common_fact_by_ref,
+                                        state=state,
+                                        first_fact=first_fact,
+                                    )
+                                )
+                        except _FullFactFailure as error:
+                            pending = error
+                        except BaseException as error:
+                            pending = _FullFactFailure(
+                                "internal_checker_failure",
+                                first_fact,
+                            )
+                            pending.__cause__ = error
+                    try:
+                        _drain_common_capabilities(capabilities)
+                    except BaseException as error:
+                        pending = _FullFactFailure(
+                            "capability_registration_failure",
+                            first_fact,
+                        )
+                        pending.__cause__ = error
+                    if pending is not None:
+                        raise pending
+            except BaseException as error:
+                if isinstance(error, _FullFactFailure):
+                    raise error
+                raise _FullFactFailure("capability_registration_failure", first_fact) from error
+            _require_full_request_stable(
+                request,
+                captured,
+                authority,
+                fact_sha256=first_fact,
+            )
+            if decision is None:
+                raise _FullFactFailure("internal_checker_failure", first_fact)
+        return _full_result(
+            valid=True,
+            decision=decision,
+            code="valid_action_decision",
+            state=state,
+            checked_common=checked_common,
+            checked_influences=checked_influences,
+            checked_roots=checked_roots,
+            issued=issued,
+        )
+    except _FullFactFailure as error:
+        checked_influences = (
+            len(state.checked_influence_sha256s) if state is not None else checked_influences
+        )
+        return _full_result(
+            valid=False,
+            decision=None,
+            code=error.code,
+            state=state,
+            checked_common=checked_common,
+            checked_influences=checked_influences,
+            checked_roots=checked_roots,
+            issued=issued,
+            fact_sha256=error.fact_sha256 or first_fact,
+        )
+    except (AttributeError, KeyError, RuntimeError, StopIteration, TypeError, ValueError):
+        checked_influences = (
+            len(state.checked_influence_sha256s) if state is not None else checked_influences
+        )
+        return _full_result(
+            valid=False,
+            decision=None,
+            code="internal_checker_failure",
+            state=state,
+            checked_common=checked_common,
+            checked_influences=checked_influences,
+            checked_roots=checked_roots,
+            issued=issued,
+            fact_sha256=first_fact,
+        )
+    finally:
+        if capabilities:
+            try:
+                _drain_common_capabilities(capabilities)
+            except BaseException:
+                pass
 
 
 def check_m8_common_fact_bundle(
@@ -1418,8 +2802,12 @@ def check_m8_common_fact_bundle(
 
 
 __all__ = [
+    "M8CheckedFactBundleFailureCode",
+    "M8CheckedFactBundleResult",
     "M8CommonFactCheckRequest",
     "M8CommonFactCheckResult",
     "M8CommonFactFailureCode",
+    "M8FactBundleCheckRequest",
+    "check_m8_fact_bundle",
     "check_m8_common_fact_bundle",
 ]

@@ -35,6 +35,12 @@ from yieldforge.oracle.compiled import (
     _prepare_translation_layout_batch,
     _PreparedTranslationLayoutBatch,
 )
+from yieldforge.oracle.fact_checker import (
+    M8CheckedFactBundleFailureCode,
+    M8CheckedFactBundleResult,
+    M8FactBundleCheckRequest,
+    check_m8_fact_bundle,
+)
 from yieldforge.oracle.prepared import prepared_context_fingerprint
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8ActionProof, M8EventWitness, m8_suffix_sha256
@@ -198,9 +204,7 @@ def _prepare_m8_checker_context(
             catalog,
             policy=captured.runtime.replay_input.policy,
         )
-        descriptor = next(
-            item for item in catalog.actions if item.action_id == fallback.action_id
-        )
+        descriptor = next(item for item in catalog.actions if item.action_id == fallback.action_id)
         fallback_step = apply_m7_action_descriptor(
             captured.runtime,
             cursor=captured.cursor,
@@ -208,9 +212,7 @@ def _prepare_m8_checker_context(
             descriptor=descriptor,
             decision_key=fallback.decision_key,
         )
-        visible = captured.visibility.visible_suffix(
-            current_position=catalog.event_position
-        )
+        visible = captured.visibility.visible_suffix(current_position=catalog.event_position)
         registered = captured.runtime.replay_input.instances
         expected = registered[
             catalog.event_position + 1 : catalog.event_position + 1 + len(visible)
@@ -288,9 +290,7 @@ def _initialize_branch(
         raise _ProofFailure("runtime_binding_mismatch")
     request = context._request  # noqa: SLF001
     expected_start_state_sha256 = (
-        m7_cursor_sha256(request.cursor)
-        if start_state_sha256 is None
-        else start_state_sha256
+        m7_cursor_sha256(request.cursor) if start_state_sha256 is None else start_state_sha256
     )
     if canonical.start_state_sha256 != expected_start_state_sha256:
         raise _ProofFailure("start_state_mismatch")
@@ -480,10 +480,7 @@ def _check_prepared_action_proofs(
                     cursor=branch.cursor,
                     stop_event_position=context._stop_event_position,  # noqa: SLF001
                 )
-                if (
-                    terminal.events
-                    or terminal.final_costs.net_cost != branch.proof.final_net_cost
-                ):
+                if terminal.events or terminal.final_costs.net_cost != branch.proof.final_net_cost:
                     raise _ProofFailure("terminal_mismatch")
         except _ProofFailure as error:
             results[index] = _failed(error.code, branch)
@@ -524,8 +521,12 @@ def check_action_proof(
 
 
 __all__ = [
+    "M8CheckedFactBundleFailureCode",
+    "M8CheckedFactBundleResult",
+    "M8FactBundleCheckRequest",
     "M8ProofCheckResult",
     "M8ProofFailureCode",
     "check_action_proof",
     "check_action_proofs",
+    "check_m8_fact_bundle",
 ]
