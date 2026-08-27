@@ -1,6 +1,15 @@
 # M8 Portable Common-Fact Bundle Design
 
-**Status:** Approved 2026-08-26
+**Status:** Implemented and executed through complete Gate 3 — performance hold 2026-08-27
+
+## Executed outcome
+
+Portable result `yfm8gate3-ea8a12969396172d7dbc4774` passed fresh-process repeatability and full
+checking on 887/887 roots with zero fallback. Complete decision
+`yfm8g3decision-c13ec320e9fcd02873bf649c` passed its 12-action four-way proof audit with zero
+mismatch and rejected all 16 mutations, but returned `hold_performance`. The fully charged pipeline
+projects `113.434097` held-out days versus five and needs a further `22.686819x` absolute speedup.
+Six-cell calibration and evaluation remained sealed.
 
 ## Purpose
 

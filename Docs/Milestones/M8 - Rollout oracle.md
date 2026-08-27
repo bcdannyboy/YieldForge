@@ -1,6 +1,6 @@
 # M8 — Rollout oracle
 
-**Status:** First go/no-go complete — exactness passed; certificate coverage/runtime redesign required
+**Status:** Complete Gate 3 — proof and mutation pass; performance hold requires algorithmic redesign
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -200,3 +200,45 @@ This pass permits bounded v2 fact-DAG implementation and calibration benchmarkin
 the official M8 gate: the registered `20x` sampled-speedup, seven-day projection, and missing
 `exact_transition`/`policy_dominated` witness coverage still require a fresh six-cell run. No M8
 advantage or savings result exists.
+
+## Portable-fact Gate 3 and complete decision — 2026-08-27
+
+The portable fixed-layer fact pipeline completed the unchanged `no_signal` and `regime_shift`
+calibration probes and published
+`yf/experiments/results/m8-portable-fact-gate3-yfm8gate3-ea8a12969396172d7dbc4774.json`.
+Its strict identity is `yfm8gate3-ea8a12969396172d7dbc4774` with content hash
+`sha256:ea8a12969396172d7dbc4774bd239532e2907e637ddb44b1d5505c7b9011d117`.
+Both independent generations were byte-identical, all 887 action roots passed a fresh full checker,
+the exact-fallback count was zero, and total charged wall time was `686.535011` seconds.
+
+The complete Gate 3 harness then published
+`yf/experiments/results/m8-gate3-decision-yfm8g3decision-c13ec320e9fcd02873bf649c.json`.
+Its strict identity is `yfm8g3decision-c13ec320e9fcd02873bf649c` with content hash
+`sha256:c13ec320e9fcd02873bf649c4f8d84a66c48fb5c4a8e67ebf2fb2f5de268b03c`.
+The result binds the complete 887-root manifest, a cost-blind 12-action sample, the full live
+YieldForge Python source tree, fresh worker source attestations, and the frozen Jagua binary.
+
+The correctness evidence passes:
+
+- fresh v1 generator, fresh v1 checker, fresh v2 checker, and independent brute reference agreed on
+  all 12 sampled actions;
+- proof-binding, primary-implementation-overlap, normalized-semantic, and canonical-cost mismatch
+  counts were all zero;
+- all 16 registered executed mutations were rejected;
+- every action-root mutation reached the real checker and produced the exact typed
+  `m8_state_chain_mismatch`; and
+- no mutation published an artifact, leaked a registry/descendant, or accessed evaluation.
+
+The final decision is `hold_performance`, not authorization. Charging the full portable pipeline
+projects `113.434097` calendar days for held-out work versus the fixed five-day maximum. Meeting the
+absolute boundary requires reducing `686.535011` seconds to at most `30.261404` seconds, a further
+`22.686819x`. Even the non-gating first-generation-plus-checker sensitivity projects `78.547885`
+days and requires `15.709577x`.
+
+Fresh brute-reference timing expands to a diagnostic eight-slot wall estimate of
+`101034.700428` seconds, implying `147.166130x` relative to the historical portable artifact. That
+ratio is explicitly non-gating because the two sides lack a shared captured machine/load identity;
+the absolute five-day projection fails regardless. Official six-cell calibration was neither
+authorized nor executed, evaluation remained unopened, and no M8 oracle-advantage, savings,
+physical, buyer, or commercial result exists. The bounded follow-on is
+[[2026-08-27-m8-post-gate3-algorithmic-redesign]].

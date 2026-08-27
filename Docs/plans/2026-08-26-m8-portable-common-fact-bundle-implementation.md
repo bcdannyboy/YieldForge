@@ -1,5 +1,13 @@
 # M8 Portable Common-Fact Bundle Implementation Plan
 
+**Status:** Implemented and verified through complete Gate 3 — performance hold 2026-08-27
+
+The plan produced portable result `yfm8gate3-ea8a12969396172d7dbc4774` and complete decision
+`yfm8g3decision-c13ec320e9fcd02873bf649c`. Exactness, independent proof comparison, and all 16
+executed mutations passed. Performance did not: `686.535011` charged seconds project to
+`113.434097` held-out days, so the next plan must target at least a `22.686819x` algorithmic
+reduction before six-cell execution can be considered.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Remove duplicated M8 common-transition derivation by sending an explicitly unchecked,

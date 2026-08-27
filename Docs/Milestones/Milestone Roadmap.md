@@ -78,3 +78,13 @@ zero authoritative fallbacks. Aggregate common-transition wall time, including c
 improved `393.341866x` on `no_signal` and `13.255735x` on `regime_shift`, so Gate 2 passes and
 bounded v2 fact-DAG work may begin. The official six-cell `20x`/seven-day and witness-coverage gates
 remain open; evaluation and savings claims remain out of scope.
+
+The portable v2 fact pipeline subsequently passed fresh-process determinism and checking on all
+887 roots with zero exact fallback. Complete Gate 3 decision
+`yfm8g3decision-c13ec320e9fcd02873bf649c` then passed the cost-blind 12-action four-way proof audit
+with zero mismatch and rejected all 16 executed mutations. It returned `hold_performance`: the
+fully charged pipeline projects `113.434097` held-out days versus a five-day maximum and requires a
+further `22.686819x` absolute speedup. The observed `147.166130x` reference-equivalent ratio is a
+non-gating cross-run diagnostic without shared environment identity. Six-cell calibration remains
+unauthorized, evaluation remains sealed, and the next bounded work is an algorithmic
+generator/checker traversal redesign.

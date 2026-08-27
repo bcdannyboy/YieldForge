@@ -6,17 +6,20 @@
 
 ## Current objective
 
-Design the M8 v2 fact DAG against the immutable M7 baseline freeze now that the bounded
-common-transition Gate 2 passes on both representative calibration arms. Preserve complete action
+Design the next bounded M8 algorithmic speedup now that the complete portable-fact Gate 3 passed
+the proof and executed-mutation gates but returned `hold_performance`. Preserve complete action
 parity, baseline information masking, exact accounting, independent proof checking, and the sealed
 evaluation boundary.
 
 ## Next step
 
-Specify and implement the smallest content-addressed fact DAG that reuses exact common-transition
-evidence between generator and checker without sharing mutable authority. Differentially validate
-its portable facts against the frozen M7 transition, then remeasure calibration before rerunning the
-official six-cell `20x`/seven-day gate. Keep evaluation sealed.
+Profile and redesign the remaining generator/checker action traversal mathematically before any
+six-cell execution. The fixed five-day projection requires the charged portable pipeline to fall
+from `686.535011` seconds to at most `30.261404` seconds, a further `22.686819x`; even the
+non-gating first-generation-plus-checker sensitivity at `475.393859` seconds needs `15.709577x`.
+Only after the absolute projection is viable should reference and portable timing be captured under
+one bound environment for a gating comparison. See
+[[2026-08-27-m8-post-gate3-algorithmic-redesign]]. Keep evaluation sealed.
 
 ## Evidence bridge completed
 
@@ -119,6 +122,20 @@ official six-cell `20x`/seven-day gate. Keep evaluation sealed.
   `393.341866x` and `13.255735x`, respectively. Gate 2 passes; the v2 fact DAG may now proceed,
   while the official M8 `20x`/seven-day and witness-coverage gates remain unresolved. See [[M8 Gate
   2 Fast Common Transition]].
+- Portable fact Gate 3 then completed both frozen calibration probes in fresh processes and
+  published `yfm8gate3-ea8a12969396172d7dbc4774`. Both bundle generations were byte-stable,
+  887/887 action roots passed the fresh full checker, exact fallback was zero, evaluation remained
+  sealed, and the fully charged pipeline took `686.535011` seconds.
+- Complete Gate 3 decision `yfm8g3decision-c13ec320e9fcd02873bf649c` froze a cost-blind 12-action
+  sample from all 887 checked roots. Fresh v1 generation/checking, fresh v2 checking, and independent
+  brute replay agreed with zero proof-binding, implementation-overlap, semantic, or cost mismatch.
+  All 16 registered mutations were rejected; all 12 action-root mutations produced the exact typed
+  `m8_state_chain_mismatch`. The proof and mutation gates pass.
+- The final decision is nevertheless `hold_performance`. The historical portable pipeline projects
+  to `113.434097` held-out calendar days versus the fixed five-day maximum. Its `147.166130x`
+  reference-equivalent speedup is explicitly cross-run, environment-noncomparable, and non-gating.
+  Six-cell calibration was not authorized or executed, evaluation was not opened, and no M8
+  advantage or savings result exists.
 
 ## Experiment status
 

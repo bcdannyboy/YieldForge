@@ -104,3 +104,16 @@ sampled speedup, and seven-day projection; this Gate 2 pass does not waive any o
 
 This is calibration software evidence only. It is not an oracle-advantage, material-savings,
 physical-feasibility, production-readiness, buyer-demand, or commercial result.
+
+## Subsequent Gate 3 result — 2026-08-27
+
+The permitted v2 fixed-layer bundle was implemented and completed both unchanged Gate 3 probes.
+It produced two byte-stable generations, passed the fresh checker on 887/887 roots, and used zero
+exact fallback. The complete 12-action four-way audit then passed with zero mismatch, and all 16
+executed mutations were rejected.
+
+This closes the Gate 2 reuse question but not M8 performance. Complete decision
+`yfm8g3decision-c13ec320e9fcd02873bf649c` returned `hold_performance`: the charged
+`686.535011`-second portable pipeline projects to `113.434097` held-out days, requiring another
+`22.686819x` reduction to meet the fixed five-day boundary. The next bounded redesign is therefore
+algorithmic action-traversal/checker acceleration, not six-cell execution or evaluation access.
