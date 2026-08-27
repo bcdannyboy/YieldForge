@@ -75,8 +75,10 @@ from yieldforge.experiments.residual_geometry import (
 )
 from yieldforge.oracle.experiment import (
     execute_certificate_profile,
+    execute_portable_fact_gate3,
     execute_sparse_prefix_proof,
     publish_certificate_profile,
+    publish_portable_fact_gate3,
     publish_sparse_proof,
 )
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
@@ -585,6 +587,47 @@ def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_m8_portable_fact_gate3(args: argparse.Namespace) -> int:
+    """Run the frozen calibration-only portable-fact proof pipeline."""
+
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    frozen = load_frozen_json(args.frozen_baseline, M7FrozenBaseline)
+    index = build_registered_calibration_problem_view(
+        full_problem_index_id=frozen.problem_index_id,
+        full_problem_index_sha256=frozen.problem_index_sha256,
+    )
+
+    def progress(message: str) -> None:
+        print(f"M8 portable fact Gate-3: {message}", flush=True)
+
+    result = execute_portable_fact_gate3(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        progress=progress,
+    )
+    result_path = publish_portable_fact_gate3(args.output, result)
+    roots = "+".join(str(cell.checked_action_root_count) for cell in result.cells)
+    print(
+        "Published M8 portable fact Gate-3: "
+        f"gate3={result.gate3_id} "
+        f"roots={roots}/{result.checked_action_root_count} "
+        f"fallback={result.total_exact_fallback_count} "
+        f"repeat={str(result.bundle_root_repeat_match).lower()} "
+        f"compute={result.peak_compute_count}/{result.compute_slot_cap} "
+        f"evaluation_accessed={str(result.evaluation_accessed).lower()} "
+        f"first_generation_seconds={result.first_generation_phase_wall_seconds} "
+        f"second_generation_seconds={result.second_generation_phase_wall_seconds} "
+        f"checker_seconds={result.checker_phase_wall_seconds} "
+        f"total_seconds={result.total_pipeline_wall_seconds} "
+        f"decision={result.pipeline_decision} output={result_path}",
+        flush=True,
+    )
+    return 0
+
+
 def _profile_m8_certificate(args: argparse.Namespace) -> int:
     """Profile one explicit calibration stream without opening evaluation."""
 
@@ -880,6 +923,23 @@ def build_parser() -> argparse.ArgumentParser:
     prove_m8.add_argument("--jagua-binary", type=Path, required=True)
     prove_m8.add_argument("--output", type=Path, required=True)
     prove_m8.set_defaults(handler=_prove_m8_sparse_oracle)
+
+    portable_m8 = benchmark_commands.add_parser(
+        "m8-portable-gate3",
+        help="run the frozen two-probe calibration-only portable-fact Gate-3 pipeline",
+    )
+    portable_m8.add_argument("--m0", type=Path, required=True)
+    portable_m8.add_argument("--frozen-baseline", type=Path, required=True)
+    portable_m8.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    portable_m8.add_argument("--jagua-binary", type=Path, required=True)
+    portable_m8.add_argument("--output", type=Path, required=True)
+    portable_m8.set_defaults(handler=_run_m8_portable_fact_gate3)
 
     profile_m8 = benchmark_commands.add_parser(
         "m8-certificate-profile",

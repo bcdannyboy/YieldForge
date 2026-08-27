@@ -230,6 +230,211 @@ def test_m8_sparse_proof_does_not_expose_the_internal_worker_override() -> None:
         )
 
 
+def test_m8_portable_gate3_command_exposes_only_frozen_inputs() -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "m8-portable-gate3",
+            "--m0",
+            "m0.json",
+            "--frozen-baseline",
+            "freeze.json",
+            "--archive-root",
+            "archives",
+            "--jagua-binary",
+            "jagua",
+            "--output",
+            "results",
+        ]
+    )
+
+    assert args.handler.__name__ == "_run_m8_portable_fact_gate3"
+    assert set(vars(args)) == {
+        "command",
+        "benchmark_command",
+        "m0",
+        "frozen_baseline",
+        "archive_root",
+        "jagua_binary",
+        "output",
+        "handler",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--regime", "no_signal"),
+        ("--seed", "2026082300"),
+        ("--event-count", "2"),
+        ("--worker-count", "1"),
+        ("--evaluation", "true"),
+    ),
+)
+def test_m8_portable_gate3_rejects_selector_and_execution_overrides(
+    option: str,
+    value: str,
+) -> None:
+    from yieldforge.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "benchmark",
+                "m8-portable-gate3",
+                "--m0",
+                "m0.json",
+                "--frozen-baseline",
+                "freeze.json",
+                "--archive-root",
+                "archives",
+                "--jagua-binary",
+                "jagua",
+                "--output",
+                "results",
+                option,
+                value,
+            ]
+        )
+
+
+def test_m8_portable_gate3_uses_only_calibration_view_and_immutable_publisher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,  # type: ignore[no-untyped-def]
+) -> None:
+    from yieldforge import cli
+
+    m0 = object()
+    frozen = SimpleNamespace(
+        problem_index_id="yfm7i-" + "1" * 24,
+        problem_index_sha256="sha256:" + "2" * 64,
+    )
+    view = object()
+    output_directory = tmp_path / "results"
+    output_path = output_directory / "m8-portable-fact-gate3-test.json"
+    result = SimpleNamespace(
+        gate3_id="yfm8gate3-" + "3" * 24,
+        cells=(
+            SimpleNamespace(checked_action_root_count=428),
+            SimpleNamespace(checked_action_root_count=459),
+        ),
+        checked_action_root_count=887,
+        total_exact_fallback_count=0,
+        bundle_root_repeat_match=True,
+        peak_compute_count=4,
+        compute_slot_cap=8,
+        evaluation_accessed=False,
+        first_generation_phase_wall_seconds=1.25,
+        second_generation_phase_wall_seconds=1.5,
+        checker_phase_wall_seconds=2.75,
+        total_pipeline_wall_seconds=5.75,
+        pipeline_decision="pass_portable_fact_pipeline",
+    )
+    loaded: list[tuple[Path, object]] = []
+    executed: list[dict[str, object]] = []
+    published: list[tuple[Path, object]] = []
+    progress_flushes: list[bool | None] = []
+
+    def load(path: Path, model: object) -> object:
+        loaded.append((path, model))
+        return m0 if model is cli.M0ExperimentContract else frozen
+
+    def calibration_view(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs == {
+            "full_problem_index_id": frozen.problem_index_id,
+            "full_problem_index_sha256": frozen.problem_index_sha256,
+        }
+        return view
+
+    def execute(**kwargs):  # type: ignore[no-untyped-def]
+        executed.append(kwargs)
+        kwargs["progress"]("phase_start regime=all phase=portable_candidate_verification")
+        return result
+
+    def publish(output: Path, result_arg: object) -> Path:
+        published.append((output, result_arg))
+        return output_path
+
+    original_print = print
+
+    def recording_print(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and str(args[0]).startswith("M8 portable fact Gate-3: phase_"):
+            progress_flushes.append(kwargs.get("flush"))
+        original_print(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "load_frozen_json", load)
+    monkeypatch.setattr(cli, "build_registered_calibration_problem_view", calibration_view)
+    monkeypatch.setattr(
+        cli,
+        "build_registered_problem_index",
+        lambda: pytest.fail("full problem index opened evaluation streams"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_evaluation",
+        lambda **kwargs: pytest.fail("evaluation execution was opened"),
+    )
+    monkeypatch.setattr(cli, "execute_portable_fact_gate3", execute)
+    monkeypatch.setattr(cli, "publish_portable_fact_gate3", publish)
+    monkeypatch.setattr("builtins.print", recording_print)
+
+    m0_path = tmp_path / "m0.json"
+    frozen_path = tmp_path / "freeze.json"
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m8-portable-gate3",
+                "--m0",
+                str(m0_path),
+                "--frozen-baseline",
+                str(frozen_path),
+                "--archive-root",
+                str(tmp_path / "archives-a"),
+                "--archive-root",
+                str(tmp_path / "archives-b"),
+                "--jagua-binary",
+                str(tmp_path / "jagua"),
+                "--output",
+                str(output_directory),
+            ]
+        )
+        == 0
+    )
+
+    assert loaded == [
+        (m0_path, cli.M0ExperimentContract),
+        (frozen_path, cli.M7FrozenBaseline),
+    ]
+    assert executed == [
+        {
+            "index": view,
+            "m0": m0,
+            "frozen": frozen,
+            "archive_roots": (tmp_path / "archives-a", tmp_path / "archives-b"),
+            "jagua_executable": tmp_path / "jagua",
+            "progress": executed[0]["progress"],
+        }
+    ]
+    assert published == [(output_directory, result)]
+    assert progress_flushes == [True]
+    output = capsys.readouterr().out
+    assert "roots=428+459/887" in output
+    assert "fallback=0" in output
+    assert "repeat=true" in output
+    assert "compute=4/8" in output
+    assert "evaluation_accessed=false" in output
+    assert "first_generation_seconds=1.25" in output
+    assert "second_generation_seconds=1.5" in output
+    assert "checker_seconds=2.75" in output
+    assert "total_seconds=5.75" in output
+    assert "decision=pass_portable_fact_pipeline" in output
+    assert f"output={output_path}" in output
+
+
 def test_m8_command_builds_only_the_calibration_problem_view(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
