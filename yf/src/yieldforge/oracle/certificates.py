@@ -70,7 +70,9 @@ from yieldforge.oracle.compiled import (
     CompiledRejectionProblem,
     CompiledTranslationRejection,
     _compile_prepared_translation_rejections,
+    _prepared_layout_footprints,
     _prepared_rejection_problem,
+    _prepared_source_runtime,
     _prepared_standard_winner,
     _PreparedTranslationLayoutBatch,
     _registered_prepared_remnant_measurement,
@@ -1231,7 +1233,16 @@ def _zero_generation_rejection_witness(
     item: InventoryItem,
     prepared_layouts: _PreparedTranslationLayoutBatch | None,
 ) -> FastCommonRejectionWitness | None:
-    binding = runtime.replay_input.instances[event_position]
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
+    binding = source_runtime.replay_input.instances[event_position]
     measured = (
         prepare_translation_rejection_remnant(item.remnant)
         if prepared_layouts is None
@@ -1244,7 +1255,7 @@ def _zero_generation_rejection_witness(
     min_x, min_y, max_x, max_y = measured.bounds
     remnant_width = float(max_x - min_x)
     remnant_height = float(max_y - min_y)
-    fit_config = runtime.replay_input.fit_config
+    fit_config = source_runtime.replay_input.fit_config
     area_tolerance = max(
         fit_config.coordinate_tolerance,
         measured.area * fit_config.relative_area_tolerance,
@@ -1321,50 +1332,80 @@ def _synthesize_scalar_no_fit_source(
     event_position: int,
     item: InventoryItem,
     mode: _CommonDerivationMode,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
 ) -> _ScalarNoFitSource:
     """Generate exact search counts while preserving their ordered source batches."""
 
-    binding = runtime.replay_input.instances[event_position]
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
+    binding = source_runtime.replay_input.instances[event_position]
     if material_key(item.remnant.material) != material_key(binding.material):
         return _ScalarNoFitSource(searches=(), translation_batches=())
     problem = next(
         problem
-        for problem in runtime.replay_input.problems
+        for problem in source_runtime.replay_input.problems
         if problem.problem_id == binding.problem_id
     )
-    verified = runtime.runtime_candidates[binding.problem_id]
+    verified = source_runtime.runtime_candidates[binding.problem_id]
     prepared_remnant = prepare_remnant_geometry(item.remnant)
-    layouts = tuple(
-        prepare_layout_footprint(
-            problem.problem,
-            candidate,
-            runtime.replay_input.fit_config,
+    layouts = (
+        tuple(
+            prepare_layout_footprint(
+                problem.problem,
+                candidate,
+                source_runtime.replay_input.fit_config,
+            )
+            for candidate in verified.candidates
         )
-        for candidate in verified.candidates
+        if prepared_layouts is None
+        else _prepared_layout_footprints(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
     )
-    certificates = tuple(
-        certify_translation_impossible(
-            layout,
-            item.remnant,
-            material=binding.material,
-            fit_config=runtime.replay_input.fit_config,
+    certificates = (
+        tuple(
+            certify_translation_impossible(
+                layout,
+                item.remnant,
+                material=binding.material,
+                fit_config=source_runtime.replay_input.fit_config,
+            )
+            for layout in layouts
         )
-        for layout in layouts
+        if prepared_layouts is None
+        else tuple(
+            compiled_rejection.certificate
+            for compiled_rejection in _compile_prepared_translation_rejections(
+                runtime,
+                prepared=prepared_layouts,
+                event_position=event_position,
+                item=item,
+            )
+        )
     )
     if any(not certificate.impossible for certificate in certificates):
         return _ScalarNoFitSource(searches=None, translation_batches=())
-    rust_generated = runtime.jagua_executable is not None and not any(
+    rust_generated = source_runtime.jagua_executable is not None and not any(
         polygon.interiors for layout in layouts for polygon in layout.part_polygons
     )
     if rust_generated:
         try:
             generated = run_jagua_generated_prefilter(
-                runtime.jagua_executable,
+                source_runtime.jagua_executable,
                 remnant=prepared_remnant,
                 layouts=layouts,
-                fit_config=runtime.replay_input.fit_config,
-                search_config=runtime.replay_input.search_config,
-                container_guard=runtime.replay_input.jagua_container_guard or 1.0,
+                fit_config=source_runtime.replay_input.fit_config,
+                search_config=source_runtime.replay_input.search_config,
+                container_guard=source_runtime.replay_input.jagua_container_guard or 1.0,
             )
         except JaguaRepresentationError:
             if mode is _CommonDerivationMode.UNCHECKED_PORTABLE:
@@ -1385,8 +1426,8 @@ def _synthesize_scalar_no_fit_source(
                         remnant=prepared_remnant,
                         layouts=layouts,
                         expected=translations,
-                        fit_config=runtime.replay_input.fit_config,
-                        search_config=runtime.replay_input.search_config,
+                        fit_config=source_runtime.replay_input.fit_config,
+                        search_config=source_runtime.replay_input.search_config,
                         process_count=require_m8_translation_audit_processes(),
                     )
                 for batch, audited in zip(translations, audited_counts, strict=True):
@@ -1404,8 +1445,8 @@ def _synthesize_scalar_no_fit_source(
             generate_layout_translations(
                 item.remnant,
                 candidate,
-                fit_config=runtime.replay_input.fit_config,
-                search_config=runtime.replay_input.search_config,
+                fit_config=source_runtime.replay_input.fit_config,
+                search_config=source_runtime.replay_input.search_config,
                 prepared_layout=layout,
                 prepared_remnant=prepared_remnant,
             )
@@ -1417,7 +1458,7 @@ def _synthesize_scalar_no_fit_source(
                 status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
                 candidate_id=candidate.candidate_id,
                 remnant_id=item.remnant.remnant_id,
-                config=runtime.replay_input.search_config,
+                config=source_runtime.replay_input.search_config,
                 generated_candidate_count=batch.generated_candidate_count,
                 duplicate_candidate_count=batch.duplicate_candidate_count,
                 evaluated_candidate_count=len(batch.translations),
@@ -1435,6 +1476,7 @@ def _synthesize_scalar_no_fit_searches(
     *,
     event_position: int,
     item: InventoryItem,
+    prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
 ) -> tuple[LayoutFitSearchResult, ...] | None:
     """Trusted-local count synthesis retained for existing v1 capability paths."""
 
@@ -1443,6 +1485,7 @@ def _synthesize_scalar_no_fit_searches(
         event_position=event_position,
         item=item,
         mode=_CommonDerivationMode.TRUSTED_LOCAL,
+        prepared_layouts=prepared_layouts,
     ).searches
 
 
@@ -1540,6 +1583,15 @@ def _try_derive_m8_common_transition_fact_fast(
     """Prune scalar rejects while preserving exact search for every survivor."""
 
     event_position = cursor.next_event_position
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
     compiled_standard = (
         None
         if prepared_layouts is None
@@ -1552,14 +1604,17 @@ def _try_derive_m8_common_transition_fact_fast(
     compiled = None
     if cursor.inventory:
         if prepared_layouts is None:
-            binding = runtime.replay_input.instances[event_position]
-            verified = runtime.runtime_candidates[binding.problem_id]
+            binding = source_runtime.replay_input.instances[event_position]
+            verified = source_runtime.runtime_candidates[binding.problem_id]
             if not _verified_rejection_layouts_cover_candidates(verified):
                 return None
-            compiled = compile_rejection_problem(runtime, event_position=event_position)
+            compiled = compile_rejection_problem(
+                source_runtime,
+                event_position=event_position,
+            )
         else:
-            binding = runtime.replay_input.instances[event_position]
-            verified = runtime.runtime_candidates[binding.problem_id]
+            binding = source_runtime.replay_input.instances[event_position]
+            verified = source_runtime.runtime_candidates[binding.problem_id]
             if not _verified_rejection_layouts_cover_candidates(verified):
                 return None
             compiled = _prepared_rejection_problem(
@@ -1589,6 +1644,7 @@ def _try_derive_m8_common_transition_fact_fast(
                         runtime,
                         event_position=event_position,
                         item=item,
+                        prepared_layouts=prepared_layouts,
                     )
                 if searches is None:
                     survivors.append(item)
@@ -1602,11 +1658,11 @@ def _try_derive_m8_common_transition_fact_fast(
         increment_profile_count("exact_survivor_inventory_items", len(survivors))
         return None
     _require_zero_generation_search_caches(
-        runtime,
+        source_runtime,
         event_position=event_position,
         inventory=tuple(rejected),
     )
-    execution_runtime = _fresh_runtime(runtime)
+    execution_runtime = _fresh_runtime(source_runtime)
     standard_profiles = None if compiled_standard is None else compiled_standard.standard_profiles
     if counted_no_fit:
         binding = execution_runtime.replay_input.instances[event_position]
@@ -1646,7 +1702,7 @@ def _try_derive_m8_common_transition_fact_fast(
                 complete=False,
             )
         _require_common_search_caches_match_authoritative(
-            runtime,
+            source_runtime,
             authoritative_runtime=execution_runtime,
             event_position=event_position,
             inventory=cursor.inventory,
@@ -1669,13 +1725,13 @@ def _try_derive_m8_common_transition_fact_fast(
                 )
         if survivors:
             _require_common_search_caches_match_authoritative(
-                runtime,
+                source_runtime,
                 authoritative_runtime=execution_runtime,
                 event_position=event_position,
                 inventory=tuple(survivors),
             )
     if compiled_standard is not None and not survivors:
-        selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
+        selection = select_m7_fallback(catalog, policy=source_runtime.replay_input.policy)
         descriptor = next(item for item in catalog.actions if item.action_id == selection.action_id)
         if (
             selection.action_id != compiled_standard.action_id
@@ -1684,7 +1740,7 @@ def _try_derive_m8_common_transition_fact_fast(
         ):
             raise ValueError("M8 prepared standard winner differs from exact profiles")
     fact = _common_transition_fact_from_catalog(
-        runtime,
+        source_runtime,
         cursor=cursor,
         semantic_runtime_sha256=semantic_runtime_sha256,
         execution_runtime=execution_runtime,
@@ -1919,12 +1975,23 @@ def _capture_unchecked_m8_common_transition(
         runtime_authority=runtime_authority,
         operation="common capture",
     )
-    executable_identity_before = _capture_executable_identity(runtime)
     event_position = cursor.next_event_position
-    binding = runtime.replay_input.instances[event_position]
-    verified = runtime.runtime_candidates[binding.problem_id]
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
+    executable_identity_before = _capture_executable_identity(source_runtime)
+    binding = source_runtime.replay_input.instances[event_position]
+    verified = source_runtime.runtime_candidates[binding.problem_id]
     problem = next(
-        item for item in runtime.replay_input.problems if item.problem_id == binding.problem_id
+        item
+        for item in source_runtime.replay_input.problems
+        if item.problem_id == binding.problem_id
     )
     compiled_standard = (
         None
@@ -1941,7 +2008,10 @@ def _capture_unchecked_m8_common_transition(
             if not _verified_rejection_layouts_cover_candidates(verified):
                 compiled = None
             else:
-                compiled = compile_rejection_problem(runtime, event_position=event_position)
+                compiled = compile_rejection_problem(
+                    source_runtime,
+                    event_position=event_position,
+                )
         else:
             if _verified_rejection_layouts_cover_candidates(verified):
                 compiled = _prepared_rejection_problem(
@@ -1969,8 +2039,8 @@ def _capture_unchecked_m8_common_transition(
         remnant_width = float(max_x - min_x)
         remnant_height = float(max_y - min_y)
         area_tolerance = max(
-            runtime.replay_input.fit_config.coordinate_tolerance,
-            measured.area * runtime.replay_input.fit_config.relative_area_tolerance,
+            source_runtime.replay_input.fit_config.coordinate_tolerance,
+            measured.area * source_runtime.replay_input.fit_config.relative_area_tolerance,
         )
         material_matches = material_key(item.remnant.material) == material_key(binding.material)
         witness = (
@@ -1995,7 +2065,9 @@ def _capture_unchecked_m8_common_transition(
                     remnant_width=remnant_width,
                     remnant_height=remnant_height,
                     area_tolerance=area_tolerance,
-                    coordinate_tolerance=runtime.replay_input.fit_config.coordinate_tolerance,
+                    coordinate_tolerance=(
+                        source_runtime.replay_input.fit_config.coordinate_tolerance
+                    ),
                     scalar_witness=witness,
                     candidate_rejection_layouts=verified.rejection_layouts,
                     frontier=compiled.frontier,
@@ -2009,6 +2081,7 @@ def _capture_unchecked_m8_common_transition(
                 event_position=event_position,
                 item=item,
                 mode=_CommonDerivationMode.UNCHECKED_PORTABLE,
+                prepared_layouts=prepared_layouts,
             )
             if compiled is not None
             else _ScalarNoFitSource(
@@ -2031,7 +2104,9 @@ def _capture_unchecked_m8_common_transition(
                     remnant_width=remnant_width,
                     remnant_height=remnant_height,
                     area_tolerance=area_tolerance,
-                    coordinate_tolerance=runtime.replay_input.fit_config.coordinate_tolerance,
+                    coordinate_tolerance=(
+                        source_runtime.replay_input.fit_config.coordinate_tolerance
+                    ),
                     scalar_witness=None,
                     candidate_rejection_layouts=verified.rejection_layouts,
                     frontier=compiled.frontier if compiled is not None else None,
@@ -2053,7 +2128,7 @@ def _capture_unchecked_m8_common_transition(
                 remnant_width=remnant_width,
                 remnant_height=remnant_height,
                 area_tolerance=area_tolerance,
-                coordinate_tolerance=runtime.replay_input.fit_config.coordinate_tolerance,
+                coordinate_tolerance=(source_runtime.replay_input.fit_config.coordinate_tolerance),
                 scalar_witness=None,
                 candidate_rejection_layouts=(
                     verified.rejection_layouts
@@ -2070,7 +2145,7 @@ def _capture_unchecked_m8_common_transition(
             )
         )
 
-    execution_runtime = _fresh_runtime(runtime)
+    execution_runtime = _fresh_runtime(source_runtime)
     standard_profiles = None if compiled_standard is None else compiled_standard.standard_profiles
     if counted_no_fit:
         if standard_profiles is not None:
@@ -2107,7 +2182,7 @@ def _capture_unchecked_m8_common_transition(
             complete=False,
         )
         _require_common_search_caches_match_authoritative(
-            runtime,
+            source_runtime,
             authoritative_runtime=execution_runtime,
             event_position=event_position,
             inventory=cursor.inventory,
@@ -2120,7 +2195,7 @@ def _capture_unchecked_m8_common_transition(
             precomputed_standard_profiles=standard_profiles,
         )
         _require_common_search_caches_match_authoritative(
-            runtime,
+            source_runtime,
             authoritative_runtime=execution_runtime,
             event_position=event_position,
             inventory=tuple(survivors),
@@ -2132,7 +2207,7 @@ def _capture_unchecked_m8_common_transition(
             complete=False,
         )
         _require_common_search_caches_match_authoritative(
-            runtime,
+            source_runtime,
             authoritative_runtime=execution_runtime,
             event_position=event_position,
             inventory=cursor.inventory,
@@ -2145,7 +2220,7 @@ def _capture_unchecked_m8_common_transition(
             precomputed_standard_profiles=standard_profiles,
         )
     fact = _common_transition_fact_from_catalog(
-        runtime,
+        source_runtime,
         cursor=cursor,
         semantic_runtime_sha256=semantic_runtime_sha256,
         execution_runtime=execution_runtime,
@@ -2177,7 +2252,7 @@ def _capture_unchecked_m8_common_transition(
             profile=profiles_by_candidate[descriptor.candidate_id],
             context=contexts_by_action[descriptor.action_id],
             rank=rank_policy_action(
-                runtime.replay_input.policy.name,
+                source_runtime.replay_input.policy.name,
                 contexts_by_action[descriptor.action_id],
             ),
             policy_immediate_net_cost=contexts_by_action[descriptor.action_id].immediate_net_cost,
@@ -2189,7 +2264,7 @@ def _capture_unchecked_m8_common_transition(
         )
         for position, descriptor in enumerate(standard_descriptors)
     )
-    executable_identity_after = _capture_executable_identity(runtime)
+    executable_identity_after = _capture_executable_identity(source_runtime)
     if executable_identity_after != executable_identity_before:
         raise ValueError("M8 Jagua executable changed during unchecked source capture")
     _require_unchecked_runtime_source_identity(
@@ -2199,30 +2274,30 @@ def _capture_unchecked_m8_common_transition(
         operation="common capture",
     )
     jagua_sha256, jagua_size, jagua_mode = executable_identity_after
-    fit_config_sha256 = (
-        f"sha256:{semantic_sha256(runtime.replay_input.fit_config.model_dump(mode='json'))}"
+    fit_config_sha256 = "sha256:" + semantic_sha256(
+        source_runtime.replay_input.fit_config.model_dump(mode="json")
     )
-    search_config_sha256 = (
-        f"sha256:{semantic_sha256(runtime.replay_input.search_config.model_dump(mode='json'))}"
+    search_config_sha256 = "sha256:" + semantic_sha256(
+        source_runtime.replay_input.search_config.model_dump(mode="json")
     )
     source = M8UncheckedCommonSourceCapture(
-        replay_input_id=runtime.replay_input.input_id,
-        replay_input_sha256=runtime.replay_input.content_sha256,
-        replay_input=runtime.replay_input,
+        replay_input_id=source_runtime.replay_input.input_id,
+        replay_input_sha256=source_runtime.replay_input.content_sha256,
+        replay_input=source_runtime.replay_input,
         semantic_runtime_sha256=semantic_runtime_sha256,
-        stream_id=runtime.replay_input.stream_id,
-        stream_sha256=runtime.replay_input.stream_sha256,
+        stream_id=source_runtime.replay_input.stream_id,
+        stream_sha256=source_runtime.replay_input.stream_sha256,
         event_binding=binding,
         problem=problem,
         candidate_set=verified.evidence,
         verified_candidates=verified,
-        fit_config=runtime.replay_input.fit_config,
+        fit_config=source_runtime.replay_input.fit_config,
         fit_config_sha256=fit_config_sha256,
-        search_config=runtime.replay_input.search_config,
+        search_config=source_runtime.replay_input.search_config,
         search_config_sha256=search_config_sha256,
-        rules=runtime.rules,
-        rules_sha256=f"sha256:{semantic_sha256(runtime.rules.model_dump(mode='json'))}",
-        collision_backend=runtime.replay_input.collision_backend,
+        rules=source_runtime.rules,
+        rules_sha256=(f"sha256:{semantic_sha256(source_runtime.rules.model_dump(mode='json'))}"),
+        collision_backend=source_runtime.replay_input.collision_backend,
         jagua_executable_sha256=jagua_sha256,
         jagua_executable_size_bytes=jagua_size,
         jagua_executable_mode_bits=jagua_mode,
@@ -2244,6 +2319,15 @@ def _derive_m8_common_transition_fact_unprofiled(
     prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
     differential: bool = False,
 ) -> M8CommonTransitionFact:
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=cursor.next_event_position,
+        )
+    )
     fast = _try_derive_m8_common_transition_fact_fast(
         runtime,
         cursor=cursor,
@@ -2253,7 +2337,7 @@ def _derive_m8_common_transition_fact_unprofiled(
     if fast is None:
         increment_profile_count("full_authoritative_fallbacks")
         return _derive_m8_common_transition_fact_authoritative(
-            runtime,
+            source_runtime,
             cursor=cursor,
             semantic_runtime_sha256=semantic_runtime_sha256,
         )
@@ -2270,8 +2354,8 @@ def _derive_m8_common_transition_fact_unprofiled(
         len(fast.counted_no_fit_inventory),
     )
     if fast.counted_no_fit_inventory:
-        binding = runtime.replay_input.instances[cursor.next_event_position]
-        candidate_count = len(runtime.runtime_candidates[binding.problem_id].candidates)
+        binding = source_runtime.replay_input.instances[cursor.next_event_position]
+        candidate_count = len(source_runtime.runtime_candidates[binding.problem_id].candidates)
         increment_profile_count("counted_no_fit_transitions")
         increment_profile_count(
             "counted_no_fit_candidate_searches",
@@ -2284,7 +2368,7 @@ def _derive_m8_common_transition_fact_unprofiled(
         increment_profile_count("standard_only_materializations")
     if differential:
         authoritative = _derive_m8_common_transition_fact_authoritative(
-            runtime,
+            source_runtime,
             cursor=cursor,
             semantic_runtime_sha256=semantic_runtime_sha256,
         )
@@ -2647,8 +2731,17 @@ def build_validated_m8_common_transition_in_context(
         prepared_layouts=prepared_layouts,
         differential=differential,
     )
+    validation_runtime = (
+        authority.runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            authority.runtime,
+            event_position=cursor.next_event_position,
+        )
+    )
     _validate_portable_common_transition_fact(
-        authority.runtime,
+        validation_runtime,
         fact,
         semantic_runtime_sha256=authority.semantic_sha256,
     )
@@ -3186,9 +3279,18 @@ def _calculate_influence_source(
     prepared_layouts: _PreparedTranslationLayoutBatch | None,
     mode: _CommonDerivationMode,
 ) -> tuple[M8UncheckedInfluenceCapture, int]:
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+        )
+    )
     rejections = (
         compile_translation_rejections(
-            runtime,
+            source_runtime,
             event_position=event_position,
             item=item,
         )
@@ -3250,14 +3352,14 @@ def _calculate_influence_source(
             authoritative_searches,
             translation_batches,
         ) = _capture_unchecked_competitor_source(
-            runtime,
+            source_runtime,
             event_position=event_position,
             item=item,
             cursor_template=cursor_template,
         )
     else:
         competitor, context, authoritative_searches = _authoritative_competitor(
-            runtime,
+            source_runtime,
             event_position=event_position,
             item=item,
             cursor_template=cursor_template,
@@ -3309,7 +3411,7 @@ def _calculate_influence_source(
             1,
         )
 
-    competitor_rank = rank_policy_action(runtime.replay_input.policy.name, context)
+    competitor_rank = rank_policy_action(source_runtime.replay_input.policy.name, context)
     if not common_rank <= competitor_rank:
         return (
             M8UncheckedInfluenceCapture(
@@ -3508,10 +3610,19 @@ def _capture_unchecked_event_passivity_body(
     if type(common) is not M8UncheckedProducerTransition:
         raise ValueError("M8 unchecked traversal requires a producer-only transition record")
     fact = common.common_fact
+    source_runtime = (
+        runtime
+        if prepared_layouts is None
+        else _prepared_source_runtime(
+            prepared_layouts,
+            runtime,
+            event_position=fact.event_position,
+        )
+    )
     if (
         fact.semantic_runtime_sha256 != common.source.semantic_runtime_sha256
-        or fact.replay_input_id != runtime.replay_input.input_id
-        or fact.replay_input_sha256 != runtime.replay_input.content_sha256
+        or fact.replay_input_id != source_runtime.replay_input.input_id
+        or fact.replay_input_sha256 != source_runtime.replay_input.content_sha256
     ):
         raise ValueError("M8 unchecked producer transition differs from runtime context")
     delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
@@ -3537,8 +3648,8 @@ def _capture_unchecked_event_passivity_body(
             influences=(),
             exact_search_count=0,
         )
-    verified = runtime.runtime_candidates[
-        runtime.replay_input.instances[fact.event_position].problem_id
+    verified = source_runtime.runtime_candidates[
+        source_runtime.replay_input.instances[fact.event_position].problem_id
     ]
     if not _verified_rejection_layouts_cover_candidates(verified):
         return M8UncheckedEventPassivityCapture(
@@ -3551,7 +3662,7 @@ def _capture_unchecked_event_passivity_body(
             exact_search_count=0,
         )
     transition = apply_m7_frozen_action_evidence_with_commitments(
-        runtime,
+        source_runtime,
         cursor=branch_cursor,
         event_position=fact.event_position,
         action=fact.step.event.action,
@@ -3670,6 +3781,15 @@ def certify_event_passivity(
     )
     with proof_context as proof_runtime:
         try:
+            source_runtime = (
+                proof_runtime
+                if prepared_layouts is None
+                else _prepared_source_runtime(
+                    prepared_layouts,
+                    proof_runtime,
+                    event_position=fact.event_position,
+                )
+            )
             delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
             if not delta.added and not delta.removed:
                 return EventPassivityResult(
@@ -3690,7 +3810,7 @@ def certify_event_passivity(
                 )
 
             transition = apply_m7_frozen_action_evidence_with_commitments(
-                proof_runtime,
+                source_runtime,
                 cursor=branch_cursor,
                 event_position=fact.event_position,
                 action=fact.step.event.action,

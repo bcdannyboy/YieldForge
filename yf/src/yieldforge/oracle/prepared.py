@@ -83,6 +83,14 @@ def prepared_context_fingerprint(
                     }
                     for item in generated.standard_profiles
                 ),
+                "materialized_standard_actions": tuple(
+                    {
+                        "candidate_id": item.candidate_id,
+                        "action_id": item.action_id,
+                        "content_sha256": item.content_sha256,
+                    }
+                    for item in generated.materialized_standard_actions
+                ),
                 "remnant_actions": tuple(
                     item.model_dump(mode="json") for item in generated.remnant_actions
                 ),

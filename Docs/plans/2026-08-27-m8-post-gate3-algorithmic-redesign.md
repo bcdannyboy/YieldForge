@@ -1,6 +1,7 @@
 # M8 Post-Gate-3 Algorithmic Traversal Redesign
 
-**Status:** Phase A root-level quotient census complete — no-go; batched/compiled spike next
+**Status:** Phase B bounded reuse complete — correctness pass, performance no-go; C0
+frontier-columnar influence kernel authorized next
 
 ## Objective
 
@@ -35,17 +36,18 @@ both producer and checker.
 
 Candidate mechanisms, in priority order:
 
-1. Exact state-quotient discovery: group action roots only when their complete future-replay state,
-   inventory lineage, economic state, suffix, and runtime commitments are identical; replay one
-   representative and persist a membership proof for every root.
-2. Batched algebraic action traversal: replace repeated object-by-object state-chain and cost
-   reconciliation with a content-addressed columnar transition over shared suffix evidence, while
-   retaining one exact root commitment and terminal-cost check per action.
-3. Compiled pure verification kernel: move only the measured canonical state-chain/cost operations
-   into a deterministic compiled boundary after the first two mechanisms establish that semantic
-   sharing alone cannot reach the target.
-4. GPU work only if profiling identifies a large, uniform numeric kernel with transfer costs below
-   the phase budget. GPU use is not itself a gate or a substitute for the algorithmic proof.
+1. Batched columnar event traversal: evaluate the hard arm's complete candidate/rejection matrix
+   and shared suffix transition in one runtime-, event-, candidate-, geometry-, and action-bound
+   kernel while retaining every exact root commitment.
+2. Compiled deterministic CPU verification: move the measured branch/state-chain loops across both
+   producer and independent checker into a native boundary, keeping the current Python path as the
+   reference oracle and fail-closed fallback.
+3. If that spike succeeds, extend the same boundary to authority reconstruction, catalog
+   construction, and common verification. Eliminating traversal alone cannot meet the aggregate
+   target.
+4. GPU work only if a later profile exposes a substantially larger uniform numeric kernel. The
+   current 459-by-459 exact comparison matrix is dominated by Python object and hashing overhead,
+   so native CPU/SIMD is the lower-risk next boundary.
 
 ## Execution phases and go/no-go gates
 
@@ -84,22 +86,82 @@ Implement the smallest unchecked producer plus fresh checker path for `regime_sh
 The spike is a no-go if projected full-pipeline wall, using measured unchanged companion work,
 cannot plausibly fit `30.261404` seconds.
 
+**Executed result — 2026-08-27:** The hardened, strict, source-attested one-arm v3 profile published
+`yfm8profile-ffbf978a466f6e98768a7556` with content hash
+`sha256:ffbf978a466f6e98768a7556d223e61bbbca85737b04b845a6da32709ac85e87`.
+It retained the official `regime_shift` identity: 459 roots, 2,297 fixed nodes, 43,520,933
+semantic bytes, the exact bundle and decision hashes, byte-identical repeated generation, and zero
+fallback. Three distinct fresh workers were source-attested in a fresh bytecode-cache scope; the
+six-cell calibration remained unauthorized and evaluation remained unopened.
+
+The bounded implementation builds standard-sheet actions once per catalog and retains full
+prepared layouts behind process-local bindings that commit runtime, event, candidate order, fit
+configuration, and geometry. Prepared consumers use a proof-owned semantic runtime snapshot;
+retained actions, loaded worker code, source mirrors, output publication, and mutation cleanup are
+fail-closed. Jagua results and translation audits were not cached away. The externally recomputed
+source-tree hash is
+`sha256:63825133dee1927d753d2bbcd74a49bee241c347eeb5c0b594cbff73e2929eac`; controller and all workers
+match runtime hash
+`sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508`. Focused correctness,
+integrity, mutation, publisher-race, strict-load, and source/runtime identity checks pass.
+
+The exact one-arm controller pipeline took `592.221873` seconds: first generation `158.964633`,
+repeat generation `156.515162`, and checker `276.558218`. This is not a full two-probe Gate-3 rerun;
+it is a Phase-B lower bound. It alone is `19.570205x` the entire `30.261404`-second full-pipeline
+budget, so Phase B is a definitive performance no-go. Diagnostic hard-arm worker time fell from
+`683.808438` to `587.867289` seconds (`14.030413%`), but checker time did not improve. The dominant
+remaining inclusives are producer traversal `76.083734`, catalog enumeration `48.990843`, checker
+action traversal `95.247443`, common verification `66.238186`, context preparation `59.613163`, and
+authority reconstruction `45.497482` seconds.
+
+Whole-root quotienting and bounded object reuse are now closed as sufficient strategies. Proceed to
+the compiled columnar event kernel. Do not infer a new full-pipeline speedup or held-out-day
+projection from this one-arm run.
+
+### Phase C0 — frontier-columnar influence kernel
+
+Replace the hard arm's repeated 459-by-459 rejection-certificate expansion with one producer-side
+batch over 459 branch queries and the exact 13-member Pareto frontier. The numeric boundary accepts
+validated Python float/boolean records, evaluates local NumPy `float64`/boolean arrays, and returns
+exact Python booleans plus opaque row identities. It owns no runtime objects, geometry, facts,
+capabilities, or hashes. NumPy and the explicit kernel identity must be added to a new C0 runtime
+contract; historical Phase-B runtime evidence remains unchanged.
+
+The fresh checker does not trust the batch result or call NumPy. For compact all-impossible groups,
+it reconstructs the prepared frontier, validates the complete 459-member scalar-reference set once,
+and proves each row through the existing scalar frontier predicate. Every survivor or unsupported
+row follows the unchanged exact path. A numeric mismatch is an integrity failure, not fallback.
+
+The current producer/checker action traversal totals `171.331178` seconds. Go to a wider compiled
+boundary only if the C0 hard-arm run preserves exact bundle/decision identity, byte-identical repeat
+generation, complete membership, source/runtime attestation, zero fallback, and reduces that
+combined traversal to at most `8.566559` seconds (at least `20x`). Passing C0 does not pass the
+`30.261404`-second full-pipeline gate.
+
+**State:** Authorized next; implementation not yet executed.
+
 ### Phase C — unchanged two-probe performance rerun
 
 Rerun both portable probes twice, charge every phase, and repeat the complete 12-action proof and
 mutation gates. The only passing performance condition is full charged wall at or below
 `30.261404` seconds. Phase allocations may move; the aggregate boundary may not.
 
+**State:** Unexecuted and unauthorized. Phase C0 must first clear its bounded go-to-expand gate.
+
 ### Phase D — paired timing identity
 
 Only after Phase C clears the absolute projection, capture portable and reference timing under one
 bound machine/load/runtime identity. Until then, reference-equivalent speedup remains diagnostic.
+
+**State:** Unexecuted and unauthorized.
 
 ### Phase E — six-cell authorization decision
 
 Authorize the official six-cell calibration only if exactness, mutations, absolute projection, and
 paired performance all pass their frozen contracts. Evaluation remains sealed until a later
 explicit gate authorizes it.
+
+**State:** Unexecuted and unauthorized.
 
 ## Claim ceiling
 

@@ -1801,6 +1801,354 @@ def test_portable_fact_source_capture_runs_one_generation_and_one_checker(
     assert experiment._portable_registry_state().is_clean  # noqa: SLF001
 
 
+def test_portable_fact_profile_cell_is_fresh_exact_and_wall_attributed() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+    from yieldforge.oracle.source_attestation import capture_source_tree
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+
+    (
+        source,
+        repeated_generation,
+        generator_profile,
+        generation_phase,
+        repeat_generation_phase,
+        checker_phase,
+        timing,
+    ) = (
+        experiment._profile_portable_fact_cell(  # noqa: SLF001
+            cell,
+            rules=runtime.rules,
+            jagua_executable=runtime.jagua_executable,
+            freeze_id="yfm7freeze-" + "b" * 24,
+            freeze_sha256="sha256:" + "b" * 64,
+            expected_jagua_sha256=None,
+            budget=M8_GATE3_CONCURRENCY_BUDGET,
+            source_tree=capture_source_tree(),
+        )
+    )
+
+    assert source.check.check.valid
+    assert source.check.check.total_exact_fallback_count == 0
+    assert source.first_generation.bundle_sha256 == source.check.bundle_sha256
+    assert repeated_generation.bundle_sha256 == source.first_generation.bundle_sha256
+    assert (
+        repeated_generation.semantic_bundle_bytes_sha256
+        == source.first_generation.semantic_bundle_bytes_sha256
+    )
+    assert repeated_generation.semantic_serialized_bytes == len(source.semantic_bundle_bytes)
+    assert source.first_generation.worker_pid != source.check.worker_pid
+    assert repeated_generation.worker_pid not in {
+        source.first_generation.worker_pid,
+        source.check.worker_pid,
+    }
+    assert source.first_generation.worker_pid != os.getpid()
+    assert source.check.worker_pid != os.getpid()
+    assert generator_profile.accounted_wall_fraction >= 0.90
+    assert source.check.profile.accounted_wall_fraction >= 0.90
+    assert {
+        "fact_bundle_generator_authority_reconstruction",
+        "fact_bundle_generation",
+        "fact_bundle_handoff_serialization",
+        "fact_bundle_prepared_context_session",
+        "fact_bundle_unchecked_traversal",
+        "fact_bundle_layer_assembly",
+    } <= _phase_names_from_report(generator_profile)
+    assert {
+        "fact_bundle_metadata_reconciliation",
+        "fact_bundle_authority_reconstruction",
+        "fact_bundle_authority_session",
+        "fact_bundle_action_traversal",
+    } <= _phase_names_from_report(source.check.profile)
+    assert generation_phase.result_payload_bytes > 0
+    assert repeat_generation_phase.result_payload_bytes > 0
+    assert checker_phase.task_payload_bytes > 0
+    assert timing.first_generation_phase_wall_seconds > (
+        source.first_generation.generation_wall_seconds
+    )
+    assert timing.second_generation_phase_wall_seconds > (
+        repeated_generation.generation_wall_seconds
+    )
+    assert timing.checker_phase_wall_seconds > source.check.checker_wall_seconds
+    assert timing.total_pipeline_wall_seconds >= (
+        timing.first_generation_phase_wall_seconds
+        + timing.second_generation_phase_wall_seconds
+        + timing.checker_phase_wall_seconds
+    )
+    expected_runtime_sha256 = experiment._portable_worker_runtime_identity(  # noqa: SLF001
+        runtime.jagua_executable,
+        None,
+    )[1]
+    assert (
+        timing.generator_runtime_content_sha256
+        == timing.repeat_generator_runtime_content_sha256
+        == timing.checker_runtime_content_sha256
+        == expected_runtime_sha256
+    )
+    assert not multiprocessing.active_children()
+
+
+def test_portable_profile_requires_the_committed_gate3_identity() -> None:
+    from yieldforge.experiments.contracts import semantic_sha256
+    from yieldforge.oracle import experiment
+
+    portable_path = (
+        Path(__file__).parents[2]
+        / "experiments/results/"
+        "m8-portable-fact-gate3-yfm8gate3-ea8a12969396172d7dbc4774.json"
+    )
+    official = experiment.M8PortableFactGate3Result.model_validate_json(
+        portable_path.read_bytes(),
+        strict=True,
+    )
+    draft = official.model_copy(
+        update={
+            "gate3_id": "yfm8gate3-" + "0" * 24,
+            "content_sha256": "sha256:" + "0" * 64,
+            "total_pipeline_wall_seconds": official.total_pipeline_wall_seconds + 1.0,
+        }
+    )
+    digest = semantic_sha256(draft, excluded_fields={"gate3_id", "content_sha256"})
+    forged = type(official).model_validate_json(
+        draft.model_copy(
+            update={
+                "gate3_id": f"yfm8gate3-{digest[:24]}",
+                "content_sha256": f"sha256:{digest}",
+            }
+        ).model_dump_json(),
+        strict=True,
+    )
+
+    with pytest.raises(ValueError, match="committed freeze"):
+        experiment._require_official_portable_profile_gate3(forged)  # noqa: SLF001
+
+
+def test_portable_profile_rejects_repeat_generation_identity_mismatch() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.concurrency import M8_GATE3_CONCURRENCY_BUDGET
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cell = experiment._ExecutionCell(  # noqa: SLF001
+        stream=runtime.replay_input.instances,
+        problem_ids=tuple(sorted(runtime.runtime_candidates)),
+        replay_input=runtime.replay_input,
+        verified=runtime.runtime_candidates,
+    )
+    generated = experiment._generate_portable_fact_bundle_worker(  # noqa: SLF001
+        cell,
+        runtime.rules,
+        runtime.jagua_executable,
+        "yfm7freeze-" + "b" * 24,
+        "sha256:" + "b" * 64,
+        None,
+        M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell,
+    )
+    repeated = experiment._discard_portable_bundle_bytes(generated)  # noqa: SLF001
+    mismatched = replace(
+        repeated,
+        semantic_bundle_bytes_sha256="sha256:" + "0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="repeated generation identity"):
+        experiment._require_portable_profile_repeat(generated, mismatched)  # noqa: SLF001
+
+
+def test_publish_portable_profile_rejects_untyped_self_rehashed_forgery(
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import experiment
+
+    forged = valid_profile_payload()
+    forged["official_gate3_id"] = "yfm8gate3-" + "0" * 24
+    semantic = {
+        key: value
+        for key, value in forged.items()
+        if key not in {"profile_id", "content_sha256"}
+    }
+    digest = experiment.semantic_sha256(semantic)
+    forged["profile_id"] = f"yfm8profile-{digest[:24]}"
+    forged["content_sha256"] = f"sha256:{digest}"
+
+    with pytest.raises(TypeError, match="exact result model"):
+        experiment.publish_portable_fact_profile(tmp_path / "forged.json", forged)
+
+
+def test_publish_portable_profile_strictly_round_trips_the_v2_result(
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
+
+    result = M8PortableHotspotProfileV2.model_validate(
+        valid_profile_payload(),
+        strict=True,
+    )
+    path = experiment.publish_portable_fact_profile(tmp_path / "profile.json", result)
+
+    assert M8PortableHotspotProfileV2.model_validate_json(
+        path.read_bytes(),
+        strict=True,
+    ) == result
+
+
+def test_publish_portable_profile_is_immutable_and_idempotent(tmp_path: Path) -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
+
+    first = M8PortableHotspotProfileV2.model_validate(
+        valid_profile_payload(),
+        strict=True,
+    )
+    path = experiment.publish_portable_fact_profile(tmp_path / "profile.json", first)
+    original = path.read_bytes()
+
+    changed_payload = valid_profile_payload()
+    changed_payload["generator_worker_wall_seconds"] = 1.1
+    changed_payload["core_generation_plus_checker_worker_wall_seconds"] = 4.1
+    changed_payload["repeated_generation_plus_checker_worker_wall_seconds"] = 6.1
+    from tests.oracle.test_profile_evidence import _rehash
+
+    changed = M8PortableHotspotProfileV2.model_validate(
+        _rehash(changed_payload),
+        strict=True,
+    )
+
+    assert experiment.publish_portable_fact_profile(path, first) == path
+    with pytest.raises(ValueError, match="existing profile differs"):
+        experiment.publish_portable_fact_profile(path, changed)
+    assert path.read_bytes() == original
+
+    symlink = tmp_path / "profile-link.json"
+    symlink.symlink_to(path)
+    with pytest.raises(ValueError, match="existing profile differs"):
+        experiment.publish_portable_fact_profile(symlink, first)
+
+
+def test_publish_portable_profile_rejects_symlinked_parent_directory(
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
+
+    result = M8PortableHotspotProfileV2.model_validate(
+        valid_profile_payload(),
+        strict=True,
+    )
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="parent directory"):
+        experiment.publish_portable_fact_profile(alias_parent / "profile.json", result)
+
+    assert not (real_parent / "profile.json").exists()
+
+
+def test_publish_portable_profile_rejects_replaced_temporary_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
+
+    result = M8PortableHotspotProfileV2.model_validate(
+        valid_profile_payload(),
+        strict=True,
+    )
+    original_link = experiment.os.link
+
+    def replace_then_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        experiment.os.unlink(source, dir_fd=src_dir_fd)
+        replacement = experiment.os.open(
+            source,
+            experiment.os.O_WRONLY | experiment.os.O_CREAT | experiment.os.O_EXCL,
+            0o600,
+            dir_fd=src_dir_fd,
+        )
+        try:
+            experiment.os.write(replacement, b"forged publication\n")
+        finally:
+            experiment.os.close(replacement)
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(experiment.os, "link", replace_then_link)
+
+    output = tmp_path / "profile.json"
+    with pytest.raises(ValueError, match="publication integrity differs"):
+        experiment.publish_portable_fact_profile(output, result)
+
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("worker_index", (0, 1, 2))
+def test_portable_profile_controller_rejects_each_worker_runtime_envelope(
+    worker_index: int,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    expected = ("yieldforge-m8-gate3-runtime-v1", "sha256:" + "1" * 64)
+    observed = [expected, expected, expected]
+    observed[worker_index] = (expected[0], "sha256:" + "0" * 64)
+
+    with pytest.raises(ValueError, match="worker runtime identity"):
+        experiment._require_portable_profile_worker_runtime_identities(  # noqa: SLF001
+            expected=expected,
+            observed=tuple(observed),
+        )
+
+
+def test_portable_profile_runtime_must_match_the_frozen_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import platform
+
+    from yieldforge.baseline.experiment import M7FrozenBaseline
+    from yieldforge.oracle import experiment
+
+    frozen = M7FrozenBaseline.model_validate_json(
+        (
+            Path(__file__).parents[2]
+            / "experiments/results/m7-frozen-baseline-v1.json"
+        ).read_bytes(),
+        strict=True,
+    )
+    monkeypatch.setattr(platform, "python_version", lambda: "0.0.0")
+
+    with pytest.raises(ValueError, match="runtime differs from the M7 freeze"):
+        experiment._portable_profile_runtime_identity(  # noqa: SLF001
+            frozen,
+            jagua_executable_sha256=frozen.runtime.jagua_executable_sha256,
+        )
+
+
 def test_portable_gate3_finalizer_rejects_small_pipeline_evidence() -> None:
     from tests.oracle.fixtures import two_problem_runtime
     from yieldforge.oracle import experiment

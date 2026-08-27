@@ -14,8 +14,10 @@ from yieldforge.baseline.archives import (
     build_verified_candidate_rejection_layout,
 )
 from yieldforge.baseline.contracts import (
+    M7ActionKind,
     M7CandidateArchiveEvidence,
     M7CandidateSetEvidence,
+    M7LayoutActionEvidence,
     ReusableGeometryProblem,
     TemporalInstanceBinding,
 )
@@ -38,7 +40,14 @@ from yieldforge.domain import (
 )
 from yieldforge.experiments.contracts import M0ExperimentContract, load_frozen_json, semantic_sha256
 from yieldforge.residuals.contracts import rule_set_from_m0
-from yieldforge.reuse.contracts import MaterialIdentity, MaterialProvenance, RemnantFitConfig
+from yieldforge.reuse.contracts import (
+    MaterialIdentity,
+    MaterialProvenance,
+    RemnantFitConfig,
+    RemnantLineage,
+    RemnantStock,
+    derive_remnant_id,
+)
 from yieldforge.temporal_benchmark.contracts import (
     CandidateArchiveRequirement,
     FeasibilityRateManifest,
@@ -843,6 +852,651 @@ def test_public_catalog_contains_every_action_and_exact_m7_fallback() -> None:
     assert len(catalog.actions) == catalog.standard_action_count + catalog.remnant_action_count
     assert catalog.standard_action_count == 2
     assert catalog.remnant_action_count == 0
+
+
+def test_new_standard_profiles_retain_one_exact_action_per_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    original = replay_module.build_standard_sheet_action
+    calls = []
+
+    def recording_build(*args, **kwargs):  # type: ignore[no-untyped-def]
+        action = original(*args, **kwargs)
+        calls.append(action)
+        return action
+
+    monkeypatch.setattr(replay_module, "build_standard_sheet_action", recording_build)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+
+    assert len(calls) == catalog.standard_action_count
+    assert all(
+        descriptor.evidence is None
+        for descriptor in catalog.actions
+        if descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    )
+    assert tuple(
+        action.candidate_id for action in catalog.generated.materialized_standard_actions
+    ) == tuple(
+        descriptor.candidate_id
+        for descriptor in catalog.actions
+        if descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    )
+    steps = tuple(
+        replay_module.apply_m7_action_descriptor(
+            runtime,
+            cursor=cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+            decision_key=(f"test_action_id={descriptor.action_id}",),
+        )
+        for descriptor in catalog.actions
+        if descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    )
+
+    assert len(calls) == catalog.standard_action_count
+    assert (
+        tuple(step.event.action for step in steps)
+        == catalog.generated.materialized_standard_actions
+    )
+
+
+def test_retained_action_capability_does_not_rehash_the_full_catalog_per_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    original = replay_module._materialized_standard_action_commitment  # noqa: SLF001
+    calls = 0
+
+    def recording_commitment(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        replay_module,
+        "_materialized_standard_action_commitment",
+        recording_commitment,
+    )
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    for descriptor in catalog.actions:
+        replay_module.apply_m7_action_descriptor(
+            runtime,
+            cursor=cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+            decision_key=(f"test_action_id={descriptor.action_id}",),
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "unselected_surface",
+    ("descriptor", "context", "candidate", "profile"),
+)
+def test_retained_standard_action_apply_does_not_scan_unselected_catalog_entries(
+    unselected_surface: str,
+) -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+
+    class RejectAnyUse:
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError(f"unselected {unselected_surface} was compared")
+
+        def __hash__(self) -> int:
+            raise AssertionError(f"unselected {unselected_surface} was hashed")
+
+    if unselected_surface == "descriptor":
+        target = catalog.actions[1]
+    elif unselected_surface == "context":
+        target = catalog.contexts[1]
+    elif unselected_surface == "candidate":
+        binding = runtime.replay_input.instances[catalog.event_position]
+        target = runtime.runtime_candidates[binding.problem_id].candidates[1]
+    else:
+        target = catalog.generated.standard_profiles[1]
+    field_name = "action_id" if unselected_surface in {"descriptor", "context"} else "candidate_id"
+    original_value = getattr(target, field_name)
+    object.__setattr__(target, field_name, RejectAnyUse())
+    try:
+        step = replay_module.apply_m7_action_descriptor(
+            runtime,
+            cursor=cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+            decision_key=("test=no-unselected-scan",),
+        )
+    finally:
+        object.__setattr__(target, field_name, original_value)
+
+    assert step.descriptor is descriptor
+
+
+def test_materialized_standard_actions_are_complete_for_warm_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    original = replay_module.build_standard_sheet_action
+    calls = []
+
+    def recording_build(*args, **kwargs):  # type: ignore[no-untyped-def]
+        action = original(*args, **kwargs)
+        calls.append(action)
+        return action
+
+    monkeypatch.setattr(replay_module, "build_standard_sheet_action", recording_build)
+    cold = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    warm = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+
+    assert len(calls) == cold.standard_action_count + warm.standard_action_count
+    assert tuple(
+        item.candidate_id for item in warm.generated.materialized_standard_actions
+    ) == tuple(item.candidate_id for item in warm.generated.standard_profiles)
+    assert (
+        tuple(
+            item.selected_stock.lineage.root_stock_id
+            for item in warm.generated.materialized_standard_actions
+        )
+        == (runtime.replay_input.instances[0].binding_id,) * warm.standard_action_count
+    )
+
+
+def test_retained_standard_action_matches_cold_materialization_exactly() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = next(
+        item for item in catalog.actions if item.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    )
+    retained = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=catalog,
+        descriptor=descriptor,
+        decision_key=("test=retained",),
+    )
+    cold_catalog = replace(
+        catalog,
+        generated=replace(catalog.generated, materialized_standard_actions=()),
+    )
+    rebuilt = replay_module.apply_m7_action_descriptor(
+        runtime,
+        cursor=cursor,
+        catalog=cold_catalog,
+        descriptor=descriptor,
+        decision_key=("test=retained",),
+    )
+
+    assert retained == rebuilt
+
+
+def test_materialized_standard_sidecar_requires_complete_ordered_unique_actions() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    generated = catalog.generated
+    actions = generated.materialized_standard_actions
+
+    with pytest.raises(ValueError, match="complete"):
+        replace(generated, materialized_standard_actions=actions[:-1])
+    with pytest.raises(ValueError, match="profile order"):
+        replace(generated, materialized_standard_actions=tuple(reversed(actions)))
+    with pytest.raises(ValueError, match="unique"):
+        replace(generated, materialized_standard_actions=(actions[0], actions[0]))
+
+
+def test_materialized_standard_sidecar_rejects_nonstandard_action() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    actions = catalog.generated.materialized_standard_actions
+    malformed = actions[0].model_copy(update={"kind": M7ActionKind.CONSUME_REMNANT})
+
+    with pytest.raises(ValueError, match="standard-sheet"):
+        replace(
+            catalog.generated,
+            materialized_standard_actions=(malformed, *actions[1:]),
+        )
+
+
+def test_materialized_standard_sidecar_rejects_profile_disagreement() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    actions = catalog.generated.materialized_standard_actions
+    malformed_accounting = actions[0].accounting.model_copy(
+        update={"scrap_area": actions[0].accounting.scrap_area + 1.0}
+    )
+    malformed = actions[0].model_copy(update={"accounting": malformed_accounting})
+
+    with pytest.raises(ValueError, match="exact cached profile"):
+        replace(
+            catalog.generated,
+            materialized_standard_actions=(malformed, *actions[1:]),
+        )
+
+
+def test_retained_standard_action_rejects_forged_content_addressed_sidecar() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = next(
+        item for item in catalog.actions if item.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    )
+    actions = catalog.generated.materialized_standard_actions
+    original = actions[0]
+    original_remnant = original.returned_remnants[0]
+    forged_lineage = RemnantLineage(
+        root_stock_id="forged-root-stock",
+        parent_remnant_id=original_remnant.lineage.parent_remnant_id,
+        ancestor_remnant_ids=original_remnant.lineage.ancestor_remnant_ids,
+        generation=original_remnant.lineage.generation,
+        source_candidate_id=original_remnant.lineage.source_candidate_id,
+        source_component_sha256=original_remnant.lineage.source_component_sha256,
+    )
+    forged_remnant = RemnantStock(
+        remnant_id=derive_remnant_id(
+            forged_lineage,
+            original_remnant.geometry,
+            original_remnant.material,
+        ),
+        geometry=original_remnant.geometry,
+        material=original_remnant.material,
+        root_sheet_area=original_remnant.root_sheet_area,
+        root_sheet_short_side=original_remnant.root_sheet_short_side,
+        lineage=forged_lineage,
+    )
+    semantic = original.model_dump(
+        mode="json",
+        exclude={"action_id", "content_sha256"},
+    )
+    semantic["returned_remnants"] = [forged_remnant.model_dump(mode="json")]
+    digest = semantic_sha256(semantic)
+    forged_payload = original.model_dump(mode="python")
+    forged_payload.update(
+        action_id=f"yfm7a-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        returned_remnants=(forged_remnant,),
+    )
+    forged = M7LayoutActionEvidence.model_validate(forged_payload, strict=True)
+    forged_generated = replace(
+        catalog.generated,
+        materialized_standard_actions=(forged, *actions[1:]),
+    )
+
+    assert replay_module._standard_action_matches_profile(  # noqa: SLF001
+        forged,
+        forged_generated.standard_profiles[0],
+    )
+    assert forged.returned_remnants != original.returned_remnants
+    assert replay_module.apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=cursor,
+        event_position=0,
+        action=forged,
+    ).inventory != replay_module.apply_m7_frozen_action_evidence(
+        runtime,
+        cursor=cursor,
+        event_position=0,
+        action=original,
+    ).inventory
+    with pytest.raises(ValueError, match="materialized standard action capability"):
+        replay_module.apply_m7_action_descriptor(
+            runtime,
+            cursor=cursor,
+            catalog=replace(catalog, generated=forged_generated),
+            descriptor=descriptor,
+            decision_key=("test=forged-retained-action",),
+        )
+
+
+def test_retained_standard_action_rejects_readdressed_registered_action() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    action = catalog.generated.materialized_standard_actions[0]
+    original_remnant = action.returned_remnants[0]
+    forged_lineage = RemnantLineage(
+        root_stock_id="forged-registered-root",
+        parent_remnant_id=original_remnant.lineage.parent_remnant_id,
+        ancestor_remnant_ids=original_remnant.lineage.ancestor_remnant_ids,
+        generation=original_remnant.lineage.generation,
+        source_candidate_id=original_remnant.lineage.source_candidate_id,
+        source_component_sha256=original_remnant.lineage.source_component_sha256,
+    )
+    forged_remnant = RemnantStock(
+        remnant_id=derive_remnant_id(
+            forged_lineage,
+            original_remnant.geometry,
+            original_remnant.material,
+        ),
+        geometry=original_remnant.geometry,
+        material=original_remnant.material,
+        root_sheet_area=original_remnant.root_sheet_area,
+        root_sheet_short_side=original_remnant.root_sheet_short_side,
+        lineage=forged_lineage,
+    )
+    semantic = action.model_dump(mode="json", exclude={"action_id", "content_sha256"})
+    semantic["returned_remnants"] = [forged_remnant.model_dump(mode="json")]
+    digest = semantic_sha256(semantic)
+    original_fields = action.action_id, action.content_sha256, action.returned_remnants
+    object.__setattr__(action, "action_id", f"yfm7a-{digest[:24]}")
+    object.__setattr__(action, "content_sha256", f"sha256:{digest}")
+    object.__setattr__(action, "returned_remnants", (forged_remnant,))
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=readdressed-registered-action",),
+            )
+    finally:
+        object.__setattr__(action, "action_id", original_fields[0])
+        object.__setattr__(action, "content_sha256", original_fields[1])
+        object.__setattr__(action, "returned_remnants", original_fields[2])
+
+
+def test_retained_standard_action_rejects_nested_candidate_mutation() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    binding = runtime.replay_input.instances[catalog.event_position]
+    candidate = runtime.runtime_candidates[binding.problem_id].candidates[0]
+    original_placement = candidate.placements[0]
+    candidate.placements[0] = original_placement.model_copy(
+        update={"translation": (1.0, 0.0)}
+    )
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-retained-candidate",),
+            )
+        cold_catalog = replace(
+            catalog,
+            generated=replace(catalog.generated, materialized_standard_actions=()),
+        )
+        with pytest.raises(ValueError):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=cold_catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-cold-candidate",),
+            )
+    finally:
+        candidate.placements[0] = original_placement
+
+
+def test_retained_standard_action_rejects_nested_rule_mutation() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    original_fraction = runtime.rules.primary.minimum_area_sheet_fraction
+    object.__setattr__(runtime.rules.primary, "minimum_area_sheet_fraction", 0.99)
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-retained-rules",),
+            )
+        cold_catalog = replace(
+            catalog,
+            generated=replace(catalog.generated, materialized_standard_actions=()),
+        )
+        with pytest.raises(ValueError):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=cold_catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-cold-rules",),
+            )
+    finally:
+        object.__setattr__(
+            runtime.rules.primary,
+            "minimum_area_sheet_fraction",
+            original_fraction,
+        )
+
+
+def test_retained_standard_action_rejects_nested_fit_config_mutation() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    fit_config = runtime.replay_input.fit_config
+    original_tolerance = fit_config.coordinate_tolerance
+    object.__setattr__(
+        fit_config,
+        "coordinate_tolerance",
+        original_tolerance * 100_000,
+    )
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-retained-fit-config",),
+            )
+        cold_catalog = replace(
+            catalog,
+            generated=replace(catalog.generated, materialized_standard_actions=()),
+        )
+        with pytest.raises(ValueError):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=cold_catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-cold-fit-config",),
+            )
+    finally:
+        object.__setattr__(fit_config, "coordinate_tolerance", original_tolerance)
+
+
+def test_retained_standard_action_rejects_nested_rate_mutation() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    rates = runtime.replay_input.rates
+    original_rate = rates.purchase_cost_per_area
+    object.__setattr__(rates, "purchase_cost_per_area", original_rate + 1.0)
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-retained-rates",),
+            )
+    finally:
+        object.__setattr__(rates, "purchase_cost_per_area", original_rate)
+
+
+def test_retained_standard_action_rejects_nested_event_binding_mutation() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    binding = runtime.replay_input.instances[catalog.event_position]
+    original_release = binding.released_at
+    object.__setattr__(binding, "released_at", original_release + timedelta(minutes=5))
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=mutated-retained-binding",),
+            )
+    finally:
+        object.__setattr__(binding, "released_at", original_release)
+
+
+def test_retained_standard_action_rejects_cursor_semantic_drift() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    drifted_cursor = replace(
+        cursor,
+        current_time=cursor.current_time - timedelta(minutes=5),
+    )
+
+    with pytest.raises(ValueError, match="materialized standard action capability"):
+        replay_module.apply_m7_action_descriptor(
+            runtime,
+            cursor=drifted_cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+            decision_key=("test=drifted-retained-cursor",),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("remnant_action_count", "fit_search_query_count"),
+)
+def test_retained_standard_action_rejects_generated_event_metadata_drift(
+    field_name: str,
+) -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    original_value = getattr(catalog.generated, field_name)
+    object.__setattr__(catalog.generated, field_name, original_value + 1)
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=drifted-retained-generated-metadata",),
+            )
+    finally:
+        object.__setattr__(catalog.generated, field_name, original_value)
+
+
+def test_retained_standard_action_rejects_catalog_transition_drift() -> None:
+    runtime = _two_event_runtime()
+    cursor = replay_module.initial_m7_cursor(runtime.replay_input)
+    catalog = replay_module.enumerate_m7_action_catalog(
+        runtime,
+        cursor=cursor,
+        materialize_standard_actions=True,
+    )
+    descriptor = catalog.actions[0]
+    original_storage_cost = catalog.storage_cost
+    object.__setattr__(catalog, "storage_cost", original_storage_cost + 1.0)
+    try:
+        with pytest.raises(ValueError, match="materialized standard action capability"):
+            replay_module.apply_m7_action_descriptor(
+                runtime,
+                cursor=cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=("test=drifted-retained-catalog-transition",),
+            )
+    finally:
+        object.__setattr__(catalog, "storage_cost", original_storage_cost)
 
 
 def test_public_nonzero_continuation_matches_complete_replay() -> None:

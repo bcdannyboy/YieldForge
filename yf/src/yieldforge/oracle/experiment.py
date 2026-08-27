@@ -62,6 +62,7 @@ from yieldforge.oracle.factored import (
     M8UncheckedBundleRequest,
     score_unchecked_fact_bundle,
 )
+from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
 from yieldforge.oracle.profiling import (
     M8ProfilePhase,
     M8ProfileReport,
@@ -75,6 +76,13 @@ from yieldforge.oracle.proofs import (
     m8_suffix_sha256,
 )
 from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
+from yieldforge.oracle.source_attestation import (
+    SourceAttestedOperation,
+    SourceTreeSnapshot,
+    activate_source_attestation,
+    capture_source_tree,
+    source_tree_implementation_identity,
+)
 from yieldforge.oracle.sparse import (
     M8CertificateActionResult,
     M8CommonFactDifferentialAudit,
@@ -169,9 +177,7 @@ class M8AuditActionBinding(BaselineContractModel):
 
     @model_validator(mode="after")
     def require_canonical_binding(self) -> Self:
-        if self.witness_classifications != _classification_tuple(
-            self.witness_classifications
-        ):
+        if self.witness_classifications != _classification_tuple(self.witness_classifications):
             raise ValueError("M8 audit witness classifications must be canonical and unique")
         if _action_kind(self.catalog_action_id) != self.action_kind:
             raise ValueError("M8 audit action kind differs from its exact catalog ID")
@@ -237,22 +243,18 @@ class M8CertificateProofCell(BaselineContractModel):
             raise ValueError("M8 current action kinds must be sorted and unique")
         if (
             self.current_action_ids != tuple(sorted(set(self.current_action_ids)))
-            or self.proof_catalog_action_ids
-            != tuple(sorted(set(self.proof_catalog_action_ids)))
+            or self.proof_catalog_action_ids != tuple(sorted(set(self.proof_catalog_action_ids)))
             or self.current_action_ids != self.proof_catalog_action_ids
             or len(self.current_action_ids) != self.current_action_count
         ):
             raise ValueError("M8 cell proof action IDs do not cover the current catalog")
         if not set(self.audit_action_ids) <= set(self.current_action_ids):
             raise ValueError("M8 cell audit IDs are absent from the current catalog")
-        if self.witness_classifications != _classification_tuple(
-            self.witness_classifications
-        ):
+        if self.witness_classifications != _classification_tuple(self.witness_classifications):
             raise ValueError("M8 cell witness classifications must be canonical and unique")
         if (
             self.checked_action_count != self.current_action_count
-            or self.valid_proof_count + self.checker_failure_count
-            != self.checked_action_count
+            or self.valid_proof_count + self.checker_failure_count != self.checked_action_count
         ):
             raise ValueError("M8 cell proof counts do not reconcile")
         if self.sampled_checker_failure_count > len(self.audit_action_ids):
@@ -366,9 +368,7 @@ class M8CertificateProofResult(BaselineContractModel):
         )
         for field_name, expected in aggregates.items():
             if getattr(self, field_name) != expected:
-                raise ValueError(
-                    f"M8 certificate aggregate {field_name} does not reconcile"
-                )
+                raise ValueError(f"M8 certificate aggregate {field_name} does not reconcile")
         expected_decision = _gate_decision(
             current_action_count=self.current_action_count,
             checked_action_count=self.checked_action_count,
@@ -475,12 +475,8 @@ class M8PortableFactGate3Cell(BaselineContractModel):
     event_count: Literal[2]
     first_bundle_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     second_bundle_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    first_semantic_bundle_bytes_sha256: StrictStr = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
-    second_semantic_bundle_bytes_sha256: StrictStr = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    first_semantic_bundle_bytes_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    second_semantic_bundle_bytes_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     bundle_repeat_match: Literal[True] = True
     bundle_byte_cap: Literal[134217728] = _M8_GATE3_MAX_BUNDLE_BYTES
     semantic_serialized_bytes: StrictInt = Field(gt=0)
@@ -534,31 +530,29 @@ class M8PortableFactGate3Cell(BaselineContractModel):
         )
         if (
             self.first_bundle_sha256 != self.second_bundle_sha256
-            or self.first_semantic_bundle_bytes_sha256
-            != self.second_semantic_bundle_bytes_sha256
+            or self.first_semantic_bundle_bytes_sha256 != self.second_semantic_bundle_bytes_sha256
             or self.semantic_serialized_bytes != self.repeated_semantic_serialized_bytes
             or self.semantic_serialized_bytes > self.bundle_byte_cap
             or self.fixed_layer_node_count != layer_total
             or self.checked_common_lemma_count != self.common_lemma_count
             or self.checked_influence_fact_count != self.influence_fact_count
             or self.checked_action_root_count != self.generated_action_root_count
-            or self.counted_translation_audit_count
-            != self.producer_counted_search_lemma_count
-            or self.counted_translation_audit_call_count
-            != self.producer_counted_search_lemma_count
+            or self.counted_translation_audit_count != self.producer_counted_search_lemma_count
+            or self.counted_translation_audit_call_count != self.producer_counted_search_lemma_count
         ):
             raise ValueError("M8 portable Gate-3 cell metadata does not reconcile")
-        expected_roots = (
-            428 if self.regime is TemporalRegime.NO_SIGNAL else 459
-        )
-        if self.regime not in {
-            TemporalRegime.NO_SIGNAL,
-            TemporalRegime.REGIME_SHIFT,
-        } or self.generated_action_root_count != expected_roots:
+        expected_roots = 428 if self.regime is TemporalRegime.NO_SIGNAL else 459
+        if (
+            self.regime
+            not in {
+                TemporalRegime.NO_SIGNAL,
+                TemporalRegime.REGIME_SHIFT,
+            }
+            or self.generated_action_root_count != expected_roots
+        ):
             raise ValueError("M8 portable Gate-3 cell root count differs from the freeze")
         if self.total_exact_fallback_wall_seconds != (
-            self.common_exact_fallback_wall_seconds
-            + self.influence_exact_fallback_wall_seconds
+            self.common_exact_fallback_wall_seconds + self.influence_exact_fallback_wall_seconds
         ):
             raise ValueError("M8 portable Gate-3 fallback timing does not reconcile")
         if self.total_exact_fallback_wall_seconds != 0.0:
@@ -572,15 +566,11 @@ class M8PortableFactGate3Result(BaselineContractModel):
     schema_version: Literal["yieldforge.m8-gate3-portable-fact-evidence.v1"] = (
         "yieldforge.m8-gate3-portable-fact-evidence.v1"
     )
-    execution_mode: Literal["fresh_process_unchecked_bytes_v2"] = (
-        "fresh_process_unchecked_bytes_v2"
-    )
+    execution_mode: Literal["fresh_process_unchecked_bytes_v2"] = "fresh_process_unchecked_bytes_v2"
     parent_official_schema_version: Literal["yieldforge.m8-certificate-proof.v3"] = (
         "yieldforge.m8-certificate-proof.v3"
     )
-    parent_v3_proof_id: Literal["yfm8proof-b296ba919c07d55ece14c6db"] = (
-        _M8_GATE3_PARENT_V3_PROOF_ID
-    )
+    parent_v3_proof_id: Literal["yfm8proof-b296ba919c07d55ece14c6db"] = _M8_GATE3_PARENT_V3_PROOF_ID
     parent_v3_content_sha256: Literal[
         "sha256:b296ba919c07d55ece14c6dbb6ecbce1aa4a24e612dd1a251757e7a3b739739d"
     ] = _M8_GATE3_PARENT_V3_CONTENT_SHA256
@@ -624,20 +614,14 @@ class M8PortableFactGate3Result(BaselineContractModel):
     process_exit_validation_wall_seconds: StrictFloat = Field(ge=0.0)
     worker_task_payload_bytes: StrictInt = Field(ge=0)
     worker_result_payload_bytes: StrictInt = Field(ge=0)
-    per_worker_task_payload_byte_cap: Literal[201326592] = (
-        _M8_GATE3_MAX_WORKER_TASK_BYTES
-    )
-    per_worker_result_payload_byte_cap: Literal[201326592] = (
-        _M8_GATE3_MAX_WORKER_RESULT_BYTES
-    )
+    per_worker_task_payload_byte_cap: Literal[201326592] = _M8_GATE3_MAX_WORKER_TASK_BYTES
+    per_worker_result_payload_byte_cap: Literal[201326592] = _M8_GATE3_MAX_WORKER_RESULT_BYTES
     retained_first_generation_bundle_bytes: StrictInt = Field(ge=0)
     retained_first_generation_bundle_byte_cap: Literal[268435456] = (
         _M8_GATE3_MAX_RETAINED_BUNDLE_BYTES
     )
     checker_task_payload_bytes: StrictInt = Field(ge=0)
-    checker_task_payload_byte_cap: Literal[402653184] = (
-        _M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES
-    )
+    checker_task_payload_byte_cap: Literal[402653184] = _M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES
     total_pipeline_wall_seconds: StrictFloat = Field(gt=0.0)
     timing_semantics: Literal[_PORTABLE_TIMING_SEMANTICS] = _PORTABLE_TIMING_SEMANTICS
     controller_registry_state_before: M8PortableRegistryEvidence
@@ -645,9 +629,7 @@ class M8PortableFactGate3Result(BaselineContractModel):
     surviving_registry_count: Literal[0] = 0
     surviving_descendant_count: Literal[0] = 0
     evaluation_accessed: Literal[False] = False
-    pipeline_decision: Literal["pass_portable_fact_pipeline"] = (
-        "pass_portable_fact_pipeline"
-    )
+    pipeline_decision: Literal["pass_portable_fact_pipeline"] = "pass_portable_fact_pipeline"
     claim_ceiling: Literal[
         "calibration_portable_fact_pipeline_software_evidence_only_not_gate3_"
         "hypothesis_evaluation_advantage_savings_physical_or_commercial_evidence"
@@ -661,10 +643,7 @@ class M8PortableFactGate3Result(BaselineContractModel):
         if tuple(item.regime for item in self.cells) != (
             TemporalRegime.NO_SIGNAL,
             TemporalRegime.REGIME_SHIFT,
-        ) or any(
-            item.temporal_seed != 2026082300 or item.event_count != 2
-            for item in self.cells
-        ):
+        ) or any(item.temporal_seed != 2026082300 or item.event_count != 2 for item in self.cells):
             raise ValueError("M8 portable Gate-3 probes differ from the frozen selector")
         if (
             self.semantic_serialized_bytes
@@ -682,17 +661,19 @@ class M8PortableFactGate3Result(BaselineContractModel):
             raise ValueError("M8 portable Gate-3 aggregates do not reconcile")
         if self.peak_compute_count > self.compute_slot_cap:
             raise ValueError("M8 portable Gate-3 exceeds the compute-slot cap")
-        if abs(
-            self.worker_payload_handoff_wall_seconds
-            - (
-                self.inbound_payload_handoff_wall_seconds
-                + self.outbound_payload_handoff_wall_seconds
+        if (
+            abs(
+                self.worker_payload_handoff_wall_seconds
+                - (
+                    self.inbound_payload_handoff_wall_seconds
+                    + self.outbound_payload_handoff_wall_seconds
+                )
             )
-        ) > _PORTABLE_TIMING_TOLERANCE_SECONDS:
+            > _PORTABLE_TIMING_TOLERANCE_SECONDS
+        ):
             raise ValueError("M8 portable Gate-3 payload handoff timing does not reconcile")
         if (
-            self.retained_first_generation_bundle_bytes
-            != self.semantic_serialized_bytes
+            self.retained_first_generation_bundle_bytes != self.semantic_serialized_bytes
             or self.retained_first_generation_bundle_bytes
             > self.retained_first_generation_bundle_byte_cap
             or self.checker_task_payload_bytes > self.checker_task_payload_byte_cap
@@ -790,14 +771,10 @@ def _coverage_gaps(
     for cell in cells:
         bindings = by_cell[cell.regime]
         audited_witnesses = {
-            classification
-            for item in bindings
-            for classification in item.witness_classifications
+            classification for item in bindings for classification in item.witness_classifications
         }
         audited_kinds = {item.action_kind for item in bindings}
-        per_cell_missing_witnesses.update(
-            set(cell.witness_classifications) - audited_witnesses
-        )
+        per_cell_missing_witnesses.update(set(cell.witness_classifications) - audited_witnesses)
         missing_kinds.update(set(cell.current_action_kinds) - audited_kinds)
     present_horizons = sorted({item.future_event_count for item in cells})
     if present_horizons:
@@ -814,9 +791,7 @@ def _coverage_gaps(
     missing_regimes = tuple(item for item in TemporalRegime if item not in audited_regimes)
     required_witnesses = set(_WITNESS_ORDER)
     full_witnesses = {
-        classification
-        for cell in cells
-        for classification in cell.witness_classifications
+        classification for cell in cells for classification in cell.witness_classifications
     }
     audit_witnesses = {
         classification
@@ -826,9 +801,7 @@ def _coverage_gaps(
     missing_full = required_witnesses - full_witnesses
     missing_audit = required_witnesses - audit_witnesses
     return (
-        _classification_tuple(
-            per_cell_missing_witnesses | missing_full | missing_audit
-        ),
+        _classification_tuple(per_cell_missing_witnesses | missing_full | missing_audit),
         _classification_tuple(missing_full),
         _classification_tuple(missing_audit),
         tuple(sorted(missing_kinds)),
@@ -849,23 +822,15 @@ def _aggregate_certificate_metrics(
     failures = sum(item.checker_failure_count for item in cells)
     sampled_failures = sum(item.sampled_checker_failure_count for item in cells)
     mismatches = sum(item.audit_mismatch_count for item in cells)
-    certificate_seconds = round(
-        sum(item.certificate_elapsed_seconds for item in cells), 6
-    )
+    certificate_seconds = round(sum(item.certificate_elapsed_seconds for item in cells), 6)
     checker_seconds = round(sum(item.checker_elapsed_seconds for item in cells), 6)
     pipeline_seconds = round(certificate_seconds + checker_seconds, 6)
-    reference_seconds = round(
-        sum(item.sampled_reference_elapsed_seconds for item in cells), 6
-    )
+    reference_seconds = round(sum(item.sampled_reference_elapsed_seconds for item in cells), 6)
     sampled_certificate_seconds = round(
         sum(item.sampled_certificate_elapsed_seconds for item in cells), 6
     )
-    sampled_checker_seconds = round(
-        sum(item.sampled_checker_elapsed_seconds for item in cells), 6
-    )
-    sampled_pipeline_seconds = round(
-        sampled_certificate_seconds + sampled_checker_seconds, 6
-    )
+    sampled_checker_seconds = round(sum(item.sampled_checker_elapsed_seconds for item in cells), 6)
+    sampled_pipeline_seconds = round(sampled_certificate_seconds + sampled_checker_seconds, 6)
     speedup = round(reference_seconds / sampled_pipeline_seconds, 6)
     throughput = round(current / certificate_pipeline_wall_seconds, 6)
     observed_action_events = sum(
@@ -880,11 +845,7 @@ def _aggregate_certificate_metrics(
     )
     projected_days = round(projected_seconds / 86_400.0, 6)
     witness_classifications = _classification_tuple(
-        {
-            classification
-            for item in cells
-            for classification in item.witness_classifications
-        }
+        {classification for item in cells for classification in item.witness_classifications}
     )
     certified_event_count = sum(item.certified_event_count for item in cells)
     exact_escape_count = sum(item.exact_escape_count for item in cells)
@@ -984,12 +945,10 @@ def finalize_certificate_proof(
 ) -> M8CertificateProofResult:
     """Reconcile the six calibration cells and apply the revised hard gate."""
 
-    ordered_cells = tuple(
-        sorted(cells, key=lambda item: tuple(TemporalRegime).index(item.regime))
-    )
-    if len(ordered_cells) != 6 or tuple(
-        item.regime for item in ordered_cells
-    ) != tuple(TemporalRegime):
+    ordered_cells = tuple(sorted(cells, key=lambda item: tuple(TemporalRegime).index(item.regime)))
+    if len(ordered_cells) != 6 or tuple(item.regime for item in ordered_cells) != tuple(
+        TemporalRegime
+    ):
         raise ValueError("M8 certificate proof requires all six registered cells")
     ordered_bindings = tuple(sorted(audit_bindings, key=_audit_binding_key))
     _require_audit_reconciliation(ordered_cells, ordered_bindings)
@@ -1007,20 +966,14 @@ def finalize_certificate_proof(
         checked_action_count=int(aggregates["checked_action_count"]),
         valid_proof_count=int(aggregates["valid_proof_count"]),
         checker_failure_count=int(aggregates["checker_failure_count"]),
-        sampled_checker_failure_count=int(
-            aggregates["sampled_checker_failure_count"]
-        ),
+        sampled_checker_failure_count=int(aggregates["sampled_checker_failure_count"]),
         audit_mismatch_count=int(aggregates["audit_mismatch_count"]),
         certified_event_count=int(aggregates["certified_event_count"]),
         exact_escape_count=int(aggregates["exact_escape_count"]),
         state_rejoin_count=int(aggregates["state_rejoin_count"]),
-        uncovered_witness_classifications=aggregates[
-            "uncovered_witness_classifications"
-        ],  # type: ignore[arg-type]
+        uncovered_witness_classifications=aggregates["uncovered_witness_classifications"],  # type: ignore[arg-type]
         uncovered_action_kinds=aggregates["uncovered_action_kinds"],  # type: ignore[arg-type]
-        uncovered_future_event_counts=aggregates[
-            "uncovered_future_event_counts"
-        ],  # type: ignore[arg-type]
+        uncovered_future_event_counts=aggregates["uncovered_future_event_counts"],  # type: ignore[arg-type]
         uncovered_regimes=aggregates["uncovered_regimes"],  # type: ignore[arg-type]
         speedup=float(aggregates["sampled_speedup"]),
         projected_days=float(aggregates["projected_held_out_calendar_days"]),
@@ -1092,7 +1045,13 @@ def _portable_registry_evidence(
 ) -> M8PortableRegistryEvidence:
     if not state.is_clean:
         raise ValueError("M8 portable registry evidence is not clean")
-    return M8PortableRegistryEvidence.model_validate(vars(state), strict=True)
+    return M8PortableRegistryEvidence.model_validate(
+        {
+            name: getattr(state, name)
+            for name in M8PortableRegistryEvidence.model_fields
+        },
+        strict=True,
+    )
 
 
 def _strict_portable_pipeline_execution(
@@ -1217,9 +1176,7 @@ def finalize_portable_fact_gate3(
         first = execution.first_generation
         second = execution.second_generation
         checked = execution.check
-        if (
-            _portable_generation_metadata(first) != _portable_generation_metadata(second)
-        ):
+        if _portable_generation_metadata(first) != _portable_generation_metadata(second):
             raise ValueError("M8 portable Gate-3 repeated bytes differ")
         _reconcile_portable_fact_handoff(first, checked)
         result = checked.check
@@ -1229,12 +1186,10 @@ def finalize_portable_fact_gate3(
             first_generation_worker_wall_seconds=float(first.generation_wall_seconds),
             second_generation_worker_wall_seconds=float(second.generation_wall_seconds),
             producer_bundle_serialization_wall_seconds=float(
-                first.telemetry.serialization_seconds
-                + second.telemetry.serialization_seconds
+                first.telemetry.serialization_seconds + second.telemetry.serialization_seconds
             ),
             producer_handoff_serialization_wall_seconds=float(
-                first.handoff_serialization_wall_seconds
-                + second.handoff_serialization_wall_seconds
+                first.handoff_serialization_wall_seconds + second.handoff_serialization_wall_seconds
             ),
             metadata_reconciliation_wall_seconds=float(
                 checked.metadata_reconciliation_wall_seconds
@@ -1271,12 +1226,8 @@ def finalize_portable_fact_gate3(
                 event_count=first.event_count,
                 first_bundle_sha256=first.bundle_sha256,
                 second_bundle_sha256=second.bundle_sha256,
-                first_semantic_bundle_bytes_sha256=(
-                    first.semantic_bundle_bytes_sha256
-                ),
-                second_semantic_bundle_bytes_sha256=(
-                    second.semantic_bundle_bytes_sha256
-                ),
+                first_semantic_bundle_bytes_sha256=(first.semantic_bundle_bytes_sha256),
+                second_semantic_bundle_bytes_sha256=(second.semantic_bundle_bytes_sha256),
                 semantic_serialized_bytes=first.semantic_serialized_bytes,
                 repeated_semantic_serialized_bytes=second.semantic_serialized_bytes,
                 fixed_layer_node_count=first.fixed_layer_node_count,
@@ -1295,28 +1246,18 @@ def finalize_portable_fact_gate3(
                 producer_counted_inventory_evidence_row_count=(
                     first.telemetry.counted_inventory_evidence_count
                 ),
-                producer_counted_search_lemma_count=(
-                    first.counted_search_lemma_count
-                ),
+                producer_counted_search_lemma_count=(first.counted_search_lemma_count),
                 counted_translation_audit_count=result.counted_translation_audit_count,
-                counted_translation_audit_call_count=(
-                    checked.counted_translation_audit_call_count
-                ),
-                influence_translation_audit_count=(
-                    result.influence_translation_audit_count
-                ),
+                counted_translation_audit_call_count=(checked.counted_translation_audit_call_count),
+                influence_translation_audit_count=(result.influence_translation_audit_count),
                 common_exact_fallback_count=result.common_exact_fallback_count,
                 influence_exact_fallback_count=result.influence_exact_fallback_count,
                 total_exact_fallback_count=result.total_exact_fallback_count,
-                common_exact_fallback_wall_seconds=float(
-                    result.common_exact_fallback_wall_seconds
-                ),
+                common_exact_fallback_wall_seconds=float(result.common_exact_fallback_wall_seconds),
                 influence_exact_fallback_wall_seconds=float(
                     result.influence_exact_fallback_wall_seconds
                 ),
-                total_exact_fallback_wall_seconds=float(
-                    result.total_exact_fallback_wall_seconds
-                ),
+                total_exact_fallback_wall_seconds=float(result.total_exact_fallback_wall_seconds),
                 check_valid=result.valid,
                 failure_code=result.failure_code,
                 timing=timing,
@@ -1326,17 +1267,13 @@ def finalize_portable_fact_gate3(
                 second_generator_registry_state=_portable_registry_evidence(
                     second.registry_state_after
                 ),
-                checker_registry_state=_portable_registry_evidence(
-                    checked.registry_state_after
-                ),
+                checker_registry_state=_portable_registry_evidence(checked.registry_state_after),
             )
         )
     ordered_cells = tuple(
         sorted(
             cells,
-            key=lambda item: (
-                0 if item.regime is TemporalRegime.NO_SIGNAL else 1,
-            ),
+            key=lambda item: (0 if item.regime is TemporalRegime.NO_SIGNAL else 1,),
         )
     )
     if len(ordered_cells) != 2:
@@ -1363,18 +1300,12 @@ def finalize_portable_fact_gate3(
         "cells": tuple(item.model_dump(mode="json") for item in ordered_cells),
         "bundle_byte_cap": _M8_GATE3_MAX_BUNDLE_BYTES,
         "bundle_root_repeat_match": True,
-        "semantic_serialized_bytes": sum(
-            item.semantic_serialized_bytes for item in ordered_cells
-        ),
-        "fixed_layer_node_count": sum(
-            item.fixed_layer_node_count for item in ordered_cells
-        ),
+        "semantic_serialized_bytes": sum(item.semantic_serialized_bytes for item in ordered_cells),
+        "fixed_layer_node_count": sum(item.fixed_layer_node_count for item in ordered_cells),
         "generated_action_root_count": sum(
             item.generated_action_root_count for item in ordered_cells
         ),
-        "checked_action_root_count": sum(
-            item.checked_action_root_count for item in ordered_cells
-        ),
+        "checked_action_root_count": sum(item.checked_action_root_count for item in ordered_cells),
         "total_exact_fallback_count": 0,
         "total_exact_fallback_wall_seconds": float(
             sum(item.total_exact_fallback_wall_seconds for item in ordered_cells)
@@ -1384,28 +1315,20 @@ def finalize_portable_fact_gate3(
         "nested_processes_per_outer_worker": pipeline.nested_process_count,
         "peak_compute_count": pipeline.peak_compute_count,
         "compute_slot_cap": 8,
-        "first_generation_phase_wall_seconds": float(
-            pipeline.first_generation_phase_wall_seconds
-        ),
+        "first_generation_phase_wall_seconds": float(pipeline.first_generation_phase_wall_seconds),
         "second_generation_phase_wall_seconds": float(
             pipeline.second_generation_phase_wall_seconds
         ),
         "checker_phase_wall_seconds": float(pipeline.checker_phase_wall_seconds),
-        "task_serialization_wall_seconds": float(
-            pipeline.task_serialization_wall_seconds
-        ),
-        "result_serialization_wall_seconds": float(
-            pipeline.result_serialization_wall_seconds
-        ),
+        "task_serialization_wall_seconds": float(pipeline.task_serialization_wall_seconds),
+        "result_serialization_wall_seconds": float(pipeline.result_serialization_wall_seconds),
         "inbound_payload_handoff_wall_seconds": float(
             pipeline.inbound_payload_handoff_wall_seconds
         ),
         "outbound_payload_handoff_wall_seconds": float(
             pipeline.outbound_payload_handoff_wall_seconds
         ),
-        "worker_payload_handoff_wall_seconds": float(
-            pipeline.worker_payload_handoff_wall_seconds
-        ),
+        "worker_payload_handoff_wall_seconds": float(pipeline.worker_payload_handoff_wall_seconds),
         "process_exit_validation_wall_seconds": float(
             pipeline.process_exit_validation_wall_seconds
         ),
@@ -1413,9 +1336,7 @@ def finalize_portable_fact_gate3(
         "worker_result_payload_bytes": pipeline.worker_result_payload_bytes,
         "per_worker_task_payload_byte_cap": pipeline.per_worker_task_payload_byte_cap,
         "per_worker_result_payload_byte_cap": pipeline.per_worker_result_payload_byte_cap,
-        "retained_first_generation_bundle_bytes": (
-            pipeline.retained_first_generation_bundle_bytes
-        ),
+        "retained_first_generation_bundle_bytes": (pipeline.retained_first_generation_bundle_bytes),
         "retained_first_generation_bundle_byte_cap": (
             pipeline.retained_first_generation_bundle_byte_cap
         ),
@@ -1501,6 +1422,7 @@ class _PortableRegistryState:
     """Named process-local authority state captured outside all worker scopes."""
 
     authoritative_proof_runtime: int = 0
+    materialized_standard_action: int = 0
     legacy_prepared_checker: int = 0
     prepared_generator: int = 0
     prepared_translation_layout: int = 0
@@ -1512,13 +1434,10 @@ class _PortableRegistryState:
 
     @property
     def is_clean(self) -> bool:
-        return (
-            self.translation_audit_processes is None
-            and all(
-                value == 0
-                for name, value in vars(self).items()
-                if name != "translation_audit_processes"
-            )
+        return self.translation_audit_processes is None and all(
+            value == 0
+            for name, value in vars(self).items()
+            if name != "translation_audit_processes"
         )
 
 
@@ -1557,6 +1476,34 @@ class _PortableBundleWorkerResult(_PortableBundleIdentityWorkerResult):
     """First-generation exact unchecked bytes plus untrusted producer telemetry."""
 
     semantic_bundle_bytes: bytes
+
+
+@dataclass(frozen=True)
+class _PortableGenerationProfileWorkerResult:
+    """One fresh unchecked generation plus its non-semantic phase profile."""
+
+    generation: _PortableBundleWorkerResult
+    profile: M8ProfileReport
+    runtime_id: str
+    runtime_content_sha256: str
+
+
+@dataclass(frozen=True)
+class _PortableRepeatGenerationProfileWorkerResult:
+    """One fresh repeat generation plus its worker-local runtime identity."""
+
+    generation: _PortableBundleIdentityWorkerResult
+    runtime_id: str
+    runtime_content_sha256: str
+
+
+@dataclass(frozen=True)
+class _PortableCheckProfileWorkerResult:
+    """One fresh checker result plus its worker-local runtime identity."""
+
+    check: _PortableCheckWorkerResult
+    runtime_id: str
+    runtime_content_sha256: str
 
 
 @dataclass(frozen=True)
@@ -1606,6 +1553,19 @@ class _PortableFactCellExecution:
     first_generation: _PortableBundleIdentityWorkerResult
     second_generation: _PortableBundleIdentityWorkerResult
     check: _PortableCheckWorkerResult
+
+
+@dataclass(frozen=True)
+class _PortableFactProfileTiming:
+    """Controller-observed profile timing with the official Gate-3 boundaries."""
+
+    first_generation_phase_wall_seconds: float
+    second_generation_phase_wall_seconds: float
+    checker_phase_wall_seconds: float
+    total_pipeline_wall_seconds: float
+    generator_runtime_content_sha256: str
+    repeat_generator_runtime_content_sha256: str
+    checker_runtime_content_sha256: str
 
 
 @dataclass(frozen=True)
@@ -1690,9 +1650,7 @@ def _order_worker_results(results):  # type: ignore[no-untyped-def]
     try:
         return tuple(by_regime[regime] for regime in TemporalRegime)
     except KeyError as error:
-        raise ValueError(
-            "M8 distributed phase requires exactly one result per regime"
-        ) from error
+        raise ValueError("M8 distributed phase requires exactly one result per regime") from error
 
 
 def _run_process_phase(
@@ -1712,12 +1670,8 @@ def _run_process_phase(
         raise ValueError("M8 distributed process count is outside the frozen boundary")
     if timeout_seconds <= 0:
         raise ValueError("M8 distributed phase timeout must be positive")
-    if (
-        aggregate_task_payload_byte_cap is not None
-        and (
-            type(aggregate_task_payload_byte_cap) is not int
-            or aggregate_task_payload_byte_cap <= 0
-        )
+    if aggregate_task_payload_byte_cap is not None and (
+        type(aggregate_task_payload_byte_cap) is not int or aggregate_task_payload_byte_cap <= 0
     ):
         raise ValueError("M8 distributed aggregate task payload cap must be positive")
 
@@ -1747,8 +1701,7 @@ def _run_process_phase(
             raise ValueError("M8 distributed task exceeds the frozen payload cap")
         if (
             aggregate_task_payload_byte_cap is not None
-            and task_payload_bytes + len(serialized_task)
-            > aggregate_task_payload_byte_cap
+            and task_payload_bytes + len(serialized_task) > aggregate_task_payload_byte_cap
         ):
             raise ValueError("M8 distributed aggregate task payload exceeds the frozen cap")
         task_payload_bytes += len(serialized_task)
@@ -1776,9 +1729,7 @@ def _run_process_phase(
         for _ in range(min(process_count, len(tasks))):
             start_next()
         while completed < len(tasks):
-            remaining = min(
-                owned.deadline for _index, owned in active.values()
-            ) - monotonic()
+            remaining = min(owned.deadline for _index, owned in active.values()) - monotonic()
             ready = wait(
                 tuple(active),
                 timeout=max(0.0, min(1.0, remaining)),
@@ -1799,29 +1750,17 @@ def _run_process_phase(
                 if remaining <= 0:
                     phase = (
                         "startup handshake"
-                        if any(
-                            owned.group_id is None
-                            for _index, owned in active.values()
-                        )
+                        if any(owned.group_id is None for _index, owned in active.values())
                         else "task"
                     )
-                    raise TimeoutError(
-                        f"M8 distributed {phase} exceeded "
-                        f"{timeout_seconds} seconds"
-                    )
+                    raise TimeoutError(f"M8 distributed {phase} exceeded {timeout_seconds} seconds")
                 continue
             for receiver in ready:
                 index, owned = active[receiver]
                 process = owned.process
                 if monotonic() > owned.deadline:
-                    phase = (
-                        "startup handshake"
-                        if owned.group_id is None
-                        else "task"
-                    )
-                    raise TimeoutError(
-                        f"M8 distributed {phase} exceeded {timeout_seconds} seconds"
-                    )
+                    phase = "startup handshake" if owned.group_id is None else "task"
+                    raise TimeoutError(f"M8 distributed {phase} exceeded {timeout_seconds} seconds")
                 try:
                     message = receiver.recv()
                 except EOFError as error:
@@ -1830,20 +1769,12 @@ def _run_process_phase(
                         f"(exit_code={process.exitcode})"
                     ) from error
                 if monotonic() > owned.deadline:
-                    phase = (
-                        "startup handshake"
-                        if owned.group_id is None
-                        else "task"
-                    )
-                    raise TimeoutError(
-                        f"M8 distributed {phase} exceeded {timeout_seconds} seconds"
-                    )
+                    phase = "startup handshake" if owned.group_id is None else "task"
+                    raise TimeoutError(f"M8 distributed {phase} exceeded {timeout_seconds} seconds")
                 status, payload, details, remote_timestamp_ns = message
                 if status == "ready":
                     if owned.group_id is not None or payload != process.pid:
-                        raise RuntimeError(
-                            "M8 distributed worker process-group handshake differs"
-                        )
+                        raise RuntimeError("M8 distributed worker process-group handshake differs")
                     owned.group_id = payload
                     owned.deadline = monotonic() + timeout_seconds
                     owned.payload_send_started_ns = perf_counter_ns()
@@ -1857,9 +1788,7 @@ def _run_process_phase(
                     continue
                 if status == "started":
                     if owned.payload_send_started_ns is None:
-                        raise RuntimeError(
-                            "M8 distributed worker accepted a task before handoff"
-                        )
+                        raise RuntimeError("M8 distributed worker accepted a task before handoff")
                     inbound_payload_handoff_ns += max(
                         0,
                         remote_timestamp_ns - owned.payload_send_started_ns,
@@ -1910,9 +1839,7 @@ def _run_process_phase(
                     perf_counter_ns() - remote_timestamp_ns,
                 )
                 try:
-                    worker_status, worker_payload, worker_details = pickle.loads(
-                        serialized_result
-                    )
+                    worker_status, worker_payload, worker_details = pickle.loads(serialized_result)
                 except (
                     pickle.PickleError,
                     EOFError,
@@ -1936,8 +1863,7 @@ def _run_process_phase(
                     )
                 if worker_status != "ok":
                     raise RuntimeError(
-                        "M8 distributed worker failed: "
-                        f"{worker_payload}\n{worker_details}"
+                        f"M8 distributed worker failed: {worker_payload}\n{worker_details}"
                     )
                 if owned.group_id is not None and _process_group_exists(owned.group_id):
                     try:
@@ -1968,21 +1894,11 @@ def _run_process_phase(
     if report_payload_handoff:
         return _ProcessPhaseExecution(
             results=ordered_results,
-            inbound_payload_handoff_wall_seconds=(
-                inbound_payload_handoff_ns / 1_000_000_000.0
-            ),
-            outbound_payload_handoff_wall_seconds=(
-                outbound_payload_handoff_ns / 1_000_000_000.0
-            ),
-            process_exit_validation_wall_seconds=(
-                process_exit_validation_ns / 1_000_000_000.0
-            ),
-            task_serialization_wall_seconds=(
-                task_serialization_ns / 1_000_000_000.0
-            ),
-            result_serialization_wall_seconds=(
-                result_serialization_ns / 1_000_000_000.0
-            ),
+            inbound_payload_handoff_wall_seconds=(inbound_payload_handoff_ns / 1_000_000_000.0),
+            outbound_payload_handoff_wall_seconds=(outbound_payload_handoff_ns / 1_000_000_000.0),
+            process_exit_validation_wall_seconds=(process_exit_validation_ns / 1_000_000_000.0),
+            task_serialization_wall_seconds=(task_serialization_ns / 1_000_000_000.0),
+            result_serialization_wall_seconds=(result_serialization_ns / 1_000_000_000.0),
             task_payload_bytes=task_payload_bytes,
             result_payload_bytes=result_payload_bytes,
             task_payload_byte_cap=_M8_GATE3_MAX_WORKER_TASK_BYTES,
@@ -2112,8 +2028,7 @@ class _ProcessPhaseExecution:
     @property
     def worker_payload_handoff_wall_seconds(self) -> float:
         return (
-            self.inbound_payload_handoff_wall_seconds
-            + self.outbound_payload_handoff_wall_seconds
+            self.inbound_payload_handoff_wall_seconds + self.outbound_payload_handoff_wall_seconds
         )
 
 
@@ -2215,6 +2130,9 @@ def _portable_registry_state() -> _PortableRegistryState:
         authoritative_proof_runtime=len(  # noqa: SLF001
             replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY
         ),
+        materialized_standard_action=len(  # noqa: SLF001
+            replay._MATERIALIZED_STANDARD_ACTION_REGISTRY
+        ),
         legacy_prepared_checker=len(checker._PREPARED_CHECKER_REGISTRY),  # noqa: SLF001
         prepared_generator=len(sparse._PREPARED_GENERATOR_REGISTRY),  # noqa: SLF001
         prepared_translation_layout=len(  # noqa: SLF001
@@ -2268,6 +2186,10 @@ def _strict_portable_registry_state(value: object) -> _PortableRegistryState:
         authoritative_proof_runtime=_require_exact_nonnegative_int(
             value.authoritative_proof_runtime,
             field_name="authoritative proof runtime registry count",
+        ),
+        materialized_standard_action=_require_exact_nonnegative_int(
+            value.materialized_standard_action,
+            field_name="materialized standard action registry count",
         ),
         legacy_prepared_checker=_require_exact_nonnegative_int(
             value.legacy_prepared_checker,
@@ -2420,9 +2342,7 @@ def _strict_portable_bundle_identity(
     require_bytes: bool,
 ) -> _PortableBundleIdentityWorkerResult:
     expected_type = (
-        _PortableBundleWorkerResult
-        if require_bytes
-        else _PortableBundleIdentityWorkerResult
+        _PortableBundleWorkerResult if require_bytes else _PortableBundleIdentityWorkerResult
     )
     if type(value) is not expected_type:
         raise TypeError("M8 portable generator returned an unexpected envelope")
@@ -2526,6 +2446,73 @@ def _strict_portable_bundle_identity(
     return _PortableBundleIdentityWorkerResult(**common)
 
 
+def _strict_portable_generation_profile_worker_result(
+    value: object,
+) -> _PortableGenerationProfileWorkerResult:
+    if type(value) is not _PortableGenerationProfileWorkerResult:
+        raise TypeError("M8 portable profile generator returned an unexpected envelope")
+    generated = _strict_portable_bundle_identity(
+        value.generation,
+        require_bytes=True,
+    )
+    if type(generated) is not _PortableBundleWorkerResult:
+        raise RuntimeError("M8 portable profile generator bytes were discarded")
+    return _PortableGenerationProfileWorkerResult(
+        generation=generated,
+        profile=_strict_profile_report(value.profile),
+        runtime_id=_require_portable_worker_runtime_id(value.runtime_id),
+        runtime_content_sha256=_require_prefixed_hex(
+            value.runtime_content_sha256,
+            prefix="sha256:",
+            hex_length=64,
+            field_name="profile generator worker runtime",
+        ),
+    )
+
+
+def _require_portable_worker_runtime_id(value: object) -> str:
+    if value != "yieldforge-m8-gate3-runtime-v1":
+        raise ValueError("M8 portable worker runtime ID differs")
+    return value
+
+
+def _strict_portable_repeat_generation_profile_worker_result(
+    value: object,
+) -> _PortableRepeatGenerationProfileWorkerResult:
+    if type(value) is not _PortableRepeatGenerationProfileWorkerResult:
+        raise TypeError("M8 portable profile repeat generator returned an unexpected envelope")
+    generated = _strict_portable_bundle_identity(value.generation, require_bytes=False)
+    if type(generated) is not _PortableBundleIdentityWorkerResult:
+        raise RuntimeError("M8 portable profile repeat generator retained canonical bytes")
+    return _PortableRepeatGenerationProfileWorkerResult(
+        generation=generated,
+        runtime_id=_require_portable_worker_runtime_id(value.runtime_id),
+        runtime_content_sha256=_require_prefixed_hex(
+            value.runtime_content_sha256,
+            prefix="sha256:",
+            hex_length=64,
+            field_name="profile repeat generator worker runtime",
+        ),
+    )
+
+
+def _strict_portable_check_profile_worker_result(
+    value: object,
+) -> _PortableCheckProfileWorkerResult:
+    if type(value) is not _PortableCheckProfileWorkerResult:
+        raise TypeError("M8 portable profile checker returned an unexpected envelope")
+    return _PortableCheckProfileWorkerResult(
+        check=_strict_portable_check_worker_result(value.check),
+        runtime_id=_require_portable_worker_runtime_id(value.runtime_id),
+        runtime_content_sha256=_require_prefixed_hex(
+            value.runtime_content_sha256,
+            prefix="sha256:",
+            hex_length=64,
+            field_name="profile checker worker runtime",
+        ),
+    )
+
+
 def _strict_portable_check_worker_result(
     value: object,
 ) -> _PortableCheckWorkerResult:
@@ -2621,9 +2608,7 @@ def _strict_portable_check_worker_result(
             field_name="checker worker timing",
         ),
         counted_search_lemma_count=counted_search_lemma_count,
-        counted_translation_audit_call_count=(
-            counted_translation_audit_call_count
-        ),
+        counted_translation_audit_call_count=(counted_translation_audit_call_count),
         registry_state_after=registry_state,
     )
 
@@ -2645,6 +2630,50 @@ def _verify_portable_jagua_executable(
         raise ValueError("M8 portable worker Jagua runtime differs from the freeze")
 
 
+def _portable_worker_runtime_identity(
+    jagua_executable: Path | None,
+    expected_jagua_sha256: str | None,
+) -> tuple[str, str]:
+    """Compute the Gate-3 runtime identity inside the executing process."""
+
+    if expected_jagua_sha256 is None:
+        if jagua_executable is None:
+            jagua_sha256 = "sha256:" + "0" * 64
+        else:
+            executable = Path(jagua_executable)
+            jagua_sha256 = f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}"
+    else:
+        jagua_sha256 = expected_jagua_sha256
+    from yieldforge.oracle.gate3_execution import _runtime_identity
+
+    return _runtime_identity(jagua_executable_sha256=jagua_sha256)
+
+
+def _require_portable_profile_worker_runtime_identities(
+    *,
+    expected: tuple[str, str],
+    observed: tuple[tuple[str, str], tuple[str, str], tuple[str, str]],
+) -> None:
+    """Reject any worker envelope that differs from the controller runtime."""
+
+    if (
+        type(expected) is not tuple
+        or len(expected) != 2
+        or any(type(item) is not str for item in expected)
+        or type(observed) is not tuple
+        or len(observed) != 3
+        or any(
+            type(identity) is not tuple
+            or len(identity) != 2
+            or any(type(item) is not str for item in identity)
+            for identity in observed
+        )
+    ):
+        raise TypeError("M8 portable profile worker runtime identity is malformed")
+    if any(identity != expected for identity in observed):
+        raise ValueError("M8 portable profile worker runtime identity differs")
+
+
 def _generate_portable_fact_bundle_worker(
     cell: _ExecutionCell,
     rules,  # type: ignore[no-untyped-def]
@@ -2664,23 +2693,24 @@ def _generate_portable_fact_bundle_worker(
     _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
     started = perf_counter()
     with activate_m8_translation_audit_processes(translation_audit_processes):
-        request = _request_for_cell(
-            cell,
-            rules=rules,
-            jagua_executable=jagua_executable,
-        )
-        generated = score_unchecked_fact_bundle(
-            M8UncheckedBundleRequest(
-                oracle_request=request,
-                freeze_id=freeze_id,
-                freeze_sha256=freeze_sha256,
+        with profile_phase("fact_bundle_generator_authority_reconstruction"):
+            request = _request_for_cell(
+                cell,
+                rules=rules,
+                jagua_executable=jagua_executable,
             )
-        )
+        with profile_phase("fact_bundle_generation"):
+            generated = score_unchecked_fact_bundle(
+                M8UncheckedBundleRequest(
+                    oracle_request=request,
+                    freeze_id=freeze_id,
+                    freeze_sha256=freeze_sha256,
+                )
+            )
     handoff_serialization_started = perf_counter()
-    semantic_bytes = generated.semantic_bytes
-    handoff_serialization_wall_seconds = (
-        perf_counter() - handoff_serialization_started
-    )
+    with profile_phase("fact_bundle_handoff_serialization"):
+        semantic_bytes = generated.semantic_bytes
+    handoff_serialization_wall_seconds = perf_counter() - handoff_serialization_started
     if len(semantic_bytes) > _M8_GATE3_MAX_BUNDLE_BYTES:
         raise ValueError("M8 portable generator bundle exceeds the frozen byte cap")
     bundle = generated.bundle
@@ -2703,9 +2733,7 @@ def _generate_portable_fact_bundle_worker(
         stream_id=cell.stream[0].stream_id,
         event_count=len(cell.stream),
         worker_pid=os.getpid(),
-        semantic_bundle_bytes_sha256=(
-            f"sha256:{hashlib.sha256(semantic_bytes).hexdigest()}"
-        ),
+        semantic_bundle_bytes_sha256=(f"sha256:{hashlib.sha256(semantic_bytes).hexdigest()}"),
         bundle_sha256=bundle.bundle_sha256,
         telemetry=generated.telemetry,
         fixed_layer_node_count=sum(layer_counts),
@@ -2715,10 +2743,7 @@ def _generate_portable_fact_bundle_worker(
         standard_candidate_fact_count=layer_counts[3],
         common_lemma_count=layer_counts[4],
         counted_search_lemma_count=sum(
-            any(
-                item.classification == "counted_no_fit"
-                for item in lemma.inventory_classifications
-            )
+            any(item.classification == "counted_no_fit" for item in lemma.inventory_classifications)
             for lemma in bundle.common_lemmas
         ),
         influence_fact_count=layer_counts[5],
@@ -2733,6 +2758,88 @@ def _generate_portable_fact_bundle_worker(
             semantic_bundle_bytes=semantic_bytes,
         )
     return _PortableBundleIdentityWorkerResult(**common)
+
+
+def _profile_portable_generation_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path | None,
+    freeze_id: str,
+    freeze_sha256: str,
+    expected_jagua_sha256: str | None,
+    translation_audit_processes: int,
+) -> _PortableGenerationProfileWorkerResult:
+    """Profile one fresh generator without granting proof authority to its output."""
+
+    runtime_before = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    with activate_m8_profile() as profiler:
+        generated = _generate_portable_fact_bundle_worker(
+            cell,
+            rules,
+            jagua_executable,
+            freeze_id,
+            freeze_sha256,
+            expected_jagua_sha256,
+            translation_audit_processes,
+            True,
+        )
+    if type(generated) is not _PortableBundleWorkerResult:
+        raise RuntimeError("M8 portable profile generator omitted canonical bytes")
+    runtime_after = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    if runtime_after != runtime_before:
+        raise ValueError("M8 portable profile generator runtime changed during execution")
+    return _PortableGenerationProfileWorkerResult(
+        generation=generated,
+        profile=profiler.report(),
+        runtime_id=runtime_after[0],
+        runtime_content_sha256=runtime_after[1],
+    )
+
+
+def _repeat_portable_generation_profile_worker(
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path | None,
+    freeze_id: str,
+    freeze_sha256: str,
+    expected_jagua_sha256: str | None,
+    translation_audit_processes: int,
+) -> _PortableRepeatGenerationProfileWorkerResult:
+    """Repeat generation while attesting the runtime inside its fresh worker."""
+
+    runtime_before = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    generated = _generate_portable_fact_bundle_worker(
+        cell,
+        rules,
+        jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        expected_jagua_sha256,
+        translation_audit_processes,
+        False,
+    )
+    if type(generated) is not _PortableBundleIdentityWorkerResult:
+        raise RuntimeError("M8 portable profile repeat generator retained canonical bytes")
+    runtime_after = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    if runtime_after != runtime_before:
+        raise ValueError("M8 portable profile repeat runtime changed during execution")
+    return _PortableRepeatGenerationProfileWorkerResult(
+        generation=generated,
+        runtime_id=runtime_after[0],
+        runtime_content_sha256=runtime_after[1],
+    )
 
 
 def _check_portable_fact_bundle_worker(
@@ -2755,83 +2862,82 @@ def _check_portable_fact_bundle_worker(
     if not _portable_registry_state().is_clean:
         raise RuntimeError("M8 portable checker worker started with live registries")
     _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
-    metadata_started = perf_counter()
-    metadata_bundle = json.loads(semantic_bundle_bytes)
-    if type(metadata_bundle) is not dict:
-        raise ValueError("M8 portable metadata reconciliation requires an object")
-    bundle_sha256 = metadata_bundle.get("bundle_sha256")
-    if type(bundle_sha256) is not str:
-        raise ValueError("M8 portable metadata reconciliation lacks a bundle root")
-    layer_names = (
-        "translation_batches",
-        "candidate_scalar_facts",
-        "frontier_facts",
-        "standard_candidate_facts",
-        "common_lemmas",
-        "influence_facts",
-        "action_roots",
-    )
-    layers = tuple(metadata_bundle.get(name) for name in layer_names)
-    if any(type(layer) is not list for layer in layers):
-        raise ValueError("M8 portable metadata reconciliation lacks a fixed layer")
-    layer_counts = (
-        *(len(layer) for layer in layers),  # type: ignore[arg-type]
-    )
-    counted_search_lemma_count = 0
-    for lemma in layers[4]:  # type: ignore[union-attr]
-        if type(lemma) is not dict:
-            raise ValueError("M8 portable metadata common lemma must be an object")
-        classifications = lemma.get("inventory_classifications")
-        if type(classifications) is not list:
-            raise ValueError("M8 portable metadata common classifications must be a list")
-        if any(
-            type(item) is not dict or type(item.get("classification")) is not str
-            for item in classifications
-        ):
-            raise ValueError("M8 portable metadata common classification differs")
-        counted_search_lemma_count += any(
-            item["classification"] == "counted_no_fit"
-            for item in classifications
-        )
-    metadata_reconciliation_wall_seconds = perf_counter() - metadata_started
-    authority_started = perf_counter()
-    request = _request_for_cell(
-        cell,
-        rules=rules,
-        jagua_executable=jagua_executable,
-    )
-    runtime = request.runtime
-    cursor = request.cursor
-    catalog = enumerate_m7_action_catalog(runtime, cursor=cursor)
-    visible = request.visibility.visible_suffix(
-        current_position=catalog.event_position,
-    )
-    stop = catalog.event_position + 1 + len(visible)
-    runtime_sha256 = m7_semantic_runtime_sha256(runtime)
-    check_request = M8FactBundleCheckRequest(
-        semantic_bundle_bytes=semantic_bundle_bytes,
-        oracle_request=request,
-        expected_semantic_runtime_sha256=runtime_sha256,
-        expected_current_cursor_sha256=m7_cursor_sha256(cursor),
-        expected_catalog_event_position=catalog.event_position,
-        expected_catalog_action_ids=tuple(item.action_id for item in catalog.actions),
-        expected_stop_event_position=stop,
-        expected_suffix_sha256=m8_suffix_sha256(
-            semantic_runtime_sha256=runtime_sha256,
-            start_event_position=catalog.event_position,
-            stop_event_position=stop,
-            bindings=visible,
-        ),
-        expected_freeze_id=freeze_id,
-        expected_freeze_sha256=freeze_sha256,
-        allow_exact_replay=False,
-    )
-    authority_reconstruction_wall_seconds = perf_counter() - authority_started
-    with (
-        activate_m8_translation_audit_processes(translation_audit_processes),
-        activate_m8_profile() as profiler,
-    ):
-        check = check_m8_fact_bundle(check_request)
+    with activate_m8_profile() as profiler:
+        metadata_started = perf_counter()
+        with profile_phase("fact_bundle_metadata_reconciliation"):
+            metadata_bundle = json.loads(semantic_bundle_bytes)
+            if type(metadata_bundle) is not dict:
+                raise ValueError("M8 portable metadata reconciliation requires an object")
+            bundle_sha256 = metadata_bundle.get("bundle_sha256")
+            if type(bundle_sha256) is not str:
+                raise ValueError("M8 portable metadata reconciliation lacks a bundle root")
+            layer_names = (
+                "translation_batches",
+                "candidate_scalar_facts",
+                "frontier_facts",
+                "standard_candidate_facts",
+                "common_lemmas",
+                "influence_facts",
+                "action_roots",
+            )
+            layers = tuple(metadata_bundle.get(name) for name in layer_names)
+            if any(type(layer) is not list for layer in layers):
+                raise ValueError("M8 portable metadata reconciliation lacks a fixed layer")
+            layer_counts = (
+                *(len(layer) for layer in layers),  # type: ignore[arg-type]
+            )
+            counted_search_lemma_count = 0
+            for lemma in layers[4]:  # type: ignore[union-attr]
+                if type(lemma) is not dict:
+                    raise ValueError("M8 portable metadata common lemma must be an object")
+                classifications = lemma.get("inventory_classifications")
+                if type(classifications) is not list:
+                    raise ValueError("M8 portable metadata common classifications must be a list")
+                if any(
+                    type(item) is not dict or type(item.get("classification")) is not str
+                    for item in classifications
+                ):
+                    raise ValueError("M8 portable metadata common classification differs")
+                counted_search_lemma_count += any(
+                    item["classification"] == "counted_no_fit" for item in classifications
+                )
+        metadata_reconciliation_wall_seconds = perf_counter() - metadata_started
+        authority_started = perf_counter()
+        with profile_phase("fact_bundle_authority_reconstruction"):
+            request = _request_for_cell(
+                cell,
+                rules=rules,
+                jagua_executable=jagua_executable,
+            )
+            runtime = request.runtime
+            cursor = request.cursor
+            catalog = enumerate_m7_action_catalog(runtime, cursor=cursor)
+            visible = request.visibility.visible_suffix(
+                current_position=catalog.event_position,
+            )
+            stop = catalog.event_position + 1 + len(visible)
+            runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+            check_request = M8FactBundleCheckRequest(
+                semantic_bundle_bytes=semantic_bundle_bytes,
+                oracle_request=request,
+                expected_semantic_runtime_sha256=runtime_sha256,
+                expected_current_cursor_sha256=m7_cursor_sha256(cursor),
+                expected_catalog_event_position=catalog.event_position,
+                expected_catalog_action_ids=tuple(item.action_id for item in catalog.actions),
+                expected_stop_event_position=stop,
+                expected_suffix_sha256=m8_suffix_sha256(
+                    semantic_runtime_sha256=runtime_sha256,
+                    start_event_position=catalog.event_position,
+                    stop_event_position=stop,
+                    bindings=visible,
+                ),
+                expected_freeze_id=freeze_id,
+                expected_freeze_sha256=freeze_sha256,
+                allow_exact_replay=False,
+            )
+        authority_reconstruction_wall_seconds = perf_counter() - authority_started
+        with activate_m8_translation_audit_processes(translation_audit_processes):
+            check = check_m8_fact_bundle(check_request)
     profile = profiler.report()
     counted_translation_audit_call_count = _portable_profile_phase_count(
         profile,
@@ -2868,18 +2974,51 @@ def _check_portable_fact_bundle_worker(
         layer_counts=layer_counts,
         check=check,
         profile=profile,
-        metadata_reconciliation_wall_seconds=(
-            metadata_reconciliation_wall_seconds
-        ),
-        authority_reconstruction_wall_seconds=(
-            authority_reconstruction_wall_seconds
-        ),
+        metadata_reconciliation_wall_seconds=(metadata_reconciliation_wall_seconds),
+        authority_reconstruction_wall_seconds=(authority_reconstruction_wall_seconds),
         checker_wall_seconds=checker_wall_seconds,
         counted_search_lemma_count=counted_search_lemma_count,
-        counted_translation_audit_call_count=(
-            counted_translation_audit_call_count
-        ),
+        counted_translation_audit_call_count=(counted_translation_audit_call_count),
         registry_state_after=registry_state,
+    )
+
+
+def _check_portable_fact_bundle_profile_worker(
+    semantic_bundle_bytes: bytes,
+    cell: _ExecutionCell,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path | None,
+    freeze_id: str,
+    freeze_sha256: str,
+    expected_jagua_sha256: str | None,
+    translation_audit_processes: int,
+) -> _PortableCheckProfileWorkerResult:
+    """Check one bundle while attesting the runtime inside its fresh worker."""
+
+    runtime_before = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    checked = _check_portable_fact_bundle_worker(
+        semantic_bundle_bytes,
+        cell,
+        rules,
+        jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        expected_jagua_sha256,
+        translation_audit_processes,
+    )
+    runtime_after = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    if runtime_after != runtime_before:
+        raise ValueError("M8 portable profile checker runtime changed during execution")
+    return _PortableCheckProfileWorkerResult(
+        check=checked,
+        runtime_id=runtime_after[0],
+        runtime_content_sha256=runtime_after[1],
     )
 
 
@@ -2900,6 +3039,37 @@ def _portable_generation_metadata(
         generated.influence_fact_count,
         generated.action_root_count,
     )
+
+
+def _require_portable_profile_repeat(
+    generated: _PortableBundleIdentityWorkerResult,
+    repeated: _PortableBundleIdentityWorkerResult,
+) -> _PortableBundleIdentityWorkerResult:
+    """Require a second fresh generation with the complete first-run identity."""
+
+    generated = _strict_portable_bundle_identity(
+        generated,
+        require_bytes=type(generated) is _PortableBundleWorkerResult,
+    )
+    repeated = _strict_portable_bundle_identity(repeated, require_bytes=False)
+    if (
+        (
+            generated.regime,
+            generated.temporal_seed,
+            generated.stream_id,
+            generated.event_count,
+        )
+        != (
+            repeated.regime,
+            repeated.temporal_seed,
+            repeated.stream_id,
+            repeated.event_count,
+        )
+        or _portable_generation_metadata(generated)
+        != _portable_generation_metadata(repeated)
+    ):
+        raise ValueError("M8 portable profile repeated generation identity differs")
+    return repeated
 
 
 def _reconcile_portable_fact_handoff(
@@ -2943,10 +3113,8 @@ def _reconcile_portable_fact_handoff(
         or checked.check.decision is None
         or checked.check.checked_action_root_count != generated.action_root_count
         or checked.check.decision.scored_action_count != generated.action_root_count
-        or checked.check.counted_translation_audit_count
-        != generated.counted_search_lemma_count
-        or checked.counted_translation_audit_call_count
-        != generated.counted_search_lemma_count
+        or checked.check.counted_translation_audit_count != generated.counted_search_lemma_count
+        or checked.counted_translation_audit_call_count != generated.counted_search_lemma_count
     ):
         raise ValueError("M8 portable producer/checker result does not reconcile")
     return generated, checked
@@ -3078,9 +3246,7 @@ def _capture_portable_fact_checked_sources(
             ),
             execution_cells,
         )
-        retained_bundle_bytes = sum(
-            item.semantic_serialized_bytes for item in generated
-        )
+        retained_bundle_bytes = sum(item.semantic_serialized_bytes for item in generated)
         if retained_bundle_bytes > _M8_GATE3_MAX_RETAINED_BUNDLE_BYTES:
             raise ValueError("M8 portable retained bundles exceed the aggregate cap")
 
@@ -3102,17 +3268,12 @@ def _capture_portable_fact_checked_sources(
             checker_tasks,
             process_count=outer_process_count,
             report_payload_handoff=True,
-            aggregate_task_payload_byte_cap=(
-                _M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES
-            ),
+            aggregate_task_payload_byte_cap=(_M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES),
         )
         if type(checker_phase) is not _ProcessPhaseExecution:
             raise RuntimeError("M8 portable source checker omitted handoff telemetry")
         checked = _order_portable_worker_results(
-            tuple(
-                _strict_portable_check_worker_result(item)
-                for item in checker_phase.results
-            ),
+            tuple(_strict_portable_check_worker_result(item) for item in checker_phase.results),
             execution_cells,
         )
 
@@ -3122,19 +3283,12 @@ def _capture_portable_fact_checked_sources(
                 generated_item,
                 checked_item,
             )
-            if (
-                retained_source.first_generation.worker_pid
-                == retained_source.check.worker_pid
-            ):
-                raise ValueError(
-                    "M8 portable source phases did not use distinct fresh workers"
-                )
+            if retained_source.first_generation.worker_pid == retained_source.check.worker_pid:
+                raise ValueError("M8 portable source phases did not use distinct fresh workers")
             retained_sources.append(retained_source)
         _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
     except BaseException as error:
-        controller_after_failure = _strict_portable_registry_state(
-            _portable_registry_state()
-        )
+        controller_after_failure = _strict_portable_registry_state(_portable_registry_state())
         if not controller_after_failure.is_clean:
             raise RuntimeError(
                 "M8 portable source capture leaked registries during failure"
@@ -3145,6 +3299,200 @@ def _capture_portable_fact_checked_sources(
     if not controller_after.is_clean:
         raise RuntimeError("M8 portable source capture leaked registries")
     return tuple(retained_sources)
+
+
+def _profile_portable_fact_cell(
+    cell: _ExecutionCell,
+    *,
+    rules,  # type: ignore[no-untyped-def]
+    jagua_executable: Path | None,
+    freeze_id: str,
+    freeze_sha256: str,
+    expected_jagua_sha256: str | None,
+    budget: M8ConcurrencyBudget,
+    source_tree: SourceTreeSnapshot,
+    expected_runtime_identity: tuple[str, str] | None = None,
+) -> tuple[
+    _PortableFactCheckedSource,
+    _PortableBundleIdentityWorkerResult,
+    M8ProfileReport,
+    _ProcessPhaseExecution,
+    _ProcessPhaseExecution,
+    _ProcessPhaseExecution,
+    _PortableFactProfileTiming,
+]:
+    """Measure one frozen probe with repeated generation and a fresh checker."""
+
+    controller_before = _strict_portable_registry_state(_portable_registry_state())
+    if not controller_before.is_clean:
+        raise ValueError("M8 portable profile has live registries before spawn")
+    if type(source_tree) is not SourceTreeSnapshot:
+        raise TypeError("M8 portable profile requires an exact source-tree snapshot")
+    _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
+    controller_runtime_identity = _portable_worker_runtime_identity(
+        jagua_executable,
+        expected_jagua_sha256,
+    )
+    if expected_runtime_identity is not None:
+        if (
+            type(expected_runtime_identity) is not tuple
+            or len(expected_runtime_identity) != 2
+            or any(type(item) is not str for item in expected_runtime_identity)
+        ):
+            raise TypeError("M8 portable profile expected runtime identity is malformed")
+        if controller_runtime_identity != expected_runtime_identity:
+            raise ValueError("M8 portable profile controller runtime identity differs")
+    else:
+        expected_runtime_identity = controller_runtime_identity
+    common_task = (
+        cell,
+        rules,
+        jagua_executable,
+        freeze_id,
+        freeze_sha256,
+        expected_jagua_sha256,
+        budget.translation_audit_processes_per_cell,
+    )
+    pipeline_started = perf_counter()
+    try:
+        with activate_source_attestation(source_tree):
+            phase_started = perf_counter()
+            generation_phase = _run_process_phase(
+                SourceAttestedOperation(
+                    operation=_profile_portable_generation_worker,
+                    source_tree=source_tree,
+                    expected_module_name="yieldforge.oracle.experiment",
+                    expected_function_name="_profile_portable_generation_worker",
+                ),
+                (common_task,),
+                process_count=1,
+                report_payload_handoff=True,
+            )
+            if type(generation_phase) is not _ProcessPhaseExecution:
+                raise RuntimeError("M8 portable profile generation omitted handoff telemetry")
+            first_generation_phase_wall_seconds = max(
+                0.000001,
+                perf_counter() - phase_started,
+            )
+            if len(generation_phase.results) != 1:
+                raise RuntimeError("M8 portable profile generation omitted its hard arm")
+            profiled_generation = _strict_portable_generation_profile_worker_result(
+                generation_phase.results[0]
+            )
+            generated = profiled_generation.generation
+
+            phase_started = perf_counter()
+            repeat_generation_phase = _run_process_phase(
+                SourceAttestedOperation(
+                    operation=_repeat_portable_generation_profile_worker,
+                    source_tree=source_tree,
+                    expected_module_name="yieldforge.oracle.experiment",
+                    expected_function_name="_repeat_portable_generation_profile_worker",
+                ),
+                (common_task,),
+                process_count=1,
+                report_payload_handoff=True,
+            )
+            if type(repeat_generation_phase) is not _ProcessPhaseExecution:
+                raise RuntimeError(
+                    "M8 portable profile repeat generation omitted handoff telemetry"
+                )
+            second_generation_phase_wall_seconds = max(
+                0.000001,
+                perf_counter() - phase_started,
+            )
+            if len(repeat_generation_phase.results) != 1:
+                raise RuntimeError("M8 portable profile repeat generation omitted its hard arm")
+            profiled_repeat = _strict_portable_repeat_generation_profile_worker_result(
+                repeat_generation_phase.results[0]
+            )
+            repeated_generation = _require_portable_profile_repeat(
+                generated,
+                profiled_repeat.generation,
+            )
+
+            phase_started = perf_counter()
+            checker_phase = _run_process_phase(
+                SourceAttestedOperation(
+                    operation=_check_portable_fact_bundle_profile_worker,
+                    source_tree=source_tree,
+                    expected_module_name="yieldforge.oracle.experiment",
+                    expected_function_name="_check_portable_fact_bundle_profile_worker",
+                ),
+                (
+                    (
+                        generated.semantic_bundle_bytes,
+                        *common_task,
+                    ),
+                ),
+                process_count=1,
+                report_payload_handoff=True,
+                aggregate_task_payload_byte_cap=(_M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES),
+            )
+            if type(checker_phase) is not _ProcessPhaseExecution:
+                raise RuntimeError("M8 portable profile checker omitted handoff telemetry")
+            checker_phase_wall_seconds = max(
+                0.000001,
+                perf_counter() - phase_started,
+            )
+            if len(checker_phase.results) != 1:
+                raise RuntimeError("M8 portable profile checker omitted its hard arm")
+            profiled_check = _strict_portable_check_profile_worker_result(
+                checker_phase.results[0]
+            )
+            checked = profiled_check.check
+            retained = _retain_portable_fact_checked_source(generated, checked)
+            if len(
+                {
+                    generated.worker_pid,
+                    repeated_generation.worker_pid,
+                    checked.worker_pid,
+                }
+            ) != 3:
+                raise ValueError("M8 portable profile did not use distinct fresh workers")
+            observed_runtime_identities = (
+                (
+                    profiled_generation.runtime_id,
+                    profiled_generation.runtime_content_sha256,
+                ),
+                (profiled_repeat.runtime_id, profiled_repeat.runtime_content_sha256),
+                (profiled_check.runtime_id, profiled_check.runtime_content_sha256),
+            )
+            _require_portable_profile_worker_runtime_identities(
+                expected=expected_runtime_identity,
+                observed=observed_runtime_identities,
+            )
+            _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
+    except BaseException as error:
+        controller_after_failure = _strict_portable_registry_state(_portable_registry_state())
+        if not controller_after_failure.is_clean:
+            raise RuntimeError("M8 portable profile leaked registries during failure") from error
+        raise
+    controller_after = _strict_portable_registry_state(_portable_registry_state())
+    if not controller_after.is_clean:
+        raise RuntimeError("M8 portable profile leaked registries")
+    timing = _PortableFactProfileTiming(
+        first_generation_phase_wall_seconds=first_generation_phase_wall_seconds,
+        second_generation_phase_wall_seconds=second_generation_phase_wall_seconds,
+        checker_phase_wall_seconds=checker_phase_wall_seconds,
+        total_pipeline_wall_seconds=max(0.000001, perf_counter() - pipeline_started),
+        generator_runtime_content_sha256=(
+            profiled_generation.runtime_content_sha256
+        ),
+        repeat_generator_runtime_content_sha256=(
+            profiled_repeat.runtime_content_sha256
+        ),
+        checker_runtime_content_sha256=profiled_check.runtime_content_sha256,
+    )
+    return (
+        retained,
+        repeated_generation,
+        profiled_generation.profile,
+        generation_phase,
+        repeat_generation_phase,
+        checker_phase,
+        timing,
+    )
 
 
 def _execute_portable_fact_cells_with_sources(
@@ -3200,9 +3548,7 @@ def _execute_portable_fact_cells_with_sources(
             ),
             execution_cells,
         )
-        retained_bundle_bytes = sum(
-            item.semantic_serialized_bytes for item in first
-        )
+        retained_bundle_bytes = sum(item.semantic_serialized_bytes for item in first)
         if retained_bundle_bytes > _M8_GATE3_MAX_RETAINED_BUNDLE_BYTES:
             raise ValueError("M8 portable retained bundles exceed the aggregate cap")
 
@@ -3249,18 +3595,13 @@ def _execute_portable_fact_cells_with_sources(
             checker_tasks,
             process_count=outer_process_count,
             report_payload_handoff=True,
-            aggregate_task_payload_byte_cap=(
-                _M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES
-            ),
+            aggregate_task_payload_byte_cap=(_M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES),
         )
         if type(checker_phase) is not _ProcessPhaseExecution:
             raise RuntimeError("M8 portable checker omitted handoff telemetry")
         checker_wall = max(0.000001, perf_counter() - phase_started)
         checked = _order_portable_worker_results(
-            tuple(
-                _strict_portable_check_worker_result(item)
-                for item in checker_phase.results
-            ),
+            tuple(_strict_portable_check_worker_result(item) for item in checker_phase.results),
             execution_cells,
         )
 
@@ -3299,9 +3640,7 @@ def _execute_portable_fact_cells_with_sources(
             retained_sources.append(retained_source)
         _verify_portable_jagua_executable(jagua_executable, expected_jagua_sha256)
     except BaseException as error:
-        controller_after_failure = _strict_portable_registry_state(
-            _portable_registry_state()
-        )
+        controller_after_failure = _strict_portable_registry_state(_portable_registry_state())
         if not controller_after_failure.is_clean:
             raise RuntimeError(
                 "M8 portable pipeline controller leaked registries during failure"
@@ -3340,17 +3679,13 @@ def _execute_portable_fact_cells_with_sources(
         per_worker_task_payload_byte_cap=_M8_GATE3_MAX_WORKER_TASK_BYTES,
         per_worker_result_payload_byte_cap=_M8_GATE3_MAX_WORKER_RESULT_BYTES,
         retained_first_generation_bundle_bytes=retained_bundle_bytes,
-        retained_first_generation_bundle_byte_cap=(
-            _M8_GATE3_MAX_RETAINED_BUNDLE_BYTES
-        ),
+        retained_first_generation_bundle_byte_cap=(_M8_GATE3_MAX_RETAINED_BUNDLE_BYTES),
         checker_task_payload_bytes=checker_phase.task_payload_bytes,
         checker_task_payload_byte_cap=_M8_GATE3_MAX_CHECKER_TASK_PAYLOAD_BYTES,
         total_pipeline_wall_seconds=max(0.000001, perf_counter() - pipeline_started),
         outer_process_count=outer_process_count,
         nested_process_count=budget.translation_audit_processes_per_cell,
-        peak_compute_count=(
-            outer_process_count * budget.translation_audit_processes_per_cell
-        ),
+        peak_compute_count=(outer_process_count * budget.translation_audit_processes_per_cell),
         controller_registry_state_before=controller_before,
         controller_registry_state_after=controller_after,
     )
@@ -3395,9 +3730,7 @@ def _generate_cell_worker(
             rules=rules,
             jagua_executable=jagua_executable,
         )
-        sparse, sparse_elapsed = _measure_proof_phase(
-            lambda: score_sparse_event(request)
-        )
+        sparse, sparse_elapsed = _measure_proof_phase(lambda: score_sparse_event(request))
     return _SparsePreflightResult(
         cell=cell,
         sparse=sparse,
@@ -3420,9 +3753,7 @@ def _check_cell_worker(
             rules=rules,
             jagua_executable=jagua_executable,
         )
-        checks, elapsed = _measure_proof_phase(
-            lambda: check_action_proofs(request, proofs)
-        )
+        checks, elapsed = _measure_proof_phase(lambda: check_action_proofs(request, proofs))
     return _FullCheckerResult(
         regime=cell.stream[0].regime,
         checks=checks,
@@ -3496,9 +3827,7 @@ def _sample_audit_checker_worker(
             rules=rules,
             jagua_executable=jagua_executable,
         )
-        checks, elapsed = _measure_proof_phase(
-            lambda: check_action_proofs(request, proofs)
-        )
+        checks, elapsed = _measure_proof_phase(lambda: check_action_proofs(request, proofs))
     if len(checks) != len(proofs):
         raise ValueError("M8 sampled checker worker returned a different action count")
     return _SampleAuditCheckerResult(
@@ -3610,11 +3939,9 @@ def _assemble_audit_results(
         bindings = audit_by_cell[regime]
         action_ids = tuple(item.catalog_action_id for item in bindings)
         if (
-            tuple(item.score.action_id for item in sampled_item.sampled)
-            != action_ids
+            tuple(item.score.action_id for item in sampled_item.sampled) != action_ids
             or len(checked_item.checks) != len(action_ids)
-            or tuple(item.action_id for item in reference_item.scores)
-            != action_ids
+            or tuple(item.action_id for item in reference_item.scores) != action_ids
         ):
             raise ValueError("M8 split audit actions differ from the frozen batch")
         assembled.append(
@@ -3634,9 +3961,7 @@ def _assemble_audit_results(
 def _proof_classifications(
     proof: M8ActionProof,
 ) -> tuple[M8EventClassification, ...]:
-    return _classification_tuple(
-        {item.classification for item in proof.witnesses}
-    )
+    return _classification_tuple({item.classification for item in proof.witnesses})
 
 
 def _candidate_labels(
@@ -3650,8 +3975,7 @@ def _candidate_labels(
         ("kind", regime, binding.action_kind),
     }
     labels.update(
-        ("witness", regime, classification)
-        for classification in binding.witness_classifications
+        ("witness", regime, classification) for classification in binding.witness_classifications
     )
     if binding.future_event_count in horizon_targets:
         labels.add(("horizon", str(binding.future_event_count), ""))
@@ -3693,9 +4017,11 @@ def _freeze_audit_bindings(
         uncovered -= contribution
         remaining.remove(best)
     frozen = tuple(sorted(selected, key=_audit_binding_key))
-    if {label for item in frozen for label in _candidate_labels(
-        item, horizon_targets=horizon_targets
-    )} != required:
+    if {
+        label
+        for item in frozen
+        for label in _candidate_labels(item, horizon_targets=horizon_targets)
+    } != required:
         raise ValueError("M8 deterministic audit omitted a present required stratum")
     return frozen
 
@@ -3855,10 +4181,7 @@ def _assemble_timed_cell(
 ) -> M8CertificateProofCell:
     """Reconcile independently generated, checked, and audited cell evidence."""
 
-    if not (
-        generated.regime is checked.regime
-        and generated.regime is audited.regime
-    ):
+    if not (generated.regime is checked.regime and generated.regime is audited.regime):
         raise ValueError("M8 distributed worker regime identities do not reconcile")
     sparse = generated.sparse
     checks = checked.checks
@@ -3910,13 +4233,10 @@ def _assemble_timed_cell(
         ):
             raise ValueError("M8 matched certificate differs from its pre-timing audit freeze")
 
-    full_scores = {
-        item.action_id: item.final_net_cost for item in sparse.decision.scores
-    }
+    full_scores = {item.action_id: item.final_net_cost for item in sparse.decision.scores}
     audit_mismatches = sum(
         (
-            item.final_net_cost
-            != sampled_by_id[item.action_id].score.final_net_cost
+            item.final_net_cost != sampled_by_id[item.action_id].score.final_net_cost
             or item.final_net_cost != full_scores[item.action_id]
         )
         for item in reference_scores
@@ -3940,9 +4260,7 @@ def _assemble_timed_cell(
         semantic_runtime_sha256=next(iter(proof_runtime_hashes)),
         audit_action_ids=audit_action_ids,
         audit_sample_sha256=audit_sample_sha256(audit_bindings),
-        current_action_kinds=tuple(
-            sorted({_action_kind(item) for item in current_action_ids})
-        ),
+        current_action_kinds=tuple(sorted({_action_kind(item) for item in current_action_ids})),
         current_action_ids=tuple(sorted(current_action_ids)),
         proof_catalog_action_ids=tuple(sorted(proof_ids)),
         current_action_count=len(current_action_ids),
@@ -3968,14 +4286,10 @@ def _assemble_timed_cell(
         ),
         certificate_elapsed_seconds=generated.elapsed_seconds,
         checker_elapsed_seconds=checked.elapsed_seconds,
-        sampled_certificate_elapsed_seconds=(
-            audited.sampled_certificate_elapsed_seconds
-        ),
+        sampled_certificate_elapsed_seconds=(audited.sampled_certificate_elapsed_seconds),
         sampled_checker_elapsed_seconds=audited.sampled_checker_elapsed_seconds,
         sampled_checker_failure_count=sum(not item.valid for item in sampled_checks),
-        sampled_reference_elapsed_seconds=(
-            audited.sampled_reference_elapsed_seconds
-        ),
+        sampled_reference_elapsed_seconds=(audited.sampled_reference_elapsed_seconds),
     )
 
 
@@ -4011,8 +4325,7 @@ def _execute_distributed_cells(
 
     if progress is not None:
         progress(
-            "phase_start regime=all phase=distributed_generator "
-            f"processes={cell_process_count}"
+            f"phase_start regime=all phase=distributed_generator processes={cell_process_count}"
         )
     phase_started = perf_counter()
     generated = _order_worker_results(
@@ -4079,10 +4392,7 @@ def _execute_distributed_cells(
     audit_process_count = min(budget.cell_phase_processes, len(audit_cell_tasks))
 
     if progress is not None:
-        progress(
-            "phase_start regime=all phase=distributed_checker "
-            f"processes={cell_process_count}"
-        )
+        progress(f"phase_start regime=all phase=distributed_checker processes={cell_process_count}")
     phase_started = perf_counter()
     checked = _order_worker_results(
         _run_process_phase(
@@ -4241,8 +4551,7 @@ def _execute_distributed_cells(
     )
     if progress is not None:
         progress(
-            "phase_complete regime=all phase=distributed_audit "
-            f"wall_seconds={audit_wall_seconds}"
+            f"phase_complete regime=all phase=distributed_audit wall_seconds={audit_wall_seconds}"
         )
 
     cells = tuple(
@@ -4272,9 +4581,7 @@ def _execute_distributed_cells(
         audit_bindings=frozen_audit,
         measured_process_count=measured_process_count,
         cell_phase_process_count=cell_process_count,
-        translation_audit_processes_per_cell=(
-            budget.translation_audit_processes_per_cell
-        ),
+        translation_audit_processes_per_cell=(budget.translation_audit_processes_per_cell),
         reference_phase_process_count=reference_process_count,
         peak_compute_count=budget.peak_compute,
         generator_wall_seconds=generator_wall_seconds,
@@ -4300,8 +4607,7 @@ def execute_sparse_prefix_proof(
     if (
         (index.full_problem_index_id, index.full_problem_index_sha256)
         != (frozen.problem_index_id, frozen.problem_index_sha256)
-        or (m0.contract_id, m0.content_sha256)
-        != (frozen.m0_contract_id, frozen.m0_contract_sha256)
+        or (m0.contract_id, m0.content_sha256) != (frozen.m0_contract_id, frozen.m0_contract_sha256)
         or (index.m6_contract_id, index.m6_contract_sha256)
         != (contract.contract_id, contract.content_sha256)
         or index.evaluation_partition_opened
@@ -4353,8 +4659,7 @@ def execute_sparse_prefix_proof(
             )
             if progress is not None:
                 progress(
-                    "verified certificate candidate problem "
-                    f"{offset}/{len(selected_problem_ids)}"
+                    f"verified certificate candidate problem {offset}/{len(selected_problem_ids)}"
                 )
     if progress is not None:
         progress(
@@ -4454,8 +4759,7 @@ def execute_portable_fact_gate3(
     if (
         (index.full_problem_index_id, index.full_problem_index_sha256)
         != (frozen.problem_index_id, frozen.problem_index_sha256)
-        or (m0.contract_id, m0.content_sha256)
-        != (frozen.m0_contract_id, frozen.m0_contract_sha256)
+        or (m0.contract_id, m0.content_sha256) != (frozen.m0_contract_id, frozen.m0_contract_sha256)
         or (index.m6_contract_id, index.m6_contract_sha256)
         != (contract.contract_id, contract.content_sha256)
         or index.evaluation_partition_opened
@@ -4546,6 +4850,484 @@ def execute_portable_fact_gate3(
     )
 
 
+def _portable_profile_identity_from_official(
+    cell: M8PortableFactGate3Cell,
+) -> dict[str, object]:
+    return {
+        "regime": cell.regime.value,
+        "temporal_seed": cell.temporal_seed,
+        "stream_id": cell.stream_id,
+        "event_count": cell.event_count,
+        "bundle_sha256": cell.first_bundle_sha256,
+        "semantic_bundle_bytes_sha256": cell.first_semantic_bundle_bytes_sha256,
+        "semantic_serialized_bytes": cell.semantic_serialized_bytes,
+        "fixed_layer_node_count": cell.fixed_layer_node_count,
+        "translation_batch_count": cell.translation_batch_count,
+        "candidate_scalar_fact_count": cell.candidate_scalar_fact_count,
+        "frontier_fact_count": cell.frontier_fact_count,
+        "standard_candidate_fact_count": cell.standard_candidate_fact_count,
+        "common_lemma_count": cell.common_lemma_count,
+        "influence_fact_count": cell.influence_fact_count,
+        "action_root_count": cell.generated_action_root_count,
+        "counted_inventory_evidence_count": (cell.producer_counted_inventory_evidence_row_count),
+        "counted_search_lemma_count": cell.producer_counted_search_lemma_count,
+        "checked_common_lemma_count": cell.checked_common_lemma_count,
+        "checked_influence_fact_count": cell.checked_influence_fact_count,
+        "checked_action_root_count": cell.checked_action_root_count,
+        "counted_translation_audit_count": cell.counted_translation_audit_count,
+        "counted_translation_audit_call_count": (cell.counted_translation_audit_call_count),
+        "influence_translation_audit_count": (cell.influence_translation_audit_count),
+        "total_exact_fallback_count": cell.total_exact_fallback_count,
+        "decision_id": cell.decision_id,
+        "decision_content_sha256": cell.decision_content_sha256,
+        "failure_code": cell.failure_code,
+    }
+
+
+def _portable_profile_identity_from_source(
+    source: _PortableFactCheckedSource,
+) -> dict[str, object]:
+    generated = source.first_generation
+    checked = source.check
+    result = checked.check
+    if result.decision is None:
+        raise ValueError("M8 portable profile checker omitted its decision")
+    return {
+        "regime": generated.regime.value,
+        "temporal_seed": generated.temporal_seed,
+        "stream_id": generated.stream_id,
+        "event_count": generated.event_count,
+        "bundle_sha256": generated.bundle_sha256,
+        "semantic_bundle_bytes_sha256": generated.semantic_bundle_bytes_sha256,
+        "semantic_serialized_bytes": generated.semantic_serialized_bytes,
+        "fixed_layer_node_count": generated.fixed_layer_node_count,
+        "translation_batch_count": generated.translation_batch_count,
+        "candidate_scalar_fact_count": generated.candidate_scalar_fact_count,
+        "frontier_fact_count": generated.frontier_fact_count,
+        "standard_candidate_fact_count": generated.standard_candidate_fact_count,
+        "common_lemma_count": generated.common_lemma_count,
+        "influence_fact_count": generated.influence_fact_count,
+        "action_root_count": generated.action_root_count,
+        "counted_inventory_evidence_count": (generated.telemetry.counted_inventory_evidence_count),
+        "counted_search_lemma_count": generated.counted_search_lemma_count,
+        "checked_common_lemma_count": result.checked_common_lemma_count,
+        "checked_influence_fact_count": result.checked_influence_fact_count,
+        "checked_action_root_count": result.checked_action_root_count,
+        "counted_translation_audit_count": result.counted_translation_audit_count,
+        "counted_translation_audit_call_count": (checked.counted_translation_audit_call_count),
+        "influence_translation_audit_count": (result.influence_translation_audit_count),
+        "total_exact_fallback_count": result.total_exact_fallback_count,
+        "decision_id": result.decision.decision_id,
+        "decision_content_sha256": result.decision.content_sha256,
+        "failure_code": result.failure_code,
+    }
+
+
+def _portable_profile_generation_identity(
+    generated: _PortableBundleIdentityWorkerResult,
+) -> dict[str, object]:
+    """Return every immutable hard-arm generation field bound by profile v2."""
+
+    generated = _strict_portable_bundle_identity(
+        generated,
+        require_bytes=type(generated) is _PortableBundleWorkerResult,
+    )
+    return {
+        "regime": generated.regime.value,
+        "temporal_seed": generated.temporal_seed,
+        "stream_id": generated.stream_id,
+        "event_count": generated.event_count,
+        "bundle_sha256": generated.bundle_sha256,
+        "semantic_bundle_bytes_sha256": generated.semantic_bundle_bytes_sha256,
+        "semantic_serialized_bytes": generated.semantic_serialized_bytes,
+        "fixed_layer_node_count": generated.fixed_layer_node_count,
+        "translation_batch_count": generated.translation_batch_count,
+        "candidate_scalar_fact_count": generated.candidate_scalar_fact_count,
+        "frontier_fact_count": generated.frontier_fact_count,
+        "standard_candidate_fact_count": generated.standard_candidate_fact_count,
+        "common_lemma_count": generated.common_lemma_count,
+        "influence_fact_count": generated.influence_fact_count,
+        "action_root_count": generated.action_root_count,
+        "counted_inventory_evidence_count": (
+            generated.telemetry.counted_inventory_evidence_count
+        ),
+        "counted_search_lemma_count": generated.counted_search_lemma_count,
+    }
+
+
+def _require_portable_profile_identity(
+    official: M8PortableFactGate3Cell,
+    source: _PortableFactCheckedSource,
+) -> dict[str, object]:
+    expected = _portable_profile_identity_from_official(official)
+    observed = _portable_profile_identity_from_source(source)
+    mismatches = tuple(
+        key for key, expected_value in expected.items() if observed.get(key) != expected_value
+    )
+    if mismatches:
+        raise ValueError(
+            "M8 portable profile differs from the official hard arm: " + ",".join(mismatches)
+        )
+    return observed
+
+
+def _require_official_portable_profile_gate3(
+    value: M8PortableFactGate3Result,
+) -> M8PortableFactGate3Result:
+    """Pin the profile to the one committed portable Gate-3 timing artifact."""
+
+    from yieldforge.oracle.gate3_evidence import require_official_portable_gate3
+
+    return require_official_portable_gate3(
+        value,
+        label="M8 portable profile",
+    )
+
+
+def _portable_profile_runtime_identity(
+    frozen: M7FrozenBaseline,
+    *,
+    jagua_executable_sha256: str,
+) -> tuple[str, str]:
+    """Require the frozen Python/Shapely runtime and bind the full current runtime."""
+
+    import platform
+
+    import shapely
+
+    if (
+        frozen.runtime.python_implementation != platform.python_implementation()
+        or frozen.runtime.python_version != platform.python_version()
+        or frozen.runtime.shapely_version != shapely.__version__
+        or frozen.runtime.jagua_executable_sha256 != jagua_executable_sha256
+    ):
+        raise ValueError("M8 portable profile runtime differs from the M7 freeze")
+    from yieldforge.oracle.gate3_execution import _runtime_identity
+
+    return _runtime_identity(jagua_executable_sha256=jagua_executable_sha256)
+
+
+def execute_portable_fact_profile(
+    *,
+    index: M7CalibrationProblemView,
+    m0: M0ExperimentContract,
+    frozen: M7FrozenBaseline,
+    official_gate3: M8PortableFactGate3Result,
+    archive_roots: tuple[Path, ...],
+    jagua_executable: Path,
+    progress=None,  # type: ignore[no-untyped-def]
+) -> M8PortableHotspotProfileV2:
+    """Profile only the sealed two-event regime-shift portable hard arm."""
+
+    if (
+        type(index) is not M7CalibrationProblemView
+        or type(m0) is not M0ExperimentContract
+        or type(frozen) is not M7FrozenBaseline
+        or type(official_gate3) is not M8PortableFactGate3Result
+    ):
+        raise TypeError("M8 portable profile requires exact frozen input contracts")
+    index = M7CalibrationProblemView.model_validate(index.model_dump(mode="python"), strict=True)
+    m0 = M0ExperimentContract.model_validate(m0.model_dump(mode="python"), strict=True)
+    frozen = M7FrozenBaseline.model_validate(frozen.model_dump(mode="python"), strict=True)
+    official_gate3 = _require_official_portable_profile_gate3(
+        M8PortableFactGate3Result.model_validate_json(
+            official_gate3.model_dump_json(), strict=True
+        )
+    )
+    contract = build_registered_contract()
+    expected_boundary = (
+        m0.contract_id,
+        m0.content_sha256,
+        index.m6_contract_id,
+        index.m6_contract_sha256,
+        index.m6_population_id,
+        index.m6_population_sha256,
+        index.full_problem_index_id,
+        index.full_problem_index_sha256,
+        frozen.freeze_id,
+        frozen.content_sha256,
+        index.view_id,
+        index.content_sha256,
+    )
+    official_boundary = (
+        official_gate3.m0_contract_id,
+        official_gate3.m0_contract_sha256,
+        official_gate3.m6_contract_id,
+        official_gate3.m6_contract_sha256,
+        official_gate3.m6_population_id,
+        official_gate3.m6_population_sha256,
+        official_gate3.problem_index_id,
+        official_gate3.problem_index_sha256,
+        official_gate3.freeze_id,
+        official_gate3.freeze_sha256,
+        official_gate3.calibration_view_id,
+        official_gate3.calibration_view_sha256,
+    )
+    if (
+        (index.full_problem_index_id, index.full_problem_index_sha256)
+        != (frozen.problem_index_id, frozen.problem_index_sha256)
+        or (m0.contract_id, m0.content_sha256) != (frozen.m0_contract_id, frozen.m0_contract_sha256)
+        or (index.m6_contract_id, index.m6_contract_sha256)
+        != (contract.contract_id, contract.content_sha256)
+        or expected_boundary != official_boundary
+        or index.evaluation_partition_opened
+        or official_gate3.evaluation_accessed
+    ):
+        raise ValueError("M8 portable profile inputs differ from the sealed Gate-3 boundary")
+    executable = Path(jagua_executable)
+    metadata = executable.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("M8 portable profile Jagua runtime must be a regular file")
+    executable_sha = f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}"
+    if executable_sha != frozen.runtime.jagua_executable_sha256:
+        raise ValueError("M8 portable profile Jagua runtime differs from the M7 freeze")
+    runtime_identity = _portable_profile_runtime_identity(
+        frozen,
+        jagua_executable_sha256=executable_sha,
+    )
+
+    official_cells = tuple(
+        cell for cell in official_gate3.cells if cell.regime is TemporalRegime.REGIME_SHIFT
+    )
+    if len(official_cells) != 1:
+        raise ValueError("M8 portable profile official hard arm is not unique")
+    official_cell = official_cells[0]
+    selected_streams = _select_portable_gate3_probe_streams(index)
+    selected = tuple(
+        stream for stream in selected_streams if stream[0].regime is TemporalRegime.REGIME_SHIFT
+    )
+    if len(selected) != 1:
+        raise ValueError("M8 portable profile hard-arm stream is not unique")
+    selected_stream = selected[0]
+    if (
+        selected_stream[0].temporal_seed != official_cell.temporal_seed
+        or selected_stream[0].stream_id != official_cell.stream_id
+        or len(selected_stream) != official_cell.event_count
+    ):
+        raise ValueError("M8 portable profile stream differs from the official hard arm")
+
+    calibration = select_calibration_instances(index)
+    problem_by_id = {item.problem_id: item for item in index.problems}
+    selected_problem_ids = tuple(sorted({item.problem_id for item in selected_stream}))
+    references_by_task: dict[int, list[object]] = {}
+    for reference in canonical_m2_archive_references():
+        references_by_task.setdefault(reference.tasks_index, []).append(reference)
+    if progress is not None:
+        progress(
+            "phase_start regime=regime_shift phase=portable_profile_candidate_verification "
+            f"problems={len(selected_problem_ids)}"
+        )
+    verified = {}
+    for problem_id in selected_problem_ids:
+        problem = problem_by_id[problem_id]
+        verified[problem_id] = verify_problem_candidates(
+            problem,
+            tuple(references_by_task[problem.tasks_index]),  # type: ignore[arg-type]
+            archive_roots,
+        )
+    calibration_problem_ids = tuple(sorted({item.problem_id for item in calibration}))
+    frozen_by_problem = {
+        problem_id: (candidate_id, candidate_sha)
+        for problem_id, candidate_id, candidate_sha in zip(
+            calibration_problem_ids,
+            frozen.candidate_set_ids,
+            frozen.candidate_set_sha256s,
+            strict=True,
+        )
+    }
+    for problem_id, candidates in verified.items():
+        if (
+            candidates.evidence.candidate_set_id,
+            candidates.evidence.content_sha256,
+        ) != frozen_by_problem[problem_id]:
+            raise ValueError("M8 portable profile candidates differ from the M7 freeze")
+    if progress is not None:
+        progress(
+            "phase_complete regime=regime_shift phase=portable_profile_candidate_verification "
+            f"problems={len(selected_problem_ids)}"
+        )
+
+    execution_cell = _build_execution_cells(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        verified=verified,
+        selected_streams=[selected_stream],
+    )[0]
+    if progress is not None:
+        progress("phase_start regime=regime_shift phase=portable_profile_generation_check")
+    source_tree = capture_source_tree()
+    implementation_identity = source_tree_implementation_identity(
+        "portable-profile",
+        (Path(__file__),),
+        source_tree=source_tree,
+    )
+    (
+        source,
+        repeated_generation,
+        generator_profile,
+        generation_phase,
+        repeat_generation_phase,
+        checker_phase,
+        timing,
+    ) = _profile_portable_fact_cell(
+        execution_cell,
+        rules=rule_set_from_m0(m0.remnant_eligibility),
+        jagua_executable=executable,
+        freeze_id=frozen.freeze_id,
+        freeze_sha256=frozen.content_sha256,
+        expected_jagua_sha256=frozen.runtime.jagua_executable_sha256,
+        budget=M8_GATE3_CONCURRENCY_BUDGET,
+        source_tree=source_tree,
+        expected_runtime_identity=runtime_identity,
+    )
+    identity = _require_portable_profile_identity(official_cell, source)
+    generator_report = generator_profile.model_dump()
+    checker_report = source.check.profile.model_dump()
+    measurement_complete = (
+        generator_profile.accounted_wall_fraction >= 0.90
+        and source.check.profile.accounted_wall_fraction >= 0.90
+    )
+    if progress is not None:
+        progress(
+            "phase_complete regime=regime_shift phase=portable_profile_generation_check "
+            f"roots={identity['action_root_count']} "
+            f"measurement_complete={str(measurement_complete).lower()}"
+        )
+    payload: dict[str, object] = {
+        "schema_version": "yieldforge.m8-portable-hotspot-profile.v2",
+        "official_gate3_id": official_gate3.gate3_id,
+        "official_gate3_content_sha256": official_gate3.content_sha256,
+        "regime": TemporalRegime.REGIME_SHIFT.value,
+        "temporal_seed": official_cell.temporal_seed,
+        "stream_id": official_cell.stream_id,
+        "event_count": official_cell.event_count,
+        "official_identity_match": True,
+        "repeated_output_identity_match": True,
+        "first_generation_identity": _portable_profile_generation_identity(
+            source.first_generation
+        ),
+        "repeat_generation_identity": _portable_profile_generation_identity(
+            repeated_generation
+        ),
+        "identity": identity,
+        "profile_implementation_id": implementation_identity[0],
+        "profile_implementation_content_sha256": implementation_identity[1],
+        "runtime_id": runtime_identity[0],
+        "runtime_content_sha256": runtime_identity[1],
+        "generator_runtime_content_sha256": (
+            timing.generator_runtime_content_sha256
+        ),
+        "repeat_generator_runtime_content_sha256": (
+            timing.repeat_generator_runtime_content_sha256
+        ),
+        "checker_runtime_content_sha256": timing.checker_runtime_content_sha256,
+        "runtime_attested_workers": True,
+        "source_attested_workers": True,
+        "fresh_pycache_scope": True,
+        "generator_worker_pid": source.first_generation.worker_pid,
+        "repeat_generator_worker_pid": repeated_generation.worker_pid,
+        "checker_worker_pid": source.check.worker_pid,
+        "fresh_worker_identity": (
+            len(
+                {
+                    source.first_generation.worker_pid,
+                    repeated_generation.worker_pid,
+                    source.check.worker_pid,
+                }
+            )
+            == 3
+        ),
+        "generator_worker_wall_seconds": (source.first_generation.generation_wall_seconds),
+        "repeat_generator_worker_wall_seconds": repeated_generation.generation_wall_seconds,
+        "checker_worker_wall_seconds": source.check.checker_wall_seconds,
+        "core_generation_plus_checker_worker_wall_seconds": (
+            source.first_generation.generation_wall_seconds + source.check.checker_wall_seconds
+        ),
+        "repeated_generation_plus_checker_worker_wall_seconds": (
+            source.first_generation.generation_wall_seconds
+            + repeated_generation.generation_wall_seconds
+            + source.check.checker_wall_seconds
+        ),
+        "first_generation_phase_wall_seconds": (
+            timing.first_generation_phase_wall_seconds
+        ),
+        "second_generation_phase_wall_seconds": (
+            timing.second_generation_phase_wall_seconds
+        ),
+        "checker_phase_wall_seconds": timing.checker_phase_wall_seconds,
+        "total_pipeline_wall_seconds": timing.total_pipeline_wall_seconds,
+        "timing_semantics": "controller_phase_and_worker_operation_wall_v1",
+        "generator_profile": generator_report,
+        "checker_profile": checker_report,
+        "generator_accounted_wall_fraction": (generator_profile.accounted_wall_fraction),
+        "checker_accounted_wall_fraction": (source.check.profile.accounted_wall_fraction),
+        "minimum_accounted_wall_fraction": 0.90,
+        "measurement_complete": measurement_complete,
+        "measurement_decision": (
+            "profile_complete" if measurement_complete else "profile_incomplete"
+        ),
+        "generator_handoff": {
+            "task_serialization_wall_seconds": (generation_phase.task_serialization_wall_seconds),
+            "result_serialization_wall_seconds": (
+                generation_phase.result_serialization_wall_seconds
+            ),
+            "worker_payload_handoff_wall_seconds": (
+                generation_phase.worker_payload_handoff_wall_seconds
+            ),
+            "process_exit_validation_wall_seconds": (
+                generation_phase.process_exit_validation_wall_seconds
+            ),
+        },
+        "checker_handoff": {
+            "task_serialization_wall_seconds": checker_phase.task_serialization_wall_seconds,
+            "result_serialization_wall_seconds": (checker_phase.result_serialization_wall_seconds),
+            "worker_payload_handoff_wall_seconds": (
+                checker_phase.worker_payload_handoff_wall_seconds
+            ),
+            "process_exit_validation_wall_seconds": (
+                checker_phase.process_exit_validation_wall_seconds
+            ),
+        },
+        "repeat_generator_handoff": {
+            "task_serialization_wall_seconds": (
+                repeat_generation_phase.task_serialization_wall_seconds
+            ),
+            "result_serialization_wall_seconds": (
+                repeat_generation_phase.result_serialization_wall_seconds
+            ),
+            "worker_payload_handoff_wall_seconds": (
+                repeat_generation_phase.worker_payload_handoff_wall_seconds
+            ),
+            "process_exit_validation_wall_seconds": (
+                repeat_generation_phase.process_exit_validation_wall_seconds
+            ),
+        },
+        "configured_outer_process_count": 1,
+        "nested_translation_audit_processes": (
+            M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell
+        ),
+        "peak_compute_count": (M8_GATE3_CONCURRENCY_BUDGET.translation_audit_processes_per_cell),
+        "compute_slot_cap": M8_GATE3_CONCURRENCY_BUDGET.peak_compute,
+        "evaluation_accessed": False,
+        "official_six_cell_calibration_authorized": False,
+        "claim_ceiling": (
+            "calibration_hotspot_measurement_only_not_gate3_performance_pass_"
+            "m8_advantage_savings_physical_or_commercial_evidence"
+        ),
+    }
+    digest = semantic_sha256(payload)
+    identified = {
+        **payload,
+        "profile_id": f"yfm8profile-{digest[:24]}",
+        "content_sha256": f"sha256:{digest}",
+    }
+    return M8PortableHotspotProfileV2.model_validate_json(
+        json.dumps(identified, allow_nan=False, sort_keys=True),
+        strict=True,
+    )
+
+
 def _profile_result_payload(
     *,
     regime: TemporalRegime,
@@ -4604,8 +5386,7 @@ def execute_certificate_profile(
     if (
         (index.full_problem_index_id, index.full_problem_index_sha256)
         != (frozen.problem_index_id, frozen.problem_index_sha256)
-        or (m0.contract_id, m0.content_sha256)
-        != (frozen.m0_contract_id, frozen.m0_contract_sha256)
+        or (m0.contract_id, m0.content_sha256) != (frozen.m0_contract_id, frozen.m0_contract_sha256)
         or (index.m6_contract_id, index.m6_contract_sha256)
         != (contract.contract_id, contract.content_sha256)
         or index.evaluation_partition_opened
@@ -4654,9 +5435,7 @@ def execute_certificate_profile(
                     len(verified[problem_id].candidates),
                 )
 
-        calibration_problem_ids = tuple(
-            sorted({item.problem_id for item in calibration})
-        )
+        calibration_problem_ids = tuple(sorted({item.problem_id for item in calibration}))
         frozen_by_problem = {
             problem_id: (candidate_id, candidate_sha)
             for problem_id, candidate_id, candidate_sha in zip(
@@ -4736,6 +5515,230 @@ def publish_certificate_profile(output_path: Path, result: dict[str, object]) ->
     return path
 
 
+def _open_portable_profile_parent(output_path: Path) -> tuple[Path, int]:
+    """Open/create every parent through no-follow directory descriptors."""
+
+    absolute = Path(os.path.abspath(Path(output_path)))
+    if not absolute.name:
+        raise ValueError("M8 portable profile output filename is absent")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    parts = absolute.parent.parts
+    if not parts or parts[0] != absolute.anchor:
+        raise ValueError("M8 portable profile parent directory is malformed")
+    current = os.open(absolute.anchor, directory_flags)
+    try:
+        for component in parts[1:]:
+            try:
+                following = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o755, dir_fd=current)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(current)
+                try:
+                    following = os.open(
+                        component,
+                        directory_flags,
+                        dir_fd=current,
+                    )
+                except OSError as error:
+                    raise ValueError(
+                        "M8 portable profile parent directory is not a regular directory"
+                    ) from error
+            except OSError as error:
+                raise ValueError(
+                    "M8 portable profile parent directory is not a regular directory"
+                ) from error
+            metadata = os.fstat(following)
+            if not stat.S_ISDIR(metadata.st_mode):
+                os.close(following)
+                raise ValueError(
+                    "M8 portable profile parent directory is not a regular directory"
+                )
+            os.close(current)
+            current = following
+        return absolute, current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _read_portable_profile_entry(
+    parent_descriptor: int,
+    filename: str,
+) -> tuple[bytes, os.stat_result] | None:
+    """Read one stable regular entry without following its final component."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(filename, flags, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError("M8 portable existing profile differs") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("M8 portable existing profile differs")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        entry = os.stat(
+            filename,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        entry_identity = (
+            entry.st_dev,
+            entry.st_ino,
+            entry.st_size,
+            entry.st_mtime_ns,
+        )
+        if before_identity != after_identity or after_identity != entry_identity:
+            raise ValueError("M8 portable profile publication integrity differs")
+        return b"".join(chunks), after
+    except FileNotFoundError as error:
+        raise ValueError("M8 portable profile publication integrity differs") from error
+    finally:
+        os.close(descriptor)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("M8 portable profile write made no progress")
+        remaining = remaining[written:]
+
+
+def publish_portable_fact_profile(
+    output_path: Path,
+    result: M8PortableHotspotProfileV2,
+) -> Path:
+    """Publish a bounded profiling artifact after verifying its content identity."""
+
+    if type(result) is not M8PortableHotspotProfileV2:
+        raise TypeError("M8 portable profile publisher requires the exact result model")
+    strict = M8PortableHotspotProfileV2.model_validate_json(
+        result.model_dump_json(),
+        strict=True,
+    )
+    path = Path(output_path)
+    data = (
+        json.dumps(
+            strict.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    absolute, parent_descriptor = _open_portable_profile_parent(path)
+    filename = absolute.name
+    temporary = f".{filename}.tmp-{secrets.token_hex(16)}"
+    try:
+        existing = _read_portable_profile_entry(parent_descriptor, filename)
+        if existing is not None:
+            if existing[0] != data:
+                raise ValueError("M8 portable existing profile differs")
+            return path
+        descriptor = os.open(
+            temporary,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        linked_destination = False
+        try:
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+            source = os.fstat(descriptor)
+            source_entry = os.stat(
+                temporary,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(source.st_mode)
+                or (source.st_dev, source.st_ino) != (source_entry.st_dev, source_entry.st_ino)
+            ):
+                raise ValueError("M8 portable profile publication integrity differs")
+            try:
+                os.link(
+                    temporary,
+                    filename,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                linked_destination = True
+            except FileExistsError:
+                existing = _read_portable_profile_entry(parent_descriptor, filename)
+                if existing is None or existing[0] != data:
+                    raise ValueError("M8 portable existing profile differs") from None
+            else:
+                published = _read_portable_profile_entry(parent_descriptor, filename)
+                if (
+                    published is None
+                    or published[0] != data
+                    or (published[1].st_dev, published[1].st_ino)
+                    != (source.st_dev, source.st_ino)
+                ):
+                    raise ValueError("M8 portable profile publication integrity differs")
+                os.fsync(parent_descriptor)
+        except BaseException:
+            if linked_destination:
+                try:
+                    os.unlink(filename, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+                os.fsync(parent_descriptor)
+            raise
+        finally:
+            os.close(descriptor)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
+        else:
+            os.fsync(parent_descriptor)
+        os.close(parent_descriptor)
+    return path
+
+
 def publish_portable_fact_gate3(
     output_directory: Path,
     result: M8PortableFactGate3Result,
@@ -4777,9 +5780,7 @@ def publish_portable_fact_gate3(
             os.link(temporary, path)
         except FileExistsError:
             if path.read_bytes() != data:
-                raise ValueError(
-                    "M8 portable Gate-3 artifact is immutable and differs"
-                ) from None
+                raise ValueError("M8 portable Gate-3 artifact is immutable and differs") from None
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -4798,8 +5799,7 @@ def _publish_sparse_proof_unprofiled(
     output.mkdir(parents=True, exist_ok=True)
     path = output / f"m8-certificate-proof-{result.proof_id}.json"
     data = (
-        json.dumps(result.model_dump(mode="json"), allow_nan=False, indent=2, sort_keys=True)
-        + "\n"
+        json.dumps(result.model_dump(mode="json"), allow_nan=False, indent=2, sort_keys=True) + "\n"
     ).encode()
     if path.exists():
         if path.read_bytes() != data:
@@ -4834,14 +5834,17 @@ __all__ = [
     "M8PortableFactGate3Cell",
     "M8PortableFactGate3Result",
     "M8PortableFactPhaseTiming",
+    "M8PortableHotspotProfileV2",
     "M8PortableRegistryEvidence",
     "audit_sample_sha256",
     "execute_certificate_profile",
+    "execute_portable_fact_profile",
     "execute_portable_fact_gate3",
     "execute_sparse_prefix_proof",
     "finalize_certificate_proof",
     "finalize_portable_fact_gate3",
     "publish_certificate_profile",
+    "publish_portable_fact_profile",
     "publish_portable_fact_gate3",
     "publish_sparse_proof",
 ]

@@ -44,6 +44,49 @@ def test_sparse_passive_remnant_matches_reference_without_branch_replay() -> Non
     )
 
 
+def test_prepared_generator_retains_complete_standard_actions_without_descriptor_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.baseline import replay as replay_module
+    from yieldforge.oracle import sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    original = replay_module.build_standard_sheet_action
+    built = []
+
+    def recording_build(*args, **kwargs):  # type: ignore[no-untyped-def]
+        action = original(*args, **kwargs)
+        built.append(action)
+        return action
+
+    monkeypatch.setattr(replay_module, "build_standard_sheet_action", recording_build)
+    with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+        catalog = context._catalog  # noqa: SLF001
+        retained = catalog.generated.materialized_standard_actions
+        binding_id = runtime.replay_input.instances[0].binding_id
+        current_event_built = tuple(
+            item
+            for item in built
+            if item.selected_stock.lineage.root_stock_id == binding_id
+        )
+        standard_descriptors = tuple(
+            item
+            for item in catalog.actions
+            if item.kind.value == "open_standard_sheet"
+        )
+
+        assert len(current_event_built) == catalog.standard_action_count
+        assert tuple(item.candidate_id for item in retained) == tuple(
+            item.candidate_id for item in standard_descriptors
+        )
+        assert all(item.evidence is None for item in standard_descriptors)
+
+
 def test_generator_passive_advance_applies_once_and_hashes_two_cursors(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]

@@ -1,6 +1,7 @@
 # M8 — Rollout oracle
 
-**Status:** Complete Gate 3 — proof and mutation pass; performance hold requires algorithmic redesign
+**Status:** Gate 3 proof/mutations pass; Phase B reuse preserves correctness but performance remains
+on hold pending compiled columnar traversal
 
 M8 measures the value of knowing the realized future when choosing today's action. For each current candidate, the oracle executes it virtually and replays the remainder under the frozen strong baseline.
 
@@ -249,3 +250,49 @@ regimes: 428 classes for 428 `no_signal` roots and 459 classes for 459 `regime_s
 whole-root quotienting therefore offers zero compression and is closed as a no-go. The next spike
 must batch shared sub-operations or compile the pure state-chain/cost verification kernel without
 weakening root identity.
+
+## Bounded Phase-B action/layout reuse spike — 2026-08-27
+
+The sealed hard-arm spike published
+`yf/experiments/results/m8-portable-hotspot-profile-regime-shift-reuse-v3.json`. Its strict identity
+is `yfm8profile-ffbf978a466f6e98768a7556` with content hash
+`sha256:ffbf978a466f6e98768a7556d223e61bbbca85737b04b845a6da32709ac85e87`.
+
+The implementation reuses complete standard-sheet actions within each exact catalog and retains
+full prepared layouts only behind process-local capabilities bound to runtime, event, ordered
+candidate IDs, fit configuration, and deep geometry fingerprints. Every prepared consumer reads a
+proof-owned semantic runtime snapshot. Retained actions, loaded worker code and its private mirror,
+output publication, and cleanup are fail-closed. The fresh checker reconstructs its own authority.
+Jagua results, translation audits, portable facts, and checker outcomes are not cached or trusted
+across that boundary.
+
+The correctness and provenance result passes the bounded spike:
+
+- the official `regime_shift` arm remains exactly 459 roots, 2,297 fixed nodes, and 43,520,933
+  semantic bytes;
+- bundle, semantic-byte, decision, cost, and complete layer identities match the official Gate 3;
+- repeat generation is byte-identical and exact fallback remains zero;
+- three distinct fresh workers are source-attested under a fresh bytecode-cache scope and remain
+  below the eight-slot ceiling; and
+- the external source-tree hash is
+  `sha256:63825133dee1927d753d2bbcd74a49bee241c347eeb5c0b594cbff73e2929eac`, controller and all three
+  workers match runtime hash
+  `sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508`, and focused capability,
+  timing, source/runtime, publisher-race, and mutation protections pass.
+
+Performance does not pass. Controller-observed phase wall was `158.964633` seconds for first
+generation, `156.515162` for repeat generation, and `276.558218` for the independent checker;
+complete one-arm pipeline wall was `592.221873` seconds. This one arm alone is `19.570205x` the
+entire `30.261404`-second two-probe budget. It is a lower bound, not a replacement full Gate-3
+measurement, so no full-pipeline speedup or new held-out-day projection is claimed.
+
+The remaining hotspots are object-heavy producer/checker traversal, catalog construction, common
+verification, context preparation, and authority reconstruction. The next bounded C0 step is a
+producer-side NumPy CPU/NEON batch over 459 branch queries and the exact 13-member Pareto frontier,
+paired with an independent scalar checker and unchanged exact survivor path. This reduces the
+comparison shape from 210,681 to 5,967 predicates per pass (`35.307692x`) before vectorization, but
+the real target is avoiding expanded proof objects and repeated hashing. C0 may expand only if
+exactness and zero fallback hold and combined action traversal falls from `171.331178` to at most
+`8.566559` seconds (`20x`). Full Phase C, official six-cell calibration, and evaluation remain
+unexecuted and unauthorized. No oracle-advantage, savings, physical, buyer, or commercial result
+exists.

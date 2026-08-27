@@ -29,6 +29,9 @@ def test_profile_records_nested_process_and_wall_phases(monkeypatch) -> None:  #
     report = profiler.report()
     assert report.total_process_ns == 160
     assert report.total_wall_ns == 260
+    assert report.accounted_wall_ns == 170
+    assert report.unattributed_wall_ns == 90
+    assert report.accounted_wall_fraction == pytest.approx(170 / 260)
     assert len(report.phases) == 1
     pipeline = report.phases[0]
     assert pipeline.name == "pipeline"
@@ -225,9 +228,47 @@ def test_checker_emits_load_and_algebra_profile_phases() -> None:
         results = check_action_proofs(request, proofs)
 
     assert all(result.valid for result in results)
-    assert {"checker_load", "checker_algebra"} <= _phase_names(
-        profiler.report().phases
+    assert {"checker_load", "checker_algebra"} <= _phase_names(profiler.report().phases)
+
+
+def test_portable_fact_generator_profiles_stable_boundaries_without_semantic_drift() -> None:
+    from tests.oracle.fixtures import two_problem_runtime
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.factored import (
+        M8UncheckedBundleRequest,
+        score_unchecked_fact_bundle,
     )
+    from yieldforge.oracle.profiling import activate_m8_profile
+    from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    oracle_request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    request = M8UncheckedBundleRequest(
+        oracle_request=oracle_request,
+        freeze_id="yfm7freeze-" + "b" * 24,
+        freeze_sha256="sha256:" + "b" * 64,
+    )
+    unprofiled = score_unchecked_fact_bundle(request)
+
+    with activate_m8_profile() as profiler:
+        profiled = score_unchecked_fact_bundle(request)
+
+    assert profiled.bundle == unprofiled.bundle
+    assert profiled.semantic_bytes == unprofiled.semantic_bytes
+    assert {
+        "fact_bundle_prepared_context_session",
+        "fact_bundle_unchecked_traversal",
+        "fact_bundle_layer_assembly",
+        "fact_bundle_hash_validation",
+        "fact_bundle_semantic_serialization",
+        "fact_bundle_strict_roundtrip",
+        "fact_bundle_telemetry",
+    } <= _phase_names(profiler.report().phases)
 
 
 def test_full_fact_checker_profiles_one_existing_execution_without_duplicate_work(
@@ -303,16 +344,25 @@ def test_full_fact_checker_profiles_one_existing_execution_without_duplicate_wor
         return original_load(semantic_bytes)
 
     monkeypatch.setattr(fact_checker, "_canonical_load", counted_load)
+    unprofiled = check_m8_fact_bundle(request)
+    calls = 0
     with activate_m8_profile() as profiler:
         result = check_m8_fact_bundle(request)
 
     assert result.valid
+    assert result == unprofiled
     assert calls == 1
     assert {
+        "fact_bundle_request_snapshot",
         "fact_bundle_strict_load",
+        "fact_bundle_authority_session",
+        "fact_bundle_context_index_preparation",
         "fact_bundle_common_verification",
+        "fact_bundle_request_stability",
+        "fact_bundle_capability_registration",
         "fact_bundle_action_traversal",
         "fact_bundle_cleanup",
+        "fact_bundle_result_materialization",
     } <= _phase_names(profiler.report().phases)
 
 
@@ -338,9 +388,7 @@ def test_common_fact_differential_audit_records_exact_portable_identity() -> Non
     assert audit.event_id.startswith("yfm7e-")
     assert audit.content_sha256.startswith("sha256:")
     assert profiler.report().counts["differential_mismatches"] == 0
-    assert "common_fact_differential_audit" in _phase_names(
-        profiler.report().phases
-    )
+    assert "common_fact_differential_audit" in _phase_names(profiler.report().phases)
 
 
 def test_m8_profile_command_is_calibration_only_and_explicit() -> None:

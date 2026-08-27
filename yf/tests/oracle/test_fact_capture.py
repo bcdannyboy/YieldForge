@@ -271,6 +271,266 @@ def test_unchecked_counted_capture_skips_duplicate_audit_and_matches_trusted_v1(
     assert trusted.fact == captured.common_fact
 
 
+def test_prepared_count_synthesis_reuses_exact_layouts_and_remnant_measurement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    binding = runtime.replay_input.instances[1]
+    area_only = inventory_item(
+        Polygon(((0, 0), (4, 0), (4, 1), (1, 1), (1, 10), (0, 10))),
+        material=binding.material,
+        token="prepared-count-synthesis",
+    )
+    legacy = certificates._synthesize_scalar_no_fit_source(  # noqa: SLF001
+        runtime,
+        event_position=1,
+        item=area_only,
+        mode=certificates._CommonDerivationMode.UNCHECKED_PORTABLE,  # noqa: SLF001
+    )
+    original_layout = compiled.prepare_layout_footprint
+    original_remnant = compiled.prepare_translation_rejection_remnant
+    constructed: list[str] = []
+    measured: list[str] = []
+
+    def counted_layout(problem, candidate, config):  # type: ignore[no-untyped-def]
+        constructed.append(candidate.candidate_id)
+        return original_layout(problem, candidate, config)
+
+    def counted_remnant(remnant):  # type: ignore[no-untyped-def]
+        measured.append(remnant.remnant_id)
+        return original_remnant(remnant)
+
+    def unexpected_layout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepared count synthesis rebuilt candidate geometry")
+
+    monkeypatch.setattr(compiled, "prepare_layout_footprint", counted_layout)
+    monkeypatch.setattr(compiled, "prepare_translation_rejection_remnant", counted_remnant)
+    monkeypatch.setattr(certificates, "prepare_layout_footprint", unexpected_layout)
+    with compiled._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(1,),
+    ) as prepared:
+        reused = certificates._synthesize_scalar_no_fit_source(  # noqa: SLF001
+            runtime,
+            event_position=1,
+            item=area_only,
+            mode=certificates._CommonDerivationMode.UNCHECKED_PORTABLE,  # noqa: SLF001
+            prepared_layouts=prepared,
+        )
+
+    expected_ids = tuple(
+        candidate.candidate_id
+        for candidate in runtime.runtime_candidates[binding.problem_id].candidates
+    )
+    assert tuple(constructed) == expected_ids
+    assert measured == [area_only.remnant.remnant_id]
+    assert reused == legacy
+
+
+@pytest.mark.parametrize("source_field", ("event_material", "fit_config"))
+def test_prepared_count_synthesis_ignores_transient_live_source_mutation(
+    source_field: str,
+) -> None:
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    binding = runtime.replay_input.instances[1]
+    area_only = inventory_item(
+        Polygon(((0, 0), (4, 0), (4, 1), (1, 1), (1, 10), (0, 10))),
+        material=binding.material.model_copy(deep=True),
+        token=f"prepared-count-snapshot-{source_field}",
+    )
+
+    with compiled._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(1,),
+    ) as prepared:
+        canonical = certificates._synthesize_scalar_no_fit_source(  # noqa: SLF001
+            runtime,
+            event_position=1,
+            item=area_only,
+            mode=certificates._CommonDerivationMode.UNCHECKED_PORTABLE,  # noqa: SLF001
+            prepared_layouts=prepared,
+        )
+        if source_field == "event_material":
+            owner, field_name = binding.material, "grade"
+            mutated = f"{binding.material.grade}-transient"
+        else:
+            owner, field_name = runtime.replay_input.fit_config, "coordinate_tolerance"
+            mutated = 100.0
+        original = getattr(owner, field_name)
+        object.__setattr__(owner, field_name, mutated)
+        try:
+            repeated = certificates._synthesize_scalar_no_fit_source(  # noqa: SLF001
+                runtime,
+                event_position=1,
+                item=area_only,
+                mode=certificates._CommonDerivationMode.UNCHECKED_PORTABLE,  # noqa: SLF001
+                prepared_layouts=prepared,
+            )
+        finally:
+            object.__setattr__(owner, field_name, original)
+
+    assert repeated == canonical
+
+
+@pytest.mark.parametrize(
+    "source_field",
+    ("event_material", "fit_config", "search_config"),
+)
+def test_prepared_common_capture_is_issuance_bound_during_transient_runtime_mutation(
+    source_field: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    event_position = 1
+    binding = runtime.replay_input.instances[event_position]
+    area_only = inventory_item(
+        Polygon(((0, 0), (4, 0), (4, 1), (1, 1), (1, 10), (0, 10))),
+        material=binding.material.model_copy(deep=True),
+        token=f"prepared-common-snapshot-{source_field}",
+    )
+    cursor = replace(_fallback_cursor(runtime), inventory=(area_only,))
+    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    if source_field == "event_material":
+        owner, field_name = binding.material, "grade"
+        mutated = f"{binding.material.grade}-transient"
+    elif source_field == "fit_config":
+        owner, field_name = runtime.replay_input.fit_config, "coordinate_tolerance"
+        mutated = 100.0
+    else:
+        owner, field_name = runtime.replay_input.search_config, "maximum_candidates"
+        mutated = 1
+    original = getattr(owner, field_name)
+    original_standard = certificates._prepared_standard_winner  # noqa: SLF001
+    original_fact = certificates._common_transition_fact_from_catalog  # noqa: SLF001
+    mutation_observed = False
+
+    def mutate_after_boundary(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = original_standard(*args, **kwargs)
+        object.__setattr__(owner, field_name, mutated)
+        return result
+
+    def restore_before_exit(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal mutation_observed
+        mutation_observed = getattr(owner, field_name) == mutated
+        object.__setattr__(owner, field_name, original)
+        return original_fact(*args, **kwargs)
+
+    with compiled._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(event_position,),
+    ) as prepared:
+        canonical = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+            runtime,
+            cursor=cursor,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+            prepared_layouts=prepared,
+        )
+        monkeypatch.setattr(certificates, "_prepared_standard_winner", mutate_after_boundary)
+        monkeypatch.setattr(
+            certificates,
+            "_common_transition_fact_from_catalog",
+            restore_before_exit,
+        )
+        try:
+            repeated = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+                runtime,
+                cursor=cursor,
+                semantic_runtime_sha256=semantic_runtime_sha256,
+                prepared_layouts=prepared,
+            )
+        finally:
+            object.__setattr__(owner, field_name, original)
+
+    assert mutation_observed
+    assert repeated == canonical
+    assert repr(repeated).encode() == repr(canonical).encode()
+
+
+def test_prepared_unchecked_counted_capture_is_exact_without_layout_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    binding = runtime.replay_input.instances[1]
+    area_only = inventory_item(
+        Polygon(((0, 0), (4, 0), (4, 1), (1, 1), (1, 10), (0, 10))),
+        material=binding.material,
+        token="prepared-unchecked-counted-capture",
+    )
+    cursor = replace(_fallback_cursor(runtime), inventory=(area_only,))
+    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    legacy = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+    )
+
+    def unexpected_layout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepared producer rebuilt candidate geometry")
+
+    with compiled._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(1,),
+    ) as prepared:
+        monkeypatch.setattr(certificates, "prepare_layout_footprint", unexpected_layout)
+        reused = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+            runtime,
+            cursor=cursor,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+            prepared_layouts=prepared,
+        )
+
+    assert reused == legacy
+    assert reused.inventory_classifications[0].classification == "counted_no_fit"
+
+
+def test_prepared_trusted_counted_transition_is_exact_without_layout_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    binding = runtime.replay_input.instances[1]
+    area_only = inventory_item(
+        Polygon(((0, 0), (4, 0), (4, 1), (1, 1), (1, 10), (0, 10))),
+        material=binding.material,
+        token="prepared-trusted-counted-transition",
+    )
+    cursor = replace(_fallback_cursor(runtime), inventory=(area_only,))
+    semantic_runtime_sha256 = m7_semantic_runtime_sha256(runtime)
+    legacy = certificates._try_derive_m8_common_transition_fact_fast(  # noqa: SLF001
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_runtime_sha256,
+    )
+
+    def unexpected_layout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepared trusted path rebuilt candidate geometry")
+
+    with compiled._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(1,),
+    ) as prepared:
+        monkeypatch.setattr(certificates, "prepare_layout_footprint", unexpected_layout)
+        reused = certificates._try_derive_m8_common_transition_fact_fast(  # noqa: SLF001
+            runtime,
+            cursor=cursor,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+            prepared_layouts=prepared,
+        )
+
+    assert reused == legacy
+    assert reused is not None
+    assert reused.counted_no_fit_inventory == (area_only,)
+
+
 def test_producer_only_passivity_retains_full_influence_preimage() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     cursor = _fallback_cursor(runtime)

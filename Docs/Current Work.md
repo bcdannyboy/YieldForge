@@ -6,22 +6,23 @@
 
 ## Current objective
 
-Design the next bounded M8 algorithmic speedup now that the complete portable-fact Gate 3 passed
-the proof and executed-mutation gates but returned `hold_performance`. Preserve complete action
-parity, baseline information masking, exact accounting, independent proof checking, and the sealed
-evaluation boundary.
+Implement the next M8 algorithmic boundary after bounded action/layout reuse preserved correctness
+but failed the Phase-B performance gate. Preserve complete action parity, baseline information
+masking, exact accounting, independent proof checking, and the sealed evaluation boundary.
 
 ## Next step
 
-Redesign the remaining generator/checker action traversal mathematically before any six-cell
-execution. A post-Gate-3 census found zero duplicate exact initial-state, future-input,
-terminal-state, or combined replay commitments across either 428-root or 459-root probe, so
-whole-root state quotienting is a no-go; target shared sub-operations or a compiled pure checker
-kernel instead. The fixed five-day projection requires the charged portable pipeline to fall
-from `686.535011` seconds to at most `30.261404` seconds, a further `22.686819x`; even the
-non-gating first-generation-plus-checker sensitivity at `475.393859` seconds needs `15.709577x`.
-Only after the absolute projection is viable should reference and portable timing be captured under
-one bound environment for a gating comparison. See
+Build the private C0 frontier-columnar influence kernel for the hard arm's 459 branches and
+13-member Pareto frontier, avoiding the current 459-by-459 expansion while reconstructing the same
+portable facts and root commitments. The producer may use a local NumPy `float64`/boolean batch;
+the fresh checker must remain an independent scalar frontier proof, and every survivor or unsupported
+row must take the unchanged exact path. A strict Phase-B v3 profile shows why this boundary is
+necessary: bounded standard-action and prepared-layout reuse preserved the official hard-arm
+identity but the one-arm controller pipeline still took `592.221873` seconds, `19.570205x` the
+entire `30.261404`-second two-probe budget. C0 may expand only if exact identity and zero fallback
+hold and combined producer/checker traversal falls from `171.331178` to at most `8.566559` seconds
+(at least `20x`). That C0 result would authorize further compiled-boundary work, not pass full
+Phase C. The full two-probe rerun and six-cell calibration remain unauthorized. See
 [[2026-08-27-m8-post-gate3-algorithmic-redesign]]. Keep evaluation sealed.
 
 ## Evidence bridge completed
@@ -139,6 +140,21 @@ one bound environment for a gating comparison. See
   reference-equivalent speedup is explicitly cross-run, environment-noncomparable, and non-gating.
   Six-cell calibration was not authorized or executed, evaluation was not opened, and no M8
   advantage or savings result exists.
+- Phase B then implemented exact standard-action materialization reuse, process-local prepared
+  layout reuse, proof-owned semantic runtime snapshots, retained-action capabilities, immutable
+  artifact publication, and loaded-code source/runtime attestation. The sealed `regime_shift` v3
+  run published `yfm8profile-ffbf978a466f6e98768a7556` with content hash
+  `sha256:ffbf978a466f6e98768a7556d223e61bbbca85737b04b845a6da32709ac85e87`:
+  459/459 roots, 2,297 fixed nodes, 43,520,933 semantic bytes, exact official bundle/decision
+  identities, byte-identical repeat generation, zero fallback, and three distinct fresh workers.
+  Its source-tree identity is
+  `sha256:63825133dee1927d753d2bbcd74a49bee241c347eeb5c0b594cbff73e2929eac`; controller and worker
+  runtime identity is
+  `sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508`.
+  The one-arm controller pipeline was `592.221873` seconds (`158.964633` first generation,
+  `156.515162` repeat, `276.558218` checker), already `19.570205x` the full M8 budget. Correctness
+  passes; performance is a no-go. This is not a full two-probe rerun, no new held-out projection is
+  claimed, six-cell calibration remains unauthorized, and evaluation remains unopened.
 
 ## Experiment status
 

@@ -1,0 +1,381 @@
+{
+  "checker_accounted_wall_fraction": 0.9999342975608234,
+  "checker_handoff": {
+    "process_exit_validation_wall_seconds": 0.104105375,
+    "result_serialization_wall_seconds": 0.000673208,
+    "task_serialization_wall_seconds": 0.0310735,
+    "worker_payload_handoff_wall_seconds": 0.09365291599999999
+  },
+  "checker_phase_wall_seconds": 276.5582181250211,
+  "checker_profile": {
+    "accounted_process_fraction": 0.9999173772175772,
+    "accounted_process_ns": 219182931000,
+    "accounted_wall_fraction": 0.9999342975608234,
+    "accounted_wall_ns": 275502505791,
+    "counts": {
+      "actions": 0,
+      "candidates": 0,
+      "counted_no_fit_candidate_searches": 0,
+      "counted_no_fit_inventory_items": 0,
+      "counted_no_fit_transitions": 0,
+      "differential_mismatches": 0,
+      "events": 0,
+      "exact_survivor_inventory_items": 0,
+      "facts": 0,
+      "fallbacks": 0,
+      "frontier_entries": 26,
+      "frontier_rejected_inventory_items": 0,
+      "frontier_rejected_transitions": 0,
+      "full_authoritative_fallbacks": 0,
+      "partially_pruned_transitions": 0,
+      "standard_only_materializations": 0
+    },
+    "phases": [
+      {
+        "children": [],
+        "name": "fact_bundle_metadata_reconciliation",
+        "process_ns": 77482000,
+        "wall_ns": 77816333
+      },
+      {
+        "children": [],
+        "name": "fact_bundle_authority_reconstruction",
+        "process_ns": 45292328000,
+        "wall_ns": 45497481625
+      },
+      {
+        "children": [],
+        "name": "fact_bundle_request_snapshot",
+        "process_ns": 368287000,
+        "wall_ns": 369717917
+      },
+      {
+        "children": [],
+        "name": "fact_bundle_strict_load",
+        "process_ns": 2121173000,
+        "wall_ns": 2129587208
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [],
+                    "name": "scalar_frontier_construction",
+                    "process_ns": 8568000,
+                    "wall_ns": 8591291
+                  }
+                ],
+                "name": "standard_layout_materialization",
+                "process_ns": 8280891000,
+                "wall_ns": 8325020500
+              }
+            ],
+            "name": "fact_bundle_context_index_preparation",
+            "process_ns": 59304997000,
+            "wall_ns": 59613163250
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "name": "scalar_frontier_construction",
+                "process_ns": 8472000,
+                "wall_ns": 8494583
+              },
+              {
+                "children": [],
+                "name": "counted_translation_audit_call",
+                "process_ns": 34132000,
+                "wall_ns": 55271217792
+              }
+            ],
+            "name": "fact_bundle_common_verification",
+            "process_ns": 10957871000,
+            "wall_ns": 66238185542
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_request_stability",
+            "process_ns": 593030000,
+            "wall_ns": 594676083
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_capability_registration",
+            "process_ns": 349013000,
+            "wall_ns": 351304292
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_action_traversal",
+            "process_ns": 94766067000,
+            "wall_ns": 95247443375
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_cleanup",
+            "process_ns": 57482000,
+            "wall_ns": 59365250
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_request_stability",
+            "process_ns": 407858000,
+            "wall_ns": 410359916
+          }
+        ],
+        "name": "fact_bundle_authority_session",
+        "process_ns": 171322887000,
+        "wall_ns": 227427128042
+      },
+      {
+        "children": [],
+        "name": "fact_bundle_result_materialization",
+        "process_ns": 774000,
+        "wall_ns": 774666
+      }
+    ],
+    "schema_version": "yieldforge.m8-phase-profile.v2",
+    "total_process_ns": 219201042000,
+    "total_wall_ns": 275520608167,
+    "unattributed_wall_ns": 18102376
+  },
+  "checker_runtime_content_sha256": "sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508",
+  "checker_worker_pid": 95205,
+  "checker_worker_wall_seconds": 275.52227991702966,
+  "claim_ceiling": "calibration_hotspot_measurement_only_not_gate3_performance_pass_m8_advantage_savings_physical_or_commercial_evidence",
+  "compute_slot_cap": 8,
+  "configured_outer_process_count": 1,
+  "content_sha256": "sha256:ffbf978a466f6e98768a7556d223e61bbbca85737b04b845a6da32709ac85e87",
+  "core_generation_plus_checker_worker_wall_seconds": 432.3224060002249,
+  "evaluation_accessed": false,
+  "event_count": 2,
+  "first_generation_identity": {
+    "action_root_count": 459,
+    "bundle_sha256": "sha256:207a5fb36ae58a42e7f06e61de94df8b6b09dd613578de247778218cf06bb99f",
+    "candidate_scalar_fact_count": 459,
+    "common_lemma_count": 1,
+    "counted_inventory_evidence_count": 1,
+    "counted_search_lemma_count": 1,
+    "event_count": 2,
+    "fixed_layer_node_count": 2297,
+    "frontier_fact_count": 1,
+    "influence_fact_count": 459,
+    "regime": "regime_shift",
+    "semantic_bundle_bytes_sha256": "sha256:6638999ad1ee81d78f8e795dff97ecf081c08b87a63ffd111302a80dd34cec18",
+    "semantic_serialized_bytes": 43520933,
+    "standard_candidate_fact_count": 459,
+    "stream_id": "yfts-f320978a2d55802395294150",
+    "temporal_seed": 2026082300,
+    "translation_batch_count": 459
+  },
+  "first_generation_phase_wall_seconds": 158.96463304199278,
+  "fresh_pycache_scope": true,
+  "fresh_worker_identity": true,
+  "generator_accounted_wall_fraction": 0.9997813108705349,
+  "generator_handoff": {
+    "process_exit_validation_wall_seconds": 0.138848458,
+    "result_serialization_wall_seconds": 0.004037708,
+    "task_serialization_wall_seconds": 0.024336375,
+    "worker_payload_handoff_wall_seconds": 0.33598325
+  },
+  "generator_profile": {
+    "accounted_process_fraction": 0.9997567134344496,
+    "accounted_process_ns": 139953122000,
+    "accounted_wall_fraction": 0.9997813108705349,
+    "accounted_wall_ns": 156779056625,
+    "counts": {
+      "actions": 0,
+      "candidates": 0,
+      "counted_no_fit_candidate_searches": 0,
+      "counted_no_fit_inventory_items": 0,
+      "counted_no_fit_transitions": 0,
+      "differential_mismatches": 0,
+      "events": 0,
+      "exact_survivor_inventory_items": 0,
+      "facts": 0,
+      "fallbacks": 0,
+      "frontier_entries": 13,
+      "frontier_rejected_inventory_items": 0,
+      "frontier_rejected_transitions": 0,
+      "full_authoritative_fallbacks": 0,
+      "partially_pruned_transitions": 0,
+      "standard_only_materializations": 0
+    },
+    "phases": [
+      {
+        "children": [],
+        "name": "fact_bundle_generator_authority_reconstruction",
+        "process_ns": 67000,
+        "wall_ns": 67833
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [],
+                "name": "action_catalog_enumeration",
+                "process_ns": 48711604000,
+                "wall_ns": 48990842792
+              },
+              {
+                "children": [
+                  {
+                    "children": [],
+                    "name": "scalar_frontier_construction",
+                    "process_ns": 8818000,
+                    "wall_ns": 8882833
+                  }
+                ],
+                "name": "standard_layout_materialization",
+                "process_ns": 8332919000,
+                "wall_ns": 8372372458
+              },
+              {
+                "children": [],
+                "name": "fact_bundle_unchecked_traversal",
+                "process_ns": 59684852000,
+                "wall_ns": 76083734417
+              },
+              {
+                "children": [],
+                "name": "fact_bundle_layer_assembly",
+                "process_ns": 10446247000,
+                "wall_ns": 10492766625
+              },
+              {
+                "children": [],
+                "name": "fact_bundle_hash_validation",
+                "process_ns": 779876000,
+                "wall_ns": 784254375
+              }
+            ],
+            "name": "fact_bundle_prepared_context_session",
+            "process_ns": 137321719000,
+            "wall_ns": 154131537625
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_semantic_serialization",
+            "process_ns": 453877000,
+            "wall_ns": 456825000
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_strict_roundtrip",
+            "process_ns": 1410349000,
+            "wall_ns": 1418070958
+          },
+          {
+            "children": [],
+            "name": "fact_bundle_telemetry",
+            "process_ns": 3991000,
+            "wall_ns": 3999083
+          }
+        ],
+        "name": "fact_bundle_generation",
+        "process_ns": 139506160000,
+        "wall_ns": 156329084042
+      },
+      {
+        "children": [],
+        "name": "fact_bundle_handoff_serialization",
+        "process_ns": 446895000,
+        "wall_ns": 449904750
+      }
+    ],
+    "schema_version": "yieldforge.m8-phase-profile.v2",
+    "total_process_ns": 139987179000,
+    "total_wall_ns": 156813350000,
+    "unattributed_wall_ns": 34293375
+  },
+  "generator_runtime_content_sha256": "sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508",
+  "generator_worker_pid": 90367,
+  "generator_worker_wall_seconds": 156.8001260831952,
+  "identity": {
+    "action_root_count": 459,
+    "bundle_sha256": "sha256:207a5fb36ae58a42e7f06e61de94df8b6b09dd613578de247778218cf06bb99f",
+    "candidate_scalar_fact_count": 459,
+    "checked_action_root_count": 459,
+    "checked_common_lemma_count": 1,
+    "checked_influence_fact_count": 459,
+    "common_lemma_count": 1,
+    "counted_inventory_evidence_count": 1,
+    "counted_search_lemma_count": 1,
+    "counted_translation_audit_call_count": 1,
+    "counted_translation_audit_count": 1,
+    "decision_content_sha256": "sha256:7a2c333838e80808a29764cd6c3ace49a0a457507045a5b2b0522a88ba8cd571",
+    "decision_id": "yfm8d-7a2c333838e80808a29764cd",
+    "event_count": 2,
+    "failure_code": "valid_action_decision",
+    "fixed_layer_node_count": 2297,
+    "frontier_fact_count": 1,
+    "influence_fact_count": 459,
+    "influence_translation_audit_count": 0,
+    "regime": "regime_shift",
+    "semantic_bundle_bytes_sha256": "sha256:6638999ad1ee81d78f8e795dff97ecf081c08b87a63ffd111302a80dd34cec18",
+    "semantic_serialized_bytes": 43520933,
+    "standard_candidate_fact_count": 459,
+    "stream_id": "yfts-f320978a2d55802395294150",
+    "temporal_seed": 2026082300,
+    "total_exact_fallback_count": 0,
+    "translation_batch_count": 459
+  },
+  "measurement_complete": true,
+  "measurement_decision": "profile_complete",
+  "minimum_accounted_wall_fraction": 0.9,
+  "nested_translation_audit_processes": 2,
+  "official_gate3_content_sha256": "sha256:ea8a12969396172d7dbc4774bd239532e2907e637ddb44b1d5505c7b9011d117",
+  "official_gate3_id": "yfm8gate3-ea8a12969396172d7dbc4774",
+  "official_identity_match": true,
+  "official_six_cell_calibration_authorized": false,
+  "peak_compute_count": 2,
+  "profile_id": "yfm8profile-ffbf978a466f6e98768a7556",
+  "profile_implementation_content_sha256": "sha256:63825133dee1927d753d2bbcd74a49bee241c347eeb5c0b594cbff73e2929eac",
+  "profile_implementation_id": "yieldforge-m8-portable-profile-v1",
+  "regime": "regime_shift",
+  "repeat_generation_identity": {
+    "action_root_count": 459,
+    "bundle_sha256": "sha256:207a5fb36ae58a42e7f06e61de94df8b6b09dd613578de247778218cf06bb99f",
+    "candidate_scalar_fact_count": 459,
+    "common_lemma_count": 1,
+    "counted_inventory_evidence_count": 1,
+    "counted_search_lemma_count": 1,
+    "event_count": 2,
+    "fixed_layer_node_count": 2297,
+    "frontier_fact_count": 1,
+    "influence_fact_count": 459,
+    "regime": "regime_shift",
+    "semantic_bundle_bytes_sha256": "sha256:6638999ad1ee81d78f8e795dff97ecf081c08b87a63ffd111302a80dd34cec18",
+    "semantic_serialized_bytes": 43520933,
+    "standard_candidate_fact_count": 459,
+    "stream_id": "yfts-f320978a2d55802395294150",
+    "temporal_seed": 2026082300,
+    "translation_batch_count": 459
+  },
+  "repeat_generator_handoff": {
+    "process_exit_validation_wall_seconds": 0.120846458,
+    "result_serialization_wall_seconds": 4.8167e-05,
+    "task_serialization_wall_seconds": 0.03109125,
+    "worker_payload_handoff_wall_seconds": 0.037751625
+  },
+  "repeat_generator_runtime_content_sha256": "sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508",
+  "repeat_generator_worker_pid": 92813,
+  "repeat_generator_worker_wall_seconds": 155.54488287493587,
+  "repeated_generation_plus_checker_worker_wall_seconds": 587.8672888751607,
+  "repeated_output_identity_match": true,
+  "runtime_attested_workers": true,
+  "runtime_content_sha256": "sha256:bce0d552132a3de7ca12eb98599800e34a0d78cf8e0bc5440efb7faa28a45508",
+  "runtime_id": "yieldforge-m8-gate3-runtime-v1",
+  "schema_version": "yieldforge.m8-portable-hotspot-profile.v2",
+  "second_generation_phase_wall_seconds": 156.51516229193658,
+  "source_attested_workers": true,
+  "stream_id": "yfts-f320978a2d55802395294150",
+  "temporal_seed": 2026082300,
+  "timing_semantics": "controller_phase_and_worker_operation_wall_v1",
+  "total_pipeline_wall_seconds": 592.221872957889
+}

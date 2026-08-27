@@ -114,6 +114,24 @@ class M8ProfileReport:
             return 1.0 if self.accounted_process_ns == 0 else 0.0
         return min(1.0, self.accounted_process_ns / self.total_process_ns)
 
+    @property
+    def accounted_wall_ns(self) -> int:
+        """Wall time covered by mutually exclusive top-level profile regions."""
+
+        return sum(phase.wall_ns for phase in self.phases)
+
+    @property
+    def unattributed_wall_ns(self) -> int:
+        """Observed wall time outside the declared top-level regions."""
+
+        return max(0, self.total_wall_ns - self.accounted_wall_ns)
+
+    @property
+    def accounted_wall_fraction(self) -> float:
+        if self.total_wall_ns == 0:
+            return 1.0 if self.accounted_wall_ns == 0 else 0.0
+        return min(1.0, self.accounted_wall_ns / self.total_wall_ns)
+
     def model_dump(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -121,6 +139,9 @@ class M8ProfileReport:
             "total_wall_ns": self.total_wall_ns,
             "accounted_process_ns": self.accounted_process_ns,
             "accounted_process_fraction": self.accounted_process_fraction,
+            "accounted_wall_ns": self.accounted_wall_ns,
+            "unattributed_wall_ns": self.unattributed_wall_ns,
+            "accounted_wall_fraction": self.accounted_wall_fraction,
             "counts": self.counts,
             "phases": [phase.timed_payload() for phase in self.phases],
         }

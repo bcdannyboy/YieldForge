@@ -11,7 +11,7 @@ import stat
 import tempfile
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Executor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -487,6 +487,31 @@ class GeneratedActionSet:
     fit_search_generated_candidate_count: int
     fit_search_evaluated_candidate_count: int
     fit_search_budget_truncated_count: int
+    materialized_standard_actions: tuple[M7LayoutActionEvidence, ...] = dataclass_field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        actions = self.materialized_standard_actions
+        if not actions:
+            return
+        profiles = self.standard_profiles
+        if len(actions) != len(profiles):
+            raise ValueError("M7 materialized standard actions must be complete")
+        candidate_ids = tuple(action.candidate_id for action in actions)
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("M7 materialized standard actions must be unique")
+        if candidate_ids != tuple(profile.candidate_id for profile in profiles):
+            raise ValueError("M7 materialized standard actions differ from profile order")
+        if any(action.kind is not M7ActionKind.OPEN_STANDARD_SHEET for action in actions):
+            raise ValueError("M7 materialized standard actions must be standard-sheet actions")
+        for action, profile in zip(actions, profiles, strict=True):
+            if not _standard_action_matches_profile(action, profile):
+                raise ValueError(
+                    "M7 materialized standard action differs from its exact cached profile"
+                )
 
 
 @dataclass
@@ -522,6 +547,12 @@ class M7StandardActionProfile:
     accounting: ReuseAccounting
     returned_remnant_count: int
     returned_regularity: float
+
+
+@dataclass(frozen=True)
+class _BuiltStandardProfile:
+    profile: M7StandardActionProfile
+    action: M7LayoutActionEvidence
 
 
 @dataclass(frozen=True)
@@ -686,6 +717,438 @@ class M7ReplayRuntime:
     standard_profile_executor: Executor | None = None
     jagua_executable: Path | None = None
     jagua_differential_audit: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializedStandardActionEntry:
+    """One O(1)-addressable standard action bound at capability issuance."""
+
+    descriptor: M7ActionDescriptor
+    descriptor_sha256: str
+    context: ActionPolicyContext
+    context_sha256: str
+    candidate: Candidate
+    candidate_sha256: str
+    profile: M7StandardActionProfile
+    profile_sha256: str
+    action: M7LayoutActionEvidence
+    issued_action_id: str
+    issued_action_content_sha256: str
+    catalog_action_index: int
+    catalog_context_index: int
+    candidate_index: int
+    standard_action_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializedStandardActionRecord:
+    """Private process-local authority for one generated standard-action sidecar."""
+
+    reference: weakref.ReferenceType[GeneratedActionSet]
+    catalog_reference: weakref.ReferenceType[M7ActionCatalog]
+    owner_pid: int
+    runtime_id: int
+    replay_input_id: int
+    replay_problems_id: int
+    replay_instances_id: int
+    runtime_candidates_id: int
+    rules_id: int
+    rules_sha256: str
+    fit_config_id: int
+    fit_config_sha256: str
+    rates_id: int
+    rates_sha256: str
+    standard_profile_cache_id: int
+    standard_profiles_id: int
+    materialized_standard_actions_id: int
+    catalog_actions_id: int
+    catalog_contexts_id: int
+    verified: VerifiedProblemCandidates
+    verified_candidates_id: int
+    binding: TemporalInstanceBinding
+    binding_sha256: str
+    problem: ReusableGeometryProblem
+    problem_index: int
+    problem_sha256: str
+    problem_id: str
+    event_position: int
+    cursor_sha256: str
+    generated_event_metadata_sha256: str
+    catalog_transition_sha256: str
+    commitment_sha256: str
+    entries: Mapping[str, _MaterializedStandardActionEntry]
+
+
+_MATERIALIZED_STANDARD_ACTION_REGISTRY: dict[
+    int,
+    _MaterializedStandardActionRecord,
+] = {}
+
+
+def _standard_profile_payload(profile: M7StandardActionProfile) -> dict[str, object]:
+    return {
+        "candidate_id": profile.candidate_id,
+        "candidate_width": profile.candidate_width,
+        "accounting": profile.accounting.model_dump(mode="json"),
+        "returned_remnant_count": profile.returned_remnant_count,
+        "returned_regularity": profile.returned_regularity,
+    }
+
+
+def _standard_descriptor_payload(descriptor: M7ActionDescriptor) -> dict[str, object]:
+    return {
+        "action_id": descriptor.action_id,
+        "kind": descriptor.kind.value,
+        "candidate_id": descriptor.candidate_id,
+        "selected_remnant_id": descriptor.selected_remnant_id,
+        "evidence": descriptor.evidence,
+    }
+
+
+def _standard_context_payload(context: ActionPolicyContext) -> dict[str, object]:
+    return {
+        "action_id": context.action_id,
+        "kind": context.kind.value,
+        "candidate_id": context.candidate_id,
+        "candidate_width": context.candidate_width,
+        "selected_stock_id": context.selected_stock_id,
+        "immediate_net_cost": context.immediate_net_cost,
+        "selected_remnant_age_hours": context.selected_remnant_age_hours,
+        "returned_regularity": context.returned_regularity,
+        "known_order_lookahead_term": context.known_order_lookahead_term,
+    }
+
+
+def _semantic_payload_sha256(payload: object) -> str:
+    return f"sha256:{semantic_sha256(payload)}"
+
+
+def _generated_event_metadata_payload(generated: GeneratedActionSet) -> dict[str, object]:
+    """Return only generated scalars read while persisting one retained event."""
+
+    return {
+        "standard_action_count": len(generated.standard_profiles),
+        "remnant_action_count": generated.remnant_action_count,
+        "fit_search_query_count": generated.fit_search_query_count,
+        "fit_search_generated_candidate_count": (
+            generated.fit_search_generated_candidate_count
+        ),
+        "fit_search_evaluated_candidate_count": (
+            generated.fit_search_evaluated_candidate_count
+        ),
+        "fit_search_budget_truncated_count": (
+            generated.fit_search_budget_truncated_count
+        ),
+    }
+
+
+def _catalog_transition_payload(catalog: M7ActionCatalog) -> dict[str, object]:
+    """Return the catalog scalars consumed by retained transition validation."""
+
+    return {
+        "event_position": catalog.event_position,
+        "standard_action_count": catalog.standard_action_count,
+        "remnant_action_count": catalog.remnant_action_count,
+        "storage_cost": catalog.storage_cost,
+        "timestamp_group_sequence": catalog.timestamp_group_sequence,
+        "timestamp_subsequence": catalog.timestamp_subsequence,
+    }
+
+
+def _materialized_standard_action_commitment(
+    runtime: M7ReplayRuntime,
+    *,
+    event_position: int,
+    generated: GeneratedActionSet,
+) -> str:
+    replay_input = runtime.replay_input
+    if event_position < 0 or event_position >= len(replay_input.instances):
+        raise ValueError("M7 materialized standard action event is outside the replay stream")
+    binding = replay_input.instances[event_position]
+    problem = next(
+        item for item in replay_input.problems if item.problem_id == binding.problem_id
+    )
+    verified = runtime.runtime_candidates[binding.problem_id]
+    payload = {
+        "schema_version": "yieldforge.m7-materialized-standard-action-capability.v1",
+        "owner_pid": os.getpid(),
+        "generated_id": id(generated),
+        "runtime_id": id(runtime),
+        "replay_input_id": id(replay_input),
+        "replay_input_identity": (replay_input.input_id, replay_input.content_sha256),
+        "runtime_candidates_id": id(runtime.runtime_candidates),
+        "rules_id": id(runtime.rules),
+        "rules": runtime.rules.model_dump(mode="json"),
+        "standard_profile_cache_id": id(runtime.standard_profile_cache),
+        "event_position": event_position,
+        "binding": binding.model_dump(mode="json"),
+        "problem": problem.model_dump(mode="json"),
+        "candidate_evidence": verified.evidence.model_dump(mode="json"),
+        "candidates": tuple(
+            candidate.model_dump(mode="json") for candidate in verified.candidates
+        ),
+        "standard_profiles": tuple(
+            _standard_profile_payload(profile) for profile in generated.standard_profiles
+        ),
+        "remnant_actions": tuple(
+            action.model_dump(mode="json") for action in generated.remnant_actions
+        ),
+        "remnant_action_count": generated.remnant_action_count,
+        "fit_search_query_count": generated.fit_search_query_count,
+        "fit_search_generated_candidate_count": (
+            generated.fit_search_generated_candidate_count
+        ),
+        "fit_search_evaluated_candidate_count": (
+            generated.fit_search_evaluated_candidate_count
+        ),
+        "fit_search_budget_truncated_count": (
+            generated.fit_search_budget_truncated_count
+        ),
+        "materialized_standard_actions": tuple(
+            action.model_dump(mode="json")
+            for action in generated.materialized_standard_actions
+        ),
+    }
+    return f"sha256:{semantic_sha256(payload)}"
+
+
+def _issue_materialized_standard_action_capability(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    catalog: M7ActionCatalog,
+    problem: ReusableGeometryProblem,
+    verified: VerifiedProblemCandidates,
+) -> None:
+    """Register one generator-owned sidecar without exposing issuance authority."""
+
+    event_position = catalog.event_position
+    generated = catalog.generated
+    if cursor.next_event_position != event_position:
+        raise ValueError("M7 materialized standard action capability cursor differs")
+    if not generated.materialized_standard_actions:
+        raise ValueError("M7 materialized standard action capability requires exact actions")
+    key = id(generated)
+    current = _MATERIALIZED_STANDARD_ACTION_REGISTRY.get(key)
+    if current is not None and current.reference() is generated:
+        raise ValueError("M7 materialized standard action capability was already issued")
+
+    def discard(reference: weakref.ReferenceType[GeneratedActionSet]) -> None:
+        registered = _MATERIALIZED_STANDARD_ACTION_REGISTRY.get(key)
+        if registered is not None and registered.reference is reference:
+            _MATERIALIZED_STANDARD_ACTION_REGISTRY.pop(key, None)
+
+    replay_input = runtime.replay_input
+    binding = replay_input.instances[event_position]
+    problem_positions = tuple(
+        index for index, item in enumerate(replay_input.problems) if item is problem
+    )
+    if len(problem_positions) != 1 or problem.problem_id != binding.problem_id:
+        raise ValueError("M7 materialized standard action capability problem binding differs")
+    if runtime.runtime_candidates.get(problem.problem_id) is not verified:
+        raise ValueError("M7 materialized standard action capability candidates differ")
+    candidate_positions = {
+        candidate.candidate_id: (index, candidate)
+        for index, candidate in enumerate(verified.candidates)
+    }
+    if len(candidate_positions) != len(verified.candidates):
+        raise ValueError("M7 materialized standard action capability candidates are not unique")
+    context_positions = {
+        context.action_id: (index, context)
+        for index, context in enumerate(catalog.contexts)
+    }
+    if len(context_positions) != len(catalog.contexts):
+        raise ValueError("M7 materialized standard action capability contexts are not unique")
+    entries: dict[str, _MaterializedStandardActionEntry] = {}
+    for index, (profile, action) in enumerate(
+        zip(
+            generated.standard_profiles,
+            generated.materialized_standard_actions,
+            strict=True,
+        )
+    ):
+        expected_descriptor_id = f"m7-standard:{profile.candidate_id}"
+        descriptor = catalog.actions[index]
+        candidate_position = candidate_positions.get(profile.candidate_id)
+        context_position = context_positions.get(expected_descriptor_id)
+        if (
+            candidate_position is None
+            or context_position is None
+            or descriptor.action_id != expected_descriptor_id
+            or descriptor.kind is not M7ActionKind.OPEN_STANDARD_SHEET
+            or descriptor.candidate_id != profile.candidate_id
+            or descriptor.selected_remnant_id is not None
+            or descriptor.evidence is not None
+            or action.candidate_id != profile.candidate_id
+            or runtime.standard_profile_cache.get((problem.problem_id, profile.candidate_id))
+            is not profile
+        ):
+            raise ValueError("M7 materialized standard action capability bindings differ")
+        candidate_index, candidate = candidate_position
+        context_index, context = context_position
+        entries[expected_descriptor_id] = _MaterializedStandardActionEntry(
+            descriptor=descriptor,
+            descriptor_sha256=_semantic_payload_sha256(
+                _standard_descriptor_payload(descriptor)
+            ),
+            context=context,
+            context_sha256=_semantic_payload_sha256(_standard_context_payload(context)),
+            candidate=candidate,
+            candidate_sha256=_semantic_payload_sha256(candidate.model_dump(mode="json")),
+            profile=profile,
+            profile_sha256=_semantic_payload_sha256(_standard_profile_payload(profile)),
+            action=action,
+            issued_action_id=action.action_id,
+            issued_action_content_sha256=action.content_sha256,
+            catalog_action_index=index,
+            catalog_context_index=context_index,
+            candidate_index=candidate_index,
+            standard_action_index=index,
+        )
+    if len(entries) != len(generated.standard_profiles):
+        raise ValueError("M7 materialized standard action capability entries are incomplete")
+
+    reference = weakref.ref(generated, discard)
+    _MATERIALIZED_STANDARD_ACTION_REGISTRY[key] = _MaterializedStandardActionRecord(
+        reference=reference,
+        catalog_reference=weakref.ref(catalog),
+        owner_pid=os.getpid(),
+        runtime_id=id(runtime),
+        replay_input_id=id(replay_input),
+        replay_problems_id=id(replay_input.problems),
+        replay_instances_id=id(replay_input.instances),
+        runtime_candidates_id=id(runtime.runtime_candidates),
+        rules_id=id(runtime.rules),
+        rules_sha256=_semantic_payload_sha256(runtime.rules.model_dump(mode="json")),
+        fit_config_id=id(replay_input.fit_config),
+        fit_config_sha256=_semantic_payload_sha256(
+            replay_input.fit_config.model_dump(mode="json")
+        ),
+        rates_id=id(replay_input.rates),
+        rates_sha256=_semantic_payload_sha256(replay_input.rates.model_dump(mode="json")),
+        standard_profile_cache_id=id(runtime.standard_profile_cache),
+        standard_profiles_id=id(generated.standard_profiles),
+        materialized_standard_actions_id=id(generated.materialized_standard_actions),
+        catalog_actions_id=id(catalog.actions),
+        catalog_contexts_id=id(catalog.contexts),
+        verified=verified,
+        verified_candidates_id=id(verified.candidates),
+        binding=binding,
+        binding_sha256=_semantic_payload_sha256(binding.model_dump(mode="json")),
+        problem=problem,
+        problem_index=problem_positions[0],
+        problem_sha256=_semantic_payload_sha256(problem.model_dump(mode="json")),
+        problem_id=problem.problem_id,
+        event_position=event_position,
+        cursor_sha256=m7_cursor_sha256(cursor),
+        generated_event_metadata_sha256=_semantic_payload_sha256(
+            _generated_event_metadata_payload(generated)
+        ),
+        catalog_transition_sha256=_semantic_payload_sha256(
+            _catalog_transition_payload(catalog)
+        ),
+        commitment_sha256=_materialized_standard_action_commitment(
+            runtime,
+            event_position=event_position,
+            generated=generated,
+        ),
+        entries=MappingProxyType(entries),
+    )
+
+
+def _require_materialized_standard_action_capability(
+    runtime: M7ReplayRuntime,
+    *,
+    cursor: M7ReplayCursor,
+    catalog: M7ActionCatalog,
+    descriptor: M7ActionDescriptor,
+) -> tuple[_MaterializedStandardActionRecord, _MaterializedStandardActionEntry]:
+    event_position = catalog.event_position
+    generated = catalog.generated
+    registered = _MATERIALIZED_STANDARD_ACTION_REGISTRY.get(id(generated))
+    if (
+        type(generated) is not GeneratedActionSet
+        or registered is None
+        or registered.reference() is not generated
+        or registered.catalog_reference() is not catalog
+        or registered.owner_pid != os.getpid()
+        or registered.runtime_id != id(runtime)
+        or registered.replay_input_id != id(runtime.replay_input)
+        or registered.replay_problems_id != id(runtime.replay_input.problems)
+        or registered.replay_instances_id != id(runtime.replay_input.instances)
+        or registered.runtime_candidates_id != id(runtime.runtime_candidates)
+        or registered.rules_id != id(runtime.rules)
+        or registered.fit_config_id != id(runtime.replay_input.fit_config)
+        or registered.rates_id != id(runtime.replay_input.rates)
+        or registered.standard_profile_cache_id != id(runtime.standard_profile_cache)
+        or registered.standard_profiles_id != id(generated.standard_profiles)
+        or registered.materialized_standard_actions_id
+        != id(generated.materialized_standard_actions)
+        or registered.catalog_actions_id != id(catalog.actions)
+        or registered.catalog_contexts_id != id(catalog.contexts)
+        or registered.verified_candidates_id != id(registered.verified.candidates)
+        or registered.event_position != event_position
+    ):
+        raise ValueError("M7 materialized standard action capability is invalid or inactive")
+    if not registered.commitment_sha256.startswith("sha256:"):
+        raise ValueError("M7 materialized standard action capability integrity differs")
+    try:
+        entry = registered.entries.get(descriptor.action_id)
+        structurally_bound = (
+            entry is not None
+            and entry.descriptor is descriptor
+            and catalog.actions[entry.catalog_action_index] is descriptor
+            and catalog.contexts[entry.catalog_context_index] is entry.context
+            and generated.standard_profiles[entry.standard_action_index] is entry.profile
+            and generated.materialized_standard_actions[entry.standard_action_index]
+            is entry.action
+            and runtime.replay_input.problems[registered.problem_index]
+            is registered.problem
+            and runtime.replay_input.instances[event_position] is registered.binding
+            and runtime.runtime_candidates.get(registered.problem_id) is registered.verified
+            and registered.verified.candidates[entry.candidate_index] is entry.candidate
+            and runtime.standard_profile_cache.get(
+                (registered.problem_id, entry.candidate.candidate_id)
+            )
+            is entry.profile
+        )
+        semantically_bound = (
+            entry is not None
+            and entry.descriptor_sha256
+            == _semantic_payload_sha256(_standard_descriptor_payload(entry.descriptor))
+            and entry.context_sha256
+            == _semantic_payload_sha256(_standard_context_payload(entry.context))
+            and entry.candidate_sha256
+            == _semantic_payload_sha256(entry.candidate.model_dump(mode="json"))
+            and entry.profile_sha256
+            == _semantic_payload_sha256(_standard_profile_payload(entry.profile))
+            and registered.problem_sha256
+            == _semantic_payload_sha256(registered.problem.model_dump(mode="json"))
+            and registered.binding_sha256
+            == _semantic_payload_sha256(registered.binding.model_dump(mode="json"))
+            and registered.rules_sha256
+            == _semantic_payload_sha256(runtime.rules.model_dump(mode="json"))
+            and registered.fit_config_sha256
+            == _semantic_payload_sha256(
+                runtime.replay_input.fit_config.model_dump(mode="json")
+            )
+            and registered.rates_sha256
+            == _semantic_payload_sha256(runtime.replay_input.rates.model_dump(mode="json"))
+            and registered.cursor_sha256 == m7_cursor_sha256(cursor)
+            and registered.generated_event_metadata_sha256
+            == _semantic_payload_sha256(_generated_event_metadata_payload(generated))
+            and registered.catalog_transition_sha256
+            == _semantic_payload_sha256(_catalog_transition_payload(catalog))
+            and entry.action.action_id == entry.issued_action_id
+            and entry.action.content_sha256 == entry.issued_action_content_sha256
+        )
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        structurally_bound = False
+        semantically_bound = False
+        entry = None
+    if not structurally_bound or not semantically_bound or entry is None:
+        raise ValueError("M7 materialized standard action capability integrity differs")
+    return registered, entry
 
 
 class _M7SnapshotReplayRuntime(M7ReplayRuntime):
@@ -880,10 +1343,11 @@ def _build_standard_profile(
     evidence: M7CandidateSetEvidence,
     candidate: Candidate,
     material,  # type: ignore[no-untyped-def]
+    stock_id: str,
     rules: ResidualRuleSet,
     fit_config: RemnantFitConfig,
-) -> M7StandardActionProfile:
-    template = build_standard_sheet_action(
+) -> _BuiltStandardProfile:
+    action = build_standard_sheet_action(
         problem_id=problem.problem_id,
         problem_sha256=problem.content_sha256,
         candidate_set_id=evidence.candidate_set_id,
@@ -891,16 +1355,19 @@ def _build_standard_profile(
         problem=problem.problem,
         candidate=candidate,
         material=material,
-        stock_id=f"m7-profile-{problem.problem_id}",
+        stock_id=stock_id,
         rules=rules,
         fit_config=fit_config,
     )
-    return M7StandardActionProfile(
-        candidate_id=candidate.candidate_id,
-        candidate_width=candidate.width,
-        accounting=template.accounting,
-        returned_remnant_count=len(template.returned_remnants),
-        returned_regularity=_returned_regularity(template),
+    return _BuiltStandardProfile(
+        profile=M7StandardActionProfile(
+            candidate_id=candidate.candidate_id,
+            candidate_width=candidate.width,
+            accounting=action.accounting,
+            returned_remnant_count=len(action.returned_remnants),
+            returned_regularity=_returned_regularity(action),
+        ),
+        action=action,
     )
 
 
@@ -926,6 +1393,7 @@ def _generate_actions(
     prepared_layout_cache: M7PreparedLayoutCache,
     retain_all_remnant_actions: bool = False,
     retain_policy_best_remnant: bool = False,
+    materialize_standard_actions: bool = False,
 ) -> GeneratedActionSet:
     evidence = verified.evidence
     if (
@@ -940,8 +1408,18 @@ def _generate_actions(
         for candidate in verified.candidates
         if (problem.problem_id, candidate.candidate_id) not in standard_profile_cache
     )
+    profile_candidates = verified.candidates if materialize_standard_actions else missing
     profile_arguments = tuple(
-        (problem, evidence, candidate, binding.material, rules, fit_config) for candidate in missing
+        (
+            problem,
+            evidence,
+            candidate,
+            binding.material,
+            binding.binding_id,
+            rules,
+            fit_config,
+        )
+        for candidate in profile_candidates
     )
     if standard_profile_executor is None:
         built = tuple(_build_standard_profile(*arguments) for arguments in profile_arguments)
@@ -952,11 +1430,25 @@ def _generate_actions(
                 profile_arguments,
             )
         )
-    for profile in built:
-        standard_profile_cache[(problem.problem_id, profile.candidate_id)] = profile
+    requested_candidate_ids = tuple(candidate.candidate_id for candidate in profile_candidates)
+    if (
+        tuple(item.profile.candidate_id for item in built) != requested_candidate_ids
+        or tuple(item.action.candidate_id for item in built) != requested_candidate_ids
+    ):
+        raise ValueError("M7 built standard profiles differ from requested candidates")
+    for item in built:
+        key = (problem.problem_id, item.profile.candidate_id)
+        cached = standard_profile_cache.get(key)
+        if cached is None:
+            standard_profile_cache[key] = item.profile
+        elif cached != item.profile:
+            raise ValueError("M7 standard action differs from its exact cached profile")
     profiles = tuple(
         standard_profile_cache[(problem.problem_id, candidate.candidate_id)]
         for candidate in verified.candidates
+    )
+    materialized_standard_actions = (
+        tuple(item.action for item in built) if materialize_standard_actions else ()
     )
     if runtime_metrics is not None:
         runtime_metrics.standard_action_seconds += perf_counter() - standard_started
@@ -1280,6 +1772,7 @@ def _generate_actions(
         fit_search_generated_candidate_count=generated_count,
         fit_search_evaluated_candidate_count=evaluated_count,
         fit_search_budget_truncated_count=truncated_count,
+        materialized_standard_actions=materialized_standard_actions,
     )
 
 
@@ -1294,6 +1787,18 @@ def _returned_regularity(action: M7LayoutActionEvidence) -> float:
     if rectangle_area <= 0.0:
         return 0.0
     return min(1.0, max(0.0, area / rectangle_area))
+
+
+def _standard_action_matches_profile(
+    action: M7LayoutActionEvidence,
+    profile: M7StandardActionProfile,
+) -> bool:
+    return (
+        action.candidate_id == profile.candidate_id
+        and action.accounting == profile.accounting
+        and len(action.returned_remnants) == profile.returned_remnant_count
+        and abs(_returned_regularity(action) - profile.returned_regularity) <= 1e-9
+    )
 
 
 def _remnant_policy_context(
@@ -1332,7 +1837,7 @@ def _remnant_policy_context(
     )
 
 
-def _build_standard_profile_from_arguments(arguments) -> M7StandardActionProfile:  # type: ignore[no-untyped-def]
+def _build_standard_profile_from_arguments(arguments) -> _BuiltStandardProfile:  # type: ignore[no-untyped-def]
     return _build_standard_profile(*arguments)
 
 
@@ -2335,6 +2840,7 @@ def enumerate_m7_action_catalog(
     cursor: M7ReplayCursor,
     event_position: int | None = None,
     complete: bool = True,
+    materialize_standard_actions: bool = False,
 ) -> M7ActionCatalog:
     """Enumerate every exact feasible action at one arbitrary M7 cursor."""
 
@@ -2381,6 +2887,7 @@ def enumerate_m7_action_catalog(
         shared_fit_search_cache=runtime.shared_fit_search_cache,
         prepared_layout_cache=runtime.prepared_layout_cache,
         retain_all_remnant_actions=complete,
+        materialize_standard_actions=materialize_standard_actions,
     )
     contexts = _policy_contexts(
         generated,
@@ -2411,7 +2918,7 @@ def enumerate_m7_action_catalog(
         len(generated.standard_profiles) + generated.remnant_action_count
     ):
         raise ValueError("M7 complete action catalog count does not reconcile")
-    return M7ActionCatalog(
+    catalog = M7ActionCatalog(
         event_position=position,
         actions=actions,
         contexts=contexts,
@@ -2422,6 +2929,15 @@ def enumerate_m7_action_catalog(
         timestamp_subsequence=group_subsequence,
         generated=generated,
     )
+    if materialize_standard_actions:
+        _issue_materialized_standard_action_capability(
+            runtime,
+            cursor=cursor,
+            catalog=catalog,
+            problem=problem,
+            verified=verified,
+        )
+    return catalog
 
 
 def enumerate_m7_pruned_action_catalog(
@@ -2531,6 +3047,7 @@ def enumerate_m7_pruned_action_catalog(
         fit_search_budget_truncated_count=(
             generated_survivors.fit_search_budget_truncated_count
         ),
+        materialized_standard_actions=(generated_survivors.materialized_standard_actions),
     )
     contexts = _policy_contexts(
         generated,
@@ -2633,8 +3150,10 @@ def enumerate_m7_standard_only_catalog(
             retain_all_remnant_actions=False,
         )
         profiles = standards.standard_profiles
+        materialized_standard_actions = standards.materialized_standard_actions
     else:
         profiles = precomputed_standard_profiles
+        materialized_standard_actions = ()
         if tuple(item.candidate_id for item in profiles) != tuple(
             item.candidate_id for item in verified.candidates
         ):
@@ -2653,6 +3172,7 @@ def enumerate_m7_standard_only_catalog(
         fit_search_generated_candidate_count=0,
         fit_search_evaluated_candidate_count=0,
         fit_search_budget_truncated_count=0,
+        materialized_standard_actions=materialized_standard_actions,
     )
     contexts = _policy_contexts(
         generated,
@@ -2787,6 +3307,9 @@ def _canonical_materialized_action(
     cursor: M7ReplayCursor,
     event_position: int,
     action: M7LayoutActionEvidence,
+    bound_problem: ReusableGeometryProblem | None = None,
+    bound_verified: VerifiedProblemCandidates | None = None,
+    bound_candidate: Candidate | None = None,
 ) -> M7LayoutActionEvidence:
     try:
         canonical = M7LayoutActionEvidence.model_validate(
@@ -2801,14 +3324,39 @@ def _canonical_materialized_action(
     if event_position < 0 or event_position >= len(replay_input.instances):
         raise ValueError("M7 frozen action position is outside the replay stream")
     binding = replay_input.instances[event_position]
-    problem = next(item for item in replay_input.problems if item.problem_id == binding.problem_id)
-    verified = runtime.runtime_candidates[binding.problem_id]
+    capability_bound = (
+        bound_problem is not None
+        and bound_verified is not None
+        and bound_candidate is not None
+    )
+    if capability_bound:
+        problem = bound_problem
+        verified = bound_verified
+        candidate_matches = canonical.candidate_id == bound_candidate.candidate_id
+        if (
+            problem.problem_id != binding.problem_id
+            or runtime.runtime_candidates.get(binding.problem_id) is not verified
+        ):
+            raise ValueError("M7 frozen action capability binding differs from runtime")
+    else:
+        if any(
+            item is not None
+            for item in (bound_problem, bound_verified, bound_candidate)
+        ):
+            raise ValueError("M7 frozen action capability binding is incomplete")
+        problem = next(
+            item for item in replay_input.problems if item.problem_id == binding.problem_id
+        )
+        verified = runtime.runtime_candidates[binding.problem_id]
+        candidate_matches = canonical.candidate_id in {
+            item.candidate_id for item in verified.candidates
+        }
     if (
         canonical.problem_id != problem.problem_id
         or canonical.problem_sha256 != problem.content_sha256
         or canonical.candidate_set_id != verified.evidence.candidate_set_id
         or canonical.candidate_set_sha256 != verified.evidence.content_sha256
-        or canonical.candidate_id not in {item.candidate_id for item in verified.candidates}
+        or not candidate_matches
         or canonical.selected_stock.material != binding.material
     ):
         raise ValueError("M7 frozen action evidence differs from the frozen replay input")
@@ -2839,6 +3387,9 @@ def _apply_m7_materialized_action(
     cursor: M7ReplayCursor,
     event_position: int,
     action: M7LayoutActionEvidence,
+    bound_problem: ReusableGeometryProblem | None = None,
+    bound_verified: VerifiedProblemCandidates | None = None,
+    bound_candidate: Candidate | None = None,
 ) -> _M7AppliedAction:
     _validate_runtime(runtime)
     cursor_before_sha256 = m7_cursor_sha256(cursor)
@@ -2849,6 +3400,9 @@ def _apply_m7_materialized_action(
         cursor=cursor,
         event_position=event_position,
         action=action,
+        bound_problem=bound_problem,
+        bound_verified=bound_verified,
+        bound_candidate=bound_candidate,
     )
     replay_input = runtime.replay_input
     binding = replay_input.instances[event_position]
@@ -2956,48 +3510,86 @@ def apply_m7_action_descriptor(
 
     if catalog.event_position != cursor.next_event_position:
         raise ValueError("M7 action catalog differs from cursor")
-    registered = {item.action_id: item for item in catalog.actions}
-    if registered.get(descriptor.action_id) != descriptor:
-        raise ValueError("M7 action descriptor is absent from the catalog")
-    selected_contexts = tuple(
-        item for item in catalog.contexts if item.action_id == descriptor.action_id
-    )
-    if len(selected_contexts) != 1:
-        raise ValueError("M7 action descriptor must have exactly one policy context")
-    selected_context = selected_contexts[0]
     replay_input = runtime.replay_input
-    binding = replay_input.instances[catalog.event_position]
-    problem = next(
-        item for item in replay_input.problems if item.problem_id == binding.problem_id
-    )
-    verified = runtime.runtime_candidates[binding.problem_id]
+    retained_record: _MaterializedStandardActionRecord | None = None
+    retained_entry: _MaterializedStandardActionEntry | None = None
+    if (
+        descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET
+        and catalog.generated.materialized_standard_actions
+    ):
+        retained_record, retained_entry = _require_materialized_standard_action_capability(
+            runtime,
+            cursor=cursor,
+            catalog=catalog,
+            descriptor=descriptor,
+        )
+        selected_context = retained_entry.context
+        binding = retained_record.binding
+        problem = retained_record.problem
+        verified = retained_record.verified
+    else:
+        registered = {item.action_id: item for item in catalog.actions}
+        if registered.get(descriptor.action_id) != descriptor:
+            raise ValueError("M7 action descriptor is absent from the catalog")
+        selected_contexts = tuple(
+            item for item in catalog.contexts if item.action_id == descriptor.action_id
+        )
+        if len(selected_contexts) != 1:
+            raise ValueError("M7 action descriptor must have exactly one policy context")
+        selected_context = selected_contexts[0]
+        binding = replay_input.instances[catalog.event_position]
+        problem = next(
+            item for item in replay_input.problems if item.problem_id == binding.problem_id
+        )
+        verified = runtime.runtime_candidates[binding.problem_id]
     if descriptor.kind is M7ActionKind.OPEN_STANDARD_SHEET:
-        candidate = next(
-            item for item in verified.candidates if item.candidate_id == descriptor.candidate_id
-        )
-        materialization_started = perf_counter()
-        action = build_standard_sheet_action(
-            problem_id=problem.problem_id,
-            problem_sha256=problem.content_sha256,
-            candidate_set_id=verified.evidence.candidate_set_id,
-            candidate_set_sha256=verified.evidence.content_sha256,
-            problem=problem.problem,
-            candidate=candidate,
-            material=binding.material,
-            stock_id=binding.binding_id,
-            rules=runtime.rules,
-            fit_config=replay_input.fit_config,
-        )
-        if runtime.runtime_metrics is not None:
-            runtime.runtime_metrics.standard_action_seconds += (
-                perf_counter() - materialization_started
+        if retained_entry is not None:
+            candidate = retained_entry.candidate
+            profile = retained_entry.profile
+            action = retained_entry.action
+        else:
+            candidate = next(
+                item
+                for item in verified.candidates
+                if item.candidate_id == descriptor.candidate_id
             )
-        profile = runtime.standard_profile_cache[(problem.problem_id, descriptor.candidate_id)]
-        if (
-            action.accounting != profile.accounting
-            or len(action.returned_remnants) != profile.returned_remnant_count
-            or abs(_returned_regularity(action) - profile.returned_regularity) > 1e-9
-        ):
+            matching_profiles = tuple(
+                item
+                for item in catalog.generated.standard_profiles
+                if item.candidate_id == descriptor.candidate_id
+            )
+            if len(matching_profiles) != 1:
+                raise ValueError("M7 standard action must have exactly one catalog profile")
+            catalog_profile = matching_profiles[0]
+            profile = runtime.standard_profile_cache.get(
+                (problem.problem_id, descriptor.candidate_id)
+            )
+            if (
+                profile is None
+                or profile != catalog_profile
+                or profile.candidate_width != candidate.width
+            ):
+                raise ValueError(
+                    "M7 standard action catalog differs from its exact cached profile"
+                )
+            materialization_started = perf_counter()
+            action = build_standard_sheet_action(
+                problem_id=problem.problem_id,
+                problem_sha256=problem.content_sha256,
+                candidate_set_id=verified.evidence.candidate_set_id,
+                candidate_set_sha256=verified.evidence.content_sha256,
+                problem=problem.problem,
+                candidate=candidate,
+                material=binding.material,
+                stock_id=binding.binding_id,
+                rules=runtime.rules,
+                fit_config=replay_input.fit_config,
+            )
+            if runtime.runtime_metrics is not None:
+                runtime.runtime_metrics.standard_action_seconds += (
+                    perf_counter() - materialization_started
+                )
+        if not _standard_action_matches_profile(action, profile):
             raise ValueError("M7 standard action differs from its exact cached profile")
     else:
         if descriptor.evidence is None:
@@ -3008,6 +3600,9 @@ def apply_m7_action_descriptor(
         cursor=cursor,
         event_position=catalog.event_position,
         action=action,
+        bound_problem=(problem if retained_entry is not None else None),
+        bound_verified=(verified if retained_entry is not None else None),
+        bound_candidate=(candidate if retained_entry is not None else None),
     )
     if (
         applied.storage_cost != catalog.storage_cost

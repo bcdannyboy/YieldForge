@@ -302,6 +302,78 @@ def test_m8_gate3_decision_command_exposes_only_frozen_evidence_inputs() -> None
     }
 
 
+def test_m8_portable_profile_command_is_fixed_to_the_sealed_hard_arm() -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "m8-portable-profile",
+            "--m0",
+            "m0.json",
+            "--frozen-baseline",
+            "freeze.json",
+            "--portable-gate3",
+            "portable.json",
+            "--archive-root",
+            "archives",
+            "--jagua-binary",
+            "jagua",
+            "--output",
+            "profile.json",
+        ]
+    )
+
+    assert args.handler.__name__ == "_profile_m8_portable_hard_arm"
+    assert set(vars(args)) == {
+        "command",
+        "benchmark_command",
+        "m0",
+        "frozen_baseline",
+        "portable_gate3",
+        "archive_root",
+        "jagua_binary",
+        "output",
+        "handler",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--regime", "no_signal"),
+        ("--seed", "2026082301"),
+        ("--event-count", "24"),
+        ("--worker-count", "8"),
+        ("--evaluation", "true"),
+    ),
+)
+def test_m8_portable_profile_rejects_scope_overrides(option: str, value: str) -> None:
+    from yieldforge.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "benchmark",
+                "m8-portable-profile",
+                "--m0",
+                "m0.json",
+                "--frozen-baseline",
+                "freeze.json",
+                "--portable-gate3",
+                "portable.json",
+                "--archive-root",
+                "archives",
+                "--jagua-binary",
+                "jagua",
+                "--output",
+                "profile.json",
+                option,
+                value,
+            ]
+        )
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     (
@@ -616,6 +688,7 @@ def test_m8_command_builds_only_the_calibration_problem_view(
         technical_decision="pass_certificate_exact",
     )
     monkeypatch.setattr(cli, "build_registered_calibration_problem_view", calibration_view)
+
     def execute(**kwargs):  # type: ignore[no-untyped-def]
         if kwargs["index"] is not view:
             pytest.fail("wrong view")
@@ -636,15 +709,18 @@ def test_m8_command_builds_only_the_calibration_problem_view(
     frozen_path = tmp_path / "freeze.json"
     frozen_path.write_text("{}")
 
-    assert cli._prove_m8_sparse_oracle(  # noqa: SLF001
-        SimpleNamespace(
-            m0=tmp_path / "m0.json",
-            frozen_baseline=frozen_path,
-            archive_root=[tmp_path / "archives"],
-            jagua_binary=tmp_path / "jagua",
-            output=tmp_path,
+    assert (
+        cli._prove_m8_sparse_oracle(  # noqa: SLF001
+            SimpleNamespace(
+                m0=tmp_path / "m0.json",
+                frozen_baseline=frozen_path,
+                archive_root=[tmp_path / "archives"],
+                jagua_binary=tmp_path / "jagua",
+                output=tmp_path,
+            )
         )
-    ) == 0
+        == 0
+    )
     assert observed == {
         "full_problem_index_id": frozen.problem_index_id,
         "full_problem_index_sha256": frozen.problem_index_sha256,

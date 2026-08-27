@@ -268,6 +268,7 @@ def _prepare_m8_generator_context(
             catalog = enumerate_m7_action_catalog(
                 captured.runtime,
                 cursor=captured.cursor,
+                materialize_standard_actions=True,
             )
         fallback = select_m7_fallback(
             catalog,

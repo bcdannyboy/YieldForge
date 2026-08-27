@@ -76,9 +76,11 @@ from yieldforge.experiments.residual_geometry import (
 from yieldforge.oracle.experiment import (
     execute_certificate_profile,
     execute_portable_fact_gate3,
+    execute_portable_fact_profile,
     execute_sparse_prefix_proof,
     publish_certificate_profile,
     publish_portable_fact_gate3,
+    publish_portable_fact_profile,
     publish_sparse_proof,
 )
 from yieldforge.oracle.gate3_evidence import load_parent_v3_certificate_proof
@@ -528,9 +530,7 @@ def _calibrate_m7_baseline(args: argparse.Namespace) -> int:
 def _evaluate_m7_baseline(args: argparse.Namespace) -> int:
     index = build_registered_problem_index()
     m0 = load_frozen_json(args.m0, M0ExperimentContract)
-    frozen = M7FrozenBaseline.model_validate_json(
-        args.frozen_baseline.read_bytes(), strict=True
-    )
+    frozen = M7FrozenBaseline.model_validate_json(args.frozen_baseline.read_bytes(), strict=True)
 
     def progress(message: str) -> None:
         print(f"M7 evaluation: {message}")
@@ -556,9 +556,7 @@ def _evaluate_m7_baseline(args: argparse.Namespace) -> int:
 
 def _prove_m8_sparse_oracle(args: argparse.Namespace) -> int:
     m0 = load_frozen_json(args.m0, M0ExperimentContract)
-    frozen = M7FrozenBaseline.model_validate_json(
-        args.frozen_baseline.read_bytes(), strict=True
-    )
+    frozen = M7FrozenBaseline.model_validate_json(args.frozen_baseline.read_bytes(), strict=True)
     index = build_registered_calibration_problem_view(
         full_problem_index_id=frozen.problem_index_id,
         full_problem_index_sha256=frozen.problem_index_sha256,
@@ -681,9 +679,7 @@ def _profile_m8_certificate(args: argparse.Namespace) -> int:
     """Profile one explicit calibration stream without opening evaluation."""
 
     m0 = load_frozen_json(args.m0, M0ExperimentContract)
-    frozen = M7FrozenBaseline.model_validate_json(
-        args.frozen_baseline.read_bytes(), strict=True
-    )
+    frozen = M7FrozenBaseline.model_validate_json(args.frozen_baseline.read_bytes(), strict=True)
     index = build_registered_calibration_problem_view(
         full_problem_index_id=frozen.problem_index_id,
         full_problem_index_sha256=frozen.problem_index_sha256,
@@ -706,6 +702,46 @@ def _profile_m8_certificate(args: argparse.Namespace) -> int:
         f"events={result['event_count']} actions={result['action_count']} "
         f"accounted_process_fraction={profile['accounted_process_fraction']} "
         f"evaluation_accessed=false output={result_path}"
+    )
+    return 0
+
+
+def _profile_m8_portable_hard_arm(args: argparse.Namespace) -> int:
+    """Profile the fixed sealed regime-shift arm without opening evaluation."""
+
+    m0 = load_frozen_json(args.m0, M0ExperimentContract)
+    frozen = load_frozen_json(args.frozen_baseline, M7FrozenBaseline)
+    official = load_portable_fact_gate3(args.portable_gate3)
+    index = build_registered_calibration_problem_view(
+        full_problem_index_id=frozen.problem_index_id,
+        full_problem_index_sha256=frozen.problem_index_sha256,
+    )
+
+    def progress(message: str) -> None:
+        print(f"M8 portable hotspot profile: {message}", flush=True)
+
+    result = execute_portable_fact_profile(
+        index=index,
+        m0=m0,
+        frozen=frozen,
+        official_gate3=official,
+        archive_roots=tuple(args.archive_root),
+        jagua_executable=args.jagua_binary,
+        progress=progress,
+    )
+    result_path = publish_portable_fact_profile(args.output, result)
+    print(
+        "Published M8 portable hotspot profile: "
+        f"profile={result.profile_id} "
+        f"roots={result.identity.action_root_count} "
+        f"generator_seconds={result.generator_worker_wall_seconds} "
+        f"repeat_generator_seconds={result.repeat_generator_worker_wall_seconds} "
+        f"checker_seconds={result.checker_worker_wall_seconds} "
+        f"total_pipeline_seconds={result.total_pipeline_wall_seconds} "
+        f"measurement={result.measurement_decision} "
+        "evaluation_accessed=false "
+        f"output={result_path}",
+        flush=True,
     )
     return 0
 
@@ -1031,6 +1067,24 @@ def build_parser() -> argparse.ArgumentParser:
     profile_m8.add_argument("--event-count", type=int, required=True)
     profile_m8.add_argument("--output", type=Path, required=True)
     profile_m8.set_defaults(handler=_profile_m8_certificate)
+
+    portable_profile_m8 = benchmark_commands.add_parser(
+        "m8-portable-profile",
+        help="profile the sealed two-event regime-shift portable-fact hard arm",
+    )
+    portable_profile_m8.add_argument("--m0", type=Path, required=True)
+    portable_profile_m8.add_argument("--frozen-baseline", type=Path, required=True)
+    portable_profile_m8.add_argument("--portable-gate3", type=Path, required=True)
+    portable_profile_m8.add_argument(
+        "--archive-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="candidate archive root; repeat for isolated M2 runtime roots",
+    )
+    portable_profile_m8.add_argument("--jagua-binary", type=Path, required=True)
+    portable_profile_m8.add_argument("--output", type=Path, required=True)
+    portable_profile_m8.set_defaults(handler=_profile_m8_portable_hard_arm)
     return parser
 
 

@@ -924,6 +924,56 @@ def test_fact_store_rejects_same_identity_with_different_semantic_content() -> N
         )
 
 
+def test_scalar_store_reuses_existing_fact_before_content_addressed_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import factored
+
+    scalar = score_unchecked_fact_bundle(_request()).bundle.candidate_scalar_facts[0]
+    layout = SimpleNamespace(
+        problem_id=scalar.problem_id,
+        problem_sha256=scalar.problem_sha256,
+        candidate_set_id=scalar.candidate_set_id,
+        candidate_set_sha256=scalar.candidate_set_sha256,
+        candidate_id=scalar.candidate_id,
+        source_transform_sha256=scalar.source_transform_sha256,
+        material_binding_scope=scalar.material_partition,
+        fit_config_sha256=scalar.fit_config_sha256,
+        layout_area=decode_canonical_f64(scalar.layout_area_bits),
+        layout_width=decode_canonical_f64(scalar.layout_width_bits),
+        layout_height=decode_canonical_f64(scalar.layout_height_bits),
+    )
+    store = factored._FactStore()  # noqa: SLF001
+    first = store.scalar(
+        semantic_runtime_sha256=scalar.semantic_runtime_sha256,
+        stream_id=scalar.stream_id,
+        layout=layout,
+    )
+
+    monkeypatch.setattr(
+        factored,
+        "_content_addressed",
+        lambda *_args, **_kwargs: pytest.fail(
+            "existing scalar reached content-addressed construction"
+        ),
+    )
+    repeated = store.scalar(
+        semantic_runtime_sha256=scalar.semantic_runtime_sha256,
+        stream_id=scalar.stream_id,
+        layout=layout,
+    )
+
+    assert repeated is first
+    conflicting = SimpleNamespace(**vars(layout))
+    conflicting.layout_width += 1.0
+    with pytest.raises(ValueError, match="semantic identity has conflicting content"):
+        store.scalar(
+            semantic_runtime_sha256=scalar.semantic_runtime_sha256,
+            stream_id=scalar.stream_id,
+            layout=conflicting,
+        )
+
+
 def test_empty_visible_suffix_builds_terminal_roots_without_common_facts() -> None:
     from yieldforge.oracle.sparse import score_sparse_event
 

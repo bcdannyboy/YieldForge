@@ -797,33 +797,38 @@ def _full_result(
     issued: int = 0,
     fact_sha256: str | None = None,
 ) -> M8CheckedFactBundleResult:
-    common = state.common if state is not None else None
-    common_fallbacks = common.exact_replay_fallback_count if common is not None else 0
-    common_seconds = common.exact_replay_fallback_wall_seconds if common is not None else 0.0
-    influence_fallbacks = len(state.influence_exact_fallback_sha256s) if state is not None else 0
-    influence_seconds = state.influence_exact_fallback_wall_seconds if state is not None else 0.0
-    return M8CheckedFactBundleResult(
-        valid=valid,
-        decision=decision,
-        checked_common_lemma_count=checked_common,
-        checked_influence_fact_count=checked_influences,
-        checked_action_root_count=checked_roots,
-        counted_translation_audit_count=(
-            len(common.audited_counted_lemma_sha256s) if common is not None else 0
-        ),
-        influence_translation_audit_count=(
-            state.influence_translation_audit_count if state is not None else 0
-        ),
-        issued_common_capability_count=issued,
-        common_exact_fallback_count=common_fallbacks,
-        influence_exact_fallback_count=influence_fallbacks,
-        total_exact_fallback_count=common_fallbacks + influence_fallbacks,
-        common_exact_fallback_wall_seconds=float(common_seconds),
-        influence_exact_fallback_wall_seconds=float(influence_seconds),
-        total_exact_fallback_wall_seconds=float(common_seconds + influence_seconds),
-        failure_code=code,
-        first_failing_fact_sha256=fact_sha256,
-    )
+    with profile_phase("fact_bundle_result_materialization"):
+        common = state.common if state is not None else None
+        common_fallbacks = common.exact_replay_fallback_count if common is not None else 0
+        common_seconds = common.exact_replay_fallback_wall_seconds if common is not None else 0.0
+        influence_fallbacks = (
+            len(state.influence_exact_fallback_sha256s) if state is not None else 0
+        )
+        influence_seconds = (
+            state.influence_exact_fallback_wall_seconds if state is not None else 0.0
+        )
+        return M8CheckedFactBundleResult(
+            valid=valid,
+            decision=decision,
+            checked_common_lemma_count=checked_common,
+            checked_influence_fact_count=checked_influences,
+            checked_action_root_count=checked_roots,
+            counted_translation_audit_count=(
+                len(common.audited_counted_lemma_sha256s) if common is not None else 0
+            ),
+            influence_translation_audit_count=(
+                state.influence_translation_audit_count if state is not None else 0
+            ),
+            issued_common_capability_count=issued,
+            common_exact_fallback_count=common_fallbacks,
+            influence_exact_fallback_count=influence_fallbacks,
+            total_exact_fallback_count=common_fallbacks + influence_fallbacks,
+            common_exact_fallback_wall_seconds=float(common_seconds),
+            influence_exact_fallback_wall_seconds=float(influence_seconds),
+            total_exact_fallback_wall_seconds=float(common_seconds + influence_seconds),
+            failure_code=code,
+            first_failing_fact_sha256=fact_sha256,
+        )
 
 
 def _drain_common_capabilities(
@@ -2516,7 +2521,8 @@ def check_m8_fact_bundle(
     state: _FullCheckState | None = None
     capabilities: list[ValidatedCommonTransition] = []
     try:
-        captured, checker_cursor = _capture_full_request(request)
+        with profile_phase("fact_bundle_request_snapshot"):
+            captured, checker_cursor = _capture_full_request(request)
         try:
             with profile_phase("fact_bundle_strict_load"):
                 bundle = _canonical_load(captured.semantic_bundle_bytes)
@@ -2524,53 +2530,67 @@ def check_m8_fact_bundle(
             raise _FullFactFailure(error.code, error.fact_sha256) from error
         first_fact = bundle.common_lemmas[0].fact_sha256 if bundle.common_lemmas else None
         with (
+            profile_phase("fact_bundle_authority_session"),
             activate_m8_local_trusted_audit(),
             authoritative_m7_proof_runtime(captured.oracle_request.runtime) as authority,
             ExitStack() as checker_resources,
         ):
-            try:
-                fallback, stop, _suffix = _validate_context(
-                    captured,
-                    authority,
-                    bundle,
-                    checker_cursor,
-                )
-            except _CommonFactFailure as error:
-                raise _FullFactFailure(error.code, error.fact_sha256) from error
-            catalog = enumerate_m7_action_catalog(authority.runtime, cursor=checker_cursor)
-            if (
-                catalog.event_position != captured.expected_catalog_event_position
-                or tuple(item.action_id for item in catalog.actions)
-                != captured.expected_catalog_action_ids
-            ):
-                raise _FullFactFailure("catalog_binding_mismatch", first_fact)
-            expected_positions = tuple(range(fallback.cursor.next_event_position, stop))
-            if tuple(item.event_position for item in bundle.common_lemmas) != expected_positions:
-                raise _FullFactFailure("cursor_chain_mismatch", first_fact)
-            prepared_layouts = checker_resources.enter_context(
-                _prepare_translation_layout_batch(
+            with profile_phase("fact_bundle_context_index_preparation"):
+                try:
+                    fallback, stop, _suffix = _validate_context(
+                        captured,
+                        authority,
+                        bundle,
+                        checker_cursor,
+                    )
+                except _CommonFactFailure as error:
+                    raise _FullFactFailure(error.code, error.fact_sha256) from error
+                catalog = enumerate_m7_action_catalog(
                     authority.runtime,
-                    event_positions=expected_positions,
+                    cursor=checker_cursor,
                 )
-            )
-            common_state = _CommonCheckState(
-                scalar_by_sha={item.fact_sha256: item for item in bundle.candidate_scalar_facts},
-                frontier_by_sha={item.fact_sha256: item for item in bundle.frontier_facts},
-                standard_by_sha={
-                    item.fact_sha256: item for item in bundle.standard_candidate_facts
-                },
-                translation_by_sha={item.fact_sha256: item for item in bundle.translation_batches},
-            )
-            state = _FullCheckState(
-                common=common_state,
-                prepared_layouts=prepared_layouts,
-            )
-            expected_jagua_sha256 = None
-            if authority.runtime.jagua_executable is not None:
-                expected_jagua_sha256 = (
-                    "sha256:"
-                    + hashlib.sha256(authority.runtime.jagua_executable.read_bytes()).hexdigest()
+                if (
+                    catalog.event_position != captured.expected_catalog_event_position
+                    or tuple(item.action_id for item in catalog.actions)
+                    != captured.expected_catalog_action_ids
+                ):
+                    raise _FullFactFailure("catalog_binding_mismatch", first_fact)
+                expected_positions = tuple(range(fallback.cursor.next_event_position, stop))
+                if (
+                    tuple(item.event_position for item in bundle.common_lemmas)
+                    != expected_positions
+                ):
+                    raise _FullFactFailure("cursor_chain_mismatch", first_fact)
+                prepared_layouts = checker_resources.enter_context(
+                    _prepare_translation_layout_batch(
+                        authority.runtime,
+                        event_positions=expected_positions,
+                    )
                 )
+                common_state = _CommonCheckState(
+                    scalar_by_sha={
+                        item.fact_sha256: item for item in bundle.candidate_scalar_facts
+                    },
+                    frontier_by_sha={item.fact_sha256: item for item in bundle.frontier_facts},
+                    standard_by_sha={
+                        item.fact_sha256: item for item in bundle.standard_candidate_facts
+                    },
+                    translation_by_sha={
+                        item.fact_sha256: item for item in bundle.translation_batches
+                    },
+                )
+                state = _FullCheckState(
+                    common=common_state,
+                    prepared_layouts=prepared_layouts,
+                )
+                expected_jagua_sha256 = None
+                if authority.runtime.jagua_executable is not None:
+                    expected_jagua_sha256 = (
+                        "sha256:"
+                        + hashlib.sha256(
+                            authority.runtime.jagua_executable.read_bytes()
+                        ).hexdigest()
+                    )
             common_cursor = fallback.cursor
             checked_facts = []
             with profile_phase("fact_bundle_common_verification"):
@@ -2590,34 +2610,41 @@ def check_m8_fact_bundle(
                     checked_facts.append(fact)
                     common_cursor = fact.step.cursor
                     checked_common += 1
-            _require_full_request_stable(request, captured, authority, fact_sha256=first_fact)
+            with profile_phase("fact_bundle_request_stability"):
+                _require_full_request_stable(
+                    request,
+                    captured,
+                    authority,
+                    fact_sha256=first_fact,
+                )
             common_fact_by_ref: dict[str, M8CommonTransitionFact] = {}
             decision: M8OracleDecision | None = None
             try:
                 with _checker_registration_scope(authority, tuple(checked_facts)) as token:
                     pending: BaseException | None = None
                     try:
-                        for lemma, fact in zip(
-                            bundle.common_lemmas,
-                            checked_facts,
-                            strict=True,
-                        ):
-                            capability = _register_checker_validated_common_transition(
-                                fact,
-                                authority,
-                                checker_token=token,
-                            )
-                            capabilities.append(capability)
-                            bound_fact = _validated_common_transition_fact(
-                                authority.runtime,
-                                capability,
-                            )
-                            if bound_fact != fact:
-                                raise ValueError(
-                                    "M8 registered common capability differs from checked fact"
+                        with profile_phase("fact_bundle_capability_registration"):
+                            for lemma, fact in zip(
+                                bundle.common_lemmas,
+                                checked_facts,
+                                strict=True,
+                            ):
+                                capability = _register_checker_validated_common_transition(
+                                    fact,
+                                    authority,
+                                    checker_token=token,
                                 )
-                            common_fact_by_ref[lemma.fact_sha256] = bound_fact
-                            issued += 1
+                                capabilities.append(capability)
+                                bound_fact = _validated_common_transition_fact(
+                                    authority.runtime,
+                                    capability,
+                                )
+                                if bound_fact != fact:
+                                    raise ValueError(
+                                        "M8 registered common capability differs from checked fact"
+                                    )
+                                common_fact_by_ref[lemma.fact_sha256] = bound_fact
+                                issued += 1
                     except BaseException as error:
                         pending = _FullFactFailure(
                             "capability_registration_failure",
@@ -2672,12 +2699,13 @@ def check_m8_fact_bundle(
                 if isinstance(error, _FullFactFailure):
                     raise error
                 raise _FullFactFailure("capability_registration_failure", first_fact) from error
-            _require_full_request_stable(
-                request,
-                captured,
-                authority,
-                fact_sha256=first_fact,
-            )
+            with profile_phase("fact_bundle_request_stability"):
+                _require_full_request_stable(
+                    request,
+                    captured,
+                    authority,
+                    fact_sha256=first_fact,
+                )
             if decision is None:
                 raise _FullFactFailure("internal_checker_failure", first_fact)
         return _full_result(

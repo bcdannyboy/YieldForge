@@ -35,6 +35,7 @@ from yieldforge.oracle.certificates import (
     _portable_search_config,
 )
 from yieldforge.oracle.frontier import ParetoFrontier
+from yieldforge.oracle.profiling import profile_phase
 from yieldforge.oracle.reference import M8OracleRequest
 from yieldforge.oracle.sparse import (
     M8UncheckedBranchEventCapture,
@@ -262,6 +263,43 @@ class _FactStore:
         stream_id: str,
         layout: VerifiedCandidateRejectionLayout,
     ) -> facts.M8CandidateScalarFactV2:
+        identity = (
+            semantic_runtime_sha256,
+            stream_id,
+            layout.problem_id,
+            layout.candidate_set_id,
+            layout.candidate_id,
+        )
+        layout_area_bits = facts.encode_canonical_f64(float(layout.layout_area))
+        layout_width_bits = facts.encode_canonical_f64(float(layout.layout_width))
+        layout_height_bits = facts.encode_canonical_f64(float(layout.layout_height))
+        existing = self.scalars.get(identity)
+        if existing is not None:
+            expected_source = (
+                layout.problem_sha256,
+                layout.candidate_set_sha256,
+                layout.source_transform_sha256,
+                layout.material_binding_scope,
+                layout.fit_config_sha256,
+                layout_area_bits,
+                layout_width_bits,
+                layout_height_bits,
+            )
+            observed_source = (
+                existing.problem_sha256,
+                existing.candidate_set_sha256,
+                existing.source_transform_sha256,
+                existing.material_partition,
+                existing.fit_config_sha256,
+                existing.layout_area_bits,
+                existing.layout_width_bits,
+                existing.layout_height_bits,
+            )
+            if observed_source != expected_source:
+                raise ValueError(
+                    "M8 candidate scalar semantic identity has conflicting content"
+                )
+            return existing
         candidate = _content_addressed(
             facts.M8CandidateScalarFactV2,
             {
@@ -277,17 +315,10 @@ class _FactStore:
                 "source_transform_sha256": layout.source_transform_sha256,
                 "material_partition": layout.material_binding_scope,
                 "fit_config_sha256": layout.fit_config_sha256,
-                "layout_area_bits": facts.encode_canonical_f64(float(layout.layout_area)),
-                "layout_width_bits": facts.encode_canonical_f64(float(layout.layout_width)),
-                "layout_height_bits": facts.encode_canonical_f64(float(layout.layout_height)),
+                "layout_area_bits": layout_area_bits,
+                "layout_width_bits": layout_width_bits,
+                "layout_height_bits": layout_height_bits,
             },
-        )
-        identity = (
-            semantic_runtime_sha256,
-            stream_id,
-            layout.problem_id,
-            layout.candidate_set_id,
-            layout.candidate_id,
         )
         return self._deduplicate(  # type: ignore[return-value]
             self.scalars,
@@ -980,140 +1011,151 @@ def score_unchecked_fact_bundle(
     request.require_valid()
     oracle_request = request.oracle_request
     store = _FactStore()
-    with _prepare_m8_generator_context(oracle_request) as context:
+    with (
+        profile_phase("fact_bundle_prepared_context_session"),
+        _prepare_m8_generator_context(oracle_request) as context,
+    ):
         request.require_prepared_bindings(
             oracle_request=context._request,  # noqa: SLF001
             semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
         )
-        capture = _capture_prepared_unchecked_traversal(context)
-        common_lemmas_list: list[facts.M8CommonTransitionLemmaV2] = []
-        previous_common_lemma_ref: str | None = None
-        for common in capture.common_transitions:
-            lemma = _common_lemma(
-                store,
-                common=common,
-                previous_common_lemma_ref=previous_common_lemma_ref,
-            )
-            common_lemmas_list.append(lemma)
-            previous_common_lemma_ref = lemma.fact_sha256
-        common_lemmas = tuple(common_lemmas_list)
-
-        if len(common_lemmas) != len(capture.common_transitions):
-            raise ValueError("M8 unchecked common lemma coverage differs from source traversal")
-        start_state_sha256 = m7_cursor_sha256(context._request.cursor)  # noqa: SLF001
-        influence_rows: list[facts.M8InfluenceFactV2] = []
-        roots: list[facts.M8ActionRootV2] = []
-        for branch in capture.branches:
-            if len(branch.events) != len(common_lemmas):
-                raise ValueError("M8 unchecked branch/common event coverage differs")
-            branch_cursor_before = branch.initial_step.cursor
-            branch_influences = []
-            for common, lemma, event in zip(
-                capture.common_transitions,
-                common_lemmas,
-                branch.events,
-                strict=True,
-            ):
-                influence = _influence_fact(
+        with profile_phase("fact_bundle_unchecked_traversal"):
+            capture = _capture_prepared_unchecked_traversal(context)
+        with profile_phase("fact_bundle_layer_assembly"):
+            common_lemmas_list: list[facts.M8CommonTransitionLemmaV2] = []
+            previous_common_lemma_ref: str | None = None
+            for common in capture.common_transitions:
+                lemma = _common_lemma(
                     store,
                     common=common,
-                    common_lemma=lemma,
-                    branch=branch,
-                    event=event,
-                    branch_cursor_before=branch_cursor_before,
+                    previous_common_lemma_ref=previous_common_lemma_ref,
                 )
-                branch_influences.append(influence)
-                influence_rows.append(influence)
-                branch_cursor_before = event.branch_after
-            if branch_cursor_before != branch.cursor:
-                raise ValueError("M8 unchecked terminal branch cursor differs from event chain")
-            terminal = run_m7_continuation(
-                context._request.runtime,  # noqa: SLF001
-                cursor=branch.cursor,
-                stop_event_position=context._stop_event_position,  # noqa: SLF001
-            )
-            if terminal.events:
-                raise ValueError("M8 terminal reconciliation replayed missing branch events")
-            root = _content_addressed(
-                facts.M8ActionRootV2,
-                {
-                    "schema_version": "yieldforge.m8-action-root.v2",
-                    "fact_kind": "action_root",
-                    "semantic_runtime_sha256": context._authority.semantic_sha256,  # noqa: SLF001
-                    "stream_id": context._request.runtime.replay_input.stream_id,  # noqa: SLF001
-                    "action_id": branch.initial_step.event.action.action_id,
-                    "catalog_action_id": branch.descriptor.action_id,
-                    "baseline_action_id": context._fallback_step.event.action.action_id,  # noqa: SLF001
-                    "baseline_catalog_action_id": context._fallback_step.descriptor.action_id,  # noqa: SLF001
-                    "start_event_position": context._catalog.event_position,  # noqa: SLF001
-                    "stop_event_position": context._stop_event_position,  # noqa: SLF001
-                    "suffix_sha256": context._suffix_sha256,  # noqa: SLF001
-                    "start_state_sha256": start_state_sha256,
-                    "initial_state_after_sha256": m7_cursor_sha256(branch.initial_step.cursor),
-                    "final_state_sha256": m7_cursor_sha256(branch.cursor),
-                    "common_lemma_refs": tuple(item.fact_sha256 for item in common_lemmas),
-                    "influence_fact_refs": tuple(item.fact_sha256 for item in branch_influences),
-                    "final_net_cost_bits": facts.encode_canonical_f64(
-                        float(terminal.final_costs.net_cost)
-                    ),
-                },
-            )
-            roots.append(root)
+                common_lemmas_list.append(lemma)
+                previous_common_lemma_ref = lemma.fact_sha256
+            common_lemmas = tuple(common_lemmas_list)
 
-        replay_input = context._request.runtime.replay_input  # noqa: SLF001
-        dimension = replay_input.instances[0]
-        provenance = facts.M8BundleProvenanceV2(
-            replay_input_id=replay_input.input_id,
-            replay_input_sha256=replay_input.content_sha256,
-            semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
-            stream_id=replay_input.stream_id,
-            stream_sha256=replay_input.stream_sha256,
-            regime=dimension.regime.value,
-            temporal_seed=dimension.temporal_seed,
-            suffix_sha256=context._suffix_sha256,  # noqa: SLF001
-            freeze_id=request.freeze_id,
-            freeze_sha256=request.freeze_sha256,
-            evaluation_partition_opened=False,
-        )
-        payload = _bundle_payload(
-            provenance=provenance,
-            store=store,
-            common_lemmas=common_lemmas,
-            influence_facts=tuple(influence_rows),
-            action_roots=tuple(roots),
-        )
-        bundle = facts.M8UncheckedFactBundleV2.model_validate(
-            {**payload, "bundle_sha256": facts.m8_bundle_sha256(payload)},
+            if len(common_lemmas) != len(capture.common_transitions):
+                raise ValueError("M8 unchecked common lemma coverage differs from source traversal")
+            start_state_sha256 = m7_cursor_sha256(context._request.cursor)  # noqa: SLF001
+            influence_rows: list[facts.M8InfluenceFactV2] = []
+            roots: list[facts.M8ActionRootV2] = []
+            for branch in capture.branches:
+                if len(branch.events) != len(common_lemmas):
+                    raise ValueError("M8 unchecked branch/common event coverage differs")
+                branch_cursor_before = branch.initial_step.cursor
+                branch_influences = []
+                for common, lemma, event in zip(
+                    capture.common_transitions,
+                    common_lemmas,
+                    branch.events,
+                    strict=True,
+                ):
+                    influence = _influence_fact(
+                        store,
+                        common=common,
+                        common_lemma=lemma,
+                        branch=branch,
+                        event=event,
+                        branch_cursor_before=branch_cursor_before,
+                    )
+                    branch_influences.append(influence)
+                    influence_rows.append(influence)
+                    branch_cursor_before = event.branch_after
+                if branch_cursor_before != branch.cursor:
+                    raise ValueError("M8 unchecked terminal branch cursor differs from event chain")
+                terminal = run_m7_continuation(
+                    context._request.runtime,  # noqa: SLF001
+                    cursor=branch.cursor,
+                    stop_event_position=context._stop_event_position,  # noqa: SLF001
+                )
+                if terminal.events:
+                    raise ValueError("M8 terminal reconciliation replayed missing branch events")
+                root = _content_addressed(
+                    facts.M8ActionRootV2,
+                    {
+                        "schema_version": "yieldforge.m8-action-root.v2",
+                        "fact_kind": "action_root",
+                        "semantic_runtime_sha256": context._authority.semantic_sha256,  # noqa: SLF001
+                        "stream_id": context._request.runtime.replay_input.stream_id,  # noqa: SLF001
+                        "action_id": branch.initial_step.event.action.action_id,
+                        "catalog_action_id": branch.descriptor.action_id,
+                        "baseline_action_id": context._fallback_step.event.action.action_id,  # noqa: SLF001
+                        "baseline_catalog_action_id": context._fallback_step.descriptor.action_id,  # noqa: SLF001
+                        "start_event_position": context._catalog.event_position,  # noqa: SLF001
+                        "stop_event_position": context._stop_event_position,  # noqa: SLF001
+                        "suffix_sha256": context._suffix_sha256,  # noqa: SLF001
+                        "start_state_sha256": start_state_sha256,
+                        "initial_state_after_sha256": m7_cursor_sha256(branch.initial_step.cursor),
+                        "final_state_sha256": m7_cursor_sha256(branch.cursor),
+                        "common_lemma_refs": tuple(item.fact_sha256 for item in common_lemmas),
+                        "influence_fact_refs": tuple(
+                            item.fact_sha256 for item in branch_influences
+                        ),
+                        "final_net_cost_bits": facts.encode_canonical_f64(
+                            float(terminal.final_costs.net_cost)
+                        ),
+                    },
+                )
+                roots.append(root)
+
+            replay_input = context._request.runtime.replay_input  # noqa: SLF001
+            dimension = replay_input.instances[0]
+            provenance = facts.M8BundleProvenanceV2(
+                replay_input_id=replay_input.input_id,
+                replay_input_sha256=replay_input.content_sha256,
+                semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
+                stream_id=replay_input.stream_id,
+                stream_sha256=replay_input.stream_sha256,
+                regime=dimension.regime.value,
+                temporal_seed=dimension.temporal_seed,
+                suffix_sha256=context._suffix_sha256,  # noqa: SLF001
+                freeze_id=request.freeze_id,
+                freeze_sha256=request.freeze_sha256,
+                evaluation_partition_opened=False,
+            )
+            payload = _bundle_payload(
+                provenance=provenance,
+                store=store,
+                common_lemmas=common_lemmas,
+                influence_facts=tuple(influence_rows),
+                action_roots=tuple(roots),
+            )
+        with profile_phase("fact_bundle_hash_validation"):
+            bundle = facts.M8UncheckedFactBundleV2.model_validate(
+                {**payload, "bundle_sha256": facts.m8_bundle_sha256(payload)},
+                strict=True,
+            )
+    with profile_phase("fact_bundle_semantic_serialization"):
+        serialization_started = perf_counter()
+        semantic_bytes = unchecked_fact_bundle_semantic_bytes(bundle)
+        serialization_seconds = perf_counter() - serialization_started
+    with profile_phase("fact_bundle_strict_roundtrip"):
+        strict_loaded = facts.M8UncheckedFactBundleV2.model_validate_json(
+            semantic_bytes,
             strict=True,
         )
-    serialization_started = perf_counter()
-    semantic_bytes = unchecked_fact_bundle_semantic_bytes(bundle)
-    serialization_seconds = perf_counter() - serialization_started
-    strict_loaded = facts.M8UncheckedFactBundleV2.model_validate_json(
-        semantic_bytes,
-        strict=True,
-    )
-    if strict_loaded != bundle:
-        raise ValueError("M8 unchecked bundle semantic serialization does not round trip")
-    telemetry = M8BundleGenerationTelemetry(
-        semantic_serialized_bytes=len(semantic_bytes),
-        serialization_seconds=float(serialization_seconds),
-        portable_transition_serialized_bytes=tuple(
-            len(facts.canonical_semantic_json(item.portable_transition.model_dump(mode="json")))
-            for item in bundle.common_lemmas
-        ),
-        common_event_count=len(bundle.common_lemmas),
-        action_root_count=len(bundle.action_roots),
-        counted_inventory_evidence_count=sum(
-            item.classification == "counted_no_fit"
-            for lemma in bundle.common_lemmas
-            for item in lemma.inventory_classifications
-        ),
-        translation_batch_count=len(bundle.translation_batches),
-        exact_transition_count=sum(
-            item.classification == "exact_transition" for item in bundle.influence_facts
-        ),
-    )
+        if strict_loaded != bundle:
+            raise ValueError("M8 unchecked bundle semantic serialization does not round trip")
+    with profile_phase("fact_bundle_telemetry"):
+        telemetry = M8BundleGenerationTelemetry(
+            semantic_serialized_bytes=len(semantic_bytes),
+            serialization_seconds=float(serialization_seconds),
+            portable_transition_serialized_bytes=tuple(
+                len(facts.canonical_semantic_json(item.portable_transition.model_dump(mode="json")))
+                for item in bundle.common_lemmas
+            ),
+            common_event_count=len(bundle.common_lemmas),
+            action_root_count=len(bundle.action_roots),
+            counted_inventory_evidence_count=sum(
+                item.classification == "counted_no_fit"
+                for lemma in bundle.common_lemmas
+                for item in lemma.inventory_classifications
+            ),
+            translation_batch_count=len(bundle.translation_batches),
+            exact_transition_count=sum(
+                item.classification == "exact_transition" for item in bundle.influence_facts
+            ),
+        )
     return M8UncheckedBundleGenerationResult(
         bundle=bundle,
         telemetry=telemetry,
