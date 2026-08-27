@@ -26,6 +26,7 @@ from yieldforge.baseline.policies import M7PolicyName
 from yieldforge.baseline.replay import initial_m7_cursor
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle import certificates
+from yieldforge.oracle import facts as portable_facts
 from yieldforge.oracle.factored import (
     M8UncheckedBundleRequest,
     score_unchecked_fact_bundle,
@@ -761,6 +762,62 @@ def test_policy_dominated_mapping_keeps_complete_search_and_policy_bindings() ->
                     assert competitor.decision_key == legacy.competing_decision_key
                     assert competitor.catalog_action_id == legacy.competing_catalog_action_id
                     assert competitor.materialized_action_id == legacy.competing_action_id
+
+
+def test_generator_emits_one_compact_rejection_group_per_changed_remnant() -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "myopic_geometry-zero-fit-equal-same-two"
+    )
+    bundle = score_unchecked_fact_bundle(_bundle_request(case.request)).bundle
+    compact_rows = tuple(
+        row for influence in bundle.influence_facts for row in influence.rejection_evidence
+    )
+
+    assert compact_rows
+    assert all(
+        isinstance(row, portable_facts.M8CandidateScalarGroupEvidenceV2) for row in compact_rows
+    )
+    for influence in bundle.influence_facts:
+        if not influence.rejection_evidence:
+            continue
+        expected = {
+            *(("removed", item) for item in influence.inventory_delta.removed_remnant_ids),
+            *(("added", item) for item in influence.inventory_delta.added_remnant_ids),
+        }
+        observed = {(row.direction, row.remnant_id) for row in influence.rejection_evidence}
+        assert observed == expected
+        assert all(
+            row.candidate_scalar_refs == tuple(sorted(set(row.candidate_scalar_refs)))
+            for row in influence.rejection_evidence
+        )
+
+
+@pytest.mark.parametrize(
+    ("remnant_count", "candidate_count"),
+    ((428, 689), (459, 459)),
+)
+def test_compact_rejection_production_cardinality_stays_under_32_mib(
+    remnant_count: int,
+    candidate_count: int,
+) -> None:
+    scalar_refs = tuple(f"sha256:{index:064x}" for index in range(candidate_count))
+    groups = tuple(
+        portable_facts.M8CandidateScalarGroupEvidenceV2(
+            evidence_kind="candidate_scalar_group",
+            direction="removed",
+            remnant_id=f"yfrm-{index:024x}",
+            candidate_scalar_refs=scalar_refs,
+            all_candidates_impossible=True,
+        ).model_dump(mode="json")
+        for index in range(remnant_count)
+    )
+
+    encoded_size = len(canonical_semantic_json({"rejection_evidence": groups}))
+
+    assert encoded_size < 32 * 1024 * 1024
+    assert encoded_size < 128 * 1024 * 1024
 
 
 def test_two_fresh_spawn_workers_emit_identical_strict_semantic_bytes(

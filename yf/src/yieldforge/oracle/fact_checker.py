@@ -1576,20 +1576,58 @@ def _validate_rejections_for_item(
         event_position=influence.event_position,
         item=item,
     )
-    portable_by_candidate = {
+    expanded_by_candidate = {
         row.candidate_id: row
         for row in influence.rejection_evidence
+        if isinstance(row, facts.M8RejectionEvidenceV2)
         if row.direction == direction and row.remnant_id == item.remnant.remnant_id
     }
-    if require_portable and set(portable_by_candidate) != {row.candidate_id for row in expected}:
+    compact_groups = tuple(
+        row
+        for row in influence.rejection_evidence
+        if isinstance(row, facts.M8CandidateScalarGroupEvidenceV2)
+        and row.direction == direction
+        and row.remnant_id == item.remnant.remnant_id
+    )
+    if compact_groups:
+        if len(compact_groups) != 1 or expanded_by_candidate:
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        if not require_portable:
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        group = compact_groups[0]
+        scalar_ref_by_candidate: dict[str, str] = {}
+        for scalar_ref in group.candidate_scalar_refs:
+            scalar = state.common.scalar_by_sha.get(scalar_ref)
+            if scalar is None or scalar.candidate_id in scalar_ref_by_candidate:
+                raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+            scalar_ref_by_candidate[scalar.candidate_id] = scalar_ref
+        expected_candidate_ids = {row.candidate_id for row in expected}
+        if set(scalar_ref_by_candidate) != expected_candidate_ids:
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        impossible = []
+        for row in expected:
+            _validate_influence_scalar(
+                runtime,
+                event_position=influence.event_position,
+                scalar_ref=scalar_ref_by_candidate[row.candidate_id],
+                expected_candidate_id=row.candidate_id,
+                state=state,
+                owner_sha256=influence.fact_sha256,
+            )
+            impossible.append(row.certificate.impossible)
+        if group.all_candidates_impossible != all(impossible):
+            raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
+        return tuple(impossible)
+
+    if require_portable and set(expanded_by_candidate) != {row.candidate_id for row in expected}:
         raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
     if not require_portable:
-        if portable_by_candidate:
+        if expanded_by_candidate:
             raise _FullFactFailure("influence_rejection_mismatch", influence.fact_sha256)
         return tuple(row.certificate.impossible for row in expected)
     impossible = []
     for row in expected:
-        portable = portable_by_candidate[row.candidate_id]
+        portable = expanded_by_candidate[row.candidate_id]
         scalar = _validate_influence_scalar(
             runtime,
             event_position=influence.event_position,

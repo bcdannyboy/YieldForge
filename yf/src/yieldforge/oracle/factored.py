@@ -699,9 +699,10 @@ def _rejection_evidence(
     *,
     common: M8UncheckedProducerTransition,
     influence: M8UncheckedInfluenceCapture,
-) -> tuple[facts.M8RejectionEvidenceV2, ...]:
+) -> tuple[facts.M8CandidateScalarGroupEvidenceV2, ...]:
     layout_by_candidate = _layout_by_candidate(common)
-    rows = []
+    scalar_refs = []
+    impossible = []
     for rejection in influence.rejections:
         layout = layout_by_candidate.get(rejection.candidate_id)
         if layout is None:
@@ -711,26 +712,18 @@ def _rejection_evidence(
             stream_id=common.source.stream_id,
             layout=layout,
         )
-        certificate = rejection.certificate
-        rows.append(
-            facts.M8RejectionEvidenceV2(
-                direction=influence.direction,
-                remnant_id=influence.remnant_id,
-                candidate_id=rejection.candidate_id,
-                candidate_scalar_ref=scalar.fact_sha256,
-                impossible=certificate.impossible,
-                reason=certificate.reason,
-                layout_area_bits=facts.encode_canonical_f64(float(certificate.layout_area)),
-                remnant_area_bits=facts.encode_canonical_f64(float(certificate.remnant_area)),
-                layout_width_bits=facts.encode_canonical_f64(float(certificate.layout_width)),
-                remnant_width_bits=facts.encode_canonical_f64(float(certificate.remnant_width)),
-                layout_height_bits=facts.encode_canonical_f64(float(certificate.layout_height)),
-                remnant_height_bits=facts.encode_canonical_f64(float(certificate.remnant_height)),
-                area_tolerance_bits=facts.encode_canonical_f64(float(certificate.area_tolerance)),
-            )
-        )
-    return tuple(
-        sorted(rows, key=lambda item: (item.direction, item.remnant_id, item.candidate_id))
+        scalar_refs.append(scalar.fact_sha256)
+        impossible.append(rejection.certificate.impossible)
+    if not scalar_refs:
+        raise ValueError("M8 influence rejection group lacks candidate scalar references")
+    return (
+        facts.M8CandidateScalarGroupEvidenceV2(
+            evidence_kind="candidate_scalar_group",
+            direction=influence.direction,
+            remnant_id=influence.remnant_id,
+            candidate_scalar_refs=tuple(sorted(set(scalar_refs))),
+            all_candidates_impossible=all(impossible),
+        ),
     )
 
 
@@ -840,7 +833,7 @@ def _influence_fact(
     if sources and any(item.delta != delta for item in sources):
         raise ValueError("M8 passive influence delta differs from branch/common state")
     if event.classification == "exact_transition":
-        rejection_rows: tuple[facts.M8RejectionEvidenceV2, ...] = ()
+        rejection_rows: tuple[facts.M8RejectionEvidenceClaimV2, ...] = ()
         search_rows: tuple[facts.M8SearchEvidenceV2, ...] = ()
         competitor_rows: tuple[facts.M8CompetitorEvidenceV2, ...] = ()
         evidence_mode = "exact_transition"
@@ -855,7 +848,7 @@ def _influence_fact(
                     for source in sources
                     for row in _rejection_evidence(store, common=common, influence=source)
                 ),
-                key=lambda item: (item.direction, item.remnant_id, item.candidate_id),
+                key=lambda item: (item.direction, item.remnant_id),
             )
         )
         search_rows = tuple(

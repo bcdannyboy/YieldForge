@@ -1460,6 +1460,27 @@ class M8RejectionEvidenceV2(BaselineContractModel):
         return self
 
 
+class M8CandidateScalarGroupEvidenceV2(BaselineContractModel):
+    """Compact complete candidate-scalar set for one changed remnant."""
+
+    evidence_kind: Literal["candidate_scalar_group"] = "candidate_scalar_group"
+    direction: Literal["added", "removed"]
+    remnant_id: StrictStr = Field(pattern=_REMNANT_ID_PATTERN)
+    candidate_scalar_refs: tuple[M8Sha256, ...] = Field(min_length=1)
+    all_candidates_impossible: StrictBool
+
+    @model_validator(mode="after")
+    def require_canonical_candidate_refs(self) -> Self:
+        _sorted_unique(
+            self.candidate_scalar_refs,
+            label="compact rejection candidate-scalar references",
+        )
+        return self
+
+
+M8RejectionEvidenceClaimV2 = M8RejectionEvidenceV2 | M8CandidateScalarGroupEvidenceV2
+
+
 class M8SearchEvidenceV2(BaselineContractModel):
     """Typed exact-search preimage; collision classifications remain absent."""
 
@@ -1558,19 +1579,28 @@ class M8InfluenceFactV2(_M8FactV2):
         "exact_transition",
         "state_rejoin",
     ]
-    rejection_evidence: tuple[M8RejectionEvidenceV2, ...]
+    rejection_evidence: tuple[M8RejectionEvidenceClaimV2, ...]
     search_evidence: tuple[M8SearchEvidenceV2, ...]
     competitor_evidence: tuple[M8CompetitorEvidenceV2, ...]
 
     @model_validator(mode="after")
     def require_complete_influence_evidence(self) -> Self:
-        rejection_keys = tuple(
-            (
-                item.direction,
-                item.remnant_id,
-                item.candidate_id,
-            )
+        expanded_rejections = tuple(
+            item for item in self.rejection_evidence if isinstance(item, M8RejectionEvidenceV2)
+        )
+        compact_rejections = tuple(
+            item
             for item in self.rejection_evidence
+            if isinstance(item, M8CandidateScalarGroupEvidenceV2)
+        )
+        if expanded_rejections and compact_rejections:
+            raise ValueError("influence cannot mix expanded and compact rejection encodings")
+        rejection_keys = (
+            tuple(
+                (item.direction, item.remnant_id, item.candidate_id) for item in expanded_rejections
+            )
+            if expanded_rejections
+            else tuple((item.direction, item.remnant_id) for item in compact_rejections)
         )
         if rejection_keys != tuple(sorted(set(rejection_keys))):
             raise ValueError("influence rejection evidence must be sorted and unique")
@@ -1585,6 +1615,15 @@ class M8InfluenceFactV2(_M8FactV2):
         )
         if search_keys != tuple(sorted(set(search_keys))):
             raise ValueError("influence search evidence must be sorted and unique")
+        search_remnants = {(item.direction, item.remnant_id) for item in self.search_evidence}
+        for group in compact_rejections:
+            group_key = (group.direction, group.remnant_id)
+            if group.all_candidates_impossible and group_key in search_remnants:
+                raise ValueError(
+                    "all-impossible compact rejection group cannot carry search evidence"
+                )
+            if not group.all_candidates_impossible and group_key not in search_remnants:
+                raise ValueError("non-impossible compact rejection group requires search evidence")
         competitor_keys = tuple(
             (
                 item.direction,
@@ -1624,7 +1663,12 @@ class M8InfluenceFactV2(_M8FactV2):
             valid = (
                 self.classification == "no_fit"
                 and bool(self.rejection_evidence)
-                and all(item.impossible for item in self.rejection_evidence)
+                and all(
+                    item.impossible
+                    if isinstance(item, M8RejectionEvidenceV2)
+                    else item.all_candidates_impossible
+                    for item in self.rejection_evidence
+                )
                 and not self.search_evidence
                 and not self.competitor_evidence
             )
@@ -2474,19 +2518,37 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 *(("removed", item) for item in influence.inventory_delta.removed_remnant_ids),
                 *(("added", item) for item in influence.inventory_delta.added_remnant_ids),
             }
-            rejection_pairs = tuple(
-                (evidence.direction, evidence.remnant_id, evidence.candidate_id)
+            expanded_rejections = tuple(
+                evidence
                 for evidence in influence.rejection_evidence
+                if isinstance(evidence, M8RejectionEvidenceV2)
+            )
+            compact_rejections = tuple(
+                evidence
+                for evidence in influence.rejection_evidence
+                if isinstance(evidence, M8CandidateScalarGroupEvidenceV2)
             )
             expected_rejection_pairs = {
                 (direction, remnant_id, candidate_id)
                 for direction, remnant_id in expected_delta
                 for candidate_id in expected_candidate_ids
             }
-            if rejection_pairs and (
-                len(rejection_pairs) != len(set(rejection_pairs))
-                or set(rejection_pairs) != expected_rejection_pairs
-            ):
+            expanded_rejection_pairs = tuple(
+                (evidence.direction, evidence.remnant_id, evidence.candidate_id)
+                for evidence in expanded_rejections
+            )
+            compact_rejection_pairs = tuple(
+                (evidence.direction, evidence.remnant_id) for evidence in compact_rejections
+            )
+            incomplete_expanded = expanded_rejection_pairs and (
+                len(expanded_rejection_pairs) != len(set(expanded_rejection_pairs))
+                or set(expanded_rejection_pairs) != expected_rejection_pairs
+            )
+            incomplete_compact = compact_rejection_pairs and (
+                len(compact_rejection_pairs) != len(set(compact_rejection_pairs))
+                or set(compact_rejection_pairs) != expected_delta
+            )
+            if incomplete_expanded or incomplete_compact:
                 _raise_structural_error(
                     _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
                     "M8 influence lacks the complete rejection candidate set",
@@ -2521,7 +2583,15 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                     fact_sha256=influence.fact_sha256,
                     dependency_sha256=common.fact_sha256,
                 )
-            scalar_refs = tuple(item.candidate_scalar_ref for item in influence.rejection_evidence)
+            scalar_refs = tuple(
+                reference
+                for evidence in influence.rejection_evidence
+                for reference in (
+                    (evidence.candidate_scalar_ref,)
+                    if isinstance(evidence, M8RejectionEvidenceV2)
+                    else evidence.candidate_scalar_refs
+                )
+            )
             missing_scalar_ref = next((ref for ref in scalar_refs if ref not in scalars), None)
             if missing_scalar_ref is not None:
                 _raise_structural_error(
@@ -2532,7 +2602,8 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 )
             scalar_items = tuple(scalars[ref] for ref in scalar_refs)
             self._require_dependency_context(influence, scalar_items)
-            for evidence, scalar in zip(influence.rejection_evidence, scalar_items, strict=True):
+            for evidence in expanded_rejections:
+                scalar = scalars[evidence.candidate_scalar_ref]
                 if (
                     evidence.candidate_id != scalar.candidate_id
                     or scalar.problem_id != common.problem_id
@@ -2550,6 +2621,41 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                         "referenced scalar identity or scalar measurements",
                         fact_sha256=influence.fact_sha256,
                         dependency_sha256=scalar.fact_sha256,
+                    )
+            for group in compact_rejections:
+                group_scalars = tuple(
+                    scalars[reference] for reference in group.candidate_scalar_refs
+                )
+                scalar_candidate_ids = tuple(item.candidate_id for item in group_scalars)
+                if (
+                    len(scalar_candidate_ids) != len(set(scalar_candidate_ids))
+                    or set(scalar_candidate_ids) != expected_candidate_ids
+                ):
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.INCOMPLETE_EVIDENCE,
+                        "M8 influence lacks the complete rejection candidate set",
+                        fact_sha256=influence.fact_sha256,
+                        dependency_sha256=common.fact_sha256,
+                    )
+                mismatched_scalar = next(
+                    (
+                        scalar
+                        for scalar in group_scalars
+                        if scalar.problem_id != common.problem_id
+                        or scalar.problem_sha256 != common.problem_sha256
+                        or scalar.candidate_set_id != common.candidate_set_id
+                        or scalar.candidate_set_sha256 != common.candidate_set_sha256
+                        or scalar.fit_config_sha256 != common.fit_config_sha256
+                    ),
+                    None,
+                )
+                if mismatched_scalar is not None:
+                    _raise_structural_error(
+                        _M8StructuralErrorCode.PARTITION_MISMATCH,
+                        "M8 influence rejection scalar partition differs from referenced "
+                        "scalar identity",
+                        fact_sha256=influence.fact_sha256,
+                        dependency_sha256=mismatched_scalar.fact_sha256,
                     )
             translation_refs = tuple(
                 search.translation_batch_ref for search in influence.search_evidence
@@ -2817,7 +2923,15 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
                 visit_common(common.fact_sha256)
             for influence in root_influences:
                 reachable.add(influence.fact_sha256)
-                reachable.update(item.candidate_scalar_ref for item in influence.rejection_evidence)
+                reachable.update(
+                    reference
+                    for evidence in influence.rejection_evidence
+                    for reference in (
+                        (evidence.candidate_scalar_ref,)
+                        if isinstance(evidence, M8RejectionEvidenceV2)
+                        else evidence.candidate_scalar_refs
+                    )
+                )
                 reachable.update(
                     search.translation_batch_ref for search in influence.search_evidence
                 )
@@ -2911,6 +3025,7 @@ class M8UncheckedFactBundleV2(BaselineContractModel):
 __all__ = [
     "M8ActionRootV2",
     "M8BundleProvenanceV2",
+    "M8CandidateScalarGroupEvidenceV2",
     "M8CandidateScalarFactV2",
     "M8CanonicalF64",
     "M8CanonicalUtc",
@@ -2921,6 +3036,7 @@ __all__ = [
     "M8InfluenceFactV2",
     "M8InventoryDeltaV2",
     "M8PortableTranslationBatch",
+    "M8RejectionEvidenceClaimV2",
     "M8RejectionEvidenceV2",
     "M8SearchEvidenceV2",
     "M8Sha256",

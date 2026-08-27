@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from yieldforge.oracle import facts as portable_facts
 from yieldforge.oracle.experiment import M8CertificateProofResult
 from yieldforge.oracle.facts import (
     M8ActionRootV2,
@@ -1190,6 +1191,122 @@ def test_all_eight_named_contracts_strict_load_minimal_fixture() -> None:
     assert tuple(type(item) for item in observed) == expected_types
 
 
+def test_compact_rejection_group_strict_loads_without_changing_v2_fact_schema() -> None:
+    raw = _bundle().model_dump(mode="python")
+    influence = raw["influence_facts"][0]
+    legacy = influence["rejection_evidence"][0]
+    influence["rejection_evidence"] = (
+        {
+            "evidence_kind": "candidate_scalar_group",
+            "direction": legacy["direction"],
+            "remnant_id": legacy["remnant_id"],
+            "candidate_scalar_refs": (legacy["candidate_scalar_ref"],),
+            "all_candidates_impossible": True,
+        },
+    )
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    loaded = M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+    compact = loaded.influence_facts[0].rejection_evidence[0]
+
+    assert isinstance(compact, portable_facts.M8CandidateScalarGroupEvidenceV2)
+    assert compact.candidate_scalar_refs == (legacy["candidate_scalar_ref"],)
+    assert loaded.influence_facts[0].schema_version == "yieldforge.m8-influence-fact.v2"
+
+
+def test_influence_rejects_mixed_expanded_and_compact_rejection_encodings() -> None:
+    raw = _bundle().model_dump(mode="python")
+    influence = raw["influence_facts"][0]
+    legacy = influence["rejection_evidence"][0]
+    compact = {
+        "evidence_kind": "candidate_scalar_group",
+        "direction": legacy["direction"],
+        "remnant_id": legacy["remnant_id"],
+        "candidate_scalar_refs": (legacy["candidate_scalar_ref"],),
+        "all_candidates_impossible": True,
+    }
+    influence["rejection_evidence"] = (legacy, compact)
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match="cannot mix.*rejection encodings"):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+@pytest.mark.parametrize(
+    ("all_impossible", "include_search", "message"),
+    (
+        (True, True, "all-impossible compact rejection group cannot carry search evidence"),
+        (False, False, "non-impossible compact rejection group requires search evidence"),
+    ),
+)
+def test_compact_rejection_aggregate_and_search_evidence_are_consistent(
+    all_impossible: bool,
+    include_search: bool,
+    message: str,
+) -> None:
+    raw = _bundle().model_dump(mode="python")
+    influence = raw["influence_facts"][0]
+    legacy = influence["rejection_evidence"][0]
+    influence.update(
+        {
+            "evidence_mode": "exact_transition",
+            "rejection_evidence": (
+                {
+                    "evidence_kind": "candidate_scalar_group",
+                    "direction": legacy["direction"],
+                    "remnant_id": legacy["remnant_id"],
+                    "candidate_scalar_refs": (legacy["candidate_scalar_ref"],),
+                    "all_candidates_impossible": all_impossible,
+                },
+            ),
+            "search_evidence": (
+                {
+                    "direction": legacy["direction"],
+                    "remnant_id": legacy["remnant_id"],
+                    "candidate_id": legacy["candidate_id"],
+                    "search_config": _search_config(),
+                    "search_config_sha256": _search_config_sha256(),
+                    "translation_batch_ref": raw["translation_batches"][0]["fact_sha256"],
+                    "generated_candidate_count": 2,
+                    "duplicate_candidate_count": 1,
+                    "evaluated_candidate_count": 2,
+                    "budget_truncated": False,
+                    "result": "no_witness_within_registered_search",
+                    "selected_translation": None,
+                },
+            )
+            if include_search
+            else (),
+        }
+    )
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
+
+    with pytest.raises(ValidationError, match=message):
+        M8UncheckedFactBundleV2.model_validate(raw, strict=True)
+
+
+def test_legacy_expanded_rejection_roundtrip_preserves_content_hash() -> None:
+    raw = _bundle().model_dump(mode="python")
+    original = deepcopy(raw["influence_facts"][0])
+
+    loaded = M8InfluenceFactV2.model_validate(original, strict=True)
+
+    assert loaded.model_dump(mode="python") == original
+    assert "evidence_kind" not in loaded.model_dump(mode="python")["rejection_evidence"][0]
+
+
 def test_bundle_root_failure_has_stable_structured_error_and_bundle_identity() -> None:
     raw = _bundle().model_dump(mode="python")
     raw["bundle_sha256"] = SHA_D
@@ -1857,6 +1974,35 @@ def test_scalar_no_fit_requires_complete_rejection_candidate_set() -> None:
     raw = _two_candidate_bundle_raw(include_second_translation=True)
     influence = raw["influence_facts"][0]
     common = raw["common_lemmas"][0]
+
+    error = _first_validation_error(raw)
+
+    assert error["type"] == "m8_incomplete_evidence"
+    assert error["ctx"] == {
+        "fact_sha256": influence["fact_sha256"],
+        "dependency_sha256": common["fact_sha256"],
+    }
+
+
+def test_compact_rejection_group_requires_complete_candidate_scalar_bijection() -> None:
+    raw = _two_candidate_bundle_raw(include_second_translation=True)
+    influence = raw["influence_facts"][0]
+    common = raw["common_lemmas"][0]
+    first_ref = raw["candidate_scalar_facts"][0]["fact_sha256"]
+    influence["rejection_evidence"] = (
+        {
+            "evidence_kind": "candidate_scalar_group",
+            "direction": "removed",
+            "remnant_id": influence["inventory_delta"]["removed_remnant_ids"][0],
+            "candidate_scalar_refs": (first_ref,),
+            "all_candidates_impossible": True,
+        },
+    )
+    _rehash_fact(influence)
+    root = raw["action_roots"][0]
+    root["influence_fact_refs"] = (influence["fact_sha256"],)
+    _rehash_fact(root)
+    _rehash_bundle(raw)
 
     error = _first_validation_error(raw)
 

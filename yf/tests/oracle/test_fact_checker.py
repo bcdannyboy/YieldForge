@@ -227,6 +227,67 @@ def test_full_checker_accepts_all_roots_only_after_fixed_layer_traversal() -> No
     assert result.authority_mode == "checked_fixed_layer_actions"
 
 
+def test_full_checker_recomputes_compact_rejection_group_aggregate() -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "myopic_geometry-zero-fit-equal-same-two"
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=case.request,
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    payload = deepcopy(json.loads(generated.semantic_bytes))
+    influence = next(
+        item
+        for item in payload["influence_facts"]
+        if item["classification"] == "policy_dominated" and item["rejection_evidence"]
+    )
+    group = influence["rejection_evidence"][0]
+    assert group["evidence_kind"] == "candidate_scalar_group"
+    assert not group["all_candidates_impossible"]
+    group["all_candidates_impossible"] = True
+    group_key = (group["direction"], group["remnant_id"])
+    influence["search_evidence"] = [
+        item
+        for item in influence["search_evidence"]
+        if (item["direction"], item["remnant_id"]) != group_key
+    ]
+    influence["competitor_evidence"] = [
+        item
+        for item in influence["competitor_evidence"]
+        if (item["direction"], item["selected_remnant_id"]) != group_key
+    ]
+    reachable_translation_refs = {
+        *(
+            reference
+            for item in payload["common_lemmas"]
+            for reference in item["translation_batch_refs"]
+        ),
+        *(
+            search["translation_batch_ref"]
+            for item in payload["influence_facts"]
+            for search in item["search_evidence"]
+        ),
+    }
+    payload["translation_batches"] = [
+        item
+        for item in payload["translation_batches"]
+        if item["fact_sha256"] in reachable_translation_refs
+    ]
+    semantic_bytes = _rehash_payload(payload)
+    owner_sha256 = influence["fact_sha256"]
+
+    result = check_m8_fact_bundle(_full_check_request(unchecked, semantic_bytes))
+
+    assert not result.valid
+    assert result.failure_code == "influence_rejection_mismatch"
+    assert result.first_failing_fact_sha256 == owner_sha256
+    assert result.decision is None
+
+
 def test_full_checker_rejects_rehashed_evidence_injected_into_exact_transition() -> None:
     case = next(
         item
@@ -724,7 +785,7 @@ def test_every_full_reachable_scalar_mutation_fails_stably_with_actual_owner() -
                 ):
                     failures.append(f"{label}: unstable {first.failure_code}")
 
-    assert checked_fields >= 200
+    assert checked_fields >= 180
     assert not failures, "\n".join(failures[:25])
 
 
