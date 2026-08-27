@@ -74,6 +74,7 @@ from yieldforge.oracle.compiled import (
     _prepared_standard_winner,
     _PreparedTranslationLayoutBatch,
     _registered_prepared_remnant_measurement,
+    _verified_rejection_layouts_cover_candidates,
     compile_rejection_problem,
     compile_translation_rejections,
 )
@@ -1553,12 +1554,14 @@ def _try_derive_m8_common_transition_fact_fast(
         if prepared_layouts is None:
             binding = runtime.replay_input.instances[event_position]
             verified = runtime.runtime_candidates[binding.problem_id]
-            if not verified.rejection_layouts or tuple(
-                item.candidate_id for item in verified.rejection_layouts
-            ) != tuple(item.candidate_id for item in verified.candidates):
+            if not _verified_rejection_layouts_cover_candidates(verified):
                 return None
             compiled = compile_rejection_problem(runtime, event_position=event_position)
         else:
+            binding = runtime.replay_input.instances[event_position]
+            verified = runtime.runtime_candidates[binding.problem_id]
+            if not _verified_rejection_layouts_cover_candidates(verified):
+                return None
             compiled = _prepared_rejection_problem(
                 prepared_layouts,
                 runtime,
@@ -1935,18 +1938,17 @@ def _capture_unchecked_m8_common_transition(
     compiled = None
     if cursor.inventory:
         if prepared_layouts is None:
-            if not verified.rejection_layouts or tuple(
-                item.candidate_id for item in verified.rejection_layouts
-            ) != tuple(item.candidate_id for item in verified.candidates):
+            if not _verified_rejection_layouts_cover_candidates(verified):
                 compiled = None
             else:
                 compiled = compile_rejection_problem(runtime, event_position=event_position)
         else:
-            compiled = _prepared_rejection_problem(
-                prepared_layouts,
-                runtime,
-                event_position=event_position,
-            )
+            if _verified_rejection_layouts_cover_candidates(verified):
+                compiled = _prepared_rejection_problem(
+                    prepared_layouts,
+                    runtime,
+                    event_position=event_position,
+                )
 
     rejected: list[InventoryItem] = []
     counted_no_fit: list[InventoryItem] = []
@@ -3526,6 +3528,19 @@ def _capture_unchecked_event_passivity_body(
     binding = fact.step.action_binding
     common_action_id = fact.step.event.action.action_id
     if binding.context.selected_stock_id in set(_item_ids(delta.removed)):
+        return M8UncheckedEventPassivityCapture(
+            passive=False,
+            classification=None,
+            branch_after=None,
+            state_before_sha256=None,
+            state_after_sha256=None,
+            influences=(),
+            exact_search_count=0,
+        )
+    verified = runtime.runtime_candidates[
+        runtime.replay_input.instances[fact.event_position].problem_id
+    ]
+    if not _verified_rejection_layouts_cover_candidates(verified):
         return M8UncheckedEventPassivityCapture(
             passive=False,
             classification=None,

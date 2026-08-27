@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 
+from yieldforge.baseline.archives import VerifiedProblemCandidates
 from yieldforge.baseline.geometry import (
     PreparedTranslationRejectionLayout,
     PreparedTranslationRejectionRemnant,
@@ -34,6 +35,22 @@ from yieldforge.reuse.contracts import RemnantStock
 from yieldforge.reuse.geometry import material_key
 
 _MAX_PREPARED_LAYOUT_CACHE_PROBLEMS = 2
+
+
+def _verified_rejection_layouts_cover_candidates(
+    verified: VerifiedProblemCandidates,
+) -> bool:
+    """Require one unique, ordered retained scalar for every unique candidate."""
+
+    candidate_ids = tuple(item.candidate_id for item in verified.candidates)
+    retained_ids = tuple(item.candidate_id for item in verified.rejection_layouts)
+    return (
+        bool(candidate_ids)
+        and bool(retained_ids)
+        and len(candidate_ids) == len(set(candidate_ids))
+        and len(retained_ids) == len(set(retained_ids))
+        and retained_ids == candidate_ids
+    )
 
 
 @dataclass(frozen=True)
@@ -456,10 +473,6 @@ def _prepare_translation_layout_batch(
                         event_position=event_position,
                     )
                 )
-                rejection_by_key[key] = compile_rejection_problem(
-                    runtime,
-                    event_position=event_position,
-                )
                 layouts_by_key[key] = tuple(
                     prepare_translation_rejection_layout(
                         prepare_layout_footprint(
@@ -470,6 +483,11 @@ def _prepare_translation_layout_batch(
                     )
                     for candidate in verified.candidates
                 )
+                if _verified_rejection_layouts_cover_candidates(verified):
+                    rejection_by_key[key] = compile_rejection_problem(
+                        runtime,
+                        event_position=event_position,
+                    )
     layouts = tuple(sorted(layouts_by_key.items()))
     rejection_problems = tuple(sorted(rejection_by_key.items()))
     standard_winners = tuple(sorted(standard_by_key.items()))
@@ -660,9 +678,7 @@ def compile_rejection_problem(
         if item.problem_id == binding.problem_id
     )
     verified = runtime.runtime_candidates[binding.problem_id]
-    candidate_ids = tuple(item.candidate_id for item in verified.candidates)
-    retained_ids = tuple(item.candidate_id for item in verified.rejection_layouts)
-    if not verified.rejection_layouts or retained_ids != candidate_ids:
+    if not _verified_rejection_layouts_cover_candidates(verified):
         raise ValueError("M8 retained rejection layouts do not cover verified candidates")
     for retained in verified.rejection_layouts:
         if (

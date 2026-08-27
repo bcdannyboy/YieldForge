@@ -1324,3 +1324,67 @@ def test_missing_rejection_archive_is_a_declared_exact_unsupported_fallback() ->
 
     assert result.valid
     assert result.exact_replay_fallback_count == 1
+
+
+@pytest.mark.parametrize("retained_layout_count", (0, 1))
+def test_generator_and_checker_use_declared_exact_fallback_for_incomplete_archive(
+    retained_layout_count: int,
+) -> None:
+    runtime = two_problem_runtime(first_width=9.0, second_width=9.0)
+    binding = runtime.replay_input.instances[1]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        verified,
+        rejection_layouts=verified.rejection_layouts[:retained_layout_count],
+    )
+    oracle_request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=oracle_request,
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+
+    generated = score_unchecked_fact_bundle(unchecked)
+
+    assert len(generated.bundle.common_lemmas) == 1
+    lemma = generated.bundle.common_lemmas[0]
+    assert lemma.evidence_mode == "exact_replay"
+    assert lemma.exact_replay_reason == "exact_survivor_unsupported_representation"
+    assert len(lemma.inventory_classifications) == 1
+    classification = lemma.inventory_classifications[0]
+    assert classification.classification == "exact_survivor"
+    assert classification.exact_replay_reason == "unsupported_representation"
+    assert classification.frontier_ref is None
+    assert classification.candidate_scalar_refs == ()
+    assert classification.translation_batch_refs == ()
+    assert generated.bundle.candidate_scalar_facts == ()
+    assert generated.bundle.frontier_facts == ()
+    assert generated.bundle.translation_batches == ()
+    assert {item.classification for item in generated.bundle.influence_facts} == {
+        "state_rejoin",
+        "exact_transition",
+    }
+    exact_influences = tuple(
+        item
+        for item in generated.bundle.influence_facts
+        if item.classification == "exact_transition"
+    )
+    assert exact_influences
+    assert all(item.rejection_evidence == () for item in exact_influences)
+    assert all(item.search_evidence == () for item in exact_influences)
+    assert all(item.competitor_evidence == () for item in exact_influences)
+
+    request = _check_request(unchecked, generated.semantic_bytes)
+    denied = check_m8_common_fact_bundle(request)
+    allowed = check_m8_common_fact_bundle(replace(request, allow_exact_replay=True))
+
+    assert not denied.valid
+    assert denied.failure_code == "implicit_exact_replay"
+    assert denied.exact_replay_fallback_count == 0
+    assert allowed.valid
+    assert allowed.failure_code == "valid_common_facts"
+    assert allowed.exact_replay_fallback_count == 1

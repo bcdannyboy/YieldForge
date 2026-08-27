@@ -531,6 +531,49 @@ def test_prepared_fast_common_reuses_compiled_standard_profiles(
         assert call_count == preparation_calls
 
 
+def test_prepared_fast_common_falls_back_exactly_without_complete_rejection_archive() -> None:
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=9.0)
+    cursor = _fallback_cursor(runtime)
+    binding = runtime.replay_input.instances[cursor.next_event_position]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        verified,
+        rejection_layouts=verified.rejection_layouts[:1],
+    )
+    semantic_sha256 = m7_semantic_runtime_sha256(runtime)
+    authoritative = certificates._derive_m8_common_transition_fact_authoritative(  # noqa: SLF001
+        runtime,
+        cursor=cursor,
+        semantic_runtime_sha256=semantic_sha256,
+    )
+
+    with compiled._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(cursor.next_event_position,),
+    ) as prepared:
+        assert (
+            certificates._try_derive_m8_common_transition_fact_fast(  # noqa: SLF001
+                runtime,
+                cursor=cursor,
+                semantic_runtime_sha256=semantic_sha256,
+                prepared_layouts=prepared,
+            )
+            is None
+        )
+        with activate_m8_profile() as profiler:
+            derived = certificates._derive_m8_common_transition_fact_unprofiled(  # noqa: SLF001
+                runtime,
+                cursor=cursor,
+                semantic_runtime_sha256=semantic_sha256,
+                prepared_layouts=prepared,
+            )
+
+    assert derived == authoritative
+    assert profiler.report().counts["full_authoritative_fallbacks"] == 1
+
+
 def test_prepared_mixed_common_reuses_profiles_and_remains_exact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

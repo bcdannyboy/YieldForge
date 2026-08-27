@@ -895,6 +895,86 @@ def test_producer_exact_fallback_retains_the_nonwinning_influence_preimage() -> 
     assert attempted.translation_batches
 
 
+def test_prepared_unchecked_branch_uses_exact_transition_without_complete_archive() -> None:
+    from yieldforge.oracle import sparse
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=9.0)
+    binding = runtime.replay_input.instances[1]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        verified,
+        rejection_layouts=verified.rejection_layouts[:1],
+    )
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+
+    with sparse._prepare_m8_generator_context(request) as context:  # noqa: SLF001
+        common_cursor = replace(context._fallback_step.cursor, inventory=())  # noqa: SLF001
+        common = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+            context._request.runtime,  # noqa: SLF001
+            cursor=common_cursor,
+            semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
+            prepared_layouts=context._prepared_layouts,  # noqa: SLF001
+            runtime_authority=context._authority,  # noqa: SLF001
+        )
+        assert common.inventory_classifications == ()
+        assert common.standard_candidates
+        added = inventory_item(
+            box(0, 0, 1, 1),
+            material=binding.material,
+            token="incomplete-archive-branch-delta",
+        )
+        branch = sparse._UncheckedBranchState(  # noqa: SLF001
+            descriptor=context._catalog.actions[0],  # noqa: SLF001
+            initial_step=context._fallback_step,  # noqa: SLF001
+            cursor=replace(common_cursor, inventory=(added,)),
+        )
+
+        sparse._advance_unchecked_branch(context, branch, common=common)  # noqa: SLF001
+
+    assert len(branch.events) == 1
+    event = branch.events[0]
+    assert event.classification == "exact_transition"
+    assert event.influences == ()
+    assert event.attempted_influences == ()
+    assert event.exact_step is not None
+
+
+def test_direct_unchecked_passivity_rejects_cheap_authority_without_complete_archive() -> None:
+    runtime = two_problem_runtime(first_width=9.0, second_width=9.0)
+    binding = runtime.replay_input.instances[1]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        verified,
+        rejection_layouts=verified.rejection_layouts[:1],
+    )
+    common_cursor = replace(_fallback_cursor(runtime), inventory=())
+    common = certificates._capture_unchecked_m8_common_transition(  # noqa: SLF001
+        runtime,
+        cursor=common_cursor,
+        semantic_runtime_sha256=m7_semantic_runtime_sha256(runtime),
+    )
+    added = inventory_item(
+        box(0, 0, 1, 1),
+        material=binding.material,
+        token="incomplete-archive-direct-branch-delta",
+    )
+
+    passivity = certificates._capture_unchecked_event_passivity(  # noqa: SLF001
+        runtime,
+        common=common,
+        branch_cursor=replace(common_cursor, inventory=(added,)),
+    )
+
+    assert not passivity.passive
+    assert passivity.classification is None
+    assert passivity.influences == ()
+    assert passivity.exact_search_count == 0
+
+
 def test_exact_fallback_retains_passive_prefix_before_terminal_competitor() -> None:
     from yieldforge.oracle import sparse
 

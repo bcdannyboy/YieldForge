@@ -60,7 +60,10 @@ from yieldforge.oracle.certificates import (
     _register_checker_validated_common_transition,
     _release_validated_common_transition,
 )
-from yieldforge.oracle.compiled import compile_rejection_problem
+from yieldforge.oracle.compiled import (
+    _verified_rejection_layouts_cover_candidates,
+    compile_rejection_problem,
+)
 from yieldforge.oracle.concurrency import (
     activate_m8_local_trusted_audit,
     require_m8_translation_audit_processes,
@@ -644,9 +647,7 @@ def _validate_inventory_evidence(
     problem = next(
         item for item in runtime.replay_input.problems if item.problem_id == binding.problem_id
     )
-    rejection_layouts_supported = bool(verified.rejection_layouts) and tuple(
-        item.candidate_id for item in verified.rejection_layouts
-    ) == tuple(item.candidate_id for item in verified.candidates)
+    rejection_layouts_supported = _verified_rejection_layouts_cover_candidates(verified)
     compiled = None
     if cursor.inventory and rejection_layouts_supported:
         partition_key = (binding.problem_id, verified.evidence.candidate_set_id)

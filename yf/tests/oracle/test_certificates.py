@@ -290,6 +290,49 @@ def test_private_prepared_layout_batch_constructs_each_layout_once(
     assert first == second
 
 
+@pytest.mark.parametrize(
+    "archive_shape",
+    ("empty", "truncated", "reordered", "duplicate", "extra"),
+)
+def test_private_prepared_batch_keeps_geometry_and_standard_without_complete_archive(
+    archive_shape: str,
+) -> None:
+    runtime = two_problem_runtime(first_width=9.0, second_width=9.0)
+    binding = runtime.replay_input.instances[1]
+    verified = runtime.runtime_candidates[binding.problem_id]
+    layouts = verified.rejection_layouts
+    unsupported = {
+        "empty": (),
+        "truncated": layouts[:1],
+        "reordered": tuple(reversed(layouts)),
+        "duplicate": (layouts[0], replace(layouts[1], candidate_id=layouts[0].candidate_id)),
+        "extra": (*layouts, layouts[0]),
+    }[archive_shape]
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        verified,
+        rejection_layouts=unsupported,
+    )
+    key = (binding.problem_id, verified.evidence.candidate_set_id)
+
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(1,),
+    ) as prepared:
+        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            id(prepared)
+        ]
+
+        assert len(dict(record.layouts)[key]) == len(verified.candidates)
+        assert key in dict(record.standard_winners)
+        assert key not in dict(record.rejection_problems)
+        with pytest.raises(ValueError, match="rejection problem is absent"):
+            compiled_module._prepared_rejection_problem(  # noqa: SLF001
+                prepared,
+                runtime,
+                event_position=1,
+            )
+
+
 def test_private_prepared_batch_validates_each_semantic_remnant_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
