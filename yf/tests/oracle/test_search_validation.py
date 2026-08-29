@@ -1,19 +1,79 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import json
+import sys
+from dataclasses import replace
 from functools import cache
 from inspect import getsource
+from pathlib import Path
+
+import pytest
 
 from tests.oracle.fixtures import exhaustive_certificate_cases
 from yieldforge.baseline.contracts import M7ActionKind
+from yieldforge.oracle.reference import score_reference_event
 from yieldforge.oracle.search_validation import (
     evaluate_search_validation,
     solve_exact_search,
 )
 
+_RUNNER_PATH = Path(__file__).parents[2] / "tools" / "run_m9_minimal_search_validation.py"
+
 
 @cache
 def _matrix():  # type: ignore[no-untyped-def]
     return evaluate_search_validation(exhaustive_certificate_cases())
+
+
+def _load_runner():  # type: ignore[no-untyped-def]
+    module_name = "yieldforge_test_run_m9_minimal_search_validation"
+    spec = importlib.util.spec_from_file_location(module_name, _RUNNER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _semantic_bytes(payload: object) -> bytes:
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _all_mapping_keys(payload: object) -> tuple[str, ...]:
+    if isinstance(payload, dict):
+        return tuple(payload) + tuple(
+            key
+            for value in payload.values()
+            for key in _all_mapping_keys(value)
+        )
+    if isinstance(payload, list):
+        return tuple(key for value in payload for key in _all_mapping_keys(value))
+    return ()
+
+
+def _changed_telemetry_result():  # type: ignore[no-untyped-def]
+    result = _matrix()
+    first = result.primary.cases[0]
+    changed_telemetry = replace(
+        first.exact_search_telemetry,
+        explored_transition_count=(
+            first.exact_search_telemetry.explored_transition_count + 1
+        ),
+    )
+    changed_first = replace(first, exact_search_telemetry=changed_telemetry)
+    changed_primary = replace(
+        result.primary,
+        cases=(changed_first, *result.primary.cases[1:]),
+    )
+    return replace(result, primary=changed_primary)
 
 
 def test_exact_search_matches_hand_computed_high_retrieval_case() -> None:
@@ -158,3 +218,153 @@ def test_terminal_objective_sensitivity_does_not_reverse_the_conclusion() -> Non
         "remnant_first-one-match-fit-unequal-high-retrieval-three",
     )
     assert result.terminal_sensitivity.counterexamples[0].absolute_first_action_regret == 100.0
+
+
+def test_primary_one_step_scores_match_reference_for_all_registered_cases() -> None:
+    cases = exhaustive_certificate_cases()
+    comparisons = _matrix().primary.cases
+
+    assert tuple(item.case_id for item in comparisons) == tuple(case.case_id for case in cases)
+    for case, comparison in zip(cases, comparisons, strict=True):
+        reference = score_reference_event(case.request).decision
+        assert comparison.baseline_action_id == reference.baseline_action_id
+        assert comparison.rollout_selected_action_id == reference.selected_action_id
+        assert tuple(
+            (item.action_id, item.objective_cost) for item in comparison.one_step_scores
+        ) == tuple((item.action_id, item.final_net_cost) for item in reference.scores)
+
+
+def test_runner_rebuilds_twice_and_publishes_content_addressed_fail_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = _load_runner()
+    fixture_builds: list[tuple[object, ...]] = []
+    evaluations: list[tuple[str, ...]] = []
+
+    def fresh_cases():  # type: ignore[no-untyped-def]
+        cases = exhaustive_certificate_cases()
+        fixture_builds.append(cases)
+        return cases
+
+    def cached_evaluator(cases):  # type: ignore[no-untyped-def]
+        evaluations.append(tuple(case.case_id for case in cases))
+        return _matrix()
+
+    monkeypatch.setattr(runner, "exhaustive_certificate_cases", fresh_cases)
+    monkeypatch.setattr(runner, "evaluate_search_validation", cached_evaluator)
+
+    outcome = runner.run_minimal_search_validation(output_directory=tmp_path)
+
+    assert len(fixture_builds) == 2
+    assert fixture_builds[0] is not fixture_builds[1]
+    assert all(
+        first is not second
+        for first, second in zip(fixture_builds[0], fixture_builds[1], strict=True)
+    )
+    assert len(evaluations) == 2
+    assert evaluations[0] == evaluations[1]
+    assert outcome.decision == "fail_search_gap"
+    assert len(outcome.pass_wall_seconds) == 2
+    assert all(value >= 0.0 for value in outcome.pass_wall_seconds)
+    assert outcome.artifact_path.is_file()
+
+    raw = outcome.artifact_path.read_bytes()
+    payload = json.loads(raw)
+    assert raw.startswith(b"{\n") and raw.endswith(b"\n")
+    assert payload["schema_version"] == "yieldforge.m9-minimal-search-validation.v1"
+    assert payload["fixture_source"] == (
+        "tests.oracle.fixtures.exhaustive_certificate_cases"
+    )
+    assert payload["fixture_build_count"] == 2
+    assert payload["repeat_count"] == 2
+    assert payload["repeat_semantic_identity_match"] is True
+    assert payload["evaluation_partition_opened"] is False
+    assert payload["evaluator_result"]["decision"] == "fail_search_gap"
+    assert len(payload["ordered_case_ids"]) == 45
+    assert not any("wall" in key for key in _all_mapping_keys(payload))
+
+    evaluator_bytes = _semantic_bytes(payload["evaluator_result"])
+    assert payload["reproducibility_sha256"] == (
+        f"sha256:{hashlib.sha256(evaluator_bytes).hexdigest()}"
+    )
+    semantic_core = dict(payload)
+    result_id = semantic_core.pop("result_id")
+    content_sha256 = semantic_core.pop("content_sha256")
+    digest = hashlib.sha256(_semantic_bytes(semantic_core)).hexdigest()
+    assert result_id == f"yfm9-{digest[:24]}"
+    assert content_sha256 == f"sha256:{digest}"
+    assert outcome.result_id == result_id
+    assert outcome.content_sha256 == content_sha256
+    assert outcome.artifact_path.name == (
+        f"m9-minimal-search-validation-{result_id}.json"
+    )
+
+    assert runner.main(["--output-directory", str(tmp_path)]) == 0
+    cli_payload = json.loads(capsys.readouterr().out)
+    assert cli_payload["decision"] == "fail_search_gap"
+    assert Path(cli_payload["artifact_path"]) == outcome.artifact_path
+    assert outcome.artifact_path.read_bytes() == raw
+
+
+def test_runner_refuses_to_replace_different_existing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(
+        runner,
+        "evaluate_search_validation",
+        lambda cases: _matrix(),
+    )
+    outcome = runner.run_minimal_search_validation(output_directory=tmp_path)
+    outcome.artifact_path.write_bytes(b"foreign artifact\n")
+
+    with pytest.raises(runner.M9RunnerError, match="different existing artifact"):
+        runner.run_minimal_search_validation(output_directory=tmp_path)
+
+    assert outcome.artifact_path.read_bytes() == b"foreign artifact\n"
+
+
+@pytest.mark.parametrize("destination_kind", ["symlink", "directory"])
+def test_runner_refuses_nonregular_existing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_kind: str,
+) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(
+        runner,
+        "evaluate_search_validation",
+        lambda cases: _matrix(),
+    )
+    outcome = runner.run_minimal_search_validation(output_directory=tmp_path)
+    outcome.artifact_path.unlink()
+    if destination_kind == "symlink":
+        target = tmp_path / "foreign.json"
+        target.write_text("foreign\n", encoding="utf-8")
+        outcome.artifact_path.symlink_to(target)
+    else:
+        outcome.artifact_path.mkdir()
+
+    with pytest.raises(runner.M9RunnerError, match="regular file"):
+        runner.run_minimal_search_validation(output_directory=tmp_path)
+
+
+def test_runner_publishes_nothing_when_second_semantic_pass_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    results = iter((_matrix(), _changed_telemetry_result()))
+    monkeypatch.setattr(
+        runner,
+        "evaluate_search_validation",
+        lambda cases: next(results),
+    )
+
+    with pytest.raises(runner.M9RunnerError, match="semantic results differ"):
+        runner.run_minimal_search_validation(output_directory=tmp_path)
+
+    assert not tuple(tmp_path.glob("m9-minimal-search-validation-*.json"))
