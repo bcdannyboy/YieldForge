@@ -86,5 +86,27 @@ with zero mismatch and rejected all 16 executed mutations. It returned `hold_per
 fully charged pipeline projects `113.434097` held-out days versus a five-day maximum and requires a
 further `22.686819x` absolute speedup. The observed `147.166130x` reference-equivalent ratio is a
 non-gating cross-run diagnostic without shared environment identity. Six-cell calibration remains
-unauthorized, evaluation remains sealed, and the next bounded work is an algorithmic
-generator/checker traversal redesign.
+unauthorized and evaluation remains sealed. The user subsequently accepted M8 for decision
+sequencing only; the original formal performance/evaluation gate did not pass, and no M8
+oracle-savings result exists.
+
+Minimal M9 result `yfm9-97e032de7a09247cc83e6c5a` then compared M8's frozen one-step rollout with
+exact future reoptimization on all 45 registered finite cases under two terminal objectives. Each
+objective completed 3,110 transitions and 2,440 terminal leaves with peak branching factor 10 and
+zero truncation; all five information-null controls passed. The selected first action was globally
+optimal in 44/45 primary cases. In
+`remnant_first-one-match-fit-unequal-high-retrieval-three`, the frozen rollout scored all four root
+actions at `500.0` and selected a remnant action, but exact reoptimization reached `300.0` by opening
+a standard sheet first and only `400.0` after the selected remnant action. The `100.0` absolute,
+`33.3333%` relative first-action regret persisted with zero total terminal credit, so the bounded
+decision is `fail_search_gap`.
+
+The M9 result is deterministic: semantic content SHA
+`sha256:97e032de7a09247cc83e6c5a7140c67ea988712a1b493ca92b6513d95ea98dca` and evaluator
+reproducibility SHA
+`sha256:327163a6d1bbb8fd6479f3a3227b522c4379a5f6882fc3d420388d07b9ac92f6`.
+The original publication runs took 15.2690 and 16.0135 seconds, operational measurements outside
+semantic identity. This finite result is not a universal, physical, savings, or commercial claim.
+No beam repair exists. The next explicit choice is bounded beam/shallow reoptimization versus
+accepting the observed one-step risk before separately considering M10; neither repair nor M10 is
+authorized by this result.
