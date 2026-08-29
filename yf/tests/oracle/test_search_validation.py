@@ -85,6 +85,39 @@ def _changed_telemetry_result():  # type: ignore[no-untyped-def]
     return replace(result, primary=changed_primary)
 
 
+def _changed_repair_telemetry_result():  # type: ignore[no-untyped-def]
+    result = _repair_matrix()
+    first = result.primary.cases[0]
+    exact_telemetry = first.exact_search_telemetry
+    changed_first = replace(
+        first,
+        exact_search_telemetry=replace(
+            exact_telemetry,
+            explored_transition_count=exact_telemetry.explored_transition_count + 1,
+        ),
+    )
+    return replace(
+        result,
+        primary=replace(
+            result.primary,
+            cases=(changed_first, *result.primary.cases[1:]),
+        ),
+    )
+
+
+def _inconsistent_repair_budget_result():  # type: ignore[no-untyped-def]
+    result = _repair_matrix()
+    budget = result.primary.compute_budget
+    changed_budget = replace(
+        budget,
+        observed_catalog_count=budget.observed_catalog_count + 1,
+    )
+    return replace(
+        result,
+        primary=replace(result.primary, compute_budget=changed_budget),
+    )
+
+
 def test_exact_search_matches_hand_computed_high_retrieval_case() -> None:
     case = next(
         item
@@ -726,3 +759,338 @@ def test_runner_publishes_nothing_when_second_semantic_pass_differs(
         runner.run_minimal_search_validation(output_directory=tmp_path)
 
     assert not tuple(tmp_path.glob("m9-minimal-search-validation-*.json"))
+
+
+def test_two_ply_runner_rebuilds_twice_and_publishes_passing_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    fixture_builds: list[tuple[object, ...]] = []
+    evaluations: list[tuple[str, ...]] = []
+
+    def fresh_cases():  # type: ignore[no-untyped-def]
+        cases = exhaustive_certificate_cases()
+        fixture_builds.append(cases)
+        return cases
+
+    def cached_evaluator(cases):  # type: ignore[no-untyped-def]
+        evaluations.append(tuple(case.case_id for case in cases))
+        return _repair_matrix()
+
+    monkeypatch.setattr(runner, "exhaustive_certificate_cases", fresh_cases)
+    monkeypatch.setattr(
+        runner,
+        "evaluate_two_ply_repair_validation",
+        cached_evaluator,
+    )
+
+    outcome = runner.run_two_ply_repair_validation(output_directory=tmp_path)
+
+    assert len(fixture_builds) == 2
+    assert fixture_builds[0] is not fixture_builds[1]
+    assert all(
+        first is not second
+        for first, second in zip(fixture_builds[0], fixture_builds[1], strict=True)
+    )
+    assert evaluations == [evaluations[0], evaluations[0]]
+    assert outcome.decision == "pass_decision_feasibility"
+    assert len(outcome.pass_wall_seconds) == 2
+    assert all(value >= 0.0 for value in outcome.pass_wall_seconds)
+
+    raw = outcome.artifact_path.read_bytes()
+    payload = json.loads(raw)
+    assert raw.startswith(b"{\n") and raw.endswith(b"\n")
+    assert payload["schema_version"] == "yieldforge.m9-two-ply-repair-validation.v1"
+    assert payload["fixture_source"] == (
+        "tests.oracle.fixtures.exhaustive_certificate_cases"
+    )
+    assert payload["fixture_build_count"] == 2
+    assert payload["repeat_count"] == 2
+    assert payload["repeat_semantic_identity_match"] is True
+    assert payload["evaluation_partition_opened"] is False
+    assert payload["claim_ceiling"].startswith("finite_registered_45_case")
+    assert payload["evaluator_result"]["decision"] == "pass_decision_feasibility"
+    assert len(payload["ordered_case_ids"]) == 45
+    assert payload["repair_semantics"] == {
+        "action_catalogs": "complete",
+        "continuation_policy": "frozen_m7",
+        "search_depth": 2,
+        "tie_break": "bounded_cost_then_baseline_then_action_id",
+    }
+    assert payload["original_failure_binding"] == {
+        "artifact_name": (
+            "m9-minimal-search-validation-"
+            "yfm9-97e032de7a09247cc83e6c5a.json"
+        ),
+        "content_sha256": (
+            "sha256:97e032de7a09247cc83e6c5a7140c67"
+            "ea988712a1b493ca92b6513d95ea98dca"
+        ),
+        "decision": "fail_search_gap",
+        "raw_file_sha256": (
+            "sha256:9ae6d7fdf2252023a96de8773877bb50"
+            "f3786f2f7c8b1c6c4bcb5a7de1ca82e3"
+        ),
+        "result_id": "yfm9-97e032de7a09247cc83e6c5a",
+        "schema_version": "yieldforge.m9-minimal-search-validation.v1",
+    }
+    assert not any("wall" in key for key in _all_mapping_keys(payload))
+
+    evaluator_bytes = _semantic_bytes(payload["evaluator_result"])
+    assert payload["reproducibility_sha256"] == (
+        f"sha256:{hashlib.sha256(evaluator_bytes).hexdigest()}"
+    )
+    semantic_core = dict(payload)
+    result_id = semantic_core.pop("result_id")
+    content_sha256 = semantic_core.pop("content_sha256")
+    digest = hashlib.sha256(_semantic_bytes(semantic_core)).hexdigest()
+    assert result_id == f"yfm9r-{digest[:24]}"
+    assert content_sha256 == f"sha256:{digest}"
+    assert outcome.result_id == result_id
+    assert outcome.content_sha256 == content_sha256
+    assert outcome.artifact_path.name == (
+        f"m9-two-ply-repair-validation-{result_id}.json"
+    )
+
+    repeated = runner.run_two_ply_repair_validation(output_directory=tmp_path)
+    assert repeated.artifact_path == outcome.artifact_path
+    assert repeated.artifact_path.read_bytes() == raw
+
+
+def test_two_ply_runner_cli_is_additive_and_default_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(
+        runner,
+        "evaluate_search_validation",
+        lambda cases: _matrix(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_two_ply_repair_validation",
+        lambda cases: _repair_matrix(),
+    )
+
+    assert runner.main(["--output-directory", str(tmp_path)]) == 0
+    original_cli = json.loads(capsys.readouterr().out)
+    assert original_cli["decision"] == "fail_search_gap"
+    assert Path(original_cli["artifact_path"]).name.startswith(
+        "m9-minimal-search-validation-yfm9-"
+    )
+
+    assert runner.main(
+        ["--two-ply-repair", "--output-directory", str(tmp_path)]
+    ) == 0
+    repair_cli = json.loads(capsys.readouterr().out)
+    assert repair_cli["decision"] == "pass_decision_feasibility"
+    assert Path(repair_cli["artifact_path"]).name.startswith(
+        "m9-two-ply-repair-validation-yfm9r-"
+    )
+    assert set(repair_cli) == {
+        "artifact_path",
+        "content_sha256",
+        "decision",
+        "pass_wall_seconds",
+        "result_id",
+    }
+
+
+def test_two_ply_runner_publishes_nothing_on_repeat_or_aggregate_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    results = iter((_repair_matrix(), _changed_repair_telemetry_result()))
+    monkeypatch.setattr(
+        runner,
+        "evaluate_two_ply_repair_validation",
+        lambda cases: next(results),
+    )
+
+    with pytest.raises(runner.M9RunnerError, match="semantic results differ"):
+        runner.run_two_ply_repair_validation(output_directory=tmp_path)
+    assert not tuple(tmp_path.glob("m9-two-ply-repair-validation-*.json"))
+
+    monkeypatch.setattr(
+        runner,
+        "evaluate_two_ply_repair_validation",
+        lambda cases: _inconsistent_repair_budget_result(),
+    )
+    with pytest.raises(runner.M9RunnerError, match="compute budget"):
+        runner.run_two_ply_repair_validation(output_directory=tmp_path)
+    assert not tuple(tmp_path.glob("m9-two-ply-repair-validation-*.json"))
+
+
+@pytest.mark.parametrize("destination_kind", ["different", "symlink", "directory"])
+def test_two_ply_runner_refuses_unsafe_existing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_kind: str,
+) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(
+        runner,
+        "evaluate_two_ply_repair_validation",
+        lambda cases: _repair_matrix(),
+    )
+    outcome = runner.run_two_ply_repair_validation(output_directory=tmp_path)
+    outcome.artifact_path.unlink()
+    if destination_kind == "different":
+        outcome.artifact_path.write_bytes(b"foreign artifact\n")
+        match = "different existing artifact"
+    elif destination_kind == "symlink":
+        target = tmp_path / "foreign.json"
+        target.write_text("foreign\n", encoding="utf-8")
+        outcome.artifact_path.symlink_to(target)
+        match = "regular file"
+    else:
+        outcome.artifact_path.mkdir()
+        match = "regular file"
+
+    with pytest.raises(runner.M9RunnerError, match=match):
+        runner.run_two_ply_repair_validation(output_directory=tmp_path)
+
+
+def test_two_ply_runner_requires_live_original_failure_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    tampered_original = tmp_path / "tampered-original.json"
+    tampered_original.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner,
+        "_ORIGINAL_FAILURE_ARTIFACT_PATH",
+        tampered_original,
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_two_ply_repair_validation",
+        lambda cases: _repair_matrix(),
+    )
+
+    with pytest.raises(runner.M9RunnerError, match="original M9 failure artifact"):
+        runner.run_two_ply_repair_validation(output_directory=tmp_path)
+    assert not tuple(tmp_path.glob("m9-two-ply-repair-validation-*.json"))
+
+
+def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
+    results_directory = Path(__file__).parents[2] / "experiments" / "results"
+    repair_paths = tuple(results_directory.glob("m9-two-ply-repair-validation-*.json"))
+    assert len(repair_paths) == 1
+    repair_path = repair_paths[0]
+    raw = repair_path.read_bytes()
+    payload = json.loads(raw)
+
+    assert payload["schema_version"] == "yieldforge.m9-two-ply-repair-validation.v1"
+    assert payload["evaluation_partition_opened"] is False
+    assert payload["evaluator_result"]["decision"] == "pass_decision_feasibility"
+    ordered_case_ids = tuple(
+        case.case_id for case in exhaustive_certificate_cases()
+    )
+    assert tuple(payload["ordered_case_ids"]) == ordered_case_ids
+    assert len(ordered_case_ids) == len(set(ordered_case_ids)) == 45
+
+    semantic_core = dict(payload)
+    result_id = semantic_core.pop("result_id")
+    content_sha256 = semantic_core.pop("content_sha256")
+    semantic_digest = hashlib.sha256(_semantic_bytes(semantic_core)).hexdigest()
+    assert result_id == f"yfm9r-{semantic_digest[:24]}"
+    assert content_sha256 == f"sha256:{semantic_digest}"
+    assert repair_path.name == f"m9-two-ply-repair-validation-{result_id}.json"
+    evaluator = payload["evaluator_result"]
+    assert payload["reproducibility_sha256"] == (
+        f"sha256:{hashlib.sha256(_semantic_bytes(evaluator)).hexdigest()}"
+    )
+
+    controls = tuple(evaluator["information_null_control_case_ids"])
+    assert len(controls) == 5
+    assert controls == tuple(
+        case_id
+        for case_id in ordered_case_ids
+        if case_id.endswith("zero-no-fit-equal-separated-two")
+    )
+    expected_value_error = {
+        "scrap_only": (42, 3, 100.0),
+        "zero_total_terminal_credit": (42, 3, 101.0),
+    }
+    for objective in (evaluator["primary"], evaluator["terminal_sensitivity"]):
+        records = objective["cases"]
+        assert tuple(record["case_id"] for record in records) == ordered_case_ids
+        assert len(records) == 45
+        assert objective["complete"] is True
+        assert objective["every_selected_action_is_globally_optimal"] is True
+        assert objective["max_absolute_first_action_regret"] == 0.0
+        assert objective["information_null_controls_pass"] is True
+        assert objective["counterexamples"] == []
+        assert objective["conclusion"] == "pass_decision_feasibility"
+        for record in records:
+            exact_by_action = {
+                score["action_id"]: score["final_net_cost"]
+                for score in record["exact_root_scores"]
+            }
+            bounded_by_action = {
+                score["action_id"]: score["bounded_objective_cost"]
+                for score in record["two_ply_root_scores"]
+            }
+            assert tuple(exact_by_action) == tuple(bounded_by_action)
+            exact_optimum = min(exact_by_action.values())
+            exact_optimal_ids = tuple(
+                action_id
+                for action_id, cost in exact_by_action.items()
+                if cost == exact_optimum
+            )
+            selected = record["repaired_selected_action_id"]
+            assert tuple(record["exact_optimal_first_action_ids"]) == exact_optimal_ids
+            assert selected in exact_optimal_ids
+            assert record["exact_optimal_cost"] == exact_optimum
+            assert record["exact_cost_after_selected_first_action"] == exact_by_action[selected]
+            assert record["absolute_first_action_regret"] == 0.0
+            assert record["relative_first_action_regret"] == 0.0
+            assert record["bounded_selected_action_score"] == bounded_by_action[selected]
+            signed_error = round(
+                bounded_by_action[selected] - exact_by_action[selected],
+                6,
+            )
+            assert record["bounded_selected_action_signed_error"] == signed_error
+            assert record["bounded_selected_action_absolute_error"] == abs(signed_error)
+
+        budget = objective["compute_budget"]
+        assert budget["observed_catalog_count"] == 185
+        assert budget["observed_explicit_transition_count"] == 650
+        assert budget["observed_continuation_event_count"] == 500
+        assert budget["observed_total_event_transition_count"] == 1150
+        assert budget["observed_truncated_catalog_count"] == 0
+        assert budget["totals_reconcile"] is True
+        assert budget["pass_budget"] is True
+        assert budget["max_catalog_count"] == 200
+        assert budget["max_explicit_transition_count"] == 700
+        assert budget["max_total_event_transition_count"] == 1200
+        exact_count, nonexact_count, max_error = expected_value_error[
+            objective["objective_label"]
+        ]
+        value_error = objective["value_error_summary"]
+        assert value_error["case_count"] == 45
+        assert value_error["exact_value_match_count"] == exact_count
+        assert value_error["nonexact_value_count"] == nonexact_count
+        assert value_error["max_absolute_error"] == max_error
+
+    assert evaluator["terminal_conclusion_does_not_reverse"] is True
+    original_path = (
+        results_directory
+        / "m9-minimal-search-validation-yfm9-97e032de7a09247cc83e6c5a.json"
+    )
+    original_raw = original_path.read_bytes()
+    assert hashlib.sha256(original_raw).hexdigest() == (
+        "9ae6d7fdf2252023a96de8773877bb50f3786f2f7c8b1c6c4bcb5a7de1ca82e3"
+    )
+    original_payload = json.loads(original_raw)
+    assert original_payload["result_id"] == "yfm9-97e032de7a09247cc83e6c5a"
+    assert original_payload["evaluator_result"]["decision"] == "fail_search_gap"
+    assert payload["original_failure_binding"]["raw_file_sha256"] == (
+        f"sha256:{hashlib.sha256(original_raw).hexdigest()}"
+    )
