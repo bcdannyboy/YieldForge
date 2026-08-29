@@ -330,6 +330,7 @@ changes are the five expected inherited Task-2 files.
 **Files:**
 
 - Modify: `yf/src/yieldforge/oracle/certificates.py`
+- Modify: `yf/src/yieldforge/oracle/__init__.py`
 - Modify: `yf/src/yieldforge/oracle/compiled.py`
 - Modify: `yf/src/yieldforge/oracle/prepared.py`
 - Modify: `yf/src/yieldforge/oracle/sparse.py`
@@ -355,7 +356,9 @@ while object identity must not be preserved. `factored.py` is included because t
 bundle wrapper must be captured before generator authority and may not dispatch caller methods from
 inside the prepared context. `reference.py` and `test_reference.py` are included because the public
 correctness oracle must capture the request, cursor, visibility, and action identifiers before its
-authoritative scope. `facts.py` is included to make the portable replay-cursor schema faithfully
+authoritative scope. `oracle/__init__.py` is included because the public package facade must expose
+the newly hardened batched reference scorer consistently with the reference module. `facts.py` is
+included to make the portable replay-cursor schema faithfully
 represent the frozen M7 initial cursor sentinel (`timestamp_group_sequence == -1`). `profiling.py`
 and `test_m8_profiling.py` remain
 unchanged; the profiling suite remains a required regression execution below.
@@ -381,14 +384,15 @@ Run from `yf`:
 ```bash
 .venv/bin/pytest -q tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_factored_generator.py tests/oracle/test_certificates.py tests/oracle/test_frontier.py
 .venv/bin/pytest -q tests/oracle/test_sparse.py tests/oracle/test_checker.py tests/oracle/test_reference.py tests/oracle/test_m8_profiling.py
-.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/factored.py src/yieldforge/oracle/facts.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/reference.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_factored_generator.py tests/oracle/test_frontier.py tests/oracle/test_reference.py tests/oracle/test_sparse.py
+.venv/bin/ruff check src/yieldforge/oracle/__init__.py src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/factored.py src/yieldforge/oracle/facts.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/reference.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_factored_generator.py tests/oracle/test_frontier.py tests/oracle/test_reference.py tests/oracle/test_sparse.py
 git diff --check
 ```
 
 Require both reviews to pass. Commit only accepted Task-2 files:
 
 ```bash
-git add -- src/yieldforge/oracle/certificates.py \
+git add -- src/yieldforge/oracle/__init__.py \
+  src/yieldforge/oracle/certificates.py \
   src/yieldforge/oracle/checker.py \
   src/yieldforge/oracle/compiled.py \
   src/yieldforge/oracle/fact_checker.py \
