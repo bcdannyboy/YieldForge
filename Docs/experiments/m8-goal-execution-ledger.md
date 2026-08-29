@@ -25,7 +25,8 @@ used because a commit cannot contain its own hash; the value is resolved unambig
 | G0.1 preserve and inventory inherited Task-2 draft | completed | `8278e6e01101d2b3eae4fe25ffe31b1040931a19` | `SELF` | G0.2 integrity audit and repairs |
 | G0.2 repair known integrity blockers | completed | `f09c2253e995d4d429ee96a45bf23902dba37b2d` | `2c4d723eebde183eebbfeae97521522413315584` | G0.3 independent acceptance |
 | G0.3 independently accept and commit Task 2 | completed | `f09c2253e995d4d429ee96a45bf23902dba37b2d` | `2c4d723eebde183eebbfeae97521522413315584` | G0.4 hardened publisher |
-| G0.4 generalize and seal hardened publisher | in_progress | `2c4d723eebde183eebbfeae97521522413315584` | — | G0.5 compute lease |
+| G0.4 generalize and seal hardened publisher | completed | `2c4d723eebde183eebbfeae97521522413315584` | `40a72ccd69e485282c91d54ee204656dff1f84e8` | G0.5 compute lease |
+| G0.5 enforce baseline compute lease | in_progress | `40a72ccd69e485282c91d54ee204656dff1f84e8` | — | G0.6 goal authority |
 
 ## G0.1 — Preserve and inventory inherited Task-2 draft
 
@@ -145,3 +146,68 @@ used because a commit cannot contain its own hash; the value is resolved unambig
 - Decision: G0 Task-2 integrity acceptance passes and authorizes G0.4 implementation only. This is
   not a C0 performance pass, Phase-C authorization, savings result, physical validation, buyer
   evidence, commercial evidence, or permission to open evaluation.
+
+## G0.4 — Generalize and seal the hardened publisher
+
+### Scope and ownership
+
+- Completed at `2026-08-29T07:36:59-07:00` in source commit
+  `40a72ccd69e485282c91d54ee204656dff1f84e8`.
+- The accepted allowlist contains exactly six paths: the reusable publisher and its tests plus the
+  `experiment.py` and `gate3_execution.py` compatibility seams and their tests.
+- No dependency, lockfile, timing threshold, evaluation input, historical artifact, or machine
+  evidence artifact changed.
+
+### Fresh RED/GREEN evidence
+
+- Public regressions cover no-follow parent/target traversal, non-regular entries, fresh/existing/
+  race-winner publication, same- and different-byte collision, inode and content replacement,
+  file and directory durability, canonical validation, strict reread, and owned rollback.
+- Adversarial fault tests cover short writes, partial side effects, `BaseException` at staging,
+  install, quarantine, fsync, close, and parent-lock transitions, cleanup error aggregation, and
+  exact descriptor/name identity rechecks.
+- A same-inode descriptor-number reuse RED proved that retrying an ambiguous POSIX `close` can close
+  a foreign open-file description. The accepted implementation makes exactly one close attempt,
+  surfaces the error, and permanently relinquishes that numeric descriptor. A synthetic pre-call
+  interruption can therefore strand the original descriptor, but cannot trigger an unsafe retry.
+- A frozen-candidate review reproduced a post-parent-acquire interruption that poisoned thread-local
+  publication state. Its public RED failed the next publication; the repair makes cleanup ownership
+  visible before registration/lock acquisition, and the GREEN proves later publication succeeds
+  with an empty registry.
+- Compatibility tests preserve historical canonical bytes, filenames, IDs, and mapped public error
+  messages in the experiment and Gate-3 wrappers.
+
+### Root verification
+
+- Targeted parent/validator transition regressions: `8 passed`.
+- Direct publisher suite: `63 passed in 1.03s`.
+- Focused publisher/wrapper matrix: `82 passed, 87 deselected in 6.36s`.
+- Complete three-file component matrix: `169 passed in 129.75s`.
+- Full Oracle regression suite on the final staged bytes: `1402 passed in 285.56s`.
+- Exact Ruff allowlist: pass with `All checks passed!`.
+- `git diff --cached --check`: pass with no output.
+- Exact accepted staged binary diff SHA-256:
+  `9cbeff00e7ecb3289c19b6fbada9130c4dee104e05f2004ea100da70f62a01ce`.
+- The staged path list matched the six-path G0.4 allowlist exactly; the committed stat is 4,114
+  insertions and 286 deletions.
+
+### Independent review
+
+- Specification/semantic review: PASS on exact staged diff
+  `9cbeff00e7ecb3289c19b6fbada9130c4dee104e05f2004ea100da70f62a01ce`; all previously reproduced
+  validation, path-freeze, fsync, cleanup, descriptor-reuse, and lock-state blockers are closed.
+- Separate adversarial/pass-gate review: PASS on the same exact staged diff after rechecking parent
+  lock/registry transitions, publication races, cleanup, fsync, no-follow traversal, canonical
+  validation, and wrapper compatibility.
+
+### Classification and decision
+
+- Observed: exact Git diff/index hash, test/lint output, staged allowlist, reviewer verdicts, and
+  committed source identity.
+- Derived: path and insertion/deletion totals from Git.
+- Generated: publisher implementation, compatibility adapters, regressions, and this ledger row.
+- Assumed: no stronger descriptor-generation primitive than supported POSIX APIs; the one-close
+  ambiguity boundary is explicit and fail-loud.
+- Decision: G0.4 passes and authorizes G0.5 compute-lease implementation only. This is not a C0
+  performance pass, Phase-C authorization, savings result, physical validation, buyer evidence,
+  commercial evidence, or permission to open evaluation.
