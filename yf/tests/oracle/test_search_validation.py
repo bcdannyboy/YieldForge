@@ -16,9 +16,11 @@ from yieldforge.baseline.contracts import M7ActionKind
 from yieldforge.oracle.reference import score_reference_event
 from yieldforge.oracle.search_validation import (
     evaluate_search_validation,
+    evaluate_two_ply_repair_validation,
     score_two_ply_reoptimization,
     solve_exact_search,
 )
+from yieldforge.replay.contracts import rounded_cost
 
 _RUNNER_PATH = Path(__file__).parents[2] / "tools" / "run_m9_minimal_search_validation.py"
 
@@ -26,6 +28,11 @@ _RUNNER_PATH = Path(__file__).parents[2] / "tools" / "run_m9_minimal_search_vali
 @cache
 def _matrix():  # type: ignore[no-untyped-def]
     return evaluate_search_validation(exhaustive_certificate_cases())
+
+
+@cache
+def _repair_matrix():  # type: ignore[no-untyped-def]
+    return evaluate_two_ply_repair_validation(exhaustive_certificate_cases())
 
 
 def _load_runner():  # type: ignore[no-untyped-def]
@@ -314,6 +321,165 @@ def test_primary_one_step_scores_match_reference_for_all_registered_cases() -> N
         assert tuple(
             (item.action_id, item.objective_cost) for item in comparison.one_step_scores
         ) == tuple((item.action_id, item.final_net_cost) for item in reference.scores)
+
+
+def test_two_ply_repair_matrix_passes_exact_action_gate_in_fixture_order() -> None:
+    cases = exhaustive_certificate_cases()
+    result = _repair_matrix()
+    expected_ids = tuple(case.case_id for case in cases)
+
+    assert result.case_count == 45
+    assert result.objective_labels == (
+        "scrap_only",
+        "zero_total_terminal_credit",
+    )
+    assert tuple(record.case_id for record in result.primary.cases) == expected_ids
+    assert tuple(record.case_id for record in result.terminal_sensitivity.cases) == (
+        expected_ids
+    )
+    for objective in (result.primary, result.terminal_sensitivity):
+        assert objective.complete is True
+        assert objective.every_selected_action_is_globally_optimal is True
+        assert objective.max_absolute_first_action_regret == 0.0
+        assert objective.counterexamples == ()
+        assert objective.information_null_controls_pass is True
+        assert objective.conclusion == "pass_decision_feasibility"
+        assert len(objective.cases) == 45
+        for record in objective.cases:
+            bounded_by_action = {
+                score.action_id: score.bounded_objective_cost
+                for score in record.two_ply_root_scores
+            }
+            exact_by_action = {
+                score.action_id: score.final_net_cost
+                for score in record.exact_root_scores
+            }
+            assert tuple(bounded_by_action) == tuple(exact_by_action)
+            assert record.baseline_action_id in bounded_by_action
+            assert record.repaired_selected_action_id in bounded_by_action
+            assert record.exact_optimal_first_action_ids
+            assert (
+                record.repaired_selected_action_id
+                in record.exact_optimal_first_action_ids
+            )
+            assert record.exact_cost_after_selected_first_action == exact_by_action[
+                record.repaired_selected_action_id
+            ]
+            assert record.bounded_selected_action_score == bounded_by_action[
+                record.repaired_selected_action_id
+            ]
+            assert record.bounded_selected_action_signed_error == rounded_cost(
+                record.bounded_selected_action_score
+                - record.exact_cost_after_selected_first_action
+            )
+            assert record.bounded_selected_action_absolute_error == abs(
+                record.bounded_selected_action_signed_error
+            )
+            assert record.absolute_first_action_regret == 0.0
+            assert record.relative_first_action_regret == 0.0
+            assert record.selected_action_is_globally_optimal is True
+            assert record.action_catalog_complete is True
+            assert record.complete is True
+            assert record.two_ply_search_telemetry.truncated_catalog_count == 0
+            assert record.exact_search_telemetry.truncated_catalog_count == 0
+
+    assert result.terminal_conclusion_does_not_reverse is True
+    assert result.decision == "pass_decision_feasibility"
+
+
+def test_two_ply_repair_compute_totals_reconcile_with_frozen_budget() -> None:
+    result = _repair_matrix()
+
+    for objective in (result.primary, result.terminal_sensitivity):
+        compute = objective.compute_budget
+        assert compute.observed_catalog_count == 185
+        assert compute.observed_explicit_transition_count == 650
+        assert compute.observed_continuation_event_count == 500
+        assert compute.observed_total_event_transition_count == 1150
+        assert compute.observed_total_event_transition_count == (
+            compute.observed_explicit_transition_count
+            + compute.observed_continuation_event_count
+        )
+        assert compute.observed_truncated_catalog_count == 0
+        assert compute.max_catalog_count == 200
+        assert compute.max_explicit_transition_count == 700
+        assert compute.max_total_event_transition_count == 1200
+        assert compute.totals_reconcile is True
+        assert compute.pass_budget is True
+        assert sum(
+            record.two_ply_search_telemetry.catalog_count
+            for record in objective.cases
+        ) == compute.observed_catalog_count
+        assert sum(
+            record.two_ply_search_telemetry.explicit_transition_count
+            for record in objective.cases
+        ) == compute.observed_explicit_transition_count
+        assert sum(
+            record.two_ply_search_telemetry.continuation_event_count
+            for record in objective.cases
+        ) == compute.observed_continuation_event_count
+        assert sum(
+            record.two_ply_search_telemetry.total_event_transition_count
+            for record in objective.cases
+        ) == compute.observed_total_event_transition_count
+        errors = tuple(
+            record.bounded_selected_action_signed_error
+            for record in objective.cases
+        )
+        value = objective.value_error_summary
+        assert value.case_count == 45
+        assert value.exact_value_match_count + value.nonexact_value_count == 45
+        assert value.min_signed_error == min(errors)
+        assert value.max_signed_error == max(errors)
+        assert value.max_absolute_error == max(abs(error) for error in errors)
+        assert value.nonexact_value_count > 0
+
+
+def test_two_ply_repair_controls_and_terminal_credit_sensitivity_are_honest() -> None:
+    result = _repair_matrix()
+    expected_control_ids = tuple(
+        case.case_id
+        for case in exhaustive_certificate_cases()
+        if case.case_id.endswith("zero-no-fit-equal-separated-two")
+    )
+
+    assert result.information_null_control_case_ids == expected_control_ids
+    for objective in (result.primary, result.terminal_sensitivity):
+        controls = tuple(
+            record for record in objective.cases if record.control_label is not None
+        )
+        assert tuple(record.case_id for record in controls) == expected_control_ids
+        assert all(record.control_label == "tiny_information_null" for record in controls)
+        assert all("no_signal" not in record.control_label for record in controls)
+        assert all(record.absolute_first_action_regret == 0.0 for record in controls)
+
+    primary_by_id = {record.case_id: record for record in result.primary.cases}
+    sensitivity_by_id = {
+        record.case_id: record for record in result.terminal_sensitivity.cases
+    }
+    affected_ids = tuple(
+        case_id
+        for case_id in primary_by_id
+        if primary_by_id[case_id].exact_optimal_cost
+        != sensitivity_by_id[case_id].exact_optimal_cost
+    )
+    assert affected_ids
+    for case_id in affected_ids:
+        assert primary_by_id[case_id].selected_action_is_globally_optimal is True
+        assert sensitivity_by_id[case_id].selected_action_is_globally_optimal is True
+
+
+def test_two_ply_repair_preserves_original_failure_evidence() -> None:
+    original = _matrix()
+    repaired = _repair_matrix()
+
+    assert original.decision == "fail_search_gap"
+    assert tuple(case.case_id for case in original.primary.counterexamples) == (
+        "remnant_first-one-match-fit-unequal-high-retrieval-three",
+    )
+    assert original.primary.max_absolute_first_action_regret == 100.0
+    assert repaired.decision == "pass_decision_feasibility"
+    assert repaired.primary.counterexamples == ()
 
 
 def test_runner_rebuilds_twice_and_publishes_content_addressed_fail_result(
