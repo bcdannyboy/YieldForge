@@ -975,7 +975,7 @@ class M8PortableReplayCursorV2(BaselineContractModel):
     current_time: M8CanonicalUtc
     inventory: tuple[M8PortableInventoryItemV2, ...]
     cumulative_costs: M8PortableCostLedgerV2
-    timestamp_group_sequence: StrictInt = Field(ge=0)
+    timestamp_group_sequence: StrictInt = Field(ge=-1)
     timestamp_subsequence: StrictInt = Field(ge=0)
     previous_release: M8CanonicalUtc | None
 

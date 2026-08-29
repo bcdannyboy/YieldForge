@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -24,6 +25,62 @@ def _request(*, passive: bool = True) -> M8OracleRequest:
         cursor=initial_m7_cursor(runtime.replay_input),
         visibility=FullRealizedVisibility(runtime.replay_input.instances),
     )
+
+
+def test_public_visibility_cannot_mutate_a_detached_checker_proof() -> None:
+    import sys
+
+    from yieldforge.oracle.checker import check_action_proofs
+
+    canonical_request = _request(passive=False)
+    valid = score_sparse_event(canonical_request).proofs[0]
+    invalid = valid.model_copy(update={"final_net_cost": valid.final_net_cost + 777.0})
+    state = {"hits": 0}
+
+    class StackVisibility:
+        mode = "full_realized_future"
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            frame = sys._getframe(1)  # noqa: SLF001
+            while frame is not None:
+                if frame.f_code.co_name == "check_action_proofs" and "captured_proofs" in (
+                    frame.f_locals
+                ):
+                    state["hits"] += 1
+                    object.__setattr__(
+                        frame.f_locals["captured_proofs"][0],
+                        "final_net_cost",
+                        valid.final_net_cost,
+                    )
+                    break
+                frame = frame.f_back
+            return canonical_request.runtime.replay_input.instances[current_position + 1 :]
+
+    request = M8OracleRequest(
+        runtime=canonical_request.runtime,
+        cursor=canonical_request.cursor,
+        visibility=StackVisibility(),  # type: ignore[arg-type]
+    )
+    result = check_action_proofs(request, (invalid,))[0]
+
+    assert not result.valid
+    assert result.failure_code == "invalid_proof"
+    assert invalid.final_net_cost == valid.final_net_cost + 777.0
+    assert state["hits"] == 0
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_public_checker_classifies_nonfinite_proof_source_as_typed_integrity(
+    value: float,
+) -> None:
+    from yieldforge.oracle.checker import check_action_proofs
+    from yieldforge.oracle.compiled import M8PreparedFrontierIntegrityError
+
+    request = _request(passive=False)
+    proof = score_sparse_event(request).proofs[0].model_copy(update={"final_net_cost": value})
+
+    with pytest.raises(M8PreparedFrontierIntegrityError, match="source commitment"):
+        check_action_proofs(request, (proof,))
 
 
 def _rebuild(proof: M8ActionProof, **changes: object) -> M8ActionProof:
@@ -68,6 +125,57 @@ def _unsafe_rehash(proof: M8ActionProof, **changes: object) -> M8ActionProof:
             "content_sha256": f"sha256:{digest}",
         }
     )
+
+
+def test_public_checker_captures_proof_before_private_context() -> None:
+    import sys
+
+    from yieldforge.oracle import checker, compiled
+
+    request = _request()
+    proof = score_sparse_event(request).proofs[0]
+    forged_suffix = "sha256:" + "e" * 64
+    bad = _rebuild(proof, suffix_sha256=forged_suffix)
+    assert checker.check_action_proof(request, bad).failure_code == "suffix_mismatch"
+    state = {"calls": 0, "eq": 0, "restored": False}
+
+    class EvilStr(str):
+        def __eq__(self, other):  # type: ignore[no-untyped-def]
+            state["eq"] += 1
+            context = state.get("context")
+            if context is not None:
+                object.__setattr__(context, "_suffix_sha256", state["original"])
+                state["restored"] = True
+            return str.__eq__(self, other)
+
+        def __ne__(self, other):  # type: ignore[no-untyped-def]
+            return not self.__eq__(other)
+
+        __hash__ = str.__hash__
+
+    def evil_model_dump(*args, **kwargs):  # type: ignore[no-untyped-def]
+        state["calls"] += 1
+        object.__getattribute__(bad, "__dict__").pop("model_dump", None)
+        frame = sys._getframe(1)  # noqa: SLF001
+        while frame is not None:
+            if frame.f_code.co_name == "_initialize_branch":
+                context = frame.f_locals["context"]
+                state["context"] = context
+                state["original"] = context._suffix_sha256  # noqa: SLF001
+                object.__setattr__(context, "_suffix_sha256", EvilStr(forged_suffix))
+                break
+            frame = frame.f_back
+        return M8ActionProof.model_dump(bad, *args, **kwargs)
+
+    object.__getattribute__(bad, "__dict__")["model_dump"] = evil_model_dump
+
+    with pytest.raises(
+        compiled.M8PreparedFrontierIntegrityError,
+        match="action proof source capture",
+    ):
+        checker.check_action_proof(request, bad)
+
+    assert state == {"calls": 0, "eq": 0, "restored": False}
 
 
 def test_checker_passive_advance_applies_once_and_hashes_two_cursors(
@@ -154,9 +262,7 @@ def test_checker_rejects_rehashed_noncanonical_exact_transition(
     request = _request()
     proof = _proof_with_classification(request, source_classification)
     source = next(
-        witness
-        for witness in proof.witnesses
-        if witness.classification == source_classification
+        witness for witness in proof.witnesses if witness.classification == source_classification
     )
     replacement = source.model_copy(
         update={
@@ -223,9 +329,7 @@ def test_checker_fails_closed_on_independently_rehashed_tampering(
         )
         tampered = _unsafe_rehash(proof, witnesses=(witness,))
     elif mutation == "state_hash":
-        witness = proof.witnesses[0].model_copy(
-            update={"state_after_sha256": "sha256:" + "f" * 64}
-        )
+        witness = proof.witnesses[0].model_copy(update={"state_after_sha256": "sha256:" + "f" * 64})
         tampered = _rebuild(proof, witnesses=(witness,))
     elif mutation == "decision_key":
         witness = proof.witnesses[0]
@@ -335,42 +439,36 @@ def test_generator_and_checker_own_distinct_cleaned_remnant_measurement_caches(
     )
     with _prepare_m8_generator_context(request) as generator:
         generator_capability_id = id(generator._prepared_layouts)  # noqa: SLF001
-        generator_record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        generator_record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             generator_capability_id
-        ]
+        )
         assert not generator_record.remnant_measurements
         action_results = _score_prepared_certificate_actions(generator)
         generator_preparation_count = preparation_count
-        generator_cache = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        generator_cache = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             generator_capability_id
-        ].remnant_measurements
+        ).remnant_measurements
         assert generator_preparation_count == len(generator_cache) > 0
     assert (
-        generator_capability_id
-        not in compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+        generator_capability_id not in compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
     )
 
     proofs = tuple(item.proof for item in action_results)
     with _prepare_m8_checker_context(request) as checker:
         checker_capability_id = id(checker._prepared_layouts)  # noqa: SLF001
-        checker_record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        checker_record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             checker_capability_id
-        ]
+        )
         assert not checker_record.remnant_measurements
         assert checker_record.remnant_measurements is not generator_cache
         checks = _check_prepared_action_proofs(checker, proofs)
         checker_preparation_count = preparation_count - generator_preparation_count
-        checker_cache = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        checker_cache = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             checker_capability_id
-        ].remnant_measurements
-        assert (
-            checker_preparation_count
-            == len(checker_cache)
-            == generator_preparation_count
-        )
+        ).remnant_measurements
+        assert checker_preparation_count == len(checker_cache) == generator_preparation_count
     assert (
-        checker_capability_id
-        not in compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+        checker_capability_id not in compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
     )
     assert all(result.valid for result in checks)
 
@@ -405,6 +503,200 @@ def test_prepared_apis_reject_crossed_reconstructed_and_copied_contexts() -> Non
                 copy.copy(generator)
             with pytest.raises(TypeError, match="cannot be serialized"):
                 copy.copy(checker)
+
+
+def test_production_checker_owns_prepared_layout_capability_drift() -> None:
+    from yieldforge.oracle import checker, compiled
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+    with activate_m8_profile() as profiler:
+        with checker._prepare_m8_checker_context(request) as context:  # noqa: SLF001
+            capability_id = id(context._prepared_layouts)  # noqa: SLF001
+            record = compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY.pop(  # noqa: SLF001
+                capability_id
+            )
+            try:
+                with pytest.raises(
+                    compiled.M8PreparedFrontierIntegrityError,
+                    match="prepared frontier integrity",
+                ):
+                    checker._check_prepared_action_proofs(context, proofs)  # noqa: SLF001
+            finally:
+                registry = compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+                registry[capability_id] = record
+                assert registry._repair_untrusted_mutations()  # noqa: SLF001
+                assert registry._seal_repaired_state()  # noqa: SLF001
+
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
+def test_public_checker_propagates_prepared_layout_integrity_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import checker, compiled
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+    original = checker._prepare_m8_checker_context  # noqa: SLF001
+
+    @contextmanager
+    def corrupt_context(request):  # type: ignore[no-untyped-def]
+        with original(request) as context:
+            capability_id = id(context._prepared_layouts)  # noqa: SLF001
+            record = compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY.pop(  # noqa: SLF001
+                capability_id
+            )
+            try:
+                yield context
+            finally:
+                registry = compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY  # noqa: SLF001
+                registry[capability_id] = record
+                assert registry._repair_untrusted_mutations()  # noqa: SLF001
+                assert registry._seal_repaired_state()  # noqa: SLF001
+
+    monkeypatch.setattr(checker, "_prepare_m8_checker_context", corrupt_context)
+    with activate_m8_profile() as profiler:
+        with pytest.raises(
+            compiled.M8PreparedFrontierIntegrityError,
+            match="prepared frontier integrity",
+        ):
+            checker.check_action_proofs(request, proofs)
+
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
+@pytest.mark.parametrize("registry_kind", ("authority", "context"))
+@pytest.mark.parametrize("registry_state", ("missing", "malformed"))
+def test_public_checker_rejects_capability_registry_drift_before_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    registry_kind: str,
+    registry_state: str,
+) -> None:
+    from yieldforge.baseline import replay
+    from yieldforge.oracle import checker, compiled
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+    original_prepare = checker._prepare_m8_checker_context  # noqa: SLF001
+    original_build = checker.build_validated_m8_common_transition_in_context
+    traversals = 0
+
+    @contextmanager
+    def corrupt_context(request):  # type: ignore[no-untyped-def]
+        with original_prepare(request) as context:
+            if registry_kind == "authority":
+                registry = replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY  # noqa: SLF001
+                capability_id = id(context._authority)  # noqa: SLF001
+            else:
+                registry = checker._PREPARED_CHECKER_REGISTRY  # noqa: SLF001
+                capability_id = id(context)
+            record = registry[capability_id]
+            if registry_state == "missing":
+                registry.pop(capability_id)
+            else:
+                registry[capability_id] = object()  # type: ignore[assignment]
+            try:
+                yield context
+            finally:
+                registry[capability_id] = record
+
+    def count_traversal(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal traversals
+        traversals += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(checker, "_prepare_m8_checker_context", corrupt_context)
+    monkeypatch.setattr(
+        checker,
+        "build_validated_m8_common_transition_in_context",
+        count_traversal,
+    )
+    with activate_m8_profile() as profiler:
+        with pytest.raises(
+            compiled.M8PreparedFrontierIntegrityError,
+            match=(
+                "checker proof authority capability"
+                if registry_kind == "authority"
+                else "prepared checker capability"
+            ),
+        ):
+            checker.check_action_proofs(request, proofs)
+
+    counts = profiler.report().counts
+    assert traversals == 0
+    assert counts["actions"] == 0
+    assert counts["facts"] == 0
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
+def test_public_checker_drains_persistently_malformed_context_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import checker, compiled
+
+    local_request = _request()
+    proofs = score_sparse_event(local_request).proofs
+    foreign_request = _request()
+    original_prepare = checker._prepare_m8_checker_context  # noqa: SLF001
+
+    with original_prepare(foreign_request) as foreign_context:
+        foreign_record = checker._PREPARED_CHECKER_REGISTRY[id(foreign_context)]  # noqa: SLF001
+
+        @contextmanager
+        def corrupt_context(request):  # type: ignore[no-untyped-def]
+            with original_prepare(request) as context:
+                checker._PREPARED_CHECKER_REGISTRY[id(context)] = object()  # type: ignore[assignment]  # noqa: SLF001
+                yield context
+
+        monkeypatch.setattr(checker, "_prepare_m8_checker_context", corrupt_context)
+        with pytest.raises(
+            compiled.M8PreparedFrontierIntegrityError,
+            match="prepared checker capability",
+        ):
+            checker.check_action_proofs(local_request, proofs)
+
+        assert checker._PREPARED_CHECKER_REGISTRY == {  # noqa: SLF001
+            id(foreign_context): foreign_record
+        }
+
+
+def test_public_checker_preserves_typed_body_error_over_cleanup_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import checker, compiled
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    request = _request()
+    proofs = score_sparse_event(request).proofs
+    sentinel = compiled.M8PreparedFrontierIntegrityError(
+        "M8 prepared frontier integrity differs: public checker sentinel"
+    )
+
+    def corrupt_body(context, _proofs):  # type: ignore[no-untyped-def]
+        checker._PREPARED_CHECKER_REGISTRY.pop(id(context))  # noqa: SLF001
+        compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY.pop(  # noqa: SLF001
+            id(context._prepared_layouts)  # noqa: SLF001
+        )
+        raise sentinel
+
+    monkeypatch.setattr(checker, "_check_prepared_action_proofs", corrupt_body)
+    with activate_m8_profile() as profiler:
+        with pytest.raises(compiled.M8PreparedFrontierIntegrityError) as captured:
+            checker.check_action_proofs(request, proofs)
+
+    assert captured.value is sentinel
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
 
 
 def test_checker_context_mutation_cannot_authorize_rehashed_suffix() -> None:
@@ -617,6 +909,54 @@ def test_event_major_batches_own_one_snapshot_and_one_common_capability(
     assert checker_fingerprint_count == 4
 
 
+def test_production_context_registries_bind_distinct_frontier_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real producer/checker entrypoints must issue and recheck role bindings."""
+
+    from yieldforge.oracle import checker, sparse
+
+    request = _request()
+    generator_bindings: list[tuple[object, object]] = []
+    checker_bindings: list[tuple[object, object]] = []
+    original_generator_fingerprint = sparse.prepared_context_fingerprint
+    original_checker_fingerprint = checker.prepared_context_fingerprint
+
+    def capture_generator(**kwargs):  # type: ignore[no-untyped-def]
+        generator_bindings.append((kwargs.get("kernel_mode"), kwargs.get("kernel_identity")))
+        return original_generator_fingerprint(**kwargs)
+
+    def capture_checker(**kwargs):  # type: ignore[no-untyped-def]
+        checker_bindings.append((kwargs.get("kernel_mode"), kwargs.get("kernel_identity")))
+        return original_checker_fingerprint(**kwargs)
+
+    monkeypatch.setattr(sparse, "prepared_context_fingerprint", capture_generator)
+    monkeypatch.setattr(checker, "prepared_context_fingerprint", capture_checker)
+
+    generated = sparse.score_sparse_event(request)
+    checked = checker.check_action_proofs(
+        request,
+        generated.proofs,
+    )
+
+    assert all(item.valid for item in checked)
+    assert len(generator_bindings) >= 2
+    assert set(generator_bindings) == {
+        (
+            "c0_frontier_columnar",
+            "yieldforge.oracle.columnar.certify_frontier_impossible_batch.v1",
+        )
+    }
+    assert len(checker_bindings) >= 2
+    assert set(checker_bindings) == {
+        (
+            "scalar_frontier_reference",
+            "yieldforge.oracle.frontier.certify_frontier_impossible.v1",
+        )
+    }
+    assert set(generator_bindings).isdisjoint(checker_bindings)
+
+
 def test_prepared_common_fact_deep_validation_scales_with_events_not_branches(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -682,6 +1022,7 @@ def test_prepared_common_fact_clones_once_per_event_and_releases_on_failure(
     with pytest.raises(RuntimeError, match="forced common-event failure"):
         sparse.score_sparse_event(request)
     assert len(certificates._VALIDATED_COMMON_REGISTRY) == initial_registry_size  # noqa: SLF001
+
 
 def test_mutating_exposed_common_fact_cannot_change_generator_or_checker(
     monkeypatch,

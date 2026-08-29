@@ -10,6 +10,7 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from time import perf_counter
 from typing import ClassVar, Literal
 
@@ -19,6 +20,7 @@ from yieldforge.baseline.archives import VerifiedCandidateRejectionLayout
 from yieldforge.baseline.contracts import M7ActionKind
 from yieldforge.baseline.replay import (
     M7ReplayCursor,
+    M7ReplayRuntime,
     m7_cursor_sha256,
     m7_semantic_runtime_sha256,
     run_m7_continuation,
@@ -31,11 +33,19 @@ from yieldforge.oracle.certificates import (
     M8UncheckedProducerTransition,
     M8UncheckedStandardCandidateCapture,
     M8UncheckedTranslationBatchCapture,
+    _capture_replay_cursor_commitment_source,
+    _capture_replay_cursor_source,
+    _capture_visible_suffix_source,
     _portable_policy_rank_components,
     _portable_search_config,
 )
+from yieldforge.oracle.compiled import (
+    M8PreparedFrontierIntegrityError,
+    _preflight_prepared_source_runtime,
+)
 from yieldforge.oracle.frontier import ParetoFrontier
 from yieldforge.oracle.profiling import profile_phase
+from yieldforge.oracle.proofs import m8_suffix_sha256
 from yieldforge.oracle.reference import M8OracleRequest
 from yieldforge.oracle.sparse import (
     M8UncheckedBranchEventCapture,
@@ -83,6 +93,8 @@ class M8UncheckedBundleRequest:
     def _require_claim_shape(self) -> None:
         if type(self.oracle_request) is not M8OracleRequest:
             raise TypeError("M8 unchecked bundle requires an exact oracle request")
+        if type(self.freeze_id) is not str or type(self.freeze_sha256) is not str:
+            raise TypeError("M8 unchecked bundle freeze identity requires exact strings")
         freeze_id = _FREEZE_ID.fullmatch(self.freeze_id)
         freeze_sha = _SHA256.fullmatch(self.freeze_sha256)
         if freeze_id is None or freeze_sha is None:
@@ -137,6 +149,319 @@ class M8UncheckedBundleRequest:
             or semantic_runtime_sha256 != self._semantic_runtime_sha256
         ):
             raise ValueError("M8 prepared generator bindings differ from bundle request")
+
+
+@dataclass(frozen=True)
+class _CapturedUncheckedBundleRequest:
+    oracle_request: M8OracleRequest
+    freeze_id: str
+    freeze_sha256: str
+    runtime_object_id: int
+    replay_input_object_id: int
+    semantic_runtime_sha256: str
+    replay_input_id: str
+    replay_input_sha256: str
+    stream_id: str
+    stream_sha256: str
+    cursor_sha256: str
+    cursor_position: int
+    suffix_sha256: str
+    source_request: M8UncheckedBundleRequest = field(repr=False, compare=False)
+    source_request_state: dict[str, object] = field(repr=False, compare=False)
+    source_oracle_request: M8OracleRequest = field(repr=False, compare=False)
+    source_oracle_state: dict[str, object] = field(repr=False, compare=False)
+    source_runtime: M7ReplayRuntime = field(repr=False, compare=False)
+    source_replay_input: BaseModel = field(repr=False, compare=False)
+    source_cursor: M7ReplayCursor = field(repr=False, compare=False)
+    source_visibility: object = field(repr=False, compare=False)
+
+
+def _capture_unchecked_bundle_request_source(
+    request: M8UncheckedBundleRequest,
+) -> _CapturedUncheckedBundleRequest:
+    """Capture wrapper claims without dispatching instance-shadowed methods."""
+
+    try:
+        if type(request) is not M8UncheckedBundleRequest:
+            raise TypeError("M8 unchecked bundle request type differs")
+        state = object.__getattribute__(request, "__dict__")
+        expected_fields = {item.name for item in dataclass_fields(M8UncheckedBundleRequest)}
+        if (
+            type(state) is not dict
+            or any(type(name) is not str for name in state)
+            or set(state) != expected_fields
+        ):
+            raise TypeError("M8 unchecked bundle request state differs")
+        scalar_names = (
+            "freeze_id",
+            "freeze_sha256",
+            "_semantic_runtime_sha256",
+            "_replay_input_id",
+            "_replay_input_sha256",
+            "_stream_id",
+            "_stream_sha256",
+            "_cursor_sha256",
+        )
+        identity_names = ("_runtime_object_id", "_replay_input_object_id")
+        if any(type(state[name]) is not str for name in scalar_names) or any(
+            type(state[name]) is not int for name in identity_names
+        ):
+            raise TypeError("M8 unchecked bundle claim type differs")
+        freeze_id = _FREEZE_ID.fullmatch(state["freeze_id"])
+        freeze_sha256 = _SHA256.fullmatch(state["freeze_sha256"])
+        if (
+            freeze_id is None
+            or freeze_sha256 is None
+            or freeze_id.group(1) != freeze_sha256.group(1)[:24]
+        ):
+            raise ValueError("M8 unchecked bundle freeze claim differs")
+        original_claims = tuple(state[name] for name in (*scalar_names, *identity_names))
+        oracle_request = state["oracle_request"]
+        if type(oracle_request) is not M8OracleRequest:
+            raise TypeError("M8 unchecked oracle request type differs")
+        oracle_state = object.__getattribute__(oracle_request, "__dict__")
+        if type(oracle_state) is not dict or set(oracle_state) != {
+            "runtime",
+            "cursor",
+            "visibility",
+        }:
+            raise TypeError("M8 unchecked oracle request state differs")
+        source_runtime = oracle_state["runtime"]
+        source_cursor = oracle_state["cursor"]
+        source_visibility = oracle_state["visibility"]
+        if type(source_runtime) is not M7ReplayRuntime:
+            raise TypeError("M8 unchecked source runtime type differs")
+        _preflight_prepared_source_runtime(source_runtime)
+        source_replay_input = source_runtime.replay_input
+        if any(
+            item.partition is not TemporalPartition.CALIBRATION
+            for item in source_replay_input.instances
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 unchecked fact generation is calibration-only"
+            )
+        cursor_position, cursor_sha256 = _capture_replay_cursor_commitment_source(
+            source_cursor
+        )
+        captured_visibility = _capture_visible_suffix_source(
+            source_runtime,
+            source_visibility,
+            current_position=cursor_position,
+        )
+        current_state = object.__getattribute__(request, "__dict__")
+        current_oracle_state = object.__getattribute__(oracle_request, "__dict__")
+        if (
+            type(current_state) is not dict
+            or current_state is not state
+            or set(current_state) != expected_fields
+            or tuple(current_state[name] for name in (*scalar_names, *identity_names))
+            != original_claims
+            or current_state["oracle_request"] is not oracle_request
+            or type(current_oracle_state) is not dict
+            or current_oracle_state is not oracle_state
+            or set(current_oracle_state) != {"runtime", "cursor", "visibility"}
+            or current_oracle_state["runtime"] is not source_runtime
+            or current_oracle_state["cursor"] is not source_cursor
+            or current_oracle_state["visibility"] is not source_visibility
+        ):
+            raise TypeError("M8 unchecked bundle request drifted during source capture")
+        captured_cursor = _capture_replay_cursor_source(source_cursor)
+        if (
+            captured_cursor.next_event_position != cursor_position
+            or m7_cursor_sha256(captured_cursor) != cursor_sha256
+        ):
+            raise TypeError("M8 unchecked bundle cursor drifted during source capture")
+        if (
+            id(source_runtime) != state["_runtime_object_id"]
+            or id(source_replay_input) != state["_replay_input_object_id"]
+            or source_runtime.replay_input is not source_replay_input
+            or source_replay_input.input_id != state["_replay_input_id"]
+            or source_replay_input.content_sha256 != state["_replay_input_sha256"]
+            or source_replay_input.stream_id != state["_stream_id"]
+            or source_replay_input.stream_sha256 != state["_stream_sha256"]
+            or m7_cursor_sha256(captured_cursor) != state["_cursor_sha256"]
+            or captured_visibility.semantic_runtime_sha256
+            != state["_semantic_runtime_sha256"]
+            or any(
+                item.partition is not TemporalPartition.CALIBRATION
+                for item in source_replay_input.instances
+            )
+        ):
+            raise ValueError("M8 unchecked bundle source bindings drifted")
+        captured_oracle_request = M8OracleRequest(
+            runtime=source_runtime,
+            cursor=captured_cursor,
+            visibility=captured_visibility,
+        )
+        suffix_sha256 = m8_suffix_sha256(
+            semantic_runtime_sha256=state["_semantic_runtime_sha256"],
+            start_event_position=cursor_position,
+            stop_event_position=cursor_position + 1 + len(captured_visibility.bindings),
+            bindings=captured_visibility.bindings,
+        )
+        return _CapturedUncheckedBundleRequest(
+            oracle_request=captured_oracle_request,
+            freeze_id=state["freeze_id"],
+            freeze_sha256=state["freeze_sha256"],
+            runtime_object_id=state["_runtime_object_id"],
+            replay_input_object_id=state["_replay_input_object_id"],
+            semantic_runtime_sha256=state["_semantic_runtime_sha256"],
+            replay_input_id=state["_replay_input_id"],
+            replay_input_sha256=state["_replay_input_sha256"],
+            stream_id=state["_stream_id"],
+            stream_sha256=state["_stream_sha256"],
+            cursor_sha256=state["_cursor_sha256"],
+            cursor_position=cursor_position,
+            suffix_sha256=suffix_sha256,
+            source_request=request,
+            source_request_state=state,
+            source_oracle_request=oracle_request,
+            source_oracle_state=oracle_state,
+            source_runtime=source_runtime,
+            source_replay_input=source_replay_input,
+            source_cursor=source_cursor,
+            source_visibility=source_visibility,
+        )
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: unchecked bundle request source capture"
+        ) from error
+
+
+def _require_captured_unchecked_bundle_bindings(
+    captured: _CapturedUncheckedBundleRequest,
+    *,
+    oracle_request: M8OracleRequest,
+    semantic_runtime_sha256: str,
+) -> None:
+    replay_input = oracle_request.runtime.replay_input
+    if any(item.partition is not TemporalPartition.CALIBRATION for item in replay_input.instances):
+        raise ValueError("M8 unchecked fact generation is calibration-only")
+    if (
+        replay_input.input_id != captured.replay_input_id
+        or replay_input.content_sha256 != captured.replay_input_sha256
+        or replay_input.stream_id != captured.stream_id
+        or replay_input.stream_sha256 != captured.stream_sha256
+        or m7_cursor_sha256(oracle_request.cursor) != captured.cursor_sha256
+        or semantic_runtime_sha256 != captured.semantic_runtime_sha256
+    ):
+        raise ValueError("M8 prepared generator bindings differ from bundle request")
+
+
+def _require_unchecked_bundle_request_source_stable(
+    captured: _CapturedUncheckedBundleRequest,
+    *,
+    request: M8UncheckedBundleRequest,
+    bundle: facts.M8UncheckedFactBundleV2,
+) -> None:
+    """Recheck public source commitments without invoking visibility again."""
+
+    try:
+        if (
+            type(captured) is not _CapturedUncheckedBundleRequest
+            or type(request) is not M8UncheckedBundleRequest
+            or request is not captured.source_request
+            or type(bundle) is not facts.M8UncheckedFactBundleV2
+        ):
+            raise TypeError("M8 unchecked bundle final source type differs")
+        expected_request_fields = {
+            item.name for item in dataclass_fields(M8UncheckedBundleRequest)
+        }
+        state = object.__getattribute__(request, "__dict__")
+        oracle_request = captured.source_oracle_request
+        oracle_state = object.__getattribute__(oracle_request, "__dict__")
+        if (
+            type(state) is not dict
+            or state is not captured.source_request_state
+            or set(state) != expected_request_fields
+            or state["oracle_request"] is not oracle_request
+            or type(oracle_state) is not dict
+            or oracle_state is not captured.source_oracle_state
+            or set(oracle_state) != {"runtime", "cursor", "visibility"}
+            or oracle_state["runtime"] is not captured.source_runtime
+            or oracle_state["cursor"] is not captured.source_cursor
+            or oracle_state["visibility"] is not captured.source_visibility
+        ):
+            raise TypeError("M8 unchecked bundle source storage drifted")
+        scalar_claims = (
+            state["freeze_id"],
+            state["freeze_sha256"],
+            state["_semantic_runtime_sha256"],
+            state["_replay_input_id"],
+            state["_replay_input_sha256"],
+            state["_stream_id"],
+            state["_stream_sha256"],
+            state["_cursor_sha256"],
+        )
+        identity_claims = (
+            state["_runtime_object_id"],
+            state["_replay_input_object_id"],
+        )
+        if any(type(value) is not str for value in scalar_claims) or any(
+            type(value) is not int for value in identity_claims
+        ):
+            raise TypeError("M8 unchecked bundle final claim type differs")
+        if scalar_claims != (
+            captured.freeze_id,
+            captured.freeze_sha256,
+            captured.semantic_runtime_sha256,
+            captured.replay_input_id,
+            captured.replay_input_sha256,
+            captured.stream_id,
+            captured.stream_sha256,
+            captured.cursor_sha256,
+        ) or identity_claims != (
+            captured.runtime_object_id,
+            captured.replay_input_object_id,
+        ):
+            raise ValueError("M8 unchecked bundle final source claims drifted")
+        _preflight_prepared_source_runtime(captured.source_runtime)
+        replay_input = captured.source_runtime.replay_input
+        cursor_position, cursor_sha256 = _capture_replay_cursor_commitment_source(
+            captured.source_cursor
+        )
+        if (
+            replay_input is not captured.source_replay_input
+            or id(captured.source_runtime) != captured.runtime_object_id
+            or id(replay_input) != captured.replay_input_object_id
+            or replay_input.input_id != captured.replay_input_id
+            or replay_input.content_sha256 != captured.replay_input_sha256
+            or replay_input.stream_id != captured.stream_id
+            or replay_input.stream_sha256 != captured.stream_sha256
+            or cursor_position != captured.cursor_position
+            or cursor_sha256 != captured.cursor_sha256
+            or m7_semantic_runtime_sha256(captured.source_runtime)
+            != captured.semantic_runtime_sha256
+        ):
+            raise ValueError("M8 unchecked bundle final source bindings drifted")
+        provenance = bundle.provenance
+        if (
+            provenance.freeze_id != captured.freeze_id
+            or provenance.freeze_sha256 != captured.freeze_sha256
+            or provenance.replay_input_id != captured.replay_input_id
+            or provenance.replay_input_sha256 != captured.replay_input_sha256
+            or provenance.semantic_runtime_sha256 != captured.semantic_runtime_sha256
+            or provenance.stream_id != captured.stream_id
+            or provenance.stream_sha256 != captured.stream_sha256
+            or provenance.suffix_sha256 != captured.suffix_sha256
+            or provenance.evaluation_partition_opened is not False
+            or any(
+                root.semantic_runtime_sha256 != captured.semantic_runtime_sha256
+                or root.stream_id != captured.stream_id
+                or root.suffix_sha256 != captured.suffix_sha256
+                or root.start_state_sha256 != captured.cursor_sha256
+                for root in bundle.action_roots
+            )
+        ):
+            raise ValueError("M8 unchecked bundle output bindings differ from source capture")
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: unchecked bundle request drift"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -1008,14 +1333,15 @@ def score_unchecked_fact_bundle(
 
     if type(request) is not M8UncheckedBundleRequest:
         raise TypeError("M8 unchecked fact generation requires an exact bundle request")
-    request.require_valid()
-    oracle_request = request.oracle_request
+    captured_request = _capture_unchecked_bundle_request_source(request)
+    oracle_request = captured_request.oracle_request
     store = _FactStore()
     with (
         profile_phase("fact_bundle_prepared_context_session"),
         _prepare_m8_generator_context(oracle_request) as context,
     ):
-        request.require_prepared_bindings(
+        _require_captured_unchecked_bundle_bindings(
+            captured_request,
             oracle_request=context._request,  # noqa: SLF001
             semantic_runtime_sha256=context._authority.semantic_sha256,  # noqa: SLF001
         )
@@ -1109,8 +1435,8 @@ def score_unchecked_fact_bundle(
                 regime=dimension.regime.value,
                 temporal_seed=dimension.temporal_seed,
                 suffix_sha256=context._suffix_sha256,  # noqa: SLF001
-                freeze_id=request.freeze_id,
-                freeze_sha256=request.freeze_sha256,
+                freeze_id=captured_request.freeze_id,
+                freeze_sha256=captured_request.freeze_sha256,
                 evaluation_partition_opened=False,
             )
             payload = _bundle_payload(
@@ -1136,6 +1462,12 @@ def score_unchecked_fact_bundle(
         )
         if strict_loaded != bundle:
             raise ValueError("M8 unchecked bundle semantic serialization does not round trip")
+        _require_unchecked_bundle_request_source_stable(
+            captured_request,
+            request=request,
+            bundle=strict_loaded,
+        )
+        bundle = strict_loaded
     with profile_phase("fact_bundle_telemetry"):
         telemetry = M8BundleGenerationTelemetry(
             semantic_serialized_bytes=len(semantic_bytes),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import sys
 from contextlib import contextmanager
 from dataclasses import fields, is_dataclass, replace
 from enum import Enum
@@ -302,6 +303,143 @@ def test_bundle_request_rejects_nested_runtime_partition_drift_before_traversal(
 
     with pytest.raises(ValueError, match="calibration-only"):
         score_unchecked_fact_bundle(request)
+
+
+def test_bundle_request_rejects_storage_replacement_during_visibility_capture() -> None:
+    from yieldforge.oracle.compiled import M8PreparedFrontierIntegrityError
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    state = {"calls": 0}
+
+    class ReplacingVisibility:
+        mode = "full_realized_future"
+        request = None
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            state["calls"] += 1
+            assert self.request is not None
+            source = object.__getattribute__(self.request, "__dict__")
+            object.__setattr__(self.request, "__dict__", dict(source))
+            return runtime.replay_input.instances[current_position + 1 :]
+
+    visibility = ReplacingVisibility()
+    oracle_request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=visibility,  # type: ignore[arg-type]
+    )
+    request = _bundle_request(oracle_request)
+    visibility.request = request
+
+    with pytest.raises(M8PreparedFrontierIntegrityError, match="request source capture"):
+        score_unchecked_fact_bundle(request)
+
+    assert state["calls"] == 1
+
+
+def test_unchecked_bundle_visibility_is_one_shot_before_bundle_construction() -> None:
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    alternate = score_unchecked_fact_bundle(
+        M8UncheckedBundleRequest(
+            oracle_request=M8OracleRequest(
+                runtime=runtime,
+                cursor=cursor,
+                visibility=FullRealizedVisibility(runtime.replay_input.instances),
+            ),
+            freeze_id="yfm7freeze-" + "b" * 24,
+            freeze_sha256="sha256:" + "b" * 64,
+        )
+    )
+    state = {"calls": 0, "late_hits": 0}
+
+    class FrameScanningVisibility:
+        mode = "full_realized_future"
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            state["calls"] += 1
+            frame = sys._getframe()  # noqa: SLF001
+            while frame is not None:
+                if (
+                    frame.f_code.co_name == "score_unchecked_fact_bundle"
+                    and "bundle" in frame.f_locals
+                ):
+                    bundle = frame.f_locals["bundle"]
+                    bundle_state = object.__getattribute__(bundle, "__dict__")
+                    alternate_state = object.__getattribute__(alternate.bundle, "__dict__")
+                    bundle_state.clear()
+                    bundle_state.update(dict(alternate_state))
+                    state["late_hits"] += 1
+                frame = frame.f_back
+            return runtime.replay_input.instances[current_position + 1 :]
+
+    request = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=cursor,
+            visibility=FrameScanningVisibility(),  # type: ignore[arg-type]
+        ),
+        freeze_id="yfm7freeze-" + "a" * 24,
+        freeze_sha256="sha256:" + "a" * 64,
+    )
+
+    generated = score_unchecked_fact_bundle(request)
+
+    assert state == {"calls": 1, "late_hits": 0}
+    assert generated.bundle.provenance.freeze_id == request.freeze_id
+    assert generated.bundle.provenance.freeze_sha256 == request.freeze_sha256
+    assert generated.bundle.bundle_sha256 != alternate.bundle.bundle_sha256
+
+
+@pytest.mark.parametrize(
+    "late_drift",
+    ["request_storage", "oracle_storage", "freeze_claim", "cursor_state"],
+)
+def test_unchecked_bundle_callback_free_guard_rejects_late_source_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    late_drift: str,
+) -> None:
+    from yieldforge.oracle import factored
+    from yieldforge.oracle.compiled import M8PreparedFrontierIntegrityError
+
+    request = _request()
+    oracle_request = request.oracle_request
+    cursor = oracle_request.cursor
+    request_state = object.__getattribute__(request, "__dict__")
+    oracle_state = object.__getattribute__(oracle_request, "__dict__")
+    cursor_state = object.__getattribute__(cursor, "__dict__")
+    original_freeze_id = request_state["freeze_id"]
+    original_position = cursor_state["next_event_position"]
+    original_bundle_payload = factored._bundle_payload  # noqa: SLF001
+    drifted = False
+
+    def mutate_source_after_assembly(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal drifted
+        payload = original_bundle_payload(*args, **kwargs)
+        if drifted:
+            return payload
+        drifted = True
+        if late_drift == "request_storage":
+            object.__setattr__(request, "__dict__", dict(request_state))
+        elif late_drift == "oracle_storage":
+            object.__setattr__(oracle_request, "__dict__", dict(oracle_state))
+        elif late_drift == "freeze_claim":
+            request_state["freeze_id"] = "yfm7freeze-" + "c" * 24
+        else:
+            cursor_state["next_event_position"] = original_position + 1
+        return payload
+
+    monkeypatch.setattr(factored, "_bundle_payload", mutate_source_after_assembly)
+    try:
+        with pytest.raises(M8PreparedFrontierIntegrityError, match="request drift"):
+            score_unchecked_fact_bundle(request)
+    finally:
+        object.__setattr__(request, "__dict__", request_state)
+        object.__setattr__(oracle_request, "__dict__", oracle_state)
+        request_state["freeze_id"] = original_freeze_id
+        cursor_state["next_event_position"] = original_position
+
+    assert drifted
 
 
 def test_bundle_request_rejects_prepared_authority_binding_drift(

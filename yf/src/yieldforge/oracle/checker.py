@@ -6,6 +6,7 @@ import os
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Self
 
@@ -16,24 +17,31 @@ from yieldforge.baseline.replay import (
     M7ActionCatalog,
     M7AuthoritativeProofRuntime,
     M7ReplayCursor,
+    M7ReplayRuntime,
     M7StepResult,
     apply_m7_action_descriptor,
     apply_m7_frozen_action_evidence,
-    authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
     m7_cursor_sha256,
     run_m7_continuation,
     select_m7_fallback,
 )
+from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle.certificates import (
+    _capture_replay_cursor_commitment_source,
+    _capture_replay_cursor_source,
+    _capture_visible_suffix_source,
+    _m8_authoritative_proof_runtime,
     _release_validated_common_transition,
     _validated_common_transition_fact,
     build_validated_m8_common_transition_in_context,
     certify_event_passivity,
 )
 from yieldforge.oracle.compiled import (
+    M8PreparedFrontierIntegrityError,
     _prepare_translation_layout_batch,
     _PreparedTranslationLayoutBatch,
+    _validate_exact_model_graph,
 )
 from yieldforge.oracle.fact_checker import (
     M8CheckedFactBundleFailureCode,
@@ -41,7 +49,11 @@ from yieldforge.oracle.fact_checker import (
     M8FactBundleCheckRequest,
     check_m8_fact_bundle,
 )
-from yieldforge.oracle.prepared import prepared_context_fingerprint
+from yieldforge.oracle.prepared import (
+    _SCALAR_FRONTIER_CHECKER_IDENTITY,
+    _SCALAR_FRONTIER_CHECKER_MODE,
+    prepared_context_fingerprint,
+)
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8ActionProof, M8EventWitness, m8_suffix_sha256
 
@@ -96,21 +108,53 @@ class _M8PreparedCheckerContext:
     _prepared_layouts: _PreparedTranslationLayoutBatch
 
     def require_active(self) -> None:
+        malformed_registry_keys = _sanitize_prepared_checker_registry_keys()
         registered = _PREPARED_CHECKER_REGISTRY.get(id(self))
         try:
             fingerprint = _checker_context_fingerprint(self)
         except (AttributeError, TypeError, ValueError) as error:
-            raise ValueError("M8 prepared checker capability integrity differs") from error
-        if (
-            type(self) is not _M8PreparedCheckerContext
-            or registered is None
-            or registered[0]() is not self
-            or registered[1] != os.getpid()
-            or registered[2] != id(self._authority)
-            or registered[3] != fingerprint
-        ):
-            raise ValueError("M8 prepared checker capability is invalid or inactive")
-        self._authority.require_active(self._request.runtime)
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "prepared checker capability integrity differs"
+            ) from error
+        try:
+            invalid = (
+                malformed_registry_keys
+                or type(self) is not _M8PreparedCheckerContext
+                or type(registered) is not tuple
+                or len(registered) != 4
+                or type(registered[0]) is not weakref.ReferenceType
+                or registered[0]() is not self
+                or type(registered[1]) is not int
+                or registered[1] != os.getpid()
+                or type(registered[2]) is not int
+                or registered[2] != id(self._authority)
+                or type(registered[3]) is not str
+                or registered[3] != fingerprint
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "prepared checker capability integrity differs"
+            ) from error
+        if invalid:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "prepared checker capability is invalid or inactive"
+            )
+        try:
+            self._prepared_layouts.require_active(self._request.runtime)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: checker layout capability"
+            ) from error
+        try:
+            self._authority.require_active(self._request.runtime)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "checker proof authority capability"
+            ) from error
 
     def __reduce__(self) -> object:
         raise TypeError("M8 prepared checker capabilities cannot be serialized")
@@ -120,6 +164,16 @@ _PREPARED_CHECKER_REGISTRY: dict[
     int,
     tuple[weakref.ReferenceType[_M8PreparedCheckerContext], int, int, str],
 ] = {}
+
+
+def _sanitize_prepared_checker_registry_keys() -> bool:
+    entries = tuple(_PREPARED_CHECKER_REGISTRY.items())
+    valid_entries = tuple((key, value) for key, value in entries if type(key) is int)
+    if len(valid_entries) == len(entries):
+        return False
+    _PREPARED_CHECKER_REGISTRY.clear()
+    _PREPARED_CHECKER_REGISTRY.update(valid_entries)
+    return True
 
 
 def _checker_context_fingerprint(context: _M8PreparedCheckerContext) -> str:
@@ -133,6 +187,8 @@ def _checker_context_fingerprint(context: _M8PreparedCheckerContext) -> str:
         visible=context._visible,
         stop_event_position=context._stop_event_position,
         suffix_sha256=context._suffix_sha256,
+        kernel_mode=_SCALAR_FRONTIER_CHECKER_MODE,
+        kernel_identity=_SCALAR_FRONTIER_CHECKER_IDENTITY,
     )
 
 
@@ -187,13 +243,63 @@ def _prepare_m8_checker_context(
 ) -> Iterator[_M8PreparedCheckerContext]:
     """Own a checker-only stable snapshot and exact common-path prefix."""
 
-    with authoritative_m7_proof_runtime(request.runtime) as authority:
-        from yieldforge.oracle.reference import M8OracleRequest
+    from yieldforge.oracle.reference import M8OracleRequest
 
+    if type(request) is not M8OracleRequest:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker request source capture"
+        )
+    request_state = object.__getattribute__(request, "__dict__")
+    if type(request_state) is not dict or set(request_state) != {
+        "runtime",
+        "cursor",
+        "visibility",
+    }:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker request state capture"
+        )
+    source_runtime = request_state["runtime"]
+    source_cursor = request_state["cursor"]
+    source_visibility = request_state["visibility"]
+    if type(source_runtime) is not M7ReplayRuntime:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker runtime source capture"
+        )
+    cursor_position, cursor_sha256 = _capture_replay_cursor_commitment_source(source_cursor)
+    captured_visibility = _capture_visible_suffix_source(
+        source_runtime,
+        source_visibility,
+        current_position=cursor_position,
+    )
+    current_request_state = object.__getattribute__(request, "__dict__")
+    if (
+        type(current_request_state) is not dict
+        or current_request_state is not request_state
+        or set(current_request_state) != {"runtime", "cursor", "visibility"}
+        or current_request_state["runtime"] is not source_runtime
+        or current_request_state["cursor"] is not source_cursor
+        or current_request_state["visibility"] is not source_visibility
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker request drift"
+        )
+    captured_cursor = _capture_replay_cursor_source(source_cursor)
+    if (
+        captured_cursor.next_event_position != cursor_position
+        or m7_cursor_sha256(captured_cursor) != cursor_sha256
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker cursor drift"
+        )
+    with _m8_authoritative_proof_runtime(source_runtime) as authority:
+        if captured_visibility.semantic_runtime_sha256 != authority.semantic_sha256:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: checker source runtime drift"
+            )
         captured = M8OracleRequest(
             runtime=authority.runtime,
-            cursor=request.cursor,
-            visibility=request.visibility,
+            cursor=captured_cursor,
+            visibility=captured_visibility,
         )
         with profile_phase("action_catalog_enumeration"):
             catalog = enumerate_m7_action_catalog(
@@ -212,7 +318,7 @@ def _prepare_m8_checker_context(
             descriptor=descriptor,
             decision_key=fallback.decision_key,
         )
-        visible = captured.visibility.visible_suffix(current_position=catalog.event_position)
+        visible = captured_visibility.bindings
         registered = captured.runtime.replay_input.instances
         expected = registered[
             catalog.event_position + 1 : catalog.event_position + 1 + len(visible)
@@ -245,8 +351,13 @@ def _prepare_m8_checker_context(
             def discard(
                 reference: weakref.ReferenceType[_M8PreparedCheckerContext],
             ) -> None:
+                _sanitize_prepared_checker_registry_keys()
                 registered = _PREPARED_CHECKER_REGISTRY.get(key)
-                if registered is not None and registered[0] is reference:
+                if (
+                    type(registered) is tuple
+                    and len(registered) == 4
+                    and registered[0] is reference
+                ):
                     _PREPARED_CHECKER_REGISTRY.pop(key, None)
 
             reference = weakref.ref(context, discard)
@@ -256,18 +367,29 @@ def _prepare_m8_checker_context(
                 id(authority),
                 _checker_context_fingerprint(context),
             )
+            body_error: BaseException | None = None
             try:
                 yield context
+            except BaseException as error:
+                body_error = error
+                raise
             finally:
                 integrity_error = None
                 try:
                     context.require_active()
-                except ValueError as error:
+                except M8PreparedFrontierIntegrityError as error:
                     integrity_error = error
-                registered = _PREPARED_CHECKER_REGISTRY.get(key)
-                if registered is not None and registered[0]() is context:
-                    _PREPARED_CHECKER_REGISTRY.pop(key, None)
-                if integrity_error is not None:
+                except ValueError as error:
+                    integrity_error = M8PreparedFrontierIntegrityError(
+                        "M8 prepared frontier integrity differs: checker cleanup"
+                    )
+                    integrity_error.__cause__ = error
+                _sanitize_prepared_checker_registry_keys()
+                _PREPARED_CHECKER_REGISTRY.pop(key, None)
+                if integrity_error is not None and not isinstance(
+                    body_error,
+                    M8PreparedFrontierIntegrityError,
+                ):
                     raise integrity_error
 
 
@@ -498,17 +620,62 @@ def _check_prepared_action_proofs(
     return tuple(item for item in results if item is not None)
 
 
+def _capture_action_proofs_source(
+    proofs: tuple[M8ActionProof, ...],
+) -> tuple[M8ActionProof, ...]:
+    """Detach exact public proof graphs before creating checker authority."""
+
+    try:
+        if type(proofs) is not tuple:
+            raise TypeError("M8 proof collection type differs")
+        captured = []
+        for proof in tuple.__iter__(proofs):
+            _validate_exact_model_graph(proof, M8ActionProof)
+            detached = deepcopy(proof)
+            _validate_exact_model_graph(detached, M8ActionProof)
+            captured.append(detached)
+        return tuple(captured)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: action proof source capture"
+        ) from error
+
+
+def _action_proof_source_commitments(
+    proofs: tuple[M8ActionProof, ...],
+) -> tuple[str, ...]:
+    """Commit public proof bytes without retaining callback-visible detached objects."""
+
+    try:
+        captured = _capture_action_proofs_source(proofs)
+        return tuple(f"sha256:{semantic_sha256(proof)}" for proof in captured)
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: action proof source commitment"
+        ) from error
+
+
 def check_action_proofs(
     request: M8OracleRequest,
     proofs: tuple[M8ActionProof, ...],
 ) -> tuple[M8ProofCheckResult, ...]:
     """Check a batch in one owned checker-only authoritative context."""
 
+    source_commitments = _action_proof_source_commitments(proofs)
     try:
         with _prepare_m8_checker_context(request) as context:
-            return _check_prepared_action_proofs(context, proofs)
+            captured_proofs = _capture_action_proofs_source(proofs)
+            if _action_proof_source_commitments(captured_proofs) != source_commitments:
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: action proof source drift"
+                )
+            return _check_prepared_action_proofs(context, captured_proofs)
+    except M8PreparedFrontierIntegrityError:
+        raise
     except Exception:
-        return tuple(_failed("invalid_proof") for _proof in proofs)
+        return tuple(_failed("invalid_proof") for _proof in source_commitments)
 
 
 def check_action_proof(

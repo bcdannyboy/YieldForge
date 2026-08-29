@@ -61,6 +61,25 @@ def _sha(index: int) -> str:
     return f"sha256:{index:064x}"
 
 
+def _prepared_registry_key_sets() -> tuple[object, ...]:
+    registries = (
+        compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY,  # noqa: SLF001
+        compiled_module._PREPARED_LAYOUT_SOURCE_LEASE_REGISTRY,  # noqa: SLF001
+        compiled_module._PREPARED_REMNANT_AUTHORITY_REGISTRY,  # noqa: SLF001
+        compiled_module._PREPARED_FRONTIER_INPUT_REGISTRY,  # noqa: SLF001
+        compiled_module._PREPARED_LAYOUT_SOURCE_LEASE_OWNER_REGISTRY,  # noqa: SLF001
+        compiled_module._PREPARED_REMNANT_AUTHORITY_OWNER_REGISTRY,  # noqa: SLF001
+        compiled_module._PREPARED_FRONTIER_INPUT_OWNER_REGISTRY,  # noqa: SLF001
+    )
+    return tuple(
+        (
+            set(registry),
+            *registry._debug_integrity_state(),  # noqa: SLF001
+        )
+        for registry in registries
+    )
+
+
 def _as_no_fit(search: LayoutFitSearchResult) -> LayoutFitSearchResult:
     return LayoutFitSearchResult(
         status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
@@ -115,9 +134,7 @@ def _branch_cursor(
 
 def _certify(runtime, item, *, cursor=None, common_fact=None):  # type: ignore[no-untyped-def]
     current, fact = (
-        _common_fact(runtime, cursor=cursor)
-        if common_fact is None
-        else (cursor, common_fact)
+        _common_fact(runtime, cursor=cursor) if common_fact is None else (cursor, common_fact)
     )
     assert current is not None
     return certify_event_passivity(
@@ -185,9 +202,7 @@ def _write_collision_jagua(path, *, collision: bool) -> None:  # type: ignore[no
         '"searches":[{"layout_id":layout["layout_id"],'
         '"generated_candidate_count":1,"duplicate_candidate_count":0,'
         '"budget_truncated":False,"translations":[[0.0,0.0]],'
-        '"collisions":['
-        + collision_literal
-        + ']} for layout in request["layouts"]]}))\'\n'
+        '"collisions":[' + collision_literal + ']} for layout in request["layouts"]]}))\'\n'
     )
     path.chmod(0o700)
 
@@ -294,7 +309,7 @@ def test_private_prepared_layout_batch_constructs_each_layout_once(
     "archive_shape",
     ("empty", "truncated", "reordered", "duplicate", "extra"),
 )
-def test_private_prepared_batch_keeps_geometry_and_standard_without_complete_archive(
+def test_private_prepared_batch_distinguishes_incomplete_from_malformed_archive(
     archive_shape: str,
 ) -> None:
     runtime = two_problem_runtime(first_width=9.0, second_width=9.0)
@@ -314,13 +329,25 @@ def test_private_prepared_batch_keeps_geometry_and_standard_without_complete_arc
     )
     key = (binding.problem_id, verified.evidence.candidate_set_id)
 
+    if archive_shape in {"reordered", "duplicate", "extra"}:
+        with pytest.raises(
+            compiled_module.M8PreparedFrontierIntegrityError,
+            match="rejection membership",
+        ):
+            with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+                runtime,
+                event_positions=(1,),
+            ):
+                pass
+        return
+
     with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
         runtime,
         event_positions=(1,),
     ) as prepared:
-        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             id(prepared)
-        ]
+        )
 
         assert len(dict(record.layouts)[key]) == len(verified.candidates)
         assert key in dict(record.standard_winners)
@@ -366,9 +393,9 @@ def test_private_prepared_batch_validates_each_semantic_remnant_once(
                     event_position=event_position,
                     item=cached_item,
                 )
-        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             id(prepared)
-        ]
+        )
         assert all(
             not hasattr(measurement, "geometry")
             for _key, layouts in record.layouts
@@ -422,6 +449,141 @@ def test_private_prepared_batch_precomputes_each_layout_measurement_once(
     assert tuple(measured) == expected
 
 
+def test_zero_generation_witness_captures_item_before_prepared_source_lookup() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    event_position = 1
+    binding = runtime.replay_input.instances[event_position]
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=binding.material.model_copy(deep=True),
+        token="zero-witness-item-capture-order",
+    )
+    original_material = binding.material
+    foreign_material = original_material.model_copy(update={"material_code": "hostile"})
+    original_item_type = type(item)
+    remnant_reads = 0
+
+    def hostile_getattribute(self, name):  # type: ignore[no-untyped-def]
+        nonlocal remnant_reads
+        if name == "remnant":
+            remnant_reads += 1
+            object.__setattr__(
+                binding,
+                "material",
+                foreign_material if remnant_reads == 1 else original_material,
+            )
+        return object.__getattribute__(self, name)
+
+    hostile_item_type = type(
+        f"_HostileInventoryItem{id(item)}",
+        (original_item_type,),
+        {"__getattribute__": hostile_getattribute},
+    )
+    before = _prepared_registry_key_sets()
+
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(event_position,),
+    ) as prepared:
+        compiled = compiled_module._prepared_rejection_problem(  # noqa: SLF001
+            prepared,
+            runtime,
+            event_position=event_position,
+        )
+        object.__setattr__(item, "__class__", hostile_item_type)
+        try:
+            with pytest.raises(
+                compiled_module.M8PreparedFrontierIntegrityError,
+                match="inventory source capture",
+            ):
+                certificate_module._zero_generation_rejection_witness(  # noqa: SLF001
+                    runtime,
+                    compiled=compiled,
+                    event_position=event_position,
+                    item=item,
+                    prepared_layouts=prepared,
+                )
+        finally:
+            object.__setattr__(binding, "material", original_material)
+            object.__setattr__(item, "__class__", original_item_type)
+
+    assert remnant_reads == 0
+    assert binding.material is original_material
+    assert _prepared_registry_key_sets() == before
+
+
+def test_scalar_no_fit_source_captures_item_before_prepared_source_lookup() -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    event_position = 1
+    binding = runtime.replay_input.instances[event_position]
+    item = inventory_item(
+        box(0, 0, 4.5, 20),
+        material=binding.material.model_copy(deep=True),
+        token="scalar-no-fit-item-capture-order",
+    )
+    original_material = binding.material
+    foreign_material = original_material.model_copy(update={"material_code": "hostile"})
+    original_foreign_material_type = type(foreign_material)
+    original_item_type = type(item)
+    remnant_reads = 0
+
+    def hostile_material_getattribute(self, name):  # type: ignore[no-untyped-def]
+        if name == "material_code":
+            object.__setattr__(binding, "material", original_material)
+        return object.__getattribute__(self, name)
+
+    hostile_material_type = type(
+        f"_HostileMaterialIdentity{id(foreign_material)}",
+        (original_foreign_material_type,),
+        {"__getattribute__": hostile_material_getattribute},
+    )
+    object.__setattr__(foreign_material, "__class__", hostile_material_type)
+
+    def hostile_item_getattribute(self, name):  # type: ignore[no-untyped-def]
+        nonlocal remnant_reads
+        if name == "remnant":
+            remnant_reads += 1
+            object.__setattr__(binding, "material", foreign_material)
+        return object.__getattribute__(self, name)
+
+    hostile_item_type = type(
+        f"_HostileInventoryItem{id(item)}",
+        (original_item_type,),
+        {"__getattribute__": hostile_item_getattribute},
+    )
+    before = _prepared_registry_key_sets()
+
+    with compiled_module._prepare_translation_layout_batch(  # noqa: SLF001
+        runtime,
+        event_positions=(event_position,),
+    ) as prepared:
+        object.__setattr__(item, "__class__", hostile_item_type)
+        try:
+            with pytest.raises(
+                compiled_module.M8PreparedFrontierIntegrityError,
+                match="inventory source capture",
+            ):
+                certificate_module._synthesize_scalar_no_fit_source(  # noqa: SLF001
+                    runtime,
+                    event_position=event_position,
+                    item=item,
+                    mode=certificate_module._CommonDerivationMode.TRUSTED_LOCAL,  # noqa: SLF001
+                    prepared_layouts=prepared,
+                )
+        finally:
+            object.__setattr__(binding, "material", original_material)
+            object.__setattr__(item, "__class__", original_item_type)
+            object.__setattr__(
+                foreign_material,
+                "__class__",
+                original_foreign_material_type,
+            )
+
+    assert remnant_reads == 0
+    assert binding.material is original_material
+    assert _prepared_registry_key_sets() == before
+
+
 def test_private_prepared_batch_rejects_registry_scalar_mutation_at_exit() -> None:
     runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
     item = inventory_item(
@@ -441,9 +603,9 @@ def test_private_prepared_batch_rejects_registry_scalar_mutation_at_exit() -> No
                 event_position=0,
                 item=item,
             )
-            record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+            record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
                 id(prepared)
-            ]
+            )
             key = next(iter(record.remnant_measurements))
             record.remnant_measurements[key] = replace(
                 record.remnant_measurements[key],
@@ -490,9 +652,7 @@ def test_private_remnant_cache_commits_only_each_new_entry_before_deep_exit(
             inserted_ids.append(item.remnant.remnant_id)
             assert committed == inserted_ids
 
-    assert sorted(committed) == sorted(
-        remnant_id for remnant_id in inserted_ids for _ in range(2)
-    )
+    assert sorted(committed) == sorted(remnant_id for remnant_id in inserted_ids for _ in range(2))
 
 
 def test_private_remnant_cache_rejects_existing_tamper_before_another_miss() -> None:
@@ -518,9 +678,9 @@ def test_private_remnant_cache_rejects_existing_tamper_before_another_miss() -> 
             event_position=0,
             item=first,
         )
-        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY[  # noqa: SLF001
+        record = compiled_module._PREPARED_TRANSLATION_LAYOUT_REGISTRY._trusted_get(  # noqa: SLF001
             id(prepared)
-        ]
+        )
         key = next(iter(record.remnant_measurements))
         original = record.remnant_measurements[key]
         record.remnant_measurements[key] = replace(original, area=original.area + 1.0)
@@ -585,7 +745,7 @@ def test_private_remnant_measurement_cache_fails_closed_on_content_mutation(
         restored: list[tuple[object, str, object]] = []
         if mutation == "wkb":
             restored.append((geometry, "wkb_hex", geometry.wkb_hex))
-            replacement = ("0" if geometry.wkb_hex[-1] != "0" else "1")
+            replacement = "0" if geometry.wkb_hex[-1] != "0" else "1"
             object.__setattr__(geometry, "wkb_hex", geometry.wkb_hex[:-1] + replacement)
         elif mutation == "hash":
             restored.append((geometry, "polygon_sha256", geometry.polygon_sha256))
@@ -639,7 +799,9 @@ def test_private_remnant_measurement_cache_fails_closed_on_content_mutation(
             item=item,
         )
 
-    assert decode_count - preparation_decode_count == 2
+    # Exact source projection rejects the mutated graph before a second geometry
+    # decode; only the first canonical registration reaches the decoder.
+    assert decode_count - preparation_decode_count == 1
 
 
 def test_prepared_layout_capability_transient_substitution_cannot_change_result() -> None:
@@ -1189,6 +1351,53 @@ def test_private_common_fact_registry_tamper_is_caught_on_release() -> None:
     assert id(common) not in certificate_module._VALIDATED_COMMON_REGISTRY  # noqa: SLF001
 
 
+@pytest.mark.parametrize("registry_kind", ("common", "authority"))
+def test_public_certifier_rejects_live_capability_registry_drift_before_mutation(
+    registry_kind: str,
+) -> None:
+    from yieldforge.baseline import replay
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    item = inventory_item(
+        box(0, 0, 3, 20),
+        material=runtime.replay_input.instances[0].material,
+        token=f"public-certifier-{registry_kind}-registry-drift",
+    )
+    branch = _branch_cursor(cursor, added=(item,))
+    with authoritative_m7_proof_runtime(runtime) as authority:
+        common = build_validated_m8_common_transition_in_context(
+            authority,
+            cursor=cursor,
+        )
+        if registry_kind == "common":
+            registry = certificate_module._VALIDATED_COMMON_REGISTRY  # noqa: SLF001
+            capability_id = id(common)
+        else:
+            registry = replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY  # noqa: SLF001
+            capability_id = id(authority)
+        record = registry.pop(capability_id)
+        try:
+            with activate_m8_profile() as profiler:
+                with pytest.raises(
+                    compiled_module.M8PreparedFrontierIntegrityError,
+                    match="prepared frontier integrity",
+                ):
+                    certify_event_passivity(
+                        authority.runtime,
+                        common=common,
+                        branch_cursor=branch,
+                    )
+        finally:
+            registry[capability_id] = record
+        certificate_module._release_validated_common_transition(common)  # noqa: SLF001
+
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
 def test_certificate_fails_closed_on_runtime_mutation_after_capability_entry(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -1725,6 +1934,109 @@ def test_common_transition_fact_rejects_tampered_bound_content(mutation: str) ->
         )
 
 
+@pytest.mark.parametrize("nested_drift", ["action", "cursor_remnant", "context_scalar"])
+def test_public_common_fact_rejects_nested_physical_graph_drift_before_authority(
+    monkeypatch,
+    nested_drift: str,
+) -> None:  # type: ignore[no-untyped-def]
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    fact = build_m8_common_transition_fact(runtime, cursor=cursor)
+    cursor_sha256_before = m7_cursor_sha256(cursor)
+    registry_before = tuple(
+        certificate_module._VALIDATED_COMMON_REGISTRY.items()  # noqa: SLF001
+    )
+    snapshot_calls = 0
+    fallback_calls = 0
+    original_fallback = certificate_module.select_m7_fallback
+
+    def forbid_snapshot(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        raise AssertionError("common-fact authority was entered before source rejection")
+
+    def count_fallback(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return original_fallback(*args, **kwargs)
+
+    def restore_source() -> None:
+        return None
+    if nested_drift == "action":
+        target = fact.step.event.action
+        target_type = type(target)
+        field_name = "content_sha256"
+        target_state = object.__getattribute__(target, "__dict__")
+        canonical_value = target_state[field_name]
+        forged_value = "sha256:" + "e" * 64
+    elif nested_drift == "cursor_remnant":
+        target = fact.step.cursor.inventory[0].remnant
+        target_type = type(target)
+        field_name = "remnant_id"
+        target_state = object.__getattribute__(target, "__dict__")
+        canonical_value = target_state[field_name]
+        forged_value = "yfrm-" + "e" * 24
+    else:
+        context_state = object.__getattribute__(fact.step.selected_context, "__dict__")
+        canonical_cost = context_state["immediate_net_cost"]
+
+        class ForgedCost(float):
+            def __float__(self) -> float:
+                return canonical_cost
+
+        context_state["immediate_net_cost"] = ForgedCost(-1e9)
+
+        def restore_context() -> None:
+            context_state["immediate_net_cost"] = canonical_cost
+
+        restore_source = restore_context
+
+    if nested_drift != "context_scalar":
+
+        def hostile_getattribute(self, name):  # type: ignore[no-untyped-def]
+            if name == field_name:
+                return canonical_value
+            return object.__getattribute__(self, name)
+
+        hostile_type = type(
+            f"HostileM8Common{nested_drift.title()}",
+            (target_type,),
+            {"__getattribute__": hostile_getattribute},
+        )
+        target_state[field_name] = forged_value
+        object.__setattr__(target, "__class__", hostile_type)
+
+        def restore_class_drift() -> None:
+            object.__setattr__(target, "__class__", target_type)
+            target_state[field_name] = canonical_value
+
+        restore_source = restore_class_drift
+
+    monkeypatch.setattr(
+        certificate_module,
+        "snapshot_m7_replay_runtime",
+        forbid_snapshot,
+    )
+    monkeypatch.setattr(certificate_module, "select_m7_fallback", count_fallback)
+    try:
+        with pytest.raises(
+            compiled_module.M8PreparedFrontierIntegrityError,
+            match="common transition fact",
+        ):
+            validate_m8_common_transition_fact(
+                runtime,
+                cursor=cursor,
+                fact=fact,
+            )
+    finally:
+        restore_source()
+
+    assert snapshot_calls == 0
+    assert fallback_calls == 0
+    assert m7_cursor_sha256(cursor) == cursor_sha256_before
+    assert tuple(certificate_module._VALIDATED_COMMON_REGISTRY.items()) == registry_before  # noqa: SLF001
+
+
 @pytest.mark.parametrize("mutation", ["catalog_action_id", "materialized_action_id", "rank"])
 def test_common_transition_fact_rejects_tampered_action_identities_and_rank(
     mutation: str,
@@ -1848,8 +2160,7 @@ def test_influence_evidence_uses_independent_v2_commitment_graph(monkeypatch) ->
     def capture_payload(value, *args, **kwargs):  # type: ignore[no-untyped-def]
         if (
             isinstance(value, dict)
-            and value.get("schema_version")
-            == "yieldforge.m8-event-influence-evidence.v2"
+            and value.get("schema_version") == "yieldforge.m8-event-influence-evidence.v2"
         ):
             captured.append(value)
         return original_sha256(value, *args, **kwargs)
@@ -1891,18 +2202,21 @@ def test_influence_evidence_uses_independent_v2_commitment_graph(monkeypatch) ->
     assert result.witness.influences[0].evidence_sha256 == (
         f"sha256:{original_sha256(expected_payload)}"
     )
-    assert not {
-        "engine",
-        "binding",
-        "problem",
-        "candidate_set",
-        "candidates",
-        "fit_config",
-        "search_config",
-        "policy",
-        "inventory_item",
-        "remnant",
-    } & expected_payload.keys()
+    assert (
+        not {
+            "engine",
+            "binding",
+            "problem",
+            "candidate_set",
+            "candidates",
+            "fit_config",
+            "search_config",
+            "policy",
+            "inventory_item",
+            "remnant",
+        }
+        & expected_payload.keys()
+    )
     variants = (
         expected_payload | {"event_position": 1},
         expected_payload | {"direction": "removed"},
@@ -1920,30 +2234,15 @@ def test_influence_evidence_uses_independent_v2_commitment_graph(monkeypatch) ->
             | {"common_transition_fact_sha256": _sha(2)}
         },
         expected_payload
-        | {
-            "commitments": expected_payload["commitments"]
-            | {"state_before_sha256": _sha(3)}
-        },
+        | {"commitments": expected_payload["commitments"] | {"state_before_sha256": _sha(3)}},
         expected_payload
-        | {
-            "commitments": expected_payload["commitments"]
-            | {"state_after_sha256": _sha(4)}
-        },
+        | {"commitments": expected_payload["commitments"] | {"state_after_sha256": _sha(4)}},
         expected_payload
-        | {
-            "common": expected_payload["common"]
-            | {"catalog_action_id": "m7-standard:changed"}
-        },
+        | {"common": expected_payload["common"] | {"catalog_action_id": "m7-standard:changed"}},
         expected_payload
-        | {
-            "common": expected_payload["common"]
-            | {"materialized_action_id": "yfm7a-" + "e" * 24}
-        },
+        | {"common": expected_payload["common"] | {"materialized_action_id": "yfm7a-" + "e" * 24}},
         expected_payload
-        | {
-            "common": expected_payload["common"]
-            | {"decision_key": ("changed=true",)}
-        },
+        | {"common": expected_payload["common"] | {"decision_key": ("changed=true",)}},
     )
     baseline_digest = original_sha256(expected_payload)
     assert all(original_sha256(variant) != baseline_digest for variant in variants)

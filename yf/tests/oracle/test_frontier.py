@@ -264,5 +264,6 @@ def test_prepared_batch_compiles_each_repeated_problem_frontier_once(
             event_position=2,
         )
 
-    assert first is second
+    assert first == second
+    assert first is not second
     assert call_count == 1

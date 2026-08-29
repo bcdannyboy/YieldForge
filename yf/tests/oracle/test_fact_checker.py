@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import pickle
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from shapely import Polygon
+from shapely import Polygon, box
 
 from tests.oracle.fixtures import (
     exhaustive_certificate_cases,
@@ -177,6 +178,108 @@ def _rehash_payload(payload: dict[str, object]) -> bytes:
             )
     payload["bundle_sha256"] = facts.m8_bundle_sha256(payload)
     return facts.canonical_semantic_json(payload)
+
+
+def test_public_full_checker_captures_cursor_before_proof_authority() -> None:
+    import sys
+
+    from yieldforge.oracle import compiled
+
+    runtime = two_problem_runtime(
+        first_width=9.0,
+        second_width=4.0,
+        rates=FeasibilityRateManifest(
+            purchase_cost_per_area=1.0,
+            storage_cost_per_area_hour=0.0,
+            return_handling_cost_per_remnant=0.0,
+            retrieval_handling_cost_per_remnant=200.0,
+            scrap_credit_per_area=0.0,
+        ),
+    )
+    binding = runtime.replay_input.instances[1]
+    runtime.runtime_candidates[binding.problem_id] = replace(
+        runtime.runtime_candidates[binding.problem_id],
+        rejection_layouts=(),
+    )
+    item = inventory_item(
+        box(0, 0, 4.5, 20),
+        material=binding.material.model_copy(deep=True),
+        token="stable-checker-target",
+    )
+    target_id = item.remnant.remnant_id
+    cursor = replace(initial_m7_cursor(runtime.replay_input), inventory=(item,))
+    visibility = FullRealizedVisibility(runtime.replay_input.instances)
+    oracle = M8OracleRequest(runtime, cursor, visibility)
+    unchecked = M8UncheckedBundleRequest(oracle, _FREEZE_ID, _FREEZE_SHA256)
+    generated = score_unchecked_fact_bundle(unchecked)
+    payload = deepcopy(json.loads(generated.semantic_bytes))
+    classification = next(
+        row
+        for lemma in payload["common_lemmas"]
+        for row in lemma["inventory_classifications"]
+        if row["remnant_id"] == target_id
+    )
+    assert classification["material_matches"] is True
+    classification["material_matches"] = False
+    forged = _rehash_payload(payload)
+    state = {"hit": 0, "read": 0}
+    original_material = binding.material
+    item_type = type(item)
+
+    def evil_item_getattribute(self, name):  # type: ignore[no-untyped-def]
+        if name == "remnant" and object.__getattribute__(self, "remnant").remnant_id == target_id:
+            frame = sys._getframe(1)  # noqa: SLF001
+            while frame is not None:
+                if frame.f_code.co_name == "_validate_inventory_evidence" and not state["hit"]:
+                    state["hit"] += 1
+                    target = frame.f_locals["binding"]
+                    canonical = target.material
+
+                    def evil_material_getattribute(  # type: ignore[no-untyped-def]
+                        material_self,
+                        field,
+                        _target=target,
+                        _canonical=canonical,
+                    ):
+                        if field == "material_code":
+                            state["read"] += 1
+                            object.__setattr__(_target, "material", _canonical)
+                        return object.__getattribute__(material_self, field)
+
+                    foreign = canonical.model_copy(update={"material_code": "hostile"})
+                    foreign_type = type(foreign)
+                    evil_material_type = type(
+                        "EvilCheckerMaterial",
+                        (foreign_type,),
+                        {"__getattribute__": evil_material_getattribute},
+                    )
+                    object.__setattr__(foreign, "__class__", evil_material_type)
+                    object.__setattr__(target, "material", foreign)
+                    break
+                frame = frame.f_back
+        return object.__getattribute__(self, name)
+
+    evil_item_type = type(
+        "EvilCheckerItem",
+        (item_type,),
+        {"__getattribute__": evil_item_getattribute},
+    )
+    evil_item_type.__pydantic_generic_metadata__ = {
+        "origin": item_type,
+        "args": (),
+        "parameters": (),
+    }
+    object.__setattr__(item, "__class__", evil_item_type)
+    request = _full_check_request(unchecked, forged)
+
+    with pytest.raises(
+        compiled.M8PreparedFrontierIntegrityError,
+        match="inventory source capture",
+    ):
+        check_m8_fact_bundle(request)
+
+    assert state == {"hit": 0, "read": 0}
+    assert binding.material is original_material
 
 
 def _unchecked_and_check_request() -> tuple[
@@ -707,6 +810,85 @@ def test_full_checker_hot_loop_deep_checks_do_not_scale_with_action_roots(
     assert fact_checker._FULL_TRAVERSAL_GUARDS == guard_registry_before  # noqa: SLF001
 
 
+@pytest.mark.parametrize("fail_derivation", (False, True))
+def test_full_checker_prepared_event_scope_is_uncached_and_exception_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_derivation: bool,
+) -> None:
+    from yieldforge.oracle import fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    original_derive = fact_checker._derive_influence_classification  # noqa: SLF001
+    entered: list[int] = []
+    exited: list[int] = []
+    active_positions: list[int] = []
+    active_runtimes: list[object] = []
+    derivation_scope_states: list[bool] = []
+
+    @contextmanager
+    def tracked_scope(
+        prepared,  # type: ignore[no-untyped-def]
+        scoped_runtime,  # type: ignore[no-untyped-def]
+        *,
+        event_position: int,
+    ):
+        assert prepared is not None
+        assert not active_positions
+        entered.append(event_position)
+        active_positions.append(event_position)
+        active_runtimes.append(scoped_runtime)
+        try:
+            yield
+        finally:
+            assert active_positions.pop() == event_position
+            assert active_runtimes.pop() is scoped_runtime
+            exited.append(event_position)
+
+    def tracked_derive(*args, **kwargs):  # type: ignore[no-untyped-def]
+        derivation_scope_states.append(bool(active_positions))
+        assert args[0] is active_runtimes[-1]
+        if fail_derivation:
+            raise RuntimeError("injected prepared influence failure")
+        return original_derive(*args, **kwargs)
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_activate_prepared_event_validation",
+        tracked_scope,
+        raising=False,
+    )
+    monkeypatch.setattr(fact_checker, "_derive_influence_classification", tracked_derive)
+
+    result = fact_checker.check_m8_fact_bundle(
+        _full_check_request(unchecked, generated.semantic_bytes),
+    )
+
+    assert derivation_scope_states and all(derivation_scope_states)
+    assert not active_positions
+    assert not active_runtimes
+    assert exited == entered
+    if fail_derivation:
+        assert not result.valid
+        assert result.failure_code == "internal_checker_failure"
+        assert len(entered) == 1
+    else:
+        assert result.valid, result
+        assert len(entered) == result.checked_influence_fact_count
+        assert sorted(entered) == sorted(
+            item.event_position for item in generated.bundle.influence_facts
+        )
+
+
 def test_full_checker_prepares_each_rejection_layout_once_per_partition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -752,6 +934,194 @@ def test_full_checker_prepares_each_rejection_layout_once_per_partition(
 
     assert result.valid, result
     assert constructed == expected_candidate_ids
+
+
+@pytest.mark.parametrize("cleanup_failure", (False, True))
+def test_full_checker_preserves_prepared_integrity_over_normalization_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_failure: bool,
+) -> None:
+    from yieldforge.oracle import compiled, fact_checker
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+    sentinel = compiled.M8PreparedFrontierIntegrityError(
+        "M8 prepared frontier integrity differs: full checker sentinel"
+    )
+
+    def fail_prepared(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise sentinel
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_compile_prepared_translation_rejections",
+        fail_prepared,
+    )
+    if cleanup_failure:
+
+        def fail_cleanup(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("forced capability cleanup failure")
+
+        monkeypatch.setattr(fact_checker, "_drain_common_capabilities", fail_cleanup)
+
+    with activate_m8_profile() as profiler:
+        with pytest.raises(compiled.M8PreparedFrontierIntegrityError) as captured:
+            fact_checker.check_m8_fact_bundle(request)
+
+    assert captured.value is sentinel
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ("prepared", "validated_common", "request_authority"),
+)
+def test_full_checker_propagates_live_capability_registry_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    from yieldforge.oracle import certificates, compiled, fact_checker
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+    if boundary == "prepared":
+        original = fact_checker._compile_prepared_translation_rejections  # noqa: SLF001
+
+        def corrupt(*args, **kwargs):  # type: ignore[no-untyped-def]
+            prepared = kwargs["prepared"]
+            capability_id = id(prepared)
+            record = compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY.pop(  # noqa: SLF001
+                capability_id
+            )
+            try:
+                return original(*args, **kwargs)
+            finally:
+                compiled._PREPARED_TRANSLATION_LAYOUT_REGISTRY[capability_id] = record  # noqa: SLF001
+
+        monkeypatch.setattr(
+            fact_checker,
+            "_compile_prepared_translation_rejections",
+            corrupt,
+        )
+    elif boundary == "validated_common":
+        original = fact_checker._validated_common_transition_fact  # noqa: SLF001
+
+        def corrupt(*args, **kwargs):  # type: ignore[no-untyped-def]
+            capability = args[1]
+            capability_id = id(capability)
+            record = certificates._VALIDATED_COMMON_REGISTRY.pop(capability_id)  # noqa: SLF001
+            try:
+                return original(*args, **kwargs)
+            finally:
+                certificates._VALIDATED_COMMON_REGISTRY[capability_id] = record  # noqa: SLF001
+
+        monkeypatch.setattr(
+            fact_checker,
+            "_validated_common_transition_fact",
+            corrupt,
+        )
+    else:
+        from yieldforge.baseline import replay
+
+        original = fact_checker._require_full_request_stable  # noqa: SLF001
+
+        def corrupt(*args, **kwargs):  # type: ignore[no-untyped-def]
+            authority = args[2] if len(args) > 2 else kwargs.get("authority")
+            if authority is None:
+                return original(*args, **kwargs)
+            capability_id = id(authority)
+            record = replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.pop(  # noqa: SLF001
+                capability_id
+            )
+            try:
+                return original(*args, **kwargs)
+            finally:
+                replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY[capability_id] = record  # noqa: SLF001
+
+        monkeypatch.setattr(
+            fact_checker,
+            "_require_full_request_stable",
+            corrupt,
+        )
+
+    with activate_m8_profile() as profiler:
+        with pytest.raises(
+            compiled.M8PreparedFrontierIntegrityError,
+            match="prepared frontier integrity",
+        ):
+            fact_checker.check_m8_fact_bundle(request)
+
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
+def test_full_checker_preserves_typed_body_and_drains_malformed_authority_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.baseline import replay
+    from yieldforge.oracle import certificates, compiled, fact_checker
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    unchecked = M8UncheckedBundleRequest(
+        oracle_request=M8OracleRequest(
+            runtime=runtime,
+            cursor=initial_m7_cursor(runtime.replay_input),
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        ),
+        freeze_id=_FREEZE_ID,
+        freeze_sha256=_FREEZE_SHA256,
+    )
+    generated = score_unchecked_fact_bundle(unchecked)
+    request = _full_check_request(unchecked, generated.semantic_bytes)
+    authority_before = dict(replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY)  # noqa: SLF001
+    token_before = dict(fact_checker._CHECKER_REGISTRATION_TOKENS)  # noqa: SLF001
+    common_before = dict(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+    sentinel = compiled.M8PreparedFrontierIntegrityError(
+        "M8 prepared frontier integrity differs: authority cleanup body sentinel"
+    )
+
+    def corrupt_authority(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        authority_id = next(iter(replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY))  # noqa: SLF001
+        replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY[authority_id] = object()  # type: ignore[assignment]  # noqa: SLF001
+        raise sentinel
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_compile_prepared_translation_rejections",
+        corrupt_authority,
+    )
+    with pytest.raises(compiled.M8PreparedFrontierIntegrityError) as captured:
+        fact_checker.check_m8_fact_bundle(request)
+
+    assert captured.value is sentinel
+    assert replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY == authority_before  # noqa: SLF001
+    assert fact_checker._CHECKER_REGISTRATION_TOKENS == token_before  # noqa: SLF001
+    assert certificates._VALIDATED_COMMON_REGISTRY == common_before  # noqa: SLF001
 
 
 def test_influence_scalar_validation_is_memoized_but_still_checks_candidate_and_context() -> None:
@@ -1455,6 +1825,119 @@ def test_common_checker_strict_loads_and_validates_without_producer_authority(
     assert unchecked.oracle_request.runtime is request.oracle_request.runtime
 
 
+def test_common_checker_preserves_typed_integrity_during_capability_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.oracle import compiled, fact_checker
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    _unchecked, request = _unchecked_and_check_request()
+    sentinel = compiled.M8PreparedFrontierIntegrityError(
+        "M8 prepared frontier integrity differs: common checker registration sentinel"
+    )
+
+    def fail_registration(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise sentinel
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_register_checker_validated_common_transition",
+        fail_registration,
+    )
+    with activate_m8_profile() as profiler:
+        with pytest.raises(compiled.M8PreparedFrontierIntegrityError) as captured:
+            check_m8_common_fact_bundle(request)
+
+    assert captured.value is sentinel
+    counts = profiler.report().counts
+    assert counts["fallbacks"] == 0
+    assert counts["full_authoritative_fallbacks"] == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "token_missing",
+        "token_malformed",
+        "token_persistent_malformed",
+        "authority_missing",
+        "common_hash",
+    ),
+)
+def test_common_checker_live_capability_drift_is_typed_and_drained(
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    from yieldforge.baseline import replay
+    from yieldforge.oracle import certificates, compiled, fact_checker
+    from yieldforge.oracle.profiling import activate_m8_profile
+
+    _unchecked, request = _unchecked_and_check_request()
+    token_before = dict(fact_checker._CHECKER_REGISTRATION_TOKENS)  # noqa: SLF001
+    common_before = dict(certificates._VALIDATED_COMMON_REGISTRY)  # noqa: SLF001
+    authority_before = dict(replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY)  # noqa: SLF001
+    original = fact_checker._register_checker_validated_common_transition  # noqa: SLF001
+
+    def corrupt(fact, authority, *, checker_token):  # type: ignore[no-untyped-def]
+        if corruption.startswith("token_"):
+            registry = fact_checker._CHECKER_REGISTRATION_TOKENS  # noqa: SLF001
+            capability_id = id(checker_token)
+        elif corruption == "authority_missing":
+            registry = replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY  # noqa: SLF001
+            capability_id = id(authority)
+        else:
+            capability = original(
+                fact,
+                authority,
+                checker_token=checker_token,
+            )
+            registered = certificates._VALIDATED_COMMON_REGISTRY[id(capability)]  # noqa: SLF001
+            object.__setattr__(
+                registered.canonical_fact,
+                "content_sha256",
+                "sha256:" + "f" * 64,
+            )
+            return capability
+        record = registry[capability_id]
+        if corruption.endswith("missing"):
+            registry.pop(capability_id)
+        else:
+            registry[capability_id] = object()  # type: ignore[assignment]
+        if corruption == "token_persistent_malformed":
+            return original(fact, authority, checker_token=checker_token)
+        try:
+            return original(fact, authority, checker_token=checker_token)
+        finally:
+            registry[capability_id] = record
+
+    monkeypatch.setattr(
+        fact_checker,
+        "_register_checker_validated_common_transition",
+        corrupt,
+    )
+    try:
+        with activate_m8_profile() as profiler:
+            with pytest.raises(
+                compiled.M8PreparedFrontierIntegrityError,
+                match="prepared frontier integrity",
+            ):
+                check_m8_common_fact_bundle(request)
+
+        assert fact_checker._CHECKER_REGISTRATION_TOKENS == token_before  # noqa: SLF001
+        assert certificates._VALIDATED_COMMON_REGISTRY == common_before  # noqa: SLF001
+        assert replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY == authority_before  # noqa: SLF001
+        counts = profiler.report().counts
+        assert counts["fallbacks"] == 0
+        assert counts["full_authoritative_fallbacks"] == 0
+    finally:
+        fact_checker._CHECKER_REGISTRATION_TOKENS.clear()  # noqa: SLF001
+        fact_checker._CHECKER_REGISTRATION_TOKENS.update(token_before)  # noqa: SLF001
+        certificates._VALIDATED_COMMON_REGISTRY.clear()  # noqa: SLF001
+        certificates._VALIDATED_COMMON_REGISTRY.update(common_before)  # noqa: SLF001
+        replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.clear()  # noqa: SLF001
+        replay._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY.update(authority_before)  # noqa: SLF001
+
+
 def test_stateful_visibility_cannot_swap_frozen_request_claims_mid_check() -> None:
     class ClaimSwappingVisibility:
         mode = "full_realized_future"
@@ -1486,8 +1969,79 @@ def test_stateful_visibility_cannot_swap_frozen_request_claims_mid_check() -> No
     result = check_m8_common_fact_bundle(request)
 
     assert not result.valid
-    assert result.failure_code == "freeze_binding_mismatch"
-    assert result.first_failing_fact_sha256 is not None
+    assert result.failure_code == "runtime_binding_mismatch"
+    assert result.first_failing_fact_sha256 is None
+
+
+def test_visibility_cannot_rewrite_checker_snapshot_and_bundle_together() -> None:
+    import sys
+
+    runtime = two_problem_runtime(first_width=9.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    canonical_oracle = M8OracleRequest(
+        runtime=runtime,
+        cursor=cursor,
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+    freeze_a_id = "yfm7freeze-" + "a" * 24
+    freeze_a_sha256 = "sha256:" + "a" * 64
+    unchecked_a = M8UncheckedBundleRequest(
+        canonical_oracle,
+        freeze_a_id,
+        freeze_a_sha256,
+    )
+    unchecked_b = M8UncheckedBundleRequest(
+        canonical_oracle,
+        _FREEZE_ID,
+        _FREEZE_SHA256,
+    )
+    generated_a = score_unchecked_fact_bundle(unchecked_a)
+    generated_b = score_unchecked_fact_bundle(unchecked_b)
+    state = {"hits": 0}
+
+    class BundleSwappingVisibility:
+        mode = "full_realized_future"
+        request = None
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            frame = sys._getframe(1)  # noqa: SLF001
+            while frame is not None:
+                if frame.f_code.co_name == "_capture_checker_request_source":
+                    state["hits"] += 1
+                    assert self.request is not None
+                    request_state = object.__getattribute__(self.request, "__dict__")
+                    old = request_state["_claim_snapshot"]
+                    replacement = (
+                        generated_b.semantic_bytes,
+                        *old[1:8],
+                        _FREEZE_ID,
+                        _FREEZE_SHA256,
+                        old[10],
+                    )
+                    request_state["semantic_bundle_bytes"] = generated_b.semantic_bytes
+                    request_state["expected_freeze_id"] = _FREEZE_ID
+                    request_state["expected_freeze_sha256"] = _FREEZE_SHA256
+                    request_state["_claim_snapshot"] = replacement
+                    before = frame.f_locals.get("before")
+                    if isinstance(before, dict):
+                        before.update(request_state)
+                    break
+                frame = frame.f_back
+            return runtime.replay_input.instances[current_position + 1 :]
+
+    visibility = BundleSwappingVisibility()
+    evil_oracle = M8OracleRequest(runtime=runtime, cursor=cursor, visibility=visibility)  # type: ignore[arg-type]
+    request = replace(
+        _full_check_request(unchecked_a, generated_a.semantic_bytes),
+        oracle_request=evil_oracle,
+    )
+    visibility.request = request
+
+    result = check_m8_fact_bundle(request)
+
+    assert not result.valid
+    assert result.failure_code == "runtime_binding_mismatch"
+    assert state["hits"] == 1
 
 
 def test_request_capture_cannot_bless_a_transient_claim_swap(
@@ -1754,7 +2308,7 @@ def test_self_consistent_rehashed_nonwinner_cannot_become_policy_minimum(
     runtime = case.request.runtime
     oracle_request = replace(
         case.request,
-        visibility=FullRealizedVisibility(runtime.replay_input.instances[:2]),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
     )
     unchecked = M8UncheckedBundleRequest(
         oracle_request=oracle_request,

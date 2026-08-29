@@ -8,6 +8,16 @@ from tests.baseline.test_replay import _two_event_runtime
 from tests.oracle.fixtures import exhaustive_certificate_cases
 
 
+def test_oracle_package_exports_selected_reference_batch() -> None:
+    import yieldforge.oracle as oracle
+    from yieldforge.oracle import score_reference_actions
+    from yieldforge.oracle.reference import score_reference_actions as module_function
+
+    assert score_reference_actions is module_function
+    assert oracle.score_reference_actions is module_function
+    assert "score_reference_actions" in oracle.__all__
+
+
 def test_reference_scores_every_current_action_and_prefers_exact_m7_tie() -> None:
     from yieldforge.baseline.replay import initial_m7_cursor
     from yieldforge.oracle.reference import M8OracleRequest, score_reference_event
@@ -46,6 +56,119 @@ def test_reference_known_only_scores_current_action_then_terminal() -> None:
     )
     assert result.continuation_event_executions == 0
     assert result.decision.selected_action_id == result.decision.baseline_action_id
+
+
+def test_reference_runs_public_visibility_before_catalog_authority() -> None:
+    import sys
+
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.reference import M8OracleRequest, score_reference_event
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    runtime = _two_event_runtime()
+    state = {"hits": 0}
+
+    class StackVisibility:
+        mode = "full_realized_future"
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            frame = sys._getframe(1)  # noqa: SLF001
+            while frame is not None:
+                if frame.f_code.co_name == "score_reference_event" and "fallback" in frame.f_locals:
+                    state["hits"] += 1
+                    break
+                frame = frame.f_back
+            return runtime.replay_input.instances[current_position + 1 :]
+
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=StackVisibility(),  # type: ignore[arg-type]
+    )
+    expected = score_reference_event(
+        M8OracleRequest(
+            runtime=runtime,
+            cursor=request.cursor,
+            visibility=FullRealizedVisibility(runtime.replay_input.instances),
+        )
+    )
+
+    assert score_reference_event(request) == expected
+    assert state["hits"] == 0
+
+
+def test_reference_rejects_callback_capable_action_identity_before_authority() -> None:
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.compiled import M8PreparedFrontierIntegrityError
+    from yieldforge.oracle.reference import M8OracleRequest, score_reference_action
+    from yieldforge.oracle.visibility import FullRealizedVisibility
+
+    state = {"hashes": 0}
+
+    class CallbackActionId(str):
+        def __hash__(self) -> int:
+            state["hashes"] += 1
+            return str.__hash__(self)
+
+    runtime = _two_event_runtime()
+    request = M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(runtime.replay_input),
+        visibility=FullRealizedVisibility(runtime.replay_input.instances),
+    )
+
+    with pytest.raises(M8PreparedFrontierIntegrityError, match="action ID source"):
+        score_reference_action(
+            request,
+            action_id=CallbackActionId("m7-standard:candidate-one"),
+        )
+
+    assert state["hashes"] == 0
+
+
+def test_reference_rejects_visibility_data_inconsistent_with_known_only_mode() -> None:
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.reference import M8OracleRequest, score_reference_event
+
+    runtime = _two_event_runtime()
+
+    class LeakingKnownOnlyVisibility:
+        mode = "known_only"
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            return runtime.replay_input.instances[current_position + 1 :]
+
+    with pytest.raises(ValueError, match="inconsistent with its mode"):
+        score_reference_event(
+            M8OracleRequest(
+                runtime=runtime,
+                cursor=initial_m7_cursor(runtime.replay_input),
+                visibility=LeakingKnownOnlyVisibility(),  # type: ignore[arg-type]
+            )
+        )
+
+
+def test_reference_rejects_truncated_full_realized_visibility() -> None:
+    from yieldforge.baseline.replay import initial_m7_cursor
+    from yieldforge.oracle.reference import M8OracleRequest, score_reference_event
+
+    runtime = _two_event_runtime()
+
+    class TruncatedFullVisibility:
+        mode = "full_realized_future"
+
+        def visible_suffix(self, *, current_position):  # type: ignore[no-untyped-def]
+            del current_position
+            return ()
+
+    with pytest.raises(ValueError, match="inconsistent with its mode"):
+        score_reference_event(
+            M8OracleRequest(
+                runtime=runtime,
+                cursor=initial_m7_cursor(runtime.replay_input),
+                visibility=TruncatedFullVisibility(),  # type: ignore[arg-type]
+            )
+        )
 
 
 def test_reference_all_action_scoring_delegates_to_exact_single_action_scores() -> None:

@@ -14,6 +14,11 @@ from yieldforge.baseline.replay import (
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle.reference import M8OracleRequest
 
+_C0_FRONTIER_KERNEL_MODE = "c0_frontier_columnar"
+_C0_FRONTIER_KERNEL_IDENTITY = "yieldforge.oracle.columnar.certify_frontier_impossible_batch.v1"
+_SCALAR_FRONTIER_CHECKER_MODE = "scalar_frontier_reference"
+_SCALAR_FRONTIER_CHECKER_IDENTITY = "yieldforge.oracle.frontier.certify_frontier_impossible.v1"
+
 
 def _descriptor_payload(descriptor) -> dict[str, object]:  # type: ignore[no-untyped-def]
     return {
@@ -40,9 +45,18 @@ def prepared_context_fingerprint(
     visible: tuple[TemporalInstanceBinding, ...],
     stop_event_position: int,
     suffix_sha256: str,
+    kernel_mode: str | None = None,
+    kernel_identity: str | None = None,
 ) -> str:
     """Hash all immutable semantics of one prepared generator or checker context."""
 
+    kernel_binding = (kernel_mode, kernel_identity)
+    if kernel_binding not in {
+        (None, None),
+        (_C0_FRONTIER_KERNEL_MODE, _C0_FRONTIER_KERNEL_IDENTITY),
+        (_SCALAR_FRONTIER_CHECKER_MODE, _SCALAR_FRONTIER_CHECKER_IDENTITY),
+    }:
+        raise ValueError("M8 prepared context kernel binding is unsupported or incomplete")
     generated = catalog.generated
     payload = {
         "schema_version": "yieldforge.m8-prepared-context-capability.v1",
@@ -121,6 +135,11 @@ def prepared_context_fingerprint(
             "cursor_sha256": m7_cursor_sha256(fallback_step.cursor),
         },
     }
+    if kernel_mode is not None and kernel_identity is not None:
+        payload["frontier_kernel"] = {
+            "mode": kernel_mode,
+            "identity": kernel_identity,
+        }
     return f"sha256:{semantic_sha256(payload)}"
 
 

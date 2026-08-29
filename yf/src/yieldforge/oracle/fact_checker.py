@@ -19,8 +19,9 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from time import perf_counter
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, NamedTuple
 
 from pydantic import StrictBool, StrictFloat, StrictInt, StrictStr, ValidationError, model_validator
 
@@ -50,7 +51,6 @@ from yieldforge.baseline.replay import (
     M7StepResult,
     apply_m7_action_descriptor,
     apply_m7_frozen_action_evidence,
-    authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
     enumerate_m7_single_remnant_competitor,
     enumerate_m7_standard_only_catalog,
@@ -62,17 +62,24 @@ from yieldforge.baseline.replay import (
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle import facts
 from yieldforge.oracle.certificates import (
-    _VALIDATED_COMMON_REGISTRY,
+    _VALIDATED_COMMON_REGISTRY,  # noqa: F401 - exposed for registry-boundary audits.
     M8CommonTransitionFact,
     ValidatedCommonTransition,
+    _capture_replay_cursor_commitment_source,
+    _capture_replay_cursor_source,
+    _capture_visible_suffix_source,
     _common_fact_payload,
+    _m8_authoritative_proof_runtime,
     _portable_common_transition,
     _portable_search_config,
     _register_checker_validated_common_transition,
+    _registered_common_entry,
     _release_validated_common_transition,
     _validated_common_transition_fact,
 )
 from yieldforge.oracle.compiled import (
+    M8PreparedFrontierIntegrityError,
+    _activate_prepared_event_validation,
     _compile_prepared_translation_rejections,
     _prepare_translation_layout_batch,
     _PreparedTranslationLayoutBatch,
@@ -237,6 +244,11 @@ class M8CommonFactCheckRequest:
             raise ValueError("M8 expected catalog action identities must be unique and nonempty")
         if type(self.allow_exact_replay) is not bool:
             raise TypeError("M8 exact-replay permission must be an exact boolean")
+        if (
+            type(self.expected_freeze_id) is not str
+            or type(self.expected_freeze_sha256) is not str
+        ):
+            raise TypeError("M8 expected freeze identity requires exact strings")
         freeze_id = re.fullmatch(r"yfm7freeze-([0-9a-f]{24})", self.expected_freeze_id)
         freeze_sha = re.fullmatch(r"sha256:([0-9a-f]{64})", self.expected_freeze_sha256)
         if (
@@ -469,6 +481,16 @@ class _RegisteredCheckerToken:
 _CHECKER_REGISTRATION_TOKENS: dict[int, _RegisteredCheckerToken] = {}
 
 
+def _sanitize_checker_registration_registry_keys() -> bool:
+    entries = tuple(_CHECKER_REGISTRATION_TOKENS.items())
+    valid_entries = tuple((key, value) for key, value in entries if type(key) is int)
+    if len(valid_entries) == len(entries):
+        return False
+    _CHECKER_REGISTRATION_TOKENS.clear()
+    _CHECKER_REGISTRATION_TOKENS.update(valid_entries)
+    return True
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class _M8FullTraversalGuard:
     """Unforgeable O(1) lease for one already-deep-checked root traversal."""
@@ -500,6 +522,16 @@ class _RegisteredFullTraversalGuard:
 
 _FULL_TRAVERSAL_GUARDS: dict[int, _RegisteredFullTraversalGuard] = {}
 
+
+def _sanitize_full_traversal_registry_keys() -> bool:
+    entries = tuple(_FULL_TRAVERSAL_GUARDS.items())
+    valid_entries = tuple((key, value) for key, value in entries if type(key) is int)
+    if len(valid_entries) == len(entries):
+        return False
+    _FULL_TRAVERSAL_GUARDS.clear()
+    _FULL_TRAVERSAL_GUARDS.update(valid_entries)
+    return True
+
 _FACT_LAYER_NAMES = frozenset(
     {
         "translation_batches",
@@ -517,46 +549,87 @@ def _require_checker_registration_token(
     token: _M8FactCheckerRegistrationToken,
     authority: M7AuthoritativeProofRuntime,
     fact: M8CommonTransitionFact,
-) -> None:
-    _require_checker_registration_scope_token(token, authority)
-    registered = _CHECKER_REGISTRATION_TOKENS.get(id(token))
-    if (
-        registered is None
-        or registered.semantic_runtime_sha256 != fact.semantic_runtime_sha256
-        or registered.replay_input_id != authority.runtime.replay_input.input_id
-        or registered.replay_input_id != fact.replay_input_id
-        or registered.replay_input_sha256 != authority.runtime.replay_input.content_sha256
-        or registered.replay_input_sha256 != fact.replay_input_sha256
-        or fact.content_sha256 not in registered.approved_fact_sha256s
-    ):
-        raise ValueError("M8 checker common registration token is invalid or inactive")
+) -> _RegisteredCheckerToken:
+    registered = _require_checker_registration_scope_token(token, authority)
+    try:
+        invalid = (
+            type(fact) is not M8CommonTransitionFact
+            or registered.semantic_runtime_sha256 != fact.semantic_runtime_sha256
+            or registered.replay_input_id != authority.runtime.replay_input.input_id
+            or registered.replay_input_id != fact.replay_input_id
+            or registered.replay_input_sha256
+            != authority.runtime.replay_input.content_sha256
+            or registered.replay_input_sha256 != fact.replay_input_sha256
+            or fact.content_sha256 not in registered.approved_fact_sha256s
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: "
+            "checker common registration token"
+        ) from error
+    if invalid:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: "
+            "checker common registration token is invalid or inactive"
+        )
+    return registered
 
 
 def _require_checker_registration_scope_token(
     token: _M8FactCheckerRegistrationToken,
     authority: M7AuthoritativeProofRuntime,
-) -> None:
-    _require_checker_registration_scope_token_identity(token, authority)
-    authority.require_active(authority.runtime)
+) -> _RegisteredCheckerToken:
+    registered = _require_checker_registration_scope_token_identity(token, authority)
+    try:
+        authority.require_active(authority.runtime)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker proof authority capability"
+        ) from error
+    return registered
 
 
 def _require_checker_registration_scope_token_identity(
     token: _M8FactCheckerRegistrationToken,
     authority: M7AuthoritativeProofRuntime,
-) -> None:
+) -> _RegisteredCheckerToken:
+    malformed_registry_keys = _sanitize_checker_registration_registry_keys()
     registered = _CHECKER_REGISTRATION_TOKENS.get(id(token))
-    if (
-        type(token) is not _M8FactCheckerRegistrationToken
-        or registered is None
-        or registered.reference() is not token
-        or registered.binding is not token._binding  # noqa: SLF001
-        or registered.owner_pid != os.getpid()
-        or registered.authority_id != id(authority)
-        or registered.runtime_id != id(authority.runtime)
-        or registered.semantic_runtime_sha256 != authority.semantic_sha256
-    ):
-        raise ValueError("M8 checker common registration token is invalid or inactive")
-    authority._require_active_identity(authority.runtime)  # noqa: SLF001
+    try:
+        invalid = (
+            malformed_registry_keys
+            or type(token) is not _M8FactCheckerRegistrationToken
+            or type(registered) is not _RegisteredCheckerToken
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not token
+            or registered.binding is not token._binding  # noqa: SLF001
+            or type(registered.owner_pid) is not int
+            or registered.owner_pid != os.getpid()
+            or type(registered.authority_id) is not int
+            or registered.authority_id != id(authority)
+            or type(registered.runtime_id) is not int
+            or registered.runtime_id != id(authority.runtime)
+            or registered.semantic_runtime_sha256 != authority.semantic_sha256
+            or type(registered.approved_fact_sha256s) is not tuple
+            or type(registered.consumed_fact_sha256s) is not set
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: "
+            "checker common registration token"
+        ) from error
+    if invalid:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: "
+            "checker common registration token is invalid or inactive"
+        )
+    try:
+        authority._require_active_identity(authority.runtime)  # noqa: SLF001
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker proof authority capability"
+        ) from error
+    return registered
 
 
 def _consume_checker_registration_token(
@@ -564,8 +637,7 @@ def _consume_checker_registration_token(
     authority: M7AuthoritativeProofRuntime,
     fact: M8CommonTransitionFact,
 ) -> None:
-    _require_checker_registration_token(token, authority, fact)
-    registered = _CHECKER_REGISTRATION_TOKENS[id(token)]
+    registered = _require_checker_registration_token(token, authority, fact)
     if fact.content_sha256 in registered.consumed_fact_sha256s:
         raise ValueError("M8 checker common registration token approval was already consumed")
     registered.consumed_fact_sha256s.add(fact.content_sha256)
@@ -576,14 +648,23 @@ def _checker_registration_scope(
     authority: M7AuthoritativeProofRuntime,
     approved_facts: tuple[M8CommonTransitionFact, ...],
 ) -> Iterator[_M8FactCheckerRegistrationToken]:
-    authority.require_active(authority.runtime)
+    try:
+        authority.require_active(authority.runtime)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker proof authority capability"
+        ) from error
     binding = object()
     token = _M8FactCheckerRegistrationToken(binding)
     key = id(token)
 
     def discard(reference: weakref.ReferenceType[_M8FactCheckerRegistrationToken]) -> None:
+        _sanitize_checker_registration_registry_keys()
         registered = _CHECKER_REGISTRATION_TOKENS.get(key)
-        if registered is not None and registered.reference is reference:
+        if (
+            type(registered) is _RegisteredCheckerToken
+            and registered.reference is reference
+        ):
             _CHECKER_REGISTRATION_TOKENS.pop(key, None)
 
     reference = weakref.ref(token, discard)
@@ -610,58 +691,89 @@ def _checker_registration_scope(
         if registered.consumed_fact_sha256s != set(registered.approved_fact_sha256s):
             raise ValueError("M8 checker did not consume every approved common fact exactly once")
     finally:
-        current = _CHECKER_REGISTRATION_TOKENS.get(key)
-        if current is registered:
-            _CHECKER_REGISTRATION_TOKENS.pop(key, None)
+        _sanitize_checker_registration_registry_keys()
+        _CHECKER_REGISTRATION_TOKENS.pop(key, None)
 
 
-def _require_full_traversal_guard(guard: _M8FullTraversalGuard) -> None:
+def _require_full_traversal_guard(
+    guard: _M8FullTraversalGuard,
+) -> _RegisteredFullTraversalGuard:
+    malformed_registry_keys = _sanitize_full_traversal_registry_keys()
     registered = _FULL_TRAVERSAL_GUARDS.get(id(guard))
-    if (
-        type(guard) is not _M8FullTraversalGuard
-        or registered is None
-        or registered.reference() is not guard
-        or registered.binding is not guard._binding  # noqa: SLF001
-        or registered.owner_pid != os.getpid()
-    ):
-        raise ValueError("M8 full traversal guard is invalid or inactive")
+    try:
+        invalid = (
+            malformed_registry_keys
+            or type(guard) is not _M8FullTraversalGuard
+            or type(registered) is not _RegisteredFullTraversalGuard
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not guard
+            or registered.binding is not guard._binding  # noqa: SLF001
+            or type(registered.owner_pid) is not int
+            or registered.owner_pid != os.getpid()
+            or type(registered.authority) is not M7AuthoritativeProofRuntime
+            or type(registered.checker_token) is not _M8FactCheckerRegistrationToken
+            or type(registered.capabilities) is not tuple
+            or type(registered.capability_entries) is not tuple
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: full traversal guard"
+        ) from error
+    if invalid:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: full traversal guard is invalid or inactive"
+        )
     source = registered.source_request
     captured = registered.captured_request
-    if (
-        source._current_claim_snapshot() != registered.source_claim_snapshot  # noqa: SLF001
-        or captured._current_claim_snapshot() != registered.captured_claim_snapshot  # noqa: SLF001
-        or source.oracle_request.runtime is not source._runtime_reference  # noqa: SLF001
-        or source.oracle_request.cursor is not source._cursor_reference  # noqa: SLF001
-        or source.oracle_request.visibility is not source._visibility_reference  # noqa: SLF001
-        or captured.oracle_request.runtime is not captured._runtime_reference  # noqa: SLF001
-        or captured.oracle_request.cursor is not captured._cursor_reference  # noqa: SLF001
-        or captured.oracle_request.visibility is not captured._visibility_reference  # noqa: SLF001
-        or registered.authority.runtime.replay_input is not registered.runtime_replay_input
-    ):
-        raise ValueError("M8 full traversal request identity drifted")
+    try:
+        identity_drifted = (
+            source._current_claim_snapshot() != registered.source_claim_snapshot  # noqa: SLF001
+            or captured._current_claim_snapshot()  # noqa: SLF001
+            != registered.captured_claim_snapshot
+            or source.oracle_request.runtime is not source._runtime_reference  # noqa: SLF001
+            or source.oracle_request.cursor is not source._cursor_reference  # noqa: SLF001
+            or source.oracle_request.visibility is not source._visibility_reference  # noqa: SLF001
+            or captured.oracle_request.runtime is not captured._runtime_reference  # noqa: SLF001
+            or captured.oracle_request.cursor is not captured._cursor_reference  # noqa: SLF001
+            or captured.oracle_request.visibility  # noqa: SLF001
+            is not captured._visibility_reference
+            or registered.authority.runtime.replay_input is not registered.runtime_replay_input
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: full traversal request identity"
+        ) from error
+    if identity_drifted:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: full traversal request identity drifted"
+        )
     _require_checker_registration_scope_token_identity(
         registered.checker_token,
         registered.authority,
     )
+    return registered
 
 
 def _require_full_traversal_capabilities(guard: _M8FullTraversalGuard) -> None:
-    _require_full_traversal_guard(guard)
-    registered = _FULL_TRAVERSAL_GUARDS[id(guard)]
+    registered = _require_full_traversal_guard(guard)
     for capability, expected_entry in zip(
         registered.capabilities,
         registered.capability_entries,
         strict=True,
     ):
         current = _VALIDATED_COMMON_REGISTRY.get(id(capability))
+        validated = _registered_common_entry(capability)
         if (
             current is not expected_entry
-            or current.reference() is not capability
+            or current is not validated
             or current.owner_pid != registered.owner_pid
             or current.authority is not registered.authority
             or current.checker_token is not registered.checker_token
         ):
-            raise ValueError("M8 full traversal common capability is inactive")
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "full traversal common capability is inactive"
+            )
 
 
 @contextmanager
@@ -676,15 +788,23 @@ def _full_traversal_guard_scope(
     capability_entries = tuple(
         _VALIDATED_COMMON_REGISTRY.get(id(capability)) for capability in capabilities
     )
-    if any(entry is None for entry in capability_entries):
-        raise ValueError("M8 full traversal common capability is inactive")
+    for capability, entry in zip(capabilities, capability_entries, strict=True):
+        if entry is None or _registered_common_entry(capability) is not entry:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "full traversal common capability is inactive"
+            )
     binding = object()
     guard = _M8FullTraversalGuard(binding)
     key = id(guard)
 
     def discard(reference: weakref.ReferenceType[_M8FullTraversalGuard]) -> None:
+        _sanitize_full_traversal_registry_keys()
         registered = _FULL_TRAVERSAL_GUARDS.get(key)
-        if registered is not None and registered.reference is reference:
+        if (
+            type(registered) is _RegisteredFullTraversalGuard
+            and registered.reference is reference
+        ):
             _FULL_TRAVERSAL_GUARDS.pop(key, None)
 
     reference = weakref.ref(guard, discard)
@@ -708,9 +828,8 @@ def _full_traversal_guard_scope(
         yield guard
         _require_full_traversal_capabilities(guard)
     finally:
-        current = _FULL_TRAVERSAL_GUARDS.get(key)
-        if current is registered:
-            _FULL_TRAVERSAL_GUARDS.pop(key, None)
+        _sanitize_full_traversal_registry_keys()
+        _FULL_TRAVERSAL_GUARDS.pop(key, None)
 
 
 def _canonical_load(semantic_bytes: bytes) -> facts.M8UncheckedFactBundleV2:
@@ -1470,6 +1589,253 @@ def _validate_one_common(
     )
 
 
+class _CheckerRequestSource(NamedTuple):
+    claims: tuple[object, ...]
+    identity_claims: tuple[int, ...]
+    oracle_request: M8OracleRequest
+    runtime: M7ReplayRuntime
+    replay_input: object
+    cursor: M7ReplayCursor
+    visibility: object
+    request_state: dict[str, object]
+    oracle_state: dict[str, object]
+
+
+def _require_exact_checker_request_source(
+    request: M8CommonFactCheckRequest,
+    expected_type: type[M8CommonFactCheckRequest],
+) -> _CheckerRequestSource:
+    """Validate request storage without invoking instance-shadowed methods."""
+
+    if type(request) is not expected_type:
+        raise TypeError("M8 checker request wrapper type differs")
+    state = object.__getattribute__(request, "__dict__")
+    expected_fields = {item.name for item in dataclass_fields(expected_type)}
+    if (
+        type(state) is not dict
+        or any(type(name) is not str for name in state)
+        or set(state) != expected_fields
+    ):
+        raise TypeError("M8 checker request wrapper state differs")
+    oracle_request = state["oracle_request"]
+    if type(oracle_request) is not M8OracleRequest:
+        raise TypeError("M8 checker oracle request type differs")
+    oracle_state = object.__getattribute__(oracle_request, "__dict__")
+    if type(oracle_state) is not dict or set(oracle_state) != {
+        "runtime",
+        "cursor",
+        "visibility",
+    }:
+        raise TypeError("M8 checker oracle request state differs")
+    identifier_names = (
+        "_runtime_object_id",
+        "_oracle_request_object_id",
+        "_replay_input_object_id",
+        "_cursor_object_id",
+        "_visibility_object_id",
+    )
+    if any(type(state[name]) is not int for name in identifier_names):
+        raise TypeError("M8 checker request identity type differs")
+    semantic_bundle_bytes = state["semantic_bundle_bytes"]
+    expected_semantic_runtime_sha256 = state["expected_semantic_runtime_sha256"]
+    expected_current_cursor_sha256 = state["expected_current_cursor_sha256"]
+    expected_catalog_event_position = state["expected_catalog_event_position"]
+    expected_catalog_action_ids = state["expected_catalog_action_ids"]
+    expected_stop_event_position = state["expected_stop_event_position"]
+    expected_suffix_sha256 = state["expected_suffix_sha256"]
+    expected_freeze_id = state["expected_freeze_id"]
+    expected_freeze_sha256 = state["expected_freeze_sha256"]
+    allow_exact_replay = state["allow_exact_replay"]
+    if type(semantic_bundle_bytes) is not bytes:
+        raise TypeError("M8 checker request bundle bytes differ")
+    sha_values = (
+        expected_semantic_runtime_sha256,
+        expected_current_cursor_sha256,
+        expected_suffix_sha256,
+        expected_freeze_sha256,
+    )
+    if any(
+        type(value) is not str or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+        for value in sha_values
+    ):
+        raise TypeError("M8 checker request SHA-256 claim differs")
+    if (
+        type(expected_freeze_id) is not str
+        or re.fullmatch(r"yfm7freeze-[0-9a-f]{24}", expected_freeze_id) is None
+        or expected_freeze_id.removeprefix("yfm7freeze-")
+        != expected_freeze_sha256.removeprefix("sha256:")[:24]
+    ):
+        raise TypeError("M8 checker request freeze claim differs")
+    if (
+        type(expected_catalog_event_position) is not int
+        or expected_catalog_event_position < 0
+        or type(expected_stop_event_position) is not int
+        or expected_stop_event_position <= expected_catalog_event_position
+        or type(expected_catalog_action_ids) is not tuple
+        or not expected_catalog_action_ids
+        or any(
+            type(action_id) is not str or not action_id
+            for action_id in tuple.__iter__(expected_catalog_action_ids)
+        )
+        or len(expected_catalog_action_ids) != len(set(expected_catalog_action_ids))
+        or type(allow_exact_replay) is not bool
+    ):
+        raise TypeError("M8 checker request scalar claim differs")
+    claim_snapshot = state["_claim_snapshot"]
+    if (
+        type(claim_snapshot) is not tuple
+        or len(claim_snapshot) != 11
+        or type(claim_snapshot[0]) is not bytes
+        or type(claim_snapshot[1]) is not int
+        or any(type(claim_snapshot[index]) is not str for index in (2, 3, 7, 8, 9))
+        or type(claim_snapshot[4]) is not int
+        or type(claim_snapshot[5]) is not tuple
+        or any(type(item) is not str for item in tuple.__iter__(claim_snapshot[5]))
+        or type(claim_snapshot[6]) is not int
+        or type(claim_snapshot[10]) is not bool
+    ):
+        raise TypeError("M8 checker request claim snapshot type differs")
+    runtime = oracle_state["runtime"]
+    cursor = oracle_state["cursor"]
+    visibility = oracle_state["visibility"]
+    if type(runtime) is not M7ReplayRuntime or type(cursor) is not M7ReplayCursor:
+        raise TypeError("M8 checker request source type differs")
+    physical_claims = (
+        semantic_bundle_bytes,
+        id(oracle_request),
+        expected_semantic_runtime_sha256,
+        expected_current_cursor_sha256,
+        expected_catalog_event_position,
+        expected_catalog_action_ids,
+        expected_stop_event_position,
+        expected_suffix_sha256,
+        expected_freeze_id,
+        expected_freeze_sha256,
+        allow_exact_replay,
+    )
+    if (
+        claim_snapshot != physical_claims
+        or state["_oracle_request_object_id"] != id(oracle_request)
+        or state["_runtime_object_id"] != id(runtime)
+        or state["_replay_input_object_id"] != id(runtime.replay_input)
+        or state["_cursor_object_id"] != id(cursor)
+        or state["_visibility_object_id"] != id(visibility)
+        or state["_runtime_reference"] is not runtime
+        or state["_cursor_reference"] is not cursor
+        or state["_visibility_reference"] is not visibility
+    ):
+        raise TypeError("M8 checker request physical binding differs")
+    return _CheckerRequestSource(
+        claims=physical_claims,
+        identity_claims=tuple(state[name] for name in identifier_names),  # type: ignore[arg-type]
+        oracle_request=oracle_request,
+        runtime=runtime,
+        replay_input=runtime.replay_input,
+        cursor=cursor,
+        visibility=visibility,
+        request_state=state,
+        oracle_state=oracle_state,
+    )
+
+
+def _require_checker_request_source_unchanged(
+    before: _CheckerRequestSource,
+    after: _CheckerRequestSource,
+) -> None:
+    if (
+        after.claims != before.claims
+        or after.identity_claims != before.identity_claims
+        or after.oracle_request is not before.oracle_request
+        or after.runtime is not before.runtime
+        or after.replay_input is not before.replay_input
+        or after.cursor is not before.cursor
+        or after.visibility is not before.visibility
+        or after.request_state is not before.request_state
+        or after.oracle_state is not before.oracle_state
+    ):
+        raise TypeError("M8 checker request drifted during source capture")
+
+
+def _capture_checker_request_source(
+    request: M8CommonFactCheckRequest,
+    expected_type: type[M8CommonFactCheckRequest],
+) -> tuple[M8CommonFactCheckRequest, M7ReplayCursor]:
+    """Run the sole caller visibility callback before retaining any trusted DTO."""
+
+    before = _require_exact_checker_request_source(request, expected_type)
+    source_runtime = before.runtime
+    source_cursor = before.cursor
+    source_visibility = before.visibility
+    cursor_position, cursor_sha256 = _capture_replay_cursor_commitment_source(source_cursor)
+    captured_visibility = _capture_visible_suffix_source(
+        source_runtime,
+        source_visibility,
+        current_position=cursor_position,
+    )
+    after = _require_exact_checker_request_source(request, expected_type)
+    _require_checker_request_source_unchanged(before, after)
+    checker_cursor = _capture_replay_cursor_source(source_cursor)
+    if (
+        checker_cursor.next_event_position != cursor_position
+        or m7_cursor_sha256(checker_cursor) != cursor_sha256
+    ):
+        raise TypeError("M8 checker cursor drifted during source capture")
+    construction_claims = before.claims
+    (
+        semantic_bundle_bytes,
+        _construction_oracle_id,
+        expected_semantic_runtime_sha256,
+        expected_current_cursor_sha256,
+        expected_catalog_event_position,
+        expected_catalog_action_ids,
+        expected_stop_event_position,
+        expected_suffix_sha256,
+        expected_freeze_id,
+        expected_freeze_sha256,
+        allow_exact_replay,
+    ) = construction_claims
+    stop_event_position = cursor_position + 1 + len(captured_visibility.bindings)
+    suffix_sha256 = m8_suffix_sha256(
+        semantic_runtime_sha256=captured_visibility.semantic_runtime_sha256,
+        start_event_position=cursor_position,
+        stop_event_position=stop_event_position,
+        bindings=captured_visibility.bindings,
+    )
+    if (
+        expected_semantic_runtime_sha256 != captured_visibility.semantic_runtime_sha256
+        or expected_current_cursor_sha256 != cursor_sha256
+        or expected_catalog_event_position != cursor_position
+        or expected_stop_event_position != stop_event_position
+        or expected_suffix_sha256 != suffix_sha256
+    ):
+        raise ValueError("M8 checker source claims differ from captured request")
+    captured_oracle_request = M8OracleRequest(
+        runtime=source_runtime,
+        cursor=checker_cursor,
+        visibility=captured_visibility,
+    )
+    captured = expected_type(
+        semantic_bundle_bytes=semantic_bundle_bytes,  # type: ignore[arg-type]
+        oracle_request=captured_oracle_request,
+        expected_semantic_runtime_sha256=expected_semantic_runtime_sha256,  # type: ignore[arg-type]
+        expected_current_cursor_sha256=expected_current_cursor_sha256,  # type: ignore[arg-type]
+        expected_catalog_event_position=expected_catalog_event_position,  # type: ignore[arg-type]
+        expected_catalog_action_ids=expected_catalog_action_ids,  # type: ignore[arg-type]
+        expected_stop_event_position=expected_stop_event_position,  # type: ignore[arg-type]
+        expected_suffix_sha256=expected_suffix_sha256,  # type: ignore[arg-type]
+        expected_freeze_id=expected_freeze_id,  # type: ignore[arg-type]
+        expected_freeze_sha256=expected_freeze_sha256,  # type: ignore[arg-type]
+        allow_exact_replay=allow_exact_replay,  # type: ignore[arg-type]
+    )
+    captured_claims = object.__getattribute__(captured, "__dict__")["_claim_snapshot"]
+    if (
+        construction_claims[0:1] + construction_claims[2:]
+        != captured_claims[0:1] + captured_claims[2:]
+    ):
+        raise TypeError("M8 checker detached claims differ")
+    return captured, checker_cursor
+
+
 def _require_full_request_stable(
     source: M8FactBundleCheckRequest,
     captured: M8FactBundleCheckRequest,
@@ -1478,12 +1844,22 @@ def _require_full_request_stable(
     fact_sha256: str | None = None,
 ) -> None:
     try:
-        source.require_valid()
-        captured.require_valid()
-        if authority is not None:
-            authority.require_active(authority.runtime)
+        _require_exact_checker_request_source(source, M8FactBundleCheckRequest)
+        _require_exact_checker_request_source(captured, M8FactBundleCheckRequest)
+        source_cursor = _capture_replay_cursor_source(  # noqa: SLF001
+            source._cursor_reference,  # type: ignore[arg-type]  # noqa: SLF001
+        )
+        if m7_cursor_sha256(source_cursor) != source.expected_current_cursor_sha256:
+            raise ValueError("M8 checker source cursor drifted")
     except (AttributeError, TypeError, ValueError) as error:
         raise _FullFactFailure("runtime_binding_mismatch", fact_sha256) from error
+    if authority is not None:
+        try:
+            authority.require_active(authority.runtime)
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: checker proof authority capability"
+            ) from error
 
 
 def _fresh_exact_runtime(runtime: M7ReplayRuntime) -> M7ReplayRuntime:
@@ -2118,15 +2494,33 @@ def _validate_one_influence(
         state.influence_exact_fallback_sha256s.add(influence.fact_sha256)
         started = perf_counter()
     try:
-        actual, _added, _removed = _derive_influence_classification(
-            authority.runtime,
-            common_fact=common_fact,
-            influence=influence,
-            branch_cursor=branch_cursor,
-            state=state,
-            require_portable_exact=(influence.classification != "exact_transition"),
-            declared_exact_mode=exact_mode,
-        )
+        if state.prepared_layouts is None:
+            actual, _added, _removed = _derive_influence_classification(
+                authority.runtime,
+                common_fact=common_fact,
+                influence=influence,
+                branch_cursor=branch_cursor,
+                state=state,
+                require_portable_exact=(influence.classification != "exact_transition"),
+                declared_exact_mode=exact_mode,
+            )
+        else:
+            with _activate_prepared_event_validation(
+                state.prepared_layouts,
+                authority.runtime,
+                event_position=influence.event_position,
+            ):
+                actual, _added, _removed = _derive_influence_classification(
+                    authority.runtime,
+                    common_fact=common_fact,
+                    influence=influence,
+                    branch_cursor=branch_cursor,
+                    state=state,
+                    require_portable_exact=(
+                        influence.classification != "exact_transition"
+                    ),
+                    declared_exact_mode=exact_mode,
+                )
         if actual != influence.classification:
             raise _FullFactFailure(
                 "influence_classification_mismatch",
@@ -2391,58 +2785,21 @@ def _capture_full_request(
     request: M8FactBundleCheckRequest,
 ) -> tuple[M8FactBundleCheckRequest, M7ReplayCursor]:
     try:
-        request.require_valid()
+        captured, checker_cursor = _capture_checker_request_source(
+            request,
+            M8FactBundleCheckRequest,
+        )
+    except M8PreparedFrontierIntegrityError:
+        raise
     except (AttributeError, TypeError, ValueError) as error:
         raise _FullFactFailure("runtime_binding_mismatch") from error
-    construction_claims = request._claim_snapshot  # noqa: SLF001
-    (
-        semantic_bundle_bytes,
-        _construction_oracle_id,
-        expected_semantic_runtime_sha256,
-        expected_current_cursor_sha256,
-        expected_catalog_event_position,
-        expected_catalog_action_ids,
-        expected_stop_event_position,
-        expected_suffix_sha256,
-        expected_freeze_id,
-        expected_freeze_sha256,
-        allow_exact_replay,
-    ) = construction_claims
-    captured_oracle_request = M8OracleRequest(
-        runtime=request._runtime_reference,  # type: ignore[arg-type]  # noqa: SLF001
-        cursor=request._cursor_reference,  # type: ignore[arg-type]  # noqa: SLF001
-        visibility=request._visibility_reference,  # type: ignore[arg-type]  # noqa: SLF001
-    )
-    captured = M8FactBundleCheckRequest(
-        semantic_bundle_bytes=semantic_bundle_bytes,  # type: ignore[arg-type]
-        oracle_request=captured_oracle_request,
-        expected_semantic_runtime_sha256=expected_semantic_runtime_sha256,  # type: ignore[arg-type]
-        expected_current_cursor_sha256=expected_current_cursor_sha256,  # type: ignore[arg-type]
-        expected_catalog_event_position=expected_catalog_event_position,  # type: ignore[arg-type]
-        expected_catalog_action_ids=expected_catalog_action_ids,  # type: ignore[arg-type]
-        expected_stop_event_position=expected_stop_event_position,  # type: ignore[arg-type]
-        expected_suffix_sha256=expected_suffix_sha256,  # type: ignore[arg-type]
-        expected_freeze_id=expected_freeze_id,  # type: ignore[arg-type]
-        expected_freeze_sha256=expected_freeze_sha256,  # type: ignore[arg-type]
-        allow_exact_replay=allow_exact_replay,  # type: ignore[arg-type]
-    )
-    _require_full_request_stable(request, captured)
-    captured_claims = captured._claim_snapshot  # noqa: SLF001
-    if (
-        construction_claims[0:1] + construction_claims[2:]
-        != captured_claims[0:1] + captured_claims[2:]
-        or captured._runtime_reference is not request._runtime_reference  # noqa: SLF001
-        or captured._cursor_reference is not request._cursor_reference  # noqa: SLF001
-        or captured._visibility_reference is not request._visibility_reference  # noqa: SLF001
-    ):
+    if type(captured) is not M8FactBundleCheckRequest:
         raise _FullFactFailure("runtime_binding_mismatch")
-    before = m7_cursor_sha256(captured.oracle_request.cursor)
-    checker_cursor = deepcopy(captured.oracle_request.cursor)
-    after = m7_cursor_sha256(captured.oracle_request.cursor)
+    _require_full_request_stable(request, captured)
     if (
-        before != captured.expected_current_cursor_sha256
-        or after != before
-        or m7_cursor_sha256(checker_cursor) != before
+        m7_cursor_sha256(captured.oracle_request.cursor)
+        != captured.expected_current_cursor_sha256
+        or m7_cursor_sha256(checker_cursor) != captured.expected_current_cursor_sha256
     ):
         raise _FullFactFailure("runtime_binding_mismatch")
     return captured, checker_cursor
@@ -2532,7 +2889,7 @@ def check_m8_fact_bundle(
         with (
             profile_phase("fact_bundle_authority_session"),
             activate_m8_local_trusted_audit(),
-            authoritative_m7_proof_runtime(captured.oracle_request.runtime) as authority,
+            _m8_authoritative_proof_runtime(captured.oracle_request.runtime) as authority,
             ExitStack() as checker_resources,
         ):
             with profile_phase("fact_bundle_context_index_preparation"):
@@ -2645,6 +3002,8 @@ def check_m8_fact_bundle(
                                     )
                                 common_fact_by_ref[lemma.fact_sha256] = bound_fact
                                 issued += 1
+                    except M8PreparedFrontierIntegrityError as error:
+                        pending = error
                     except BaseException as error:
                         pending = _FullFactFailure(
                             "capability_registration_failure",
@@ -2676,6 +3035,8 @@ def check_m8_fact_bundle(
                                             first_fact=first_fact,
                                         )
                                     )
+                        except M8PreparedFrontierIntegrityError as error:
+                            pending = error
                         except _FullFactFailure as error:
                             pending = error
                         except BaseException as error:
@@ -2688,14 +3049,20 @@ def check_m8_fact_bundle(
                         try:
                             _drain_common_capabilities(capabilities)
                         except BaseException as error:
-                            pending = _FullFactFailure(
-                                "capability_registration_failure",
-                                first_fact,
-                            )
-                            pending.__cause__ = error
+                            if not isinstance(
+                                pending,
+                                M8PreparedFrontierIntegrityError,
+                            ):
+                                pending = _FullFactFailure(
+                                    "capability_registration_failure",
+                                    first_fact,
+                                )
+                                pending.__cause__ = error
                     if pending is not None:
                         raise pending
             except BaseException as error:
+                if isinstance(error, M8PreparedFrontierIntegrityError):
+                    raise
                 if isinstance(error, _FullFactFailure):
                     raise error
                 raise _FullFactFailure("capability_registration_failure", first_fact) from error
@@ -2733,6 +3100,8 @@ def check_m8_fact_bundle(
             issued=issued,
             fact_sha256=error.fact_sha256 or first_fact,
         )
+    except M8PreparedFrontierIntegrityError:
+        raise
     except (AttributeError, KeyError, RuntimeError, StopIteration, TypeError, ValueError):
         checked_influences = (
             len(state.checked_influence_sha256s) if state is not None else checked_influences
@@ -2769,68 +3138,28 @@ def check_m8_common_fact_bundle(
     state: _CommonCheckState | None = None
     try:
         try:
-            request.require_valid()
+            captured_request, checker_cursor = _capture_checker_request_source(
+                request,
+                M8CommonFactCheckRequest,
+            )
+        except M8PreparedFrontierIntegrityError:
+            raise
         except (AttributeError, TypeError, ValueError) as error:
             raise _CommonFactFailure("runtime_binding_mismatch") from error
-        construction_claims = request._claim_snapshot  # noqa: SLF001
-        (
-            semantic_bundle_bytes,
-            _construction_oracle_id,
-            expected_semantic_runtime_sha256,
-            expected_current_cursor_sha256,
-            expected_catalog_event_position,
-            expected_catalog_action_ids,
-            expected_stop_event_position,
-            expected_suffix_sha256,
-            expected_freeze_id,
-            expected_freeze_sha256,
-            allow_exact_replay,
-        ) = construction_claims
-        captured_oracle_request = M8OracleRequest(
-            runtime=request._runtime_reference,  # type: ignore[arg-type]  # noqa: SLF001
-            cursor=request._cursor_reference,  # type: ignore[arg-type]  # noqa: SLF001
-            visibility=request._visibility_reference,  # type: ignore[arg-type]  # noqa: SLF001
-        )
-        captured_request = M8CommonFactCheckRequest(
-            semantic_bundle_bytes=semantic_bundle_bytes,  # type: ignore[arg-type]
-            oracle_request=captured_oracle_request,
-            expected_semantic_runtime_sha256=expected_semantic_runtime_sha256,  # type: ignore[arg-type]
-            expected_current_cursor_sha256=expected_current_cursor_sha256,  # type: ignore[arg-type]
-            expected_catalog_event_position=expected_catalog_event_position,  # type: ignore[arg-type]
-            expected_catalog_action_ids=expected_catalog_action_ids,  # type: ignore[arg-type]
-            expected_stop_event_position=expected_stop_event_position,  # type: ignore[arg-type]
-            expected_suffix_sha256=expected_suffix_sha256,  # type: ignore[arg-type]
-            expected_freeze_id=expected_freeze_id,  # type: ignore[arg-type]
-            expected_freeze_sha256=expected_freeze_sha256,  # type: ignore[arg-type]
-            allow_exact_replay=allow_exact_replay,  # type: ignore[arg-type]
-        )
-        request.require_valid()
-        captured_claims = captured_request._claim_snapshot  # noqa: SLF001
-        if (
-            construction_claims[0:1] + construction_claims[2:]
-            != captured_claims[0:1] + captured_claims[2:]
-            or captured_request._runtime_reference  # noqa: SLF001
-            is not request._runtime_reference  # noqa: SLF001
-            or captured_request._cursor_reference  # noqa: SLF001
-            is not request._cursor_reference  # noqa: SLF001
-            or captured_request._visibility_reference  # noqa: SLF001
-            is not request._visibility_reference  # noqa: SLF001
-        ):
+        if type(captured_request) is not M8CommonFactCheckRequest:
             raise _CommonFactFailure("runtime_binding_mismatch")
-        cursor_before_sha256 = m7_cursor_sha256(captured_request.oracle_request.cursor)
-        checker_cursor = deepcopy(captured_request.oracle_request.cursor)
-        cursor_after_sha256 = m7_cursor_sha256(captured_request.oracle_request.cursor)
         if (
-            cursor_before_sha256 != captured_request.expected_current_cursor_sha256
-            or m7_cursor_sha256(checker_cursor) != cursor_before_sha256
-            or cursor_after_sha256 != cursor_before_sha256
+            m7_cursor_sha256(captured_request.oracle_request.cursor)
+            != captured_request.expected_current_cursor_sha256
+            or m7_cursor_sha256(checker_cursor)
+            != captured_request.expected_current_cursor_sha256
         ):
             raise _CommonFactFailure("runtime_binding_mismatch")
         bundle = _canonical_load(captured_request.semantic_bundle_bytes)
         first_fact = bundle.common_lemmas[0].fact_sha256 if bundle.common_lemmas else None
         with (
             activate_m8_local_trusted_audit(),
-            authoritative_m7_proof_runtime(captured_request.oracle_request.runtime) as authority,
+            _m8_authoritative_proof_runtime(captured_request.oracle_request.runtime) as authority,
         ):
             fallback, stop, _suffix = _validate_context(
                 captured_request,
@@ -2874,8 +3203,22 @@ def check_m8_common_fact_bundle(
                 fallbacks += local_fallbacks
                 fallback_seconds += local_seconds
             try:
-                captured_request.require_valid()
-                request.require_valid()
+                source_cursor = _capture_replay_cursor_source(  # noqa: SLF001
+                    request._cursor_reference,  # type: ignore[arg-type]  # noqa: SLF001
+                )
+                if (
+                    m7_cursor_sha256(source_cursor)
+                    != request.expected_current_cursor_sha256
+                ):
+                    raise ValueError("M8 checker source cursor drifted")
+                _require_exact_checker_request_source(
+                    captured_request,
+                    M8CommonFactCheckRequest,
+                )
+                _require_exact_checker_request_source(
+                    request,
+                    M8CommonFactCheckRequest,
+                )
             except (AttributeError, TypeError, ValueError) as error:
                 raise _CommonFactFailure("runtime_binding_mismatch", first_fact) from error
             capabilities: list[ValidatedCommonTransition] = []
@@ -2896,13 +3239,29 @@ def check_m8_common_fact_bundle(
                     _drain_common_capabilities(capabilities)
                 except BaseException:
                     pass
+                if isinstance(error, M8PreparedFrontierIntegrityError):
+                    raise
                 raise _CommonFactFailure(
                     "capability_registration_failure",
                     first_fact,
                 ) from error
             try:
-                captured_request.require_valid()
-                request.require_valid()
+                source_cursor = _capture_replay_cursor_source(  # noqa: SLF001
+                    request._cursor_reference,  # type: ignore[arg-type]  # noqa: SLF001
+                )
+                if (
+                    m7_cursor_sha256(source_cursor)
+                    != request.expected_current_cursor_sha256
+                ):
+                    raise ValueError("M8 checker source cursor drifted")
+                _require_exact_checker_request_source(
+                    captured_request,
+                    M8CommonFactCheckRequest,
+                )
+                _require_exact_checker_request_source(
+                    request,
+                    M8CommonFactCheckRequest,
+                )
             except (AttributeError, TypeError, ValueError) as error:
                 raise _CommonFactFailure("runtime_binding_mismatch", first_fact) from error
         return M8CommonFactCheckResult(
@@ -2932,6 +3291,8 @@ def check_m8_common_fact_bundle(
             fallback_seconds=fallback_seconds,
             fact_sha256=error.fact_sha256 or first_fact,
         )
+    except M8PreparedFrontierIntegrityError:
+        raise
     except (AttributeError, RuntimeError, TypeError, ValueError):
         if state is not None:
             audits = len(state.audited_counted_lemma_sha256s)

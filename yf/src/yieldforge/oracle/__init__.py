@@ -28,6 +28,7 @@ from yieldforge.oracle.reference import (
     M8OracleRequest,
     M8ReferenceResult,
     score_reference_action,
+    score_reference_actions,
     score_reference_event,
 )
 from yieldforge.oracle.visibility import FullRealizedVisibility, KnownOnlyVisibility
@@ -57,5 +58,6 @@ __all__ = [
     "check_action_proof",
     "check_action_proofs",
     "score_reference_action",
+    "score_reference_actions",
     "score_reference_event",
 ]

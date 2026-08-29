@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import weakref
@@ -9,7 +10,8 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import ClassVar, Literal
 
@@ -23,11 +25,13 @@ from yieldforge.baseline.contracts import (
     LayoutFitSearchStatus,
     M7ActionKind,
     M7CandidateSetEvidence,
+    M7LayoutActionEvidence,
     ReusableGeometryProblem,
     TemporalInstanceBinding,
 )
 from yieldforge.baseline.geometry import (
     LayoutTranslationCandidates,
+    PreparedTranslationRejectionRemnant,
     certify_translation_impossible,
     generate_layout_translations,
     prepare_layout_footprint,
@@ -39,7 +43,12 @@ from yieldforge.baseline.jagua import (
     JaguaRepresentationError,
     run_jagua_generated_prefilter,
 )
-from yieldforge.baseline.policies import ActionPolicyContext, PolicyRank, rank_policy_action
+from yieldforge.baseline.policies import (
+    ActionPolicyContext,
+    M7PolicyName,
+    PolicyRank,
+    rank_policy_action,
+)
 from yieldforge.baseline.replay import (
     M7ActionDescriptor,
     M7AuthoritativeProofRuntime,
@@ -54,6 +63,7 @@ from yieldforge.baseline.replay import (
     M7StepResult,
     apply_m7_action_descriptor,
     apply_m7_frozen_action_evidence_with_commitments,
+    authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
     enumerate_m7_pruned_action_catalog,
     enumerate_m7_single_remnant_competitor,
@@ -66,16 +76,33 @@ from yieldforge.baseline.replay import (
 )
 from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.oracle import facts as portable_facts
+from yieldforge.oracle.columnar import (
+    C0FrontierColumns,
+    C0FrontierQuery,
+    C0FrontierResult,
+    certify_frontier_impossible_batch,
+)
 from yieldforge.oracle.compiled import (
     CompiledRejectionProblem,
     CompiledTranslationRejection,
+    M8PreparedFrontierIntegrityError,
+    _activate_prepared_event_validation,
+    _capture_prepared_remnant_source,
     _compile_prepared_translation_rejections,
+    _consume_prepared_layout_footprints,
+    _consume_prepared_rejection_problem,
+    _consume_prepared_standard_winner,
+    _exact_instance_state,
+    _preflight_prepared_source_runtime,
+    _prepared_frontier_batch_inputs,
     _prepared_layout_footprints,
     _prepared_rejection_problem,
     _prepared_source_runtime,
     _prepared_standard_winner,
     _PreparedTranslationLayoutBatch,
     _registered_prepared_remnant_measurement,
+    _require_prepared_frontier_batch_inputs,
+    _validate_exact_model_graph,
     _verified_rejection_layouts_cover_candidates,
     compile_rejection_problem,
     compile_translation_rejections,
@@ -85,10 +112,14 @@ from yieldforge.oracle.concurrency import (
     require_m8_translation_audit_processes,
 )
 from yieldforge.oracle.frontier import ParetoFrontier, certify_frontier_impossible
+from yieldforge.oracle.prepared import (
+    _C0_FRONTIER_KERNEL_IDENTITY,
+    _C0_FRONTIER_KERNEL_MODE,
+)
 from yieldforge.oracle.profiling import increment_profile_count, profile_phase
 from yieldforge.oracle.proofs import M8EventWitness, M8InfluenceWitness
 from yieldforge.oracle.translation_count_audit import audit_layout_translation_batch
-from yieldforge.replay.contracts import InventoryItem
+from yieldforge.replay.contracts import InventoryItem, ReplayCostLedger
 from yieldforge.residuals.contracts import ResidualRuleSet
 from yieldforge.reuse.contracts import RemnantFitConfig
 from yieldforge.reuse.geometry import material_key
@@ -96,6 +127,67 @@ from yieldforge.reuse.geometry import material_key
 
 def _item_ids(items: tuple[InventoryItem, ...]) -> tuple[str, ...]:
     return tuple(item.remnant.remnant_id for item in items)
+
+
+@contextmanager
+def _m8_authoritative_proof_runtime(
+    runtime: M7ReplayRuntime,
+) -> Iterator[M7AuthoritativeProofRuntime]:
+    """Own M7 authority cleanup without letting it downgrade M8 integrity."""
+
+    body_error: BaseException | None = None
+    yielded = False
+    try:
+        with authoritative_m7_proof_runtime(runtime) as authority:
+            from yieldforge.baseline import replay as replay_module
+
+            yielded = True
+            authority_key = id(authority)
+            authority_registry = replay_module._AUTHORITATIVE_PROOF_RUNTIME_REGISTRY  # noqa: SLF001
+            original_record = authority_registry.get(authority_key)
+            try:
+                yield authority
+            except BaseException as error:
+                body_error = error
+            authority_integrity_error = None
+            entries = tuple(authority_registry.items())
+            valid_entries = tuple((key, value) for key, value in entries if type(key) is int)
+            if len(valid_entries) != len(entries):
+                authority_registry.clear()
+                authority_registry.update(valid_entries)
+                authority_integrity_error = M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: "
+                    "authoritative proof runtime registry keys"
+                )
+            if authority_registry.get(authority_key) is not original_record:
+                authority_registry[authority_key] = original_record
+                if authority_integrity_error is None:
+                    authority_integrity_error = M8PreparedFrontierIntegrityError(
+                        "M8 prepared frontier integrity differs: "
+                        "authoritative proof runtime capability"
+                    )
+            if isinstance(body_error, (KeyboardInterrupt, SystemExit)):
+                raise body_error
+            if isinstance(body_error, M8PreparedFrontierIntegrityError):
+                raise body_error
+            if authority_integrity_error is not None:
+                if body_error is not None:
+                    authority_integrity_error.__cause__ = body_error
+                raise authority_integrity_error
+            if body_error is not None:
+                raise body_error
+    except Exception as error:
+        if error is body_error:
+            raise
+        if isinstance(body_error, M8PreparedFrontierIntegrityError):
+            raise body_error from error
+        if not yielded:
+            raise
+        integrity_error = M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: authoritative proof runtime capability"
+        )
+        integrity_error.__cause__ = error
+        raise integrity_error from error
 
 
 @dataclass(frozen=True)
@@ -114,6 +206,2260 @@ class BranchInventoryDelta:
             raise ValueError("M8 removed remnant identities must be sorted unique")
         if set(added_ids) & set(removed_ids):
             raise ValueError("M8 added and removed remnant identities must be disjoint")
+
+
+_C0_BRANCH_AUTHORITY_ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class _C0PreparedFrontierBranchAuthority:
+    """Semantic authority for one indexed branch before a C0 event."""
+
+    branch_id: int
+    event_position: int
+    catalog_action_id: str
+    root_action_id: str
+    root_step: M7StepResult
+    common_before: M7ReplayCursor
+    branch_before: M7ReplayCursor
+    _branch_batch: object = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _C0_BRANCH_AUTHORITY_ISSUER:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: unissued branch authority"
+            )
+        if type(self.branch_id) is not int or self.branch_id < 0:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch index"
+            )
+        if type(self.event_position) is not int or self.event_position < 0:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event identity"
+            )
+        if any(
+            type(value) is not str or not value
+            for value in (self.catalog_action_id, self.root_action_id)
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: root action identity"
+            )
+        if type(self.root_step) is not M7StepResult or (
+            self.catalog_action_id != self.root_step.descriptor.action_id
+            or self.catalog_action_id != self.root_step.action_binding.catalog_action_id
+            or self.root_action_id != self.root_step.event.action.action_id
+            or self.root_action_id != self.root_step.action_binding.materialized_action_id
+            or self.root_step.event.sequence >= self.event_position
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: root action binding"
+            )
+        if (
+            type(self.common_before) is not M7ReplayCursor
+            or type(self.branch_before) is not M7ReplayCursor
+            or self.common_before.next_event_position != self.event_position
+            or self.branch_before.next_event_position != self.event_position
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: cursor event binding"
+            )
+
+
+_C0_BRANCH_SCOPE_ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class _C0PreparedFrontierGeneratorScope:
+    """Opaque runtime/catalog scope allowed to issue exact C0 branch authorities."""
+
+    _branch_batch: object = field(repr=False, compare=False)
+    _record: object | None = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredC0PreparedFrontierGeneratorScope:
+    reference: weakref.ReferenceType[_C0PreparedFrontierGeneratorScope]
+    owner_pid: int
+    token: object
+    branch_batch: object
+    generator_context: object
+    generator_context_fingerprint: str
+    runtime_authority: M7AuthoritativeProofRuntime
+    context_runtime: M7ReplayRuntime
+    context_prepared_layouts: _PreparedTranslationLayoutBatch
+    consumer_runtime: M7ReplayRuntime | None
+    consumer_prepared_layouts: _PreparedTranslationLayoutBatch | None
+    semantic_runtime_sha256: str
+    root_cursor: M7ReplayCursor
+    catalog: object
+    common_before: M7ReplayCursor
+    source_branches: tuple[object, ...]
+    source_positions_by_identity: dict[int, int]
+    branch_ids: tuple[int, ...]
+    descriptors: tuple[M7ActionDescriptor, ...]
+    root_steps: tuple[M7StepResult, ...]
+    branch_cursors: tuple[M7ReplayCursor, ...]
+    kernel_mode: str
+    kernel_identity: str
+    content_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredC0PreparedFrontierBranchAuthority:
+    reference: weakref.ReferenceType[_C0PreparedFrontierBranchAuthority]
+    owner_pid: int
+    token: object
+    branch_batch: object
+    source_scope: _C0PreparedFrontierGeneratorScope
+    source_branch: object
+    descriptor: M7ActionDescriptor
+    root_step: M7StepResult
+    branch_before: M7ReplayCursor
+    common_before: M7ReplayCursor
+    content_sha256: str
+
+
+_C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY: dict[
+    int,
+    _RegisteredC0PreparedFrontierBranchAuthority,
+] = {}
+_C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY: dict[
+    int,
+    _RegisteredC0PreparedFrontierGeneratorScope,
+] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class _C0PreparedFrontierChildOwnerBinding:
+    """Immutable child-to-batch ownership independent of mutable parent ledgers."""
+
+    child_reference: weakref.ReferenceType[object]
+    child_id: int
+    branch_batch_reference: weakref.ReferenceType[object]
+    branch_batch_id: int
+    owner_pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class _C0PreparedFrontierBatchChildIndex:
+    """Exact private insertion-ordered child index for one live C0 batch."""
+
+    branch_batch_reference: weakref.ReferenceType[object]
+    branch_batch_id: int
+    owner_pid: int
+    scope_ids: dict[int, None]
+    authority_ids: dict[int, None]
+
+
+_C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY: dict[
+    int,
+    _C0PreparedFrontierChildOwnerBinding,
+] = {}
+_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY: dict[
+    int,
+    _C0PreparedFrontierChildOwnerBinding,
+] = {}
+_C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY: dict[
+    int,
+    _C0PreparedFrontierBatchChildIndex,
+] = {}
+
+
+def _bind_c0_prepared_frontier_child_owner(
+    child: object,
+    *,
+    branch_batch: object,
+    owner_registry: dict[int, _C0PreparedFrontierChildOwnerBinding],
+    is_scope: bool,
+) -> None:
+    """Atomically add one child owner sidecar and immutable batch-index entry."""
+
+    child_id = id(child)
+    branch_batch_id = id(branch_batch)
+    index = _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.get(branch_batch_id)
+    if index is None:
+        index = _C0PreparedFrontierBatchChildIndex(
+            branch_batch_reference=weakref.ref(branch_batch),
+            branch_batch_id=branch_batch_id,
+            owner_pid=os.getpid(),
+            scope_ids={},
+            authority_ids={},
+        )
+    if (
+        type(index) is not _C0PreparedFrontierBatchChildIndex
+        or type(index.branch_batch_reference) is not weakref.ReferenceType
+        or index.branch_batch_reference() is not branch_batch
+        or index.branch_batch_id != branch_batch_id
+        or index.owner_pid != os.getpid()
+        or type(index.scope_ids) is not dict
+        or type(index.authority_ids) is not dict
+        or child_id in owner_registry
+        or child_id in index.scope_ids
+        or child_id in index.authority_ids
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: duplicate C0 child owner"
+        )
+    binding = _C0PreparedFrontierChildOwnerBinding(
+        child_reference=weakref.ref(child),
+        child_id=child_id,
+        branch_batch_reference=index.branch_batch_reference,
+        branch_batch_id=branch_batch_id,
+        owner_pid=os.getpid(),
+    )
+    owner_registry[child_id] = binding
+    (index.scope_ids if is_scope else index.authority_ids)[child_id] = None
+    _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY[branch_batch_id] = index
+
+
+def _discard_c0_prepared_frontier_child_owner(
+    child_id: int,
+    *,
+    branch_batch_id: int,
+    owner_registry: dict[int, _C0PreparedFrontierChildOwnerBinding],
+    is_scope: bool,
+) -> None:
+    """Remove one exact sidecar and its immutable batch-index membership."""
+
+    owner_registry.pop(child_id, None)
+    index = _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.get(branch_batch_id)
+    if (
+        type(index) is not _C0PreparedFrontierBatchChildIndex
+        or type(index.scope_ids) is not dict
+        or type(index.authority_ids) is not dict
+    ):
+        _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.pop(branch_batch_id, None)
+        return
+    index.scope_ids.pop(child_id, None)
+    index.authority_ids.pop(child_id, None)
+    if index.scope_ids or index.authority_ids:
+        _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY[branch_batch_id] = index
+    else:
+        _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.pop(branch_batch_id, None)
+
+
+def _require_c0_prepared_frontier_child_owner(
+    child: object,
+    *,
+    branch_batch: object,
+    owner_registry: dict[int, _C0PreparedFrontierChildOwnerBinding],
+    is_scope: bool,
+) -> None:
+    """Validate one child owner sidecar and exact index membership in O(1)."""
+
+    child_id = id(child)
+    branch_batch_id = id(branch_batch)
+    binding = owner_registry.get(child_id)
+    index = _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.get(branch_batch_id)
+    indexed_ids = (
+        (index.scope_ids if is_scope else index.authority_ids)
+        if (
+            type(index) is _C0PreparedFrontierBatchChildIndex
+            and type(index.scope_ids) is dict
+            and type(index.authority_ids) is dict
+        )
+        else {}
+    )
+    if (
+        type(binding) is not _C0PreparedFrontierChildOwnerBinding
+        or type(binding.child_reference) is not weakref.ReferenceType
+        or binding.child_reference() is not child
+        or binding.child_id != child_id
+        or type(binding.branch_batch_reference) is not weakref.ReferenceType
+        or binding.branch_batch_reference() is not branch_batch
+        or binding.branch_batch_id != branch_batch_id
+        or binding.owner_pid != os.getpid()
+        or type(index) is not _C0PreparedFrontierBatchChildIndex
+        or type(index.branch_batch_reference) is not weakref.ReferenceType
+        or index.branch_batch_reference() is not branch_batch
+        or index.branch_batch_id != branch_batch_id
+        or index.owner_pid != os.getpid()
+        or type(index.scope_ids) is not dict
+        or type(index.authority_ids) is not dict
+        or indexed_ids.get(child_id, object()) is not None
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: immutable C0 child owner"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedC0PreparedFrontierEventTransaction:
+    branch_batch: object
+    owner_record: object
+    source_scope: _C0PreparedFrontierGeneratorScope
+    scope_record: _RegisteredC0PreparedFrontierGeneratorScope
+    authorities: tuple[_C0PreparedFrontierBranchAuthority, ...]
+    authority_records: tuple[_RegisteredC0PreparedFrontierBranchAuthority, ...]
+
+
+def _c0_prepared_frontier_branch_authority_sha256(
+    authority: _C0PreparedFrontierBranchAuthority,
+) -> str:
+    return "sha256:" + semantic_sha256(
+        {
+            "schema_version": "yieldforge.m8-c0-branch-authority.v1",
+            "branch_id": authority.branch_id,
+            "event_position": authority.event_position,
+            "catalog_action_id": authority.catalog_action_id,
+            "root_action_id": authority.root_action_id,
+            "root_event_position": authority.root_step.event.sequence,
+            "root_cursor_sha256": m7_cursor_sha256(authority.root_step.cursor),
+            "common_before_sha256": m7_cursor_sha256(authority.common_before),
+            "branch_before_sha256": m7_cursor_sha256(authority.branch_before),
+            "branch_batch_id": id(authority._branch_batch),  # noqa: SLF001
+        }
+    )
+
+
+def _c0_prepared_frontier_generator_scope_sha256(
+    *,
+    branch_batch: object,
+    generator_context: object,
+    generator_context_fingerprint: str,
+    runtime_authority: M7AuthoritativeProofRuntime,
+    context_runtime: M7ReplayRuntime,
+    context_prepared_layouts: _PreparedTranslationLayoutBatch,
+    consumer_runtime: M7ReplayRuntime | None,
+    consumer_prepared_layouts: _PreparedTranslationLayoutBatch | None,
+    semantic_runtime_sha256: str,
+    root_cursor: M7ReplayCursor,
+    catalog: object,
+    common_before: M7ReplayCursor,
+    source_branches: tuple[object, ...],
+    branch_ids: tuple[int, ...],
+    kernel_mode: str,
+    kernel_identity: str,
+) -> str:
+    return "sha256:" + semantic_sha256(
+        {
+            "schema_version": "yieldforge.m8-c0-generator-scope.v2",
+            "branch_batch_id": id(branch_batch),
+            "generator_context_id": id(generator_context),
+            "generator_context_fingerprint": generator_context_fingerprint,
+            "runtime_authority_id": id(runtime_authority),
+            "context_runtime_id": id(context_runtime),
+            "context_prepared_layouts_id": id(context_prepared_layouts),
+            "consumer_runtime_id": (id(consumer_runtime) if consumer_runtime is not None else None),
+            "consumer_prepared_layouts_id": (
+                id(consumer_prepared_layouts) if consumer_prepared_layouts is not None else None
+            ),
+            "semantic_runtime_sha256": semantic_runtime_sha256,
+            "root_cursor_sha256": m7_cursor_sha256(root_cursor),
+            "catalog_event_position": catalog.event_position,
+            "catalog_action_ids": tuple(item.action_id for item in catalog.actions),
+            "common_before_sha256": m7_cursor_sha256(common_before),
+            "branch_ids": branch_ids,
+            "kernel_mode": kernel_mode,
+            "kernel_identity": kernel_identity,
+            "branches": tuple(
+                {
+                    "descriptor_action_id": source.descriptor.action_id,
+                    "root_action_id": source.initial_step.event.action.action_id,
+                    "root_cursor_sha256": m7_cursor_sha256(source.initial_step.cursor),
+                    "branch_cursor_sha256": m7_cursor_sha256(source.cursor),
+                }
+                for source in source_branches
+            ),
+        }
+    )
+
+
+def _issue_c0_prepared_frontier_generator_scope(
+    branch_batch: object,
+    *,
+    consumer_runtime: M7ReplayRuntime | None = None,
+    consumer_prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
+    common_before: M7ReplayCursor | None = None,
+    source_branches: tuple[object, ...] | None = None,
+    root_cursor: M7ReplayCursor | None = None,
+) -> _C0PreparedFrontierGeneratorScope:
+    """Mint C0 authority only from one sparse-owned live event transaction."""
+
+    try:
+        from yieldforge.oracle import sparse
+
+        if (
+            type(branch_batch) is not sparse._M8PreparedC0BranchBatch  # noqa: SLF001
+            or consumer_runtime is not None
+            or consumer_prepared_layouts is not None
+            or common_before is not None
+            or source_branches is not None
+            or root_cursor is not None
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: active C0 branch batch required"
+            )
+        branch_batch_record = sparse._require_prepared_c0_branch_batch(  # noqa: SLF001
+            branch_batch
+        )
+        if (
+            branch_batch_record.lifecycle.scope_issued
+            or branch_batch_record.lifecycle.consumed
+            or branch_batch_record.generator_scope_references
+            or branch_batch_record.branch_authority_references
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: duplicate event scope"
+            )
+        generator_context = branch_batch_record.generator_context
+        generator_context.require_active()
+        context_registry = sparse._PREPARED_GENERATOR_REGISTRY.get(  # noqa: SLF001
+            id(generator_context)
+        )
+        context_fingerprint = sparse._generator_context_fingerprint(  # noqa: SLF001
+            generator_context
+        )
+        context_runtime = generator_context._request.runtime  # noqa: SLF001
+        context_prepared_layouts = generator_context._prepared_layouts  # noqa: SLF001
+        common_before = branch_batch_record.common.common_fact.cursor_before
+        source_branches = branch_batch_record.branches
+        if (
+            context_registry is None
+            or context_registry[0]() is not generator_context
+            or context_registry[1] != os.getpid()
+            or context_registry[2] != id(generator_context._authority)  # noqa: SLF001
+            or context_registry[3] != context_fingerprint
+            or context_prepared_layouts is not generator_context._prepared_layouts  # noqa: SLF001
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: generator context source"
+            )
+        runtime_authority = generator_context._authority  # noqa: SLF001
+        runtime_authority.require_active(context_runtime)
+        context_prepared_layouts.require_active(context_runtime)
+        root_cursor = generator_context._request.cursor  # noqa: SLF001
+        catalog = generator_context._catalog  # noqa: SLF001
+        catalog_positions = {
+            descriptor.action_id: position for position, descriptor in enumerate(catalog.actions)
+        }
+        branch_ids = tuple(
+            catalog_positions.get(source.descriptor.action_id, -1) for source in source_branches
+        )
+        if (
+            any(branch_id < 0 for branch_id in branch_ids)
+            or branch_ids != tuple(sorted(set(branch_ids)))
+            or common_before.next_event_position <= root_cursor.next_event_position
+            or common_before.next_event_position >= generator_context._stop_event_position  # noqa: SLF001
+        ):
+            raise ValueError("M8 C0 generator source roots differ from the catalog")
+        descriptors = tuple(catalog.actions[branch_id] for branch_id in branch_ids)
+        root_steps = []
+        branch_cursors = []
+        for source, descriptor in zip(source_branches, descriptors, strict=True):
+            expected_root = apply_m7_action_descriptor(
+                context_runtime,
+                cursor=root_cursor,
+                catalog=catalog,
+                descriptor=descriptor,
+                decision_key=(f"m8_hypothetical_action_id={descriptor.action_id}",),
+            )
+            if (
+                source.descriptor != descriptor
+                or source.initial_step != expected_root
+                or type(source.cursor) is not M7ReplayCursor
+                or source.cursor.next_event_position != common_before.next_event_position
+            ):
+                raise ValueError("M8 C0 generator branch root differs from the catalog")
+            root_steps.append(source.initial_step)
+            branch_cursors.append(source.cursor)
+        scope = _C0PreparedFrontierGeneratorScope(
+            _branch_batch=branch_batch,
+            _record=None,
+            _token=_C0_BRANCH_SCOPE_ISSUER,
+        )
+        scope_id = id(scope)
+        semantic_runtime_sha256 = runtime_authority.semantic_sha256
+
+        def discard(
+            reference: weakref.ReferenceType[_C0PreparedFrontierGeneratorScope],
+        ) -> None:
+            registered = _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.get(scope_id)
+            released = (
+                type(registered) is _RegisteredC0PreparedFrontierGeneratorScope
+                and registered.reference is reference
+            )
+            if released:
+                _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.pop(scope_id, None)
+            if (
+                released
+                and branch_batch_record.generator_scope_references.get(scope_id) is reference
+            ):
+                branch_batch_record.generator_scope_references.pop(scope_id, None)
+            if released:
+                _discard_c0_prepared_frontier_child_owner(
+                    scope_id,
+                    branch_batch_id=id(branch_batch),
+                    owner_registry=_C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY,
+                    is_scope=True,
+                )
+                if (
+                    type(branch_batch_record.generator_scope_references) is dict
+                    and type(branch_batch_record.branch_authority_references) is dict
+                    and not branch_batch_record.generator_scope_references
+                    and not branch_batch_record.branch_authority_references
+                ):
+                    branch_batch_record.lifecycle.issued_branch_ids.clear()
+                    branch_batch_record.lifecycle.consumed = True
+
+        reference = weakref.ref(scope, discard)
+        registered_scope = _RegisteredC0PreparedFrontierGeneratorScope(
+            reference=reference,
+            owner_pid=os.getpid(),
+            token=_C0_BRANCH_SCOPE_ISSUER,
+            branch_batch=branch_batch,
+            generator_context=generator_context,
+            generator_context_fingerprint=context_fingerprint,
+            runtime_authority=runtime_authority,
+            context_runtime=context_runtime,
+            context_prepared_layouts=context_prepared_layouts,
+            consumer_runtime=None,
+            consumer_prepared_layouts=None,
+            semantic_runtime_sha256=semantic_runtime_sha256,
+            root_cursor=root_cursor,
+            catalog=catalog,
+            common_before=common_before,
+            source_branches=source_branches,
+            source_positions_by_identity={
+                id(source): position for position, source in enumerate(source_branches)
+            },
+            branch_ids=branch_ids,
+            descriptors=descriptors,
+            root_steps=tuple(root_steps),
+            branch_cursors=tuple(branch_cursors),
+            kernel_mode=_C0_FRONTIER_KERNEL_MODE,
+            kernel_identity=_C0_FRONTIER_KERNEL_IDENTITY,
+            content_sha256=_c0_prepared_frontier_generator_scope_sha256(
+                branch_batch=branch_batch,
+                generator_context=generator_context,
+                generator_context_fingerprint=context_fingerprint,
+                runtime_authority=runtime_authority,
+                context_runtime=context_runtime,
+                context_prepared_layouts=context_prepared_layouts,
+                consumer_runtime=None,
+                consumer_prepared_layouts=None,
+                semantic_runtime_sha256=semantic_runtime_sha256,
+                root_cursor=root_cursor,
+                catalog=catalog,
+                common_before=common_before,
+                source_branches=source_branches,
+                branch_ids=branch_ids,
+                kernel_mode=_C0_FRONTIER_KERNEL_MODE,
+                kernel_identity=_C0_FRONTIER_KERNEL_IDENTITY,
+            ),
+        )
+        object.__setattr__(scope, "_record", registered_scope)
+        if (
+            scope_id in _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY
+            or scope_id in branch_batch_record.generator_scope_references
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: duplicate generator scope"
+            )
+        _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY[scope_id] = registered_scope
+        branch_batch_record.generator_scope_references[scope_id] = reference
+        try:
+            _bind_c0_prepared_frontier_child_owner(
+                scope,
+                branch_batch=branch_batch,
+                owner_registry=_C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY,
+                is_scope=True,
+            )
+        except Exception:
+            _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.pop(scope_id, None)
+            branch_batch_record.generator_scope_references.pop(scope_id, None)
+            raise
+        branch_batch_record.lifecycle.scope_issued = True
+        return scope
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: generator scope"
+        ) from error
+
+
+def _require_c0_prepared_frontier_generator_scope_registration(
+    scope: _C0PreparedFrontierGeneratorScope,
+) -> tuple[_RegisteredC0PreparedFrontierGeneratorScope, object]:
+    """Validate one scope's process-local registry and parent links in O(1)."""
+
+    try:
+        from yieldforge.oracle import sparse
+
+        registered = _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.get(id(scope))
+        owner_record = getattr(scope._branch_batch, "_owner_record", None)  # noqa: SLF001
+        _require_c0_prepared_frontier_child_owner(
+            scope,
+            branch_batch=scope._branch_batch,  # noqa: SLF001
+            owner_registry=_C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY,
+            is_scope=True,
+        )
+        if (
+            type(scope) is not _C0PreparedFrontierGeneratorScope
+            or type(registered) is not _RegisteredC0PreparedFrontierGeneratorScope
+            or type(owner_record) is not sparse._RegisteredM8PreparedC0BranchBatch  # noqa: SLF001
+            or scope._record is not registered  # noqa: SLF001
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not scope
+            or registered.owner_pid != os.getpid()
+            or registered.token is not scope._token  # noqa: SLF001
+            or scope._branch_batch is not registered.branch_batch  # noqa: SLF001
+            or type(owner_record.reference) is not weakref.ReferenceType
+            or owner_record.reference() is not registered.branch_batch
+            or owner_record.owner_pid != os.getpid()
+            or owner_record.token is not registered.branch_batch._token  # noqa: SLF001
+            or registered.branch_batch._owner_record is not owner_record  # noqa: SLF001
+            or type(owner_record.generator_scope_references) is not dict
+            or owner_record.generator_scope_references.get(id(scope)) is not registered.reference
+            or type(owner_record.branch_authority_references) is not dict
+            or type(owner_record.lifecycle) is not sparse._M8PreparedC0BranchBatchLifecycle  # noqa: SLF001
+            or not owner_record.lifecycle.scope_issued
+            or owner_record.lifecycle.consumed
+            or type(owner_record.lifecycle.issued_branch_ids) is not set
+            or type(registered.source_branches) is not tuple
+            or type(registered.source_positions_by_identity) is not dict
+            or type(registered.branch_ids) is not tuple
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: generator scope authority"
+            )
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: generator scope authority"
+        ) from error
+    return registered, owner_record
+
+
+def _require_c0_prepared_frontier_generator_scope(
+    scope: _C0PreparedFrontierGeneratorScope,
+) -> _RegisteredC0PreparedFrontierGeneratorScope:
+    try:
+        from yieldforge.oracle import sparse
+
+        registered, shallow_owner_record = (
+            _require_c0_prepared_frontier_generator_scope_registration(scope)
+        )
+        generator_context = registered.generator_context
+        branch_batch_record = sparse._require_prepared_c0_branch_batch(  # noqa: SLF001
+            registered.branch_batch
+        )
+        if type(generator_context) is not sparse._M8PreparedGeneratorContext:  # noqa: SLF001
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: generator scope authority"
+            )
+        generator_context.require_active()
+        current_fingerprint = sparse._generator_context_fingerprint(  # noqa: SLF001
+            generator_context
+        )
+        registered.runtime_authority.require_active(registered.context_runtime)
+        registered.context_prepared_layouts.require_active(registered.context_runtime)
+        consumer_bound = (
+            registered.consumer_runtime is not None
+            and registered.consumer_prepared_layouts is not None
+        )
+        if consumer_bound:
+            registered.consumer_prepared_layouts.require_active(registered.consumer_runtime)
+        if (
+            type(scope) is not _C0PreparedFrontierGeneratorScope
+            or shallow_owner_record is not branch_batch_record
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not scope
+            or registered.owner_pid != os.getpid()
+            or registered.token is not scope._token  # noqa: SLF001
+            or scope._branch_batch is not registered.branch_batch  # noqa: SLF001
+            or branch_batch_record.generator_scope_references.get(id(scope))
+            is not registered.reference
+            or branch_batch_record.generator_context is not generator_context
+            or branch_batch_record.common.common_fact.cursor_before is not registered.common_before
+            or branch_batch_record.branches is not registered.source_branches
+            or generator_context._authority is not registered.runtime_authority  # noqa: SLF001
+            or generator_context._request.runtime is not registered.context_runtime  # noqa: SLF001
+            or generator_context._request.cursor is not registered.root_cursor  # noqa: SLF001
+            or generator_context._catalog is not registered.catalog  # noqa: SLF001
+            or generator_context._prepared_layouts  # noqa: SLF001
+            is not registered.context_prepared_layouts
+            or (
+                (registered.consumer_runtime is None)
+                != (registered.consumer_prepared_layouts is None)
+            )
+            or (
+                consumer_bound
+                and registered.consumer_runtime is not generator_context._source_runtime  # noqa: SLF001
+                and registered.consumer_runtime is not registered.context_runtime
+            )
+            or registered.generator_context_fingerprint != current_fingerprint
+            or registered.semantic_runtime_sha256 != registered.runtime_authority.semantic_sha256
+            or tuple(source.descriptor for source in registered.source_branches)
+            != registered.descriptors
+            or tuple(source.initial_step for source in registered.source_branches)
+            != registered.root_steps
+            or tuple(source.cursor for source in registered.source_branches)
+            != registered.branch_cursors
+            or registered.source_positions_by_identity
+            != {id(source): position for position, source in enumerate(registered.source_branches)}
+            or registered.kernel_mode != _C0_FRONTIER_KERNEL_MODE
+            or registered.kernel_identity != _C0_FRONTIER_KERNEL_IDENTITY
+            or registered.content_sha256
+            != _c0_prepared_frontier_generator_scope_sha256(
+                branch_batch=registered.branch_batch,
+                generator_context=generator_context,
+                generator_context_fingerprint=current_fingerprint,
+                runtime_authority=registered.runtime_authority,
+                context_runtime=registered.context_runtime,
+                context_prepared_layouts=registered.context_prepared_layouts,
+                consumer_runtime=registered.consumer_runtime,
+                consumer_prepared_layouts=registered.consumer_prepared_layouts,
+                semantic_runtime_sha256=registered.semantic_runtime_sha256,
+                root_cursor=registered.root_cursor,
+                catalog=registered.catalog,
+                common_before=registered.common_before,
+                source_branches=registered.source_branches,
+                branch_ids=registered.branch_ids,
+                kernel_mode=registered.kernel_mode,
+                kernel_identity=registered.kernel_identity,
+            )
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: generator scope authority"
+            )
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: generator scope authority"
+        ) from error
+    return registered
+
+
+def _bind_c0_prepared_frontier_generator_scope(
+    scope: _C0PreparedFrontierGeneratorScope,
+    *,
+    runtime: M7ReplayRuntime,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+) -> _RegisteredC0PreparedFrontierGeneratorScope:
+    """Atomically bind an issued producer scope to its first exact consumer."""
+
+    registered = _require_c0_prepared_frontier_generator_scope(scope)
+    return _bind_c0_prepared_frontier_generator_scope_registration(
+        scope,
+        registered=registered,
+        runtime=runtime,
+        prepared_layouts=prepared_layouts,
+    )
+
+
+def _bind_c0_prepared_frontier_generator_scope_registration(
+    scope: _C0PreparedFrontierGeneratorScope,
+    *,
+    registered: _RegisteredC0PreparedFrontierGeneratorScope,
+    runtime: M7ReplayRuntime,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+) -> _RegisteredC0PreparedFrontierGeneratorScope:
+    """Bind one already fully validated scope without rescanning its branches."""
+
+    current, _owner_record = _require_c0_prepared_frontier_generator_scope_registration(scope)
+    if current is not registered:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: C0 consumer binding race"
+        )
+    if (
+        registered.consumer_runtime is runtime
+        and registered.consumer_prepared_layouts is prepared_layouts
+    ):
+        return registered
+    if (
+        registered.consumer_runtime is not None
+        or registered.consumer_prepared_layouts is not None
+        or (
+            runtime is not registered.context_runtime
+            and runtime is not registered.generator_context._source_runtime  # noqa: SLF001
+        )
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: C0 consumer binding"
+        )
+    try:
+        prepared_layouts.require_active(runtime)
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: C0 consumer capability"
+        ) from error
+    bound = replace(
+        registered,
+        consumer_runtime=runtime,
+        consumer_prepared_layouts=prepared_layouts,
+        content_sha256=_c0_prepared_frontier_generator_scope_sha256(
+            branch_batch=registered.branch_batch,
+            generator_context=registered.generator_context,
+            generator_context_fingerprint=registered.generator_context_fingerprint,
+            runtime_authority=registered.runtime_authority,
+            context_runtime=registered.context_runtime,
+            context_prepared_layouts=registered.context_prepared_layouts,
+            consumer_runtime=runtime,
+            consumer_prepared_layouts=prepared_layouts,
+            semantic_runtime_sha256=registered.semantic_runtime_sha256,
+            root_cursor=registered.root_cursor,
+            catalog=registered.catalog,
+            common_before=registered.common_before,
+            source_branches=registered.source_branches,
+            branch_ids=registered.branch_ids,
+            kernel_mode=registered.kernel_mode,
+            kernel_identity=registered.kernel_identity,
+        ),
+    )
+    if _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.get(id(scope)) is not registered:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: C0 consumer binding race"
+        )
+    _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY[id(scope)] = bound
+    object.__setattr__(scope, "_record", bound)
+    current, _owner_record = _require_c0_prepared_frontier_generator_scope_registration(scope)
+    if current is not bound:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: C0 consumer binding race"
+        )
+    return bound
+
+
+def _release_c0_prepared_frontier_generator_scopes(
+    branch_batch: object,
+    *,
+    owner_record: object | None = None,
+) -> None:
+    """Consume exactly this batch's immutable-indexed children, failure atomically."""
+
+    from yieldforge.oracle import sparse
+
+    integrity_error: M8PreparedFrontierIntegrityError | None = None
+
+    def note_integrity(error: BaseException | str) -> None:
+        nonlocal integrity_error
+        if integrity_error is None:
+            if isinstance(error, M8PreparedFrontierIntegrityError):
+                integrity_error = error
+            else:
+                integrity_error = M8PreparedFrontierIntegrityError(
+                    f"M8 prepared frontier integrity differs: C0 branch batch cleanup ({error})"
+                )
+                if isinstance(error, BaseException):
+                    integrity_error.__cause__ = error
+
+    branch_batch_id = id(branch_batch)
+    current_owner = sparse._PREPARED_C0_BRANCH_BATCH_REGISTRY.get(  # noqa: SLF001
+        branch_batch_id
+    )
+    if owner_record is None:
+        owner_record = current_owner
+    owner_type_ok = type(owner_record) is sparse._RegisteredM8PreparedC0BranchBatch  # noqa: SLF001
+    if not owner_type_ok:
+        note_integrity("malformed parent")
+
+    scope_ledger_ids: tuple[int, ...] = ()
+    authority_ledger_ids: tuple[int, ...] = ()
+    lifecycle: object | None = None
+    if owner_type_ok:
+        try:
+            if (
+                type(owner_record.reference) is not weakref.ReferenceType
+                or owner_record.reference() is not branch_batch
+                or owner_record.owner_pid != os.getpid()
+                or owner_record.token is not branch_batch._token  # noqa: SLF001
+                or branch_batch._owner_record is not owner_record  # noqa: SLF001
+                or current_owner is not owner_record
+            ):
+                note_integrity("replaced parent")
+            if type(owner_record.generator_scope_references) is dict:
+                raw_scope_ledger_ids = tuple(owner_record.generator_scope_references)
+                scope_ledger_ids = tuple(
+                    child_id for child_id in raw_scope_ledger_ids if type(child_id) is int
+                )
+                if len(scope_ledger_ids) != len(raw_scope_ledger_ids):
+                    note_integrity("malformed scope ledger key")
+            else:
+                note_integrity("malformed scope ledger")
+            if type(owner_record.branch_authority_references) is dict:
+                raw_authority_ledger_ids = tuple(owner_record.branch_authority_references)
+                authority_ledger_ids = tuple(
+                    child_id for child_id in raw_authority_ledger_ids if type(child_id) is int
+                )
+                if len(authority_ledger_ids) != len(raw_authority_ledger_ids):
+                    note_integrity("malformed authority ledger key")
+            else:
+                note_integrity("malformed authority ledger")
+            lifecycle = owner_record.lifecycle
+            if type(lifecycle) is not sparse._M8PreparedC0BranchBatchLifecycle:  # noqa: SLF001
+                lifecycle = None
+                note_integrity("malformed lifecycle")
+        except Exception as error:
+            note_integrity(error)
+
+    index = _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.get(branch_batch_id)
+    index_valid = (
+        type(index) is _C0PreparedFrontierBatchChildIndex
+        and type(index.branch_batch_reference) is weakref.ReferenceType
+        and index.branch_batch_reference() is branch_batch
+        and type(index.branch_batch_id) is int
+        and index.branch_batch_id == branch_batch_id
+        and type(index.owner_pid) is int
+        and index.owner_pid == os.getpid()
+        and type(index.scope_ids) is dict
+        and type(index.authority_ids) is dict
+        and all(
+            type(child_id) is int and value is None for child_id, value in index.scope_ids.items()
+        )
+        and all(
+            type(child_id) is int and value is None
+            for child_id, value in index.authority_ids.items()
+        )
+    )
+    if index_valid:
+        indexed_scope_ids = tuple(index.scope_ids)
+        indexed_authority_ids = tuple(index.authority_ids)
+    else:
+        already_consumed = (
+            type(lifecycle) is sparse._M8PreparedC0BranchBatchLifecycle  # noqa: SLF001
+            and lifecycle.consumed is True
+            and not scope_ledger_ids
+            and not authority_ledger_ids
+            and index is None
+            and integrity_error is None
+        )
+        if already_consumed:
+            if (
+                type(lifecycle.scope_issued) is bool
+                and lifecycle.consumed is True
+                and type(lifecycle.issued_branch_ids) is set
+                and not lifecycle.issued_branch_ids
+            ):
+                return
+            note_integrity("consumed C0 lifecycle drift")
+        note_integrity("missing exact child index")
+        indexed_scope_ids = ()
+        indexed_authority_ids = ()
+
+    if set(scope_ledger_ids) != set(indexed_scope_ids) or set(authority_ledger_ids) != set(
+        indexed_authority_ids
+    ):
+        note_integrity("mutable child ledger drift")
+
+    def cleanup_child_is_local(
+        child_id: int,
+        *,
+        owner_registry: dict[int, _C0PreparedFrontierChildOwnerBinding],
+        child_registry: dict[int, object],
+        child_record_type: type[object],
+        child_type: type[object],
+    ) -> bool:
+        """Resolve local cleanup authority without trusting one mutable record alone."""
+
+        registered = child_registry.get(child_id)
+        registered_child = (
+            registered.reference()
+            if type(registered) is child_record_type
+            and type(registered.reference) is weakref.ReferenceType
+            else None
+        )
+        exact_registered_child = (
+            type(registered) is child_record_type
+            and type(registered_child) is child_type
+            and id(registered_child) == child_id
+            and registered.reference() is registered_child
+            and type(registered.owner_pid) is int
+            and registered.owner_pid == os.getpid()
+        )
+        binding = owner_registry.get(child_id)
+        binding_owner = (
+            binding.branch_batch_reference()
+            if type(binding) is _C0PreparedFrontierChildOwnerBinding
+            and type(binding.branch_batch_reference) is weakref.ReferenceType
+            else None
+        )
+        binding_child = (
+            binding.child_reference()
+            if type(binding) is _C0PreparedFrontierChildOwnerBinding
+            and type(binding.child_reference) is weakref.ReferenceType
+            else None
+        )
+        valid_binding_owner = (
+            type(binding) is _C0PreparedFrontierChildOwnerBinding
+            and type(binding.child_reference) is weakref.ReferenceType
+            and type(binding.child_id) is int
+            and binding.child_id == child_id
+            and binding_owner is not None
+            and type(binding.branch_batch_id) is int
+            and binding.branch_batch_id == id(binding_owner)
+            and type(binding.owner_pid) is int
+            and binding.owner_pid == os.getpid()
+            and (
+                (
+                    type(binding_child) is child_type
+                    and id(binding_child) == child_id
+                    and binding_child._branch_batch is binding_owner  # type: ignore[attr-defined]  # noqa: SLF001
+                )
+                or (binding_child is None and not exact_registered_child)
+            )
+        )
+        if valid_binding_owner:
+            if binding_owner is not branch_batch:
+                note_integrity("foreign C0 child owner")
+                return False
+            return True
+
+        note_integrity("missing or malformed C0 child owner")
+        return (
+            exact_registered_child
+            and registered.branch_batch is branch_batch
+            and registered_child._branch_batch is branch_batch  # type: ignore[attr-defined]  # noqa: SLF001
+        )
+
+    scope_ids = tuple(
+        child_id
+        for child_id in dict.fromkeys(indexed_scope_ids + scope_ledger_ids)
+        if cleanup_child_is_local(
+            child_id,
+            owner_registry=_C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY,
+            child_registry=_C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY,
+            child_record_type=_RegisteredC0PreparedFrontierGeneratorScope,
+            child_type=_C0PreparedFrontierGeneratorScope,
+        )
+    )
+    authority_ids = tuple(
+        child_id
+        for child_id in dict.fromkeys(indexed_authority_ids + authority_ledger_ids)
+        if cleanup_child_is_local(
+            child_id,
+            owner_registry=_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+            child_registry=_C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY,
+            child_record_type=_RegisteredC0PreparedFrontierBranchAuthority,
+            child_type=_C0PreparedFrontierBranchAuthority,
+        )
+    )
+    if set(scope_ids) != set(indexed_scope_ids) or set(authority_ids) != set(indexed_authority_ids):
+        note_integrity("foreign C0 child index ownership")
+
+    issued_branch_ids = set()
+    for authority_id in authority_ids:
+        try:
+            binding = _C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY.get(authority_id)
+            authority = (
+                binding.child_reference()
+                if type(binding) is _C0PreparedFrontierChildOwnerBinding
+                and type(binding.child_reference) is weakref.ReferenceType
+                else None
+            )
+            binding_owner = (
+                binding.branch_batch_reference()
+                if type(binding) is _C0PreparedFrontierChildOwnerBinding
+                and type(binding.branch_batch_reference) is weakref.ReferenceType
+                else None
+            )
+            if (
+                type(binding) is not _C0PreparedFrontierChildOwnerBinding
+                or type(binding.child_id) is not int
+                or binding.child_id != authority_id
+                or binding_owner is not branch_batch
+                or type(binding.branch_batch_id) is not int
+                or binding.branch_batch_id != branch_batch_id
+                or type(binding.owner_pid) is not int
+                or binding.owner_pid != os.getpid()
+                or type(authority) is not _C0PreparedFrontierBranchAuthority
+                or type(authority.branch_id) is not int
+            ):
+                note_integrity("authority owner drift")
+            else:
+                issued_branch_ids.add(authority.branch_id)
+            registered_authority = _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.get(authority_id)
+            if (
+                type(registered_authority) is not _RegisteredC0PreparedFrontierBranchAuthority
+                or type(registered_authority.reference) is not weakref.ReferenceType
+                or registered_authority.reference() is not authority
+                or registered_authority.branch_batch is not branch_batch
+            ):
+                note_integrity("authority record drift")
+        except Exception as error:
+            note_integrity(error)
+    expected_branch_ids: set[int] | None = None
+    for scope_id in scope_ids:
+        try:
+            binding = _C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY.get(scope_id)
+            scope = (
+                binding.child_reference()
+                if type(binding) is _C0PreparedFrontierChildOwnerBinding
+                and type(binding.child_reference) is weakref.ReferenceType
+                else None
+            )
+            binding_owner = (
+                binding.branch_batch_reference()
+                if type(binding) is _C0PreparedFrontierChildOwnerBinding
+                and type(binding.branch_batch_reference) is weakref.ReferenceType
+                else None
+            )
+            if (
+                type(binding) is not _C0PreparedFrontierChildOwnerBinding
+                or type(binding.child_id) is not int
+                or binding.child_id != scope_id
+                or binding_owner is not branch_batch
+                or type(binding.branch_batch_id) is not int
+                or binding.branch_batch_id != branch_batch_id
+                or type(binding.owner_pid) is not int
+                or binding.owner_pid != os.getpid()
+                or type(scope) is not _C0PreparedFrontierGeneratorScope
+            ):
+                note_integrity("scope owner drift")
+            registered_scope = _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.get(scope_id)
+            if (
+                type(registered_scope) is not _RegisteredC0PreparedFrontierGeneratorScope
+                or type(registered_scope.reference) is not weakref.ReferenceType
+                or registered_scope.reference() is not scope
+                or registered_scope.branch_batch is not branch_batch
+                or type(registered_scope.branch_ids) is not tuple
+                or not all(type(branch_id) is int for branch_id in registered_scope.branch_ids)
+            ):
+                note_integrity("scope record drift")
+            elif expected_branch_ids is None:
+                expected_branch_ids = set(registered_scope.branch_ids)
+            else:
+                note_integrity("multiple C0 scopes")
+        except Exception as error:
+            note_integrity(error)
+    if lifecycle is not None:
+        try:
+            if (
+                type(lifecycle.scope_issued) is not bool
+                or type(lifecycle.consumed) is not bool
+                or type(lifecycle.issued_branch_ids) is not set
+                or lifecycle.consumed
+                or lifecycle.scope_issued != (len(scope_ids) == 1)
+                or lifecycle.issued_branch_ids != issued_branch_ids
+                or (
+                    lifecycle.scope_issued
+                    and expected_branch_ids is not None
+                    and issued_branch_ids != expected_branch_ids
+                )
+            ):
+                note_integrity("C0 child lifecycle drift")
+        except Exception as error:
+            note_integrity(error)
+
+    for authority_id in authority_ids:
+        for registry in (
+            _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY,
+            _C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+        ):
+            for _attempt in range(2):
+                try:
+                    registry.pop(authority_id, None)
+                    break
+                except Exception as error:
+                    note_integrity(error)
+    for scope_id in scope_ids:
+        for registry in (
+            _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY,
+            _C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY,
+        ):
+            for _attempt in range(2):
+                try:
+                    registry.pop(scope_id, None)
+                    break
+                except Exception as error:
+                    note_integrity(error)
+    for _attempt in range(2):
+        try:
+            _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.pop(branch_batch_id, None)
+            break
+        except Exception as error:
+            note_integrity(error)
+
+    if owner_type_ok:
+        for field_name in (
+            "branch_authority_references",
+            "generator_scope_references",
+        ):
+            ledger = getattr(owner_record, field_name, None)
+            try:
+                if type(ledger) is not dict:
+                    raise TypeError("malformed C0 child ledger")
+                ledger.clear()
+            except Exception as error:
+                note_integrity(error)
+                object.__setattr__(owner_record, field_name, {})
+        if lifecycle is not None:
+            try:
+                lifecycle.issued_branch_ids.clear()
+                lifecycle.consumed = True
+            except Exception as error:
+                note_integrity(error)
+                lifecycle.issued_branch_ids = set()
+    if integrity_error is not None:
+        raise integrity_error
+
+
+def _issue_c0_prepared_frontier_branch_authority(
+    *,
+    source_scope: _C0PreparedFrontierGeneratorScope | None = None,
+    source_branch: object,
+    branch_id: int | None = None,
+    event_position: int | None = None,
+    common_before: M7ReplayCursor | None = None,
+) -> _C0PreparedFrontierBranchAuthority:
+    """Derive one opaque C0 authority from an exact live generator branch."""
+
+    try:
+        if (
+            source_scope is None
+            or branch_id is not None
+            or event_position is not None
+            or common_before is not None
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: generator scope required"
+            )
+        scope, branch_batch_record = _require_c0_prepared_frontier_generator_scope_registration(
+            source_scope
+        )
+        source_position = scope.source_positions_by_identity.get(id(source_branch))
+        if (
+            type(source_position) is not int
+            or source_position < 0
+            or source_position >= len(scope.source_branches)
+            or scope.source_branches[source_position] is not source_branch
+            or source_position >= len(scope.branch_ids)
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch outside generator scope"
+            )
+        branch_id = scope.branch_ids[source_position]
+        if (
+            not branch_batch_record.lifecycle.scope_issued
+            or branch_batch_record.lifecycle.consumed
+            or len(branch_batch_record.branch_authority_references) >= len(scope.source_branches)
+            or branch_id in branch_batch_record.lifecycle.issued_branch_ids
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch authority lifecycle"
+            )
+        event_position = scope.common_before.next_event_position
+        common_before = scope.common_before
+        descriptor = source_branch.descriptor
+        root_step = source_branch.initial_step
+        branch_before = source_branch.cursor
+    except AttributeError as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: branch source"
+        ) from error
+    authority = _C0PreparedFrontierBranchAuthority(
+        branch_id=branch_id,
+        event_position=event_position,
+        catalog_action_id=descriptor.action_id,
+        root_action_id=root_step.event.action.action_id,
+        root_step=root_step,
+        common_before=common_before,
+        branch_before=branch_before,
+        _branch_batch=scope.branch_batch,
+        _token=_C0_BRANCH_AUTHORITY_ISSUER,
+    )
+    key = id(authority)
+
+    def discard(
+        reference: weakref.ReferenceType[_C0PreparedFrontierBranchAuthority],
+    ) -> None:
+        registered = _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.get(key)
+        released = (
+            type(registered) is _RegisteredC0PreparedFrontierBranchAuthority
+            and registered.reference is reference
+        )
+        if released:
+            _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.pop(key, None)
+        if released and branch_batch_record.branch_authority_references.get(key) is reference:
+            branch_batch_record.branch_authority_references.pop(key, None)
+        if released:
+            _discard_c0_prepared_frontier_child_owner(
+                key,
+                branch_batch_id=id(scope.branch_batch),
+                owner_registry=_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+                is_scope=False,
+            )
+
+    reference = weakref.ref(authority, discard)
+    registered_authority = _RegisteredC0PreparedFrontierBranchAuthority(
+        reference=reference,
+        owner_pid=os.getpid(),
+        token=_C0_BRANCH_AUTHORITY_ISSUER,
+        branch_batch=scope.branch_batch,
+        source_scope=source_scope,
+        source_branch=source_branch,
+        descriptor=descriptor,
+        root_step=root_step,
+        branch_before=branch_before,
+        common_before=common_before,
+        content_sha256=_c0_prepared_frontier_branch_authority_sha256(authority),
+    )
+    if (
+        key in _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY
+        or key in branch_batch_record.branch_authority_references
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: duplicate branch authority"
+        )
+    _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY[key] = registered_authority
+    branch_batch_record.branch_authority_references[key] = reference
+    try:
+        _bind_c0_prepared_frontier_child_owner(
+            authority,
+            branch_batch=scope.branch_batch,
+            owner_registry=_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+            is_scope=False,
+        )
+    except Exception:
+        _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.pop(key, None)
+        branch_batch_record.branch_authority_references.pop(key, None)
+        raise
+    branch_batch_record.lifecycle.issued_branch_ids.add(branch_id)
+    return authority
+
+
+def _require_c0_prepared_frontier_branch_authority_registration(
+    authority: _C0PreparedFrontierBranchAuthority,
+) -> tuple[
+    _RegisteredC0PreparedFrontierBranchAuthority,
+    _RegisteredC0PreparedFrontierGeneratorScope,
+]:
+    """Validate producer ownership without requiring a consumer binding."""
+
+    try:
+        registered = _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.get(id(authority))
+        _require_c0_prepared_frontier_child_owner(
+            authority,
+            branch_batch=authority._branch_batch,  # noqa: SLF001
+            owner_registry=_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+            is_scope=False,
+        )
+        if registered is None:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch source authority"
+            )
+        scope = _require_c0_prepared_frontier_generator_scope(registered.source_scope)
+        source_position = scope.source_positions_by_identity.get(id(registered.source_branch))
+        branch_batch_record = scope.branch_batch._owner_record  # noqa: SLF001
+        if type(source_position) is not int:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch source authority"
+            )
+        registered = _require_c0_prepared_frontier_branch_authority_registration_shallow(
+            authority,
+            branch_batch_record=branch_batch_record,
+            source_scope=registered.source_scope,
+            scope_record=scope,
+            expected_position=source_position,
+        )
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: branch source authority"
+        ) from error
+    return registered, scope
+
+
+def _require_c0_prepared_frontier_branch_authority_registration_shallow(
+    authority: _C0PreparedFrontierBranchAuthority,
+    *,
+    branch_batch_record: object,
+    source_scope: _C0PreparedFrontierGeneratorScope,
+    scope_record: _RegisteredC0PreparedFrontierGeneratorScope,
+    expected_position: int,
+) -> _RegisteredC0PreparedFrontierBranchAuthority:
+    """Validate one authority against a fully validated scope in O(1)."""
+
+    try:
+        registered = _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.get(id(authority))
+        _require_c0_prepared_frontier_child_owner(
+            authority,
+            branch_batch=authority._branch_batch,  # noqa: SLF001
+            owner_registry=_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+            is_scope=False,
+        )
+        if (
+            type(authority) is not _C0PreparedFrontierBranchAuthority
+            or type(registered) is not _RegisteredC0PreparedFrontierBranchAuthority
+            or type(expected_position) is not int
+            or expected_position < 0
+            or expected_position >= len(scope_record.source_branches)
+            or expected_position >= len(scope_record.branch_ids)
+            or _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.get(id(source_scope))
+            is not scope_record
+            or source_scope._record is not scope_record  # noqa: SLF001
+            or type(scope_record.reference) is not weakref.ReferenceType
+            or scope_record.reference() is not source_scope
+            or scope_record.branch_batch is not registered.branch_batch
+            or type(branch_batch_record.reference) is not weakref.ReferenceType
+            or scope_record.branch_batch is not branch_batch_record.reference()
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not authority
+            or registered.owner_pid != os.getpid()
+            or registered.token is not authority._token  # noqa: SLF001
+            or authority._branch_batch is not registered.branch_batch  # noqa: SLF001
+            or branch_batch_record.branch_authority_references.get(id(authority))
+            is not registered.reference
+            or registered.source_scope is not source_scope
+            or registered.source_branch is not scope_record.source_branches[expected_position]
+            or scope_record.source_positions_by_identity.get(id(registered.source_branch))
+            != expected_position
+            or scope_record.branch_ids[expected_position] != authority.branch_id
+            or scope_record.common_before is not authority.common_before
+            or registered.source_branch.descriptor is not registered.descriptor
+            or registered.source_branch.initial_step is not registered.root_step
+            or registered.source_branch.cursor is not registered.branch_before
+            or authority.root_step is not registered.root_step
+            or authority.branch_before is not registered.branch_before
+            or authority.common_before is not registered.common_before
+            or registered.content_sha256 != _c0_prepared_frontier_branch_authority_sha256(authority)
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch source authority"
+            )
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: branch source authority"
+        ) from error
+    return registered
+
+
+def _require_c0_prepared_frontier_branch_authority(
+    authority: _C0PreparedFrontierBranchAuthority,
+    *,
+    runtime: M7ReplayRuntime,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+) -> None:
+    registered, _issued_scope = _require_c0_prepared_frontier_branch_authority_registration(
+        authority
+    )
+    scope = _bind_c0_prepared_frontier_generator_scope(
+        registered.source_scope,
+        runtime=runtime,
+        prepared_layouts=prepared_layouts,
+    )
+    if (
+        scope.consumer_runtime is not runtime
+        or scope.consumer_prepared_layouts is not prepared_layouts
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: branch source authority"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _C0BranchRemnantRow:
+    """One immutable branch/remnant input to the prepared scalar batch."""
+
+    branch_id: int
+    direction: Literal["added", "removed"]
+    item: InventoryItem
+
+    def __post_init__(self) -> None:
+        if type(self.branch_id) is not int or self.branch_id < 0:
+            raise ValueError("M8 C0 branch id must be a nonnegative exact integer")
+        if self.direction not in ("added", "removed"):
+            raise ValueError("M8 C0 branch direction is unsupported")
+        if type(self.item) is not InventoryItem:
+            raise TypeError("M8 C0 branch row requires an exact inventory item")
+
+
+@dataclass(frozen=True, slots=True)
+class _C0PreparedFrontierRowBinding:
+    """Frozen semantic evidence behind one dense C0 numeric query."""
+
+    row_id: int
+    branch_id: int
+    event_position: int
+    catalog_action_id: str
+    root_action_id: str
+    branch_before_sha256: str
+    common_before_sha256: str
+    direction: Literal["added", "removed"]
+    item: InventoryItem
+    delta: BranchInventoryDelta
+    problem_id: str
+    problem_sha256: str
+    candidate_set_id: str
+    candidate_set_sha256: str
+    candidate_ids: tuple[str, ...]
+    rejection_layout_candidate_ids: tuple[str, ...]
+    rejection_layout_sha256s: tuple[str, ...]
+    retained_candidate_ids: tuple[str, ...]
+    fit_config_sha256: str
+    partition_sha256: str
+    event_material_key: tuple[str, str, str, str, str]
+    material_matches: bool
+    measurement: PreparedTranslationRejectionRemnant
+    measurement_sha256: str
+    remnant_area: float
+    remnant_width: float
+    remnant_height: float
+    area_tolerance: float
+    coordinate_tolerance: float
+
+
+@dataclass(frozen=True, slots=True)
+class _C0PreparedFrontierRowResult:
+    """Fail-closed semantic disposition for one branch/remnant row."""
+
+    binding: _C0PreparedFrontierRowBinding
+    supported: bool
+    all_impossible: bool
+
+    def __post_init__(self) -> None:
+        if type(self.supported) is not bool or type(self.all_impossible) is not bool:
+            raise TypeError("M8 C0 row disposition must use exact booleans")
+        if not self.supported and self.all_impossible:
+            raise ValueError("M8 C0 unsupported rows cannot prove impossibility")
+
+
+@dataclass(frozen=True, slots=True)
+class _C0PreparedFrontierBranchResult:
+    """Aggregate eligibility for every changed item in one branch."""
+
+    branch_id: int
+    event_position: int
+    catalog_action_id: str
+    root_action_id: str
+    branch_before_sha256: str
+    common_before_sha256: str
+    delta: BranchInventoryDelta
+    row_ids: tuple[int, ...]
+    supported: bool
+    compact_eligible: bool
+
+    def __post_init__(self) -> None:
+        if not self.row_ids:
+            raise ValueError("M8 C0 branch result must contain at least one row")
+        if type(self.supported) is not bool or type(self.compact_eligible) is not bool:
+            raise TypeError("M8 C0 branch disposition must use exact booleans")
+        if not self.supported and self.compact_eligible:
+            raise ValueError("M8 C0 unsupported branches cannot be compact eligible")
+
+
+@dataclass(frozen=True, slots=True)
+class _C0PreparedFrontierBatchResult:
+    """Fully validated scalar rows and their branch-level dispositions."""
+
+    rows: tuple[_C0PreparedFrontierRowResult, ...]
+    branches: tuple[_C0PreparedFrontierBranchResult, ...]
+
+    def __post_init__(self) -> None:
+        if tuple(item.binding.row_id for item in self.rows) != tuple(range(len(self.rows))):
+            raise ValueError("M8 C0 semantic row ids must be dense input order")
+        expected_branch_ids = tuple(dict.fromkeys(item.binding.branch_id for item in self.rows))
+        if tuple(item.branch_id for item in self.branches) != expected_branch_ids:
+            raise ValueError("M8 C0 branch result order differs from semantic rows")
+
+
+def _c0_frontier_partition_supported(inputs) -> bool:  # type: ignore[no-untyped-def]
+    """Return soft unsupported only for an explicitly absent scalar archive."""
+
+    try:
+        candidate_ids = inputs.candidate_ids
+        layout_ids = inputs.rejection_layout_candidate_ids
+        layout_hashes = inputs.rejection_layout_sha256s
+        if (
+            type(candidate_ids) is not tuple
+            or not candidate_ids
+            or any(type(item) is not str or not item for item in candidate_ids)
+            or len(candidate_ids) != len(set(candidate_ids))
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: candidate partition"
+            )
+        if (
+            type(layout_ids) is not tuple
+            or type(layout_hashes) is not tuple
+            or len(layout_ids) != len(layout_hashes)
+            or len(layout_ids) != len(set(layout_ids))
+            or any(
+                type(value) is not str or not value.startswith("sha256:") or len(value) != 71
+                for value in layout_hashes
+            )
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: rejection partition"
+            )
+        problem = inputs.problem
+        if problem is None:
+            candidate_position = {
+                candidate_id: position for position, candidate_id in enumerate(candidate_ids)
+            }
+            retained_positions = tuple(
+                candidate_position.get(candidate_id, -1) for candidate_id in layout_ids
+            )
+            if (
+                layout_ids == candidate_ids
+                or any(position < 0 for position in retained_positions)
+                or retained_positions != tuple(sorted(retained_positions))
+            ):
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: incomplete rejection archive"
+                )
+            return False
+        if layout_ids != candidate_ids:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: rejection membership"
+            )
+        if type(problem) is not CompiledRejectionProblem or (
+            problem.problem_id != inputs.problem_id
+            or problem.problem_sha256 != inputs.problem_sha256
+            or problem.candidate_set_id != inputs.candidate_set_id
+            or problem.candidate_set_sha256 != inputs.candidate_set_sha256
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: problem binding"
+            )
+        frontier = problem.frontier
+        if type(frontier) is not ParetoFrontier:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: frontier type"
+            )
+        canonical = ParetoFrontier(
+            members=frontier.members,
+            retained=frontier.retained,
+            dominated_by=frontier.dominated_by,
+        )
+        if canonical != frontier or not frontier.members or not frontier.retained:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: frontier classification"
+            )
+        member_ids = tuple(item.candidate_id for item in frontier.members)
+        if member_ids != tuple(sorted(candidate_ids)):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: frontier membership"
+            )
+        if any(
+            item.problem_id != inputs.problem_id
+            or item.problem_sha256 != inputs.problem_sha256
+            or item.candidate_set_id != inputs.candidate_set_id
+            or item.candidate_set_sha256 != inputs.candidate_set_sha256
+            or item.material_partition != "temporal_event"
+            or item.fit_config_sha256 != inputs.fit_config_sha256
+            for item in frontier.members
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: frontier partition"
+            )
+        return True
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: malformed partition"
+        ) from error
+
+
+def _validated_c0_branch_authority(
+    *,
+    transaction: _ValidatedC0PreparedFrontierEventTransaction,
+    runtime: M7ReplayRuntime,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+    event_position: int,
+    branches: tuple[_C0PreparedFrontierBranchAuthority, ...],
+    rows: tuple[_C0BranchRemnantRow, ...],
+) -> tuple[tuple[_C0PreparedFrontierBranchAuthority, BranchInventoryDelta], ...]:
+    """Require an exact authority-to-delta-to-row bijection before numeric work."""
+
+    try:
+        if type(branches) is not tuple or any(
+            type(item) is not _C0PreparedFrontierBranchAuthority for item in branches
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch authority type"
+            )
+        if len(branches) != len(transaction.authorities) or any(
+            authority is not expected
+            for authority, expected in zip(
+                branches,
+                transaction.authorities,
+                strict=True,
+            )
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event transaction ownership"
+            )
+        prepared_layouts.require_active(runtime)
+        scope_record = _bind_c0_prepared_frontier_generator_scope_registration(
+            transaction.source_scope,
+            registered=transaction.scope_record,
+            runtime=runtime,
+            prepared_layouts=prepared_layouts,
+        )
+        for expected_position, (authority, authority_record) in enumerate(
+            zip(branches, transaction.authority_records, strict=True)
+        ):
+            if (
+                _require_c0_prepared_frontier_branch_authority_registration_shallow(
+                    authority,
+                    branch_batch_record=transaction.owner_record,
+                    source_scope=transaction.source_scope,
+                    scope_record=scope_record,
+                    expected_position=expected_position,
+                )
+                is not authority_record
+            ):
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: branch source authority"
+                )
+        if type(rows) is not tuple or any(type(row) is not _C0BranchRemnantRow for row in rows):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch row type"
+            )
+        if not branches and not rows:
+            return ()
+        branch_ids = tuple(item.branch_id for item in branches)
+        if (
+            not branches
+            or branch_ids != tuple(sorted(set(branch_ids)))
+            or tuple(dict.fromkeys(row.branch_id for row in rows)) != branch_ids
+            or any(item.event_position != event_position for item in branches)
+            or len({item.catalog_action_id for item in branches}) != len(branches)
+            or len({item.root_action_id for item in branches}) != len(branches)
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch authority ordering"
+            )
+        common_hashes = tuple(m7_cursor_sha256(item.common_before) for item in branches)
+        if len(set(common_hashes)) != 1:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: common cursor binding"
+            )
+        validated = []
+        expected_rows = []
+        for authority in branches:
+            delta = _derive_branch_inventory_delta(
+                authority.common_before,
+                authority.branch_before,
+            )
+            if not delta.added and not delta.removed:
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: empty branch delta"
+                )
+            validated.append((authority, delta))
+            expected_rows.extend(
+                _C0BranchRemnantRow(
+                    branch_id=authority.branch_id,
+                    direction=direction,
+                    item=item,
+                )
+                for direction, items in (("added", delta.added), ("removed", delta.removed))
+                for item in items
+            )
+        if tuple(expected_rows) != rows:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: exact inventory delta rows"
+            )
+        return tuple(validated)
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: malformed branch authority"
+        ) from error
+
+
+def _require_c0_prepared_frontier_event_transaction_children(
+    branch_batch: object,
+    owner_record: object,
+) -> _ValidatedC0PreparedFrontierEventTransaction:
+    """Require one exact indexed parent-to-child graph without sibling scans."""
+
+    try:
+        from yieldforge.oracle import sparse
+
+        if (
+            type(owner_record) is not sparse._RegisteredM8PreparedC0BranchBatch  # noqa: SLF001
+            or type(owner_record.reference) is not weakref.ReferenceType
+            or owner_record.reference() is not branch_batch
+            or branch_batch._owner_record is not owner_record  # noqa: SLF001
+            or sparse._PREPARED_C0_BRANCH_BATCH_REGISTRY.get(id(branch_batch))  # noqa: SLF001
+            is not owner_record
+            or not owner_record.lifecycle.scope_issued
+            or owner_record.lifecycle.consumed
+            or type(owner_record.generator_scope_references) is not dict
+            or type(owner_record.branch_authority_references) is not dict
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event transaction owner"
+            )
+        scope_ledger_ids = tuple(owner_record.generator_scope_references)
+        authority_ledger_ids = tuple(owner_record.branch_authority_references)
+        index = _C0_PREPARED_FRONTIER_BATCH_CHILD_INDEX_REGISTRY.get(id(branch_batch))
+        if (
+            type(index) is not _C0PreparedFrontierBatchChildIndex
+            or type(index.branch_batch_reference) is not weakref.ReferenceType
+            or index.branch_batch_reference() is not branch_batch
+            or index.branch_batch_id != id(branch_batch)
+            or index.owner_pid != os.getpid()
+            or type(index.scope_ids) is not dict
+            or type(index.authority_ids) is not dict
+            or any(
+                type(child_id) is not int or value is not None
+                for child_id, value in index.scope_ids.items()
+            )
+            or any(
+                type(child_id) is not int or value is not None
+                for child_id, value in index.authority_ids.items()
+            )
+            or len(index.scope_ids) != 1
+            or any(type(child_id) is not int for child_id in scope_ledger_ids)
+            or any(type(child_id) is not int for child_id in authority_ledger_ids)
+            or set(scope_ledger_ids) != set(index.scope_ids)
+            or set(authority_ledger_ids) != set(index.authority_ids)
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event transaction coverage"
+            )
+        scope_id = next(iter(index.scope_ids))
+        scope_reference = owner_record.generator_scope_references[scope_id]
+        if type(scope_reference) is not weakref.ReferenceType:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event scope reference"
+            )
+        source_scope = scope_reference()
+        scope_record = _C0_PREPARED_FRONTIER_GENERATOR_SCOPE_REGISTRY.get(scope_id)
+        if (
+            type(source_scope) is not _C0PreparedFrontierGeneratorScope
+            or type(scope_record) is not _RegisteredC0PreparedFrontierGeneratorScope
+            or scope_record.reference is not scope_reference
+            or scope_record.branch_batch is not branch_batch
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event scope coverage"
+            )
+        _require_c0_prepared_frontier_child_owner(
+            source_scope,
+            branch_batch=branch_batch,
+            owner_registry=_C0_PREPARED_FRONTIER_SCOPE_OWNER_REGISTRY,
+            is_scope=True,
+        )
+        scope_record = _require_c0_prepared_frontier_generator_scope(source_scope)
+        validated_authorities = []
+        for expected_position, authority_id in enumerate(index.authority_ids):
+            reference = owner_record.branch_authority_references[authority_id]
+            if type(reference) is not weakref.ReferenceType:
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: event branch reference"
+                )
+            authority = reference()
+            registered = _C0_PREPARED_FRONTIER_BRANCH_AUTHORITY_REGISTRY.get(authority_id)
+            if (
+                type(authority) is not _C0PreparedFrontierBranchAuthority
+                or authority._branch_batch is not branch_batch  # noqa: SLF001
+                or type(registered) is not _RegisteredC0PreparedFrontierBranchAuthority
+                or registered.reference is not reference
+                or registered.branch_batch is not branch_batch
+            ):
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: event branch ownership"
+                )
+            _require_c0_prepared_frontier_child_owner(
+                authority,
+                branch_batch=branch_batch,
+                owner_registry=_C0_PREPARED_FRONTIER_AUTHORITY_OWNER_REGISTRY,
+                is_scope=False,
+            )
+            authority_record = _require_c0_prepared_frontier_branch_authority_registration_shallow(
+                authority,
+                branch_batch_record=owner_record,
+                source_scope=source_scope,
+                scope_record=scope_record,
+                expected_position=expected_position,
+            )
+            validated_authorities.append((authority, authority_record))
+        if (
+            len(validated_authorities) != len(scope_record.source_branches)
+            or tuple(authority.branch_id for authority, _record in validated_authorities)
+            != scope_record.branch_ids
+            or tuple(
+                authority_record.source_branch
+                for _authority, authority_record in validated_authorities
+            )
+            != scope_record.source_branches
+            or owner_record.lifecycle.issued_branch_ids != set(scope_record.branch_ids)
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event branch coverage"
+            )
+        return _ValidatedC0PreparedFrontierEventTransaction(
+            branch_batch=branch_batch,
+            owner_record=owner_record,
+            source_scope=source_scope,
+            scope_record=scope_record,
+            authorities=tuple(authority for authority, _record in validated_authorities),
+            authority_records=tuple(record for _authority, record in validated_authorities),
+        )
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: event transaction children"
+        ) from error
+
+
+@contextmanager
+def _consume_c0_prepared_frontier_branch_authorities(
+    branch_batch: object,
+    branches: tuple[_C0PreparedFrontierBranchAuthority, ...],
+) -> Iterator[_ValidatedC0PreparedFrontierEventTransaction]:
+    """Consume all exact event transactions referenced by one certification call."""
+
+    from yieldforge.oracle import sparse
+
+    if type(branches) is not tuple or any(
+        type(authority) is not _C0PreparedFrontierBranchAuthority
+        or authority._branch_batch is not branch_batch  # noqa: SLF001
+        for authority in branches
+    ):
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: event transaction authority"
+        )
+    try:
+        owner_record = sparse._require_prepared_c0_branch_batch(branch_batch)  # noqa: SLF001
+    except M8PreparedFrontierIntegrityError:
+        recovered_owner = getattr(branch_batch, "_owner_record", None)
+        try:
+            _release_c0_prepared_frontier_generator_scopes(
+                branch_batch,
+                owner_record=recovered_owner,
+            )
+        except M8PreparedFrontierIntegrityError:
+            pass
+        raise
+    body_error: BaseException | None = None
+    try:
+        transaction = _require_c0_prepared_frontier_event_transaction_children(
+            branch_batch,
+            owner_record,
+        )
+        if branches != transaction.authorities:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: event transaction ownership"
+            )
+        yield transaction
+    except BaseException as error:
+        body_error = error
+        raise
+    finally:
+        integrity_error: M8PreparedFrontierIntegrityError | None = None
+        try:
+            _release_c0_prepared_frontier_generator_scopes(
+                branch_batch,
+                owner_record=owner_record,
+            )
+        except M8PreparedFrontierIntegrityError as error:
+            integrity_error = error
+        if integrity_error is not None and not isinstance(
+            body_error,
+            M8PreparedFrontierIntegrityError,
+        ):
+            raise integrity_error
+
+
+def _certify_prepared_frontier_batch(
+    runtime: M7ReplayRuntime,
+    *,
+    branch_batch: object,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+    event_position: int,
+    branches: tuple[_C0PreparedFrontierBranchAuthority, ...],
+    rows: tuple[_C0BranchRemnantRow, ...],
+) -> _C0PreparedFrontierBatchResult:
+    """Consume one exact C0 event transaction around all numeric work."""
+
+    captured_rows = _capture_c0_branch_remnant_rows(rows)
+    with _consume_c0_prepared_frontier_branch_authorities(
+        branch_batch,
+        branches,
+    ) as transaction:
+        return _certify_prepared_frontier_batch_transaction(
+            runtime,
+            transaction=transaction,
+            prepared_layouts=prepared_layouts,
+            event_position=event_position,
+            branches=branches,
+            rows=captured_rows,
+        )
+
+
+def _certify_prepared_frontier_batch_transaction(
+    runtime: M7ReplayRuntime,
+    *,
+    transaction: _ValidatedC0PreparedFrontierEventTransaction,
+    prepared_layouts: _PreparedTranslationLayoutBatch,
+    event_position: int,
+    branches: tuple[_C0PreparedFrontierBranchAuthority, ...],
+    rows: tuple[_C0BranchRemnantRow, ...],
+) -> _C0PreparedFrontierBatchResult:
+    """Differentially certify a complete prepared frontier batch without branch mutation."""
+
+    validated_branches = _validated_c0_branch_authority(
+        transaction=transaction,
+        runtime=runtime,
+        prepared_layouts=prepared_layouts,
+        event_position=event_position,
+        branches=branches,
+        rows=rows,
+    )
+    if not rows:
+        return _C0PreparedFrontierBatchResult(rows=(), branches=())
+
+    with profile_phase("frontier_columnar_batch"):
+        try:
+            issued_inputs = _prepared_frontier_batch_inputs(
+                prepared_layouts,
+                runtime,
+                event_position=event_position,
+                remnants=tuple(row.item.remnant for row in rows),
+            )
+        except M8PreparedFrontierIntegrityError:
+            raise
+        except (AttributeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: prepared capability"
+            ) from error
+        try:
+            inputs = _require_prepared_frontier_batch_inputs(
+                issued_inputs,
+                prepared=prepared_layouts,
+                runtime=runtime,
+                event_position=event_position,
+            )
+        except M8PreparedFrontierIntegrityError:
+            raise
+        except (AttributeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: prepared input commitment"
+            ) from error
+        supported = _c0_frontier_partition_supported(inputs)
+        retained = inputs.problem.frontier.retained if supported and inputs.problem else ()
+        if (
+            type(inputs.measurements) is not tuple
+            or len(inputs.measurements) != len(rows)
+            or any(
+                type(item) is not PreparedTranslationRejectionRemnant
+                for item in inputs.measurements
+            )
+        ):
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: remnant measurements"
+            )
+        partition_sha256 = "sha256:" + semantic_sha256(
+            {
+                "schema_version": "yieldforge.m8-c0-frontier-partition.v1",
+                "problem_id": inputs.problem_id,
+                "problem_sha256": inputs.problem_sha256,
+                "candidate_set_id": inputs.candidate_set_id,
+                "candidate_set_sha256": inputs.candidate_set_sha256,
+                "candidate_ids": inputs.candidate_ids,
+                "rejection_layout_candidate_ids": inputs.rejection_layout_candidate_ids,
+                "rejection_layout_sha256s": inputs.rejection_layout_sha256s,
+                "fit_config_sha256": inputs.fit_config_sha256,
+                "event_material_key": inputs.event_material_key,
+                "compiled_problem": asdict(inputs.problem) if inputs.problem is not None else None,
+            }
+        )
+        authority_by_id = {
+            authority.branch_id: (authority, delta) for authority, delta in validated_branches
+        }
+        bindings = []
+        queries = []
+        for row_id, (row, measured) in enumerate(zip(rows, inputs.measurements, strict=True)):
+            authority, delta = authority_by_id[row.branch_id]
+            if (
+                measured.remnant_id != row.item.remnant.remnant_id
+                or measured.material_key != material_key(row.item.remnant.material)
+                or measured.area != row.item.remnant.geometry.area
+            ):
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: remnant measurement binding"
+                )
+            min_x, min_y, max_x, max_y = measured.bounds
+            remnant_width = float(max_x - min_x)
+            remnant_height = float(max_y - min_y)
+            coordinate_tolerance = float(inputs.fit_config.coordinate_tolerance)
+            area_tolerance = max(
+                coordinate_tolerance,
+                float(measured.area * inputs.fit_config.relative_area_tolerance),
+            )
+            material_matches = measured.material_key == inputs.event_material_key
+            measurement_sha256 = "sha256:" + semantic_sha256(
+                {
+                    "schema_version": "yieldforge.m8-c0-remnant-measurement.v1",
+                    "item": InventoryItem.model_dump(
+                        row.item,
+                        mode="json",
+                        warnings=False,
+                    ),
+                    "measurement": asdict(measured),
+                }
+            )
+            binding = _C0PreparedFrontierRowBinding(
+                row_id=row_id,
+                branch_id=row.branch_id,
+                event_position=authority.event_position,
+                catalog_action_id=authority.catalog_action_id,
+                root_action_id=authority.root_action_id,
+                branch_before_sha256=m7_cursor_sha256(authority.branch_before),
+                common_before_sha256=m7_cursor_sha256(authority.common_before),
+                direction=row.direction,
+                item=row.item,
+                delta=delta,
+                problem_id=inputs.problem_id,
+                problem_sha256=inputs.problem_sha256,
+                candidate_set_id=inputs.candidate_set_id,
+                candidate_set_sha256=inputs.candidate_set_sha256,
+                candidate_ids=inputs.candidate_ids,
+                rejection_layout_candidate_ids=inputs.rejection_layout_candidate_ids,
+                rejection_layout_sha256s=inputs.rejection_layout_sha256s,
+                retained_candidate_ids=tuple(item.candidate_id for item in retained),
+                fit_config_sha256=inputs.fit_config_sha256,
+                partition_sha256=partition_sha256,
+                event_material_key=inputs.event_material_key,
+                material_matches=material_matches,
+                measurement=measured,
+                measurement_sha256=measurement_sha256,
+                remnant_area=float(measured.area),
+                remnant_width=remnant_width,
+                remnant_height=remnant_height,
+                area_tolerance=area_tolerance,
+                coordinate_tolerance=coordinate_tolerance,
+            )
+            bindings.append(binding)
+            if supported:
+                queries.append(
+                    C0FrontierQuery(
+                        row_id=row_id,
+                        material_matches=material_matches,
+                        remnant_area=binding.remnant_area,
+                        remnant_width=remnant_width,
+                        remnant_height=remnant_height,
+                        area_tolerance=area_tolerance,
+                        coordinate_tolerance=coordinate_tolerance,
+                    )
+                )
+
+        if supported:
+            problem = inputs.problem
+            if problem is None:  # pragma: no cover - support predicate closes this branch.
+                raise AssertionError("M8 C0 supported partition lacks a rejection problem")
+            columns = C0FrontierColumns(
+                areas=tuple(float(item.area) for item in retained),
+                widths=tuple(float(item.width) for item in retained),
+                heights=tuple(float(item.height) for item in retained),
+            )
+            kernel_queries = tuple(queries)
+            columns_snapshot = asdict(columns)
+            query_snapshot = tuple(asdict(query) for query in kernel_queries)
+            kernel_results = certify_frontier_impossible_batch(columns, kernel_queries)
+            if (
+                asdict(columns) != columns_snapshot
+                or tuple(asdict(query) for query in kernel_queries) != query_snapshot
+                or type(kernel_results) is not tuple
+                or len(kernel_results) != len(queries)
+                or any(type(item) is not C0FrontierResult for item in kernel_results)
+                or tuple(item.row_id for item in kernel_results) != tuple(range(len(queries)))
+                or any(type(item.all_impossible) is not bool for item in kernel_results)
+            ):
+                raise M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs: "
+                    "C0 frontier batch result integrity differs"
+                )
+            for binding, result in zip(bindings, kernel_results, strict=True):
+                scalar_result = certify_frontier_impossible(
+                    problem.frontier,
+                    material_matches=binding.material_matches,
+                    remnant_area=binding.remnant_area,
+                    remnant_width=binding.remnant_width,
+                    remnant_height=binding.remnant_height,
+                    area_tolerance=binding.area_tolerance,
+                    coordinate_tolerance=binding.coordinate_tolerance,
+                )
+                if result.all_impossible is not scalar_result:
+                    raise M8PreparedFrontierIntegrityError(
+                        "M8 prepared frontier integrity differs: "
+                        "C0 frontier batch result integrity differs"
+                    )
+            row_results = tuple(
+                _C0PreparedFrontierRowResult(
+                    binding=binding,
+                    supported=True,
+                    all_impossible=result.all_impossible,
+                )
+                for binding, result in zip(bindings, kernel_results, strict=True)
+            )
+        else:
+            row_results = tuple(
+                _C0PreparedFrontierRowResult(
+                    binding=binding,
+                    supported=False,
+                    all_impossible=False,
+                )
+                for binding in bindings
+            )
+
+        rows_by_branch: dict[int, list[_C0PreparedFrontierRowResult]] = {}
+        for item in row_results:
+            rows_by_branch.setdefault(item.binding.branch_id, []).append(item)
+        branch_results = []
+        for branch_id, grouped_rows in rows_by_branch.items():
+            branch_rows = tuple(grouped_rows)
+            branch_supported = all(item.supported for item in branch_rows)
+            authority, delta = authority_by_id[branch_id]
+            branch_results.append(
+                _C0PreparedFrontierBranchResult(
+                    branch_id=branch_id,
+                    event_position=authority.event_position,
+                    catalog_action_id=authority.catalog_action_id,
+                    root_action_id=authority.root_action_id,
+                    branch_before_sha256=m7_cursor_sha256(authority.branch_before),
+                    common_before_sha256=m7_cursor_sha256(authority.common_before),
+                    delta=delta,
+                    row_ids=tuple(item.binding.row_id for item in branch_rows),
+                    supported=branch_supported,
+                    compact_eligible=branch_supported
+                    and all(item.all_impossible for item in branch_rows),
+                )
+            )
+        revalidated_transaction = _require_c0_prepared_frontier_event_transaction_children(
+            transaction.branch_batch,
+            transaction.owner_record,
+        )
+        revalidated_branches = _validated_c0_branch_authority(
+            transaction=revalidated_transaction,
+            runtime=runtime,
+            prepared_layouts=prepared_layouts,
+            event_position=event_position,
+            branches=branches,
+            rows=rows,
+        )
+        if revalidated_branches != validated_branches:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: branch authority changed"
+            )
+        _require_prepared_frontier_batch_inputs(
+            issued_inputs,
+            prepared=prepared_layouts,
+            runtime=runtime,
+            event_position=event_position,
+        )
+        return _C0PreparedFrontierBatchResult(
+            rows=row_results,
+            branches=tuple(branch_results),
+        )
 
 
 @dataclass(frozen=True)
@@ -771,6 +3117,7 @@ class _ValidatedCommonEntry:
     authority: M7AuthoritativeProofRuntime | None
     owns_snapshot: bool
     canonical_fact: M8CommonTransitionFact
+    canonical_fact_binding: tuple[object, ...]
     integrity_sha256: str
     checker_token: object | None
 
@@ -779,6 +3126,32 @@ _VALIDATED_COMMON_REGISTRY: dict[
     int,
     _ValidatedCommonEntry,
 ] = {}
+
+
+def _sanitize_validated_common_registry_keys() -> bool:
+    entries = tuple(_VALIDATED_COMMON_REGISTRY.items())
+    valid_entries = tuple((key, value) for key, value in entries if type(key) is int)
+    if len(valid_entries) == len(entries):
+        return False
+    _VALIDATED_COMMON_REGISTRY.clear()
+    _VALIDATED_COMMON_REGISTRY.update(valid_entries)
+    return True
+
+
+def _common_fact_registry_binding(fact: M8CommonTransitionFact) -> tuple[object, ...]:
+    return (
+        fact.replay_input_id,
+        fact.replay_input_sha256,
+        fact.event_position,
+        id(fact.cursor_before),
+        fact.cursor_before_sha256,
+        id(fact.step),
+        fact.cursor_after_sha256,
+        fact.event_id,
+        id(fact.policy_rank),
+        fact.semantic_runtime_sha256,
+        fact.content_sha256,
+    )
 
 
 def _rank_payload(rank: PolicyRank) -> dict[str, object]:
@@ -1188,6 +3561,212 @@ def _portable_common_transition(
     )
 
 
+def _capture_common_policy_context_source(
+    context: ActionPolicyContext,
+) -> ActionPolicyContext:
+    """Detach one exact policy context without caller attribute dispatch."""
+
+    context_fields = (
+        "action_id",
+        "kind",
+        "candidate_id",
+        "candidate_width",
+        "selected_stock_id",
+        "immediate_net_cost",
+        "selected_remnant_age_hours",
+        "returned_regularity",
+        "known_order_lookahead_term",
+    )
+    state = _exact_instance_state(context, ActionPolicyContext, context_fields)
+    if (
+        type(state["action_id"]) is not str
+        or type(state["kind"]) is not M7ActionKind
+        or type(state["candidate_id"]) is not str
+        or type(state["candidate_width"]) is not float
+        or type(state["selected_stock_id"]) is not str
+        or type(state["immediate_net_cost"]) is not float
+        or type(state["selected_remnant_age_hours"]) is not float
+        or type(state["returned_regularity"]) is not float
+        or type(state["known_order_lookahead_term"]) is not float
+    ):
+        raise TypeError("M8 common policy context physical state differs")
+    return ActionPolicyContext(**state)
+
+
+def _capture_common_action_descriptor_source(
+    descriptor: M7ActionDescriptor,
+) -> M7ActionDescriptor:
+    """Detach one exact submitted descriptor and its optional evidence graph."""
+
+    descriptor_fields = (
+        "action_id",
+        "kind",
+        "candidate_id",
+        "selected_remnant_id",
+        "evidence",
+    )
+    state = _exact_instance_state(descriptor, M7ActionDescriptor, descriptor_fields)
+    selected_remnant_id = state["selected_remnant_id"]
+    if (
+        type(state["action_id"]) is not str
+        or type(state["kind"]) is not M7ActionKind
+        or type(state["candidate_id"]) is not str
+        or (selected_remnant_id is not None and type(selected_remnant_id) is not str)
+    ):
+        raise TypeError("M8 common action descriptor physical state differs")
+    evidence = state["evidence"]
+    captured_evidence = None
+    if evidence is not None:
+        _validate_exact_model_graph(evidence, M7LayoutActionEvidence)
+        captured_evidence = copy.deepcopy(evidence)
+        _validate_exact_model_graph(captured_evidence, M7LayoutActionEvidence)
+    return M7ActionDescriptor(
+        action_id=state["action_id"],
+        kind=state["kind"],
+        candidate_id=state["candidate_id"],
+        selected_remnant_id=selected_remnant_id,
+        evidence=captured_evidence,
+    )
+
+
+def _capture_common_action_binding_source(
+    binding: M7PolicyActionBinding,
+) -> M7PolicyActionBinding:
+    """Detach one exact submitted catalog-to-action binding."""
+
+    state = _exact_instance_state(
+        binding,
+        M7PolicyActionBinding,
+        ("catalog_action_id", "materialized_action_id", "context"),
+    )
+    if (
+        type(state["catalog_action_id"]) is not str
+        or type(state["materialized_action_id"]) is not str
+    ):
+        raise TypeError("M8 common action binding physical state differs")
+    return M7PolicyActionBinding(
+        catalog_action_id=state["catalog_action_id"],
+        materialized_action_id=state["materialized_action_id"],
+        context=_capture_common_policy_context_source(state["context"]),
+    )
+
+
+def _capture_common_step_source(step: M7StepResult) -> M7StepResult:
+    """Detach the complete exact submitted step graph before proof authority."""
+
+    state = _exact_instance_state(
+        step,
+        M7StepResult,
+        ("descriptor", "selected_context", "action_binding", "event", "cursor"),
+    )
+    event = state["event"]
+    _validate_exact_model_graph(event, M7ReplayEvent)
+    captured_event = copy.deepcopy(event)
+    _validate_exact_model_graph(captured_event, M7ReplayEvent)
+    return M7StepResult(
+        descriptor=_capture_common_action_descriptor_source(state["descriptor"]),
+        selected_context=_capture_common_policy_context_source(state["selected_context"]),
+        action_binding=_capture_common_action_binding_source(state["action_binding"]),
+        event=captured_event,
+        cursor=_capture_replay_cursor_source(state["cursor"]),
+    )
+
+
+def _capture_common_policy_rank_source(rank: PolicyRank) -> PolicyRank:
+    """Detach the exact supported physical policy-rank representation."""
+
+    state = _exact_instance_state(
+        rank,
+        PolicyRank,
+        ("policy", "comparison_key", "decision_key"),
+    )
+    comparison_key = state["comparison_key"]
+    decision_key = state["decision_key"]
+    if (
+        type(state["policy"]) is not M7PolicyName
+        or type(comparison_key) is not tuple
+        or type(decision_key) is not tuple
+    ):
+        raise TypeError("M8 common policy rank physical state differs")
+    captured_comparison_key = tuple(tuple.__iter__(comparison_key))
+    captured_decision_key = tuple(tuple.__iter__(decision_key))
+    if any(type(value) not in (float, int, str) for value in captured_comparison_key) or any(
+        type(value) is not str for value in captured_decision_key
+    ):
+        raise TypeError("M8 common policy rank component type differs")
+    return PolicyRank(
+        policy=state["policy"],
+        comparison_key=captured_comparison_key,
+        decision_key=captured_decision_key,
+    )
+
+
+def _capture_common_transition_graph_source(
+    fact: M8CommonTransitionFact,
+) -> tuple[M8CommonTransitionFact, str]:
+    """Physically attest and detach every node in one public common fact."""
+
+    fact_fields = tuple(item.name for item in fields(M8CommonTransitionFact))
+    state = _exact_instance_state(fact, M8CommonTransitionFact, fact_fields)
+    scalar_fields = (
+        "replay_input_id",
+        "replay_input_sha256",
+        "cursor_before_sha256",
+        "cursor_after_sha256",
+        "event_id",
+        "semantic_runtime_sha256",
+        "content_sha256",
+    )
+    if type(state["event_position"]) is not int or any(
+        type(state[name]) is not str for name in scalar_fields
+    ):
+        raise TypeError("M8 common transition scalar physical state differs")
+    captured = M8CommonTransitionFact(
+        replay_input_id=state["replay_input_id"],
+        replay_input_sha256=state["replay_input_sha256"],
+        event_position=state["event_position"],
+        cursor_before=_capture_replay_cursor_source(state["cursor_before"]),
+        cursor_before_sha256=state["cursor_before_sha256"],
+        step=_capture_common_step_source(state["step"]),
+        cursor_after_sha256=state["cursor_after_sha256"],
+        event_id=state["event_id"],
+        policy_rank=_capture_common_policy_rank_source(state["policy_rank"]),
+        semantic_runtime_sha256=state["semantic_runtime_sha256"],
+        content_sha256=state["content_sha256"],
+    )
+    return captured, state["content_sha256"]
+
+
+def _capture_common_transition_fact_source(
+    runtime: M7ReplayRuntime,
+    fact: M8CommonTransitionFact,
+) -> tuple[portable_facts.M8PortableCommonTransitionV2, str]:
+    """Capture a public fact before any snapshot or proof authority exists."""
+
+    try:
+        _preflight_prepared_source_runtime(runtime)
+        semantic_before = m7_semantic_runtime_sha256(runtime)
+        captured, content_sha256 = _capture_common_transition_graph_source(fact)
+        portable = _portable_common_transition(captured)
+        _validate_exact_model_graph(
+            portable,
+            portable_facts.M8PortableCommonTransitionV2,
+        )
+        _preflight_prepared_source_runtime(runtime)
+        if m7_semantic_runtime_sha256(runtime) != semantic_before:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: common fact capture runtime drift"
+            )
+        return portable, content_sha256
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 common transition fact differs from authoritative common transition: "
+            "source capture integrity"
+        ) from error
+
+
 def _derive_m8_common_transition_fact_authoritative(
     runtime: M7ReplayRuntime,
     *,
@@ -1225,6 +3804,216 @@ def _derive_m8_common_transition_fact_authoritative(
     )
 
 
+def _capture_inventory_item_source(item: InventoryItem) -> InventoryItem:
+    """Detach one exact caller inventory item before consulting private authority."""
+
+    try:
+        _validate_exact_model_graph(item, InventoryItem)
+        item_state = _exact_instance_state(item, InventoryItem, ("remnant", "entered_at"))
+        captured = InventoryItem(
+            remnant=_capture_prepared_remnant_source(item_state["remnant"]),
+            entered_at=item_state["entered_at"],
+        )
+        _validate_exact_model_graph(captured, InventoryItem)
+        return captured
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: inventory source capture"
+        ) from error
+
+
+def _capture_replay_cursor_source(cursor: M7ReplayCursor) -> M7ReplayCursor:
+    """Detach exact cursor state before consulting any prepared authority."""
+
+    fields = (
+        "next_event_position",
+        "current_time",
+        "inventory",
+        "cumulative_costs",
+        "timestamp_group_sequence",
+        "timestamp_subsequence",
+        "previous_release",
+    )
+    try:
+        state = _exact_instance_state(cursor, M7ReplayCursor, fields)
+        inventory = state["inventory"]
+        current_time = state["current_time"]
+        previous_release = state["previous_release"]
+        if (
+            type(state["next_event_position"]) is not int
+            or type(state["timestamp_group_sequence"]) is not int
+            or type(state["timestamp_subsequence"]) is not int
+            or type(current_time) is not datetime
+            or current_time.tzinfo is not UTC
+            or (
+                previous_release is not None
+                and (type(previous_release) is not datetime or previous_release.tzinfo is not UTC)
+            )
+            or type(inventory) is not tuple
+        ):
+            raise TypeError("M8 unchecked cursor scalar type differs")
+        ledger = state["cumulative_costs"]
+        _validate_exact_model_graph(ledger, ReplayCostLedger)
+        ledger_state = _exact_instance_state(
+            ledger,
+            ReplayCostLedger,
+            tuple(ReplayCostLedger.model_fields),
+        )
+        captured = M7ReplayCursor(
+            next_event_position=state["next_event_position"],
+            current_time=current_time,
+            inventory=tuple(
+                _capture_inventory_item_source(item) for item in tuple.__iter__(inventory)
+            ),
+            cumulative_costs=ReplayCostLedger(**ledger_state),
+            timestamp_group_sequence=state["timestamp_group_sequence"],
+            timestamp_subsequence=state["timestamp_subsequence"],
+            previous_release=previous_release,
+        )
+        if type(captured) is not M7ReplayCursor:
+            raise TypeError("M8 unchecked cursor capture differs")
+        return captured
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: cursor source capture"
+        ) from error
+
+
+def _capture_replay_cursor_commitment_source(
+    cursor: M7ReplayCursor,
+) -> tuple[int, str]:
+    """Return immutable cursor commitments without retaining a callback-visible DTO."""
+
+    captured = _capture_replay_cursor_source(cursor)
+    return captured.next_event_position, m7_cursor_sha256(captured)
+
+
+@dataclass(frozen=True)
+class _CapturedFutureVisibility:
+    """Callback-free visible suffix captured before any private authority exists."""
+
+    mode: str
+    current_position: int
+    bindings: tuple[TemporalInstanceBinding, ...]
+    semantic_runtime_sha256: str
+
+    def visible_suffix(
+        self,
+        *,
+        current_position: int,
+    ) -> tuple[TemporalInstanceBinding, ...]:
+        if type(current_position) is not int or current_position != self.current_position:
+            raise ValueError("M8 captured visibility position differs")
+        return self.bindings
+
+
+def _capture_visible_suffix_source(
+    runtime: M7ReplayRuntime,
+    visibility: object,
+    *,
+    current_position: int,
+) -> _CapturedFutureVisibility:
+    """Invoke caller visibility between exact public-runtime stability checks."""
+
+    if type(current_position) is not int or current_position < 0:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: visibility position capture"
+        )
+    try:
+        _preflight_prepared_source_runtime(runtime)
+        semantic_before = m7_semantic_runtime_sha256(runtime)
+        mode = visibility.mode
+        visible_source = visibility.visible_suffix(current_position=current_position)
+        if type(mode) is not str or not mode or type(visible_source) is not tuple:
+            raise TypeError("M8 visibility source type differs")
+        visible = []
+        for binding in tuple.__iter__(visible_source):
+            _validate_exact_model_graph(binding, TemporalInstanceBinding)
+            captured_binding = copy.deepcopy(binding)
+            _validate_exact_model_graph(captured_binding, TemporalInstanceBinding)
+            visible.append(captured_binding)
+        captured_visible = tuple(visible)
+        _preflight_prepared_source_runtime(runtime)
+        semantic_after = m7_semantic_runtime_sha256(runtime)
+        if semantic_after != semantic_before:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: visibility runtime drift"
+            )
+        registered_source = runtime.replay_input.instances
+        if type(registered_source) is not tuple or current_position >= len(registered_source):
+            raise TypeError("M8 visibility runtime suffix differs")
+        registered = []
+        for binding in tuple.__iter__(registered_source):
+            _validate_exact_model_graph(binding, TemporalInstanceBinding)
+            captured_binding = copy.deepcopy(binding)
+            _validate_exact_model_graph(captured_binding, TemporalInstanceBinding)
+            registered.append(captured_binding)
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: visibility source capture"
+        ) from error
+    if mode == "known_only":
+        expected = ()
+    elif mode == "full_realized_future":
+        expected = tuple(registered)[current_position + 1 :]
+    else:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: visibility mode source"
+        )
+    if captured_visible != expected:
+        raise ValueError("M8 visibility provider returned data inconsistent with its mode")
+    return _CapturedFutureVisibility(
+        mode=mode,
+        current_position=current_position,
+        bindings=expected,
+        semantic_runtime_sha256=semantic_after,
+    )
+
+
+def _capture_c0_branch_remnant_rows(
+    rows: tuple[_C0BranchRemnantRow, ...],
+) -> tuple[_C0BranchRemnantRow, ...]:
+    """Detach every public row and item before a prepared transaction begins."""
+
+    try:
+        if type(rows) is not tuple:
+            raise TypeError("M8 C0 row collection type differs")
+        captured = []
+        for row in tuple.__iter__(rows):
+            if type(row) is not _C0BranchRemnantRow:
+                raise TypeError("M8 C0 row type differs")
+            branch_id = object.__getattribute__(row, "branch_id")
+            direction = object.__getattribute__(row, "direction")
+            item = object.__getattribute__(row, "item")
+            if (
+                type(branch_id) is not int
+                or branch_id < 0
+                or type(direction) is not str
+                or direction not in ("added", "removed")
+            ):
+                raise TypeError("M8 C0 row scalar type differs")
+            captured.append(
+                _C0BranchRemnantRow(
+                    branch_id=branch_id,
+                    direction=direction,
+                    item=_capture_inventory_item_source(item),
+                )
+            )
+        return tuple(captured)
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: C0 row source capture"
+        ) from error
+
+
 def _zero_generation_rejection_witness(
     runtime: M7ReplayRuntime,
     *,
@@ -1233,6 +4022,8 @@ def _zero_generation_rejection_witness(
     item: InventoryItem,
     prepared_layouts: _PreparedTranslationLayoutBatch | None,
 ) -> FastCommonRejectionWitness | None:
+    captured_item = _capture_inventory_item_source(item)
+    captured_remnant = captured_item.remnant
     source_runtime = (
         runtime
         if prepared_layouts is None
@@ -1244,12 +4035,12 @@ def _zero_generation_rejection_witness(
     )
     binding = source_runtime.replay_input.instances[event_position]
     measured = (
-        prepare_translation_rejection_remnant(item.remnant)
+        prepare_translation_rejection_remnant(captured_remnant)
         if prepared_layouts is None
         else _registered_prepared_remnant_measurement(
             prepared_layouts,
             runtime,
-            item.remnant,
+            captured_remnant,
         )
     )
     min_x, min_y, max_x, max_y = measured.bounds
@@ -1260,7 +4051,7 @@ def _zero_generation_rejection_witness(
         fit_config.coordinate_tolerance,
         measured.area * fit_config.relative_area_tolerance,
     )
-    material_matches = material_key(item.remnant.material) == material_key(binding.material)
+    material_matches = material_key(captured_remnant.material) == material_key(binding.material)
     query = {
         "material_matches": material_matches,
         "remnant_area": measured.area,
@@ -1278,7 +4069,7 @@ def _zero_generation_rejection_witness(
     if not impossible or not zero_generation:
         return None
     return FastCommonRejectionWitness(
-        remnant_id=item.remnant.remnant_id,
+        remnant_id=captured_remnant.remnant_id,
         candidate_ids=tuple(sorted(scalar.candidate_id for scalar in compiled.frontier.members)),
         material_matches=material_matches,
         remnant_area=measured.area,
@@ -1336,6 +4127,8 @@ def _synthesize_scalar_no_fit_source(
 ) -> _ScalarNoFitSource:
     """Generate exact search counts while preserving their ordered source batches."""
 
+    captured_item = _capture_inventory_item_source(item)
+    captured_remnant = captured_item.remnant
     source_runtime = (
         runtime
         if prepared_layouts is None
@@ -1346,7 +4139,7 @@ def _synthesize_scalar_no_fit_source(
         )
     )
     binding = source_runtime.replay_input.instances[event_position]
-    if material_key(item.remnant.material) != material_key(binding.material):
+    if material_key(captured_remnant.material) != material_key(binding.material):
         return _ScalarNoFitSource(searches=(), translation_batches=())
     problem = next(
         problem
@@ -1354,9 +4147,9 @@ def _synthesize_scalar_no_fit_source(
         if problem.problem_id == binding.problem_id
     )
     verified = source_runtime.runtime_candidates[binding.problem_id]
-    prepared_remnant = prepare_remnant_geometry(item.remnant)
-    layouts = (
-        tuple(
+    prepared_remnant = prepare_remnant_geometry(captured_remnant)
+    if prepared_layouts is None:
+        layouts = tuple(
             prepare_layout_footprint(
                 problem.problem,
                 candidate,
@@ -1364,18 +4157,23 @@ def _synthesize_scalar_no_fit_source(
             )
             for candidate in verified.candidates
         )
-        if prepared_layouts is None
-        else _prepared_layout_footprints(
+    else:
+        observed_layouts = _prepared_layout_footprints(
             prepared_layouts,
             runtime,
             event_position=event_position,
         )
-    )
+        layouts = _consume_prepared_layout_footprints(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+            observed=observed_layouts,
+        )
     certificates = (
         tuple(
             certify_translation_impossible(
                 layout,
-                item.remnant,
+                captured_remnant,
                 material=binding.material,
                 fit_config=source_runtime.replay_input.fit_config,
             )
@@ -1388,7 +4186,7 @@ def _synthesize_scalar_no_fit_source(
                 runtime,
                 prepared=prepared_layouts,
                 event_position=event_position,
-                item=item,
+                item=captured_item,
             )
         )
     )
@@ -1443,7 +4241,7 @@ def _synthesize_scalar_no_fit_source(
     if not rust_generated:
         translations = tuple(
             generate_layout_translations(
-                item.remnant,
+                captured_remnant,
                 candidate,
                 fit_config=source_runtime.replay_input.fit_config,
                 search_config=source_runtime.replay_input.search_config,
@@ -1457,7 +4255,7 @@ def _synthesize_scalar_no_fit_source(
             LayoutFitSearchResult(
                 status=LayoutFitSearchStatus.NO_WITNESS_WITHIN_REGISTERED_SEARCH,
                 candidate_id=candidate.candidate_id,
-                remnant_id=item.remnant.remnant_id,
+                remnant_id=captured_remnant.remnant_id,
                 config=source_runtime.replay_input.search_config,
                 generated_candidate_count=batch.generated_candidate_count,
                 duplicate_candidate_count=batch.duplicate_candidate_count,
@@ -1592,15 +4390,19 @@ def _try_derive_m8_common_transition_fact_fast(
             event_position=event_position,
         )
     )
-    compiled_standard = (
-        None
-        if prepared_layouts is None
-        else _prepared_standard_winner(
+    compiled_standard = None
+    if prepared_layouts is not None:
+        observed_standard = _prepared_standard_winner(
             prepared_layouts,
             runtime,
             event_position=event_position,
         )
-    )
+        compiled_standard = _consume_prepared_standard_winner(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+            observed=observed_standard,
+        )
     compiled = None
     if cursor.inventory:
         if prepared_layouts is None:
@@ -1617,10 +4419,16 @@ def _try_derive_m8_common_transition_fact_fast(
             verified = source_runtime.runtime_candidates[binding.problem_id]
             if not _verified_rejection_layouts_cover_candidates(verified):
                 return None
-            compiled = _prepared_rejection_problem(
+            observed_compiled = _prepared_rejection_problem(
                 prepared_layouts,
                 runtime,
                 event_position=event_position,
+            )
+            compiled = _consume_prepared_rejection_problem(
+                prepared_layouts,
+                runtime,
+                event_position=event_position,
+                observed=observed_compiled,
             )
     rejected = []
     counted_no_fit = []
@@ -1809,6 +4617,16 @@ _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY: dict[
 ] = {}
 
 
+def _sanitize_unchecked_source_guard_registry_keys() -> bool:
+    entries = tuple(_UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.items())
+    valid_entries = tuple((key, value) for key, value in entries if type(key) is int)
+    if len(valid_entries) == len(entries):
+        return False
+    _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.clear()
+    _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.update(valid_entries)
+    return True
+
+
 def _require_unchecked_prepared_source_guard(
     guard: _M8UncheckedPreparedSourceGuard,
     *,
@@ -1819,35 +4637,62 @@ def _require_unchecked_prepared_source_guard(
 ) -> None:
     """Perform only scope and object-identity checks inside the branch hot loop."""
 
+    malformed_registry_keys = _sanitize_unchecked_source_guard_registry_keys()
     registered = _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.get(id(guard))
-    if (
-        type(guard) is not _M8UncheckedPreparedSourceGuard
-        or registered is None
-        or registered.reference() is not guard
-        or registered.owner_pid != os.getpid()
-        or registered.token is not guard._token  # noqa: SLF001
-        or registered.runtime is not runtime
-        or registered.runtime_authority.runtime is not runtime
-        or (scope_owner is not None and registered.scope_owner is not scope_owner)
-        or registered.prepared_layouts is not prepared_layouts
-        or registered.common is not common
-        or registered.common_fact is not common.common_fact
-        or registered.source is not common.source
-        or registered.semantic_runtime_sha256 != common.common_fact.semantic_runtime_sha256
-        or registered.semantic_runtime_sha256 != common.source.semantic_runtime_sha256
-        or registered.semantic_runtime_sha256 != registered.runtime_authority.semantic_sha256
-        or registered.replay_input_id != runtime.replay_input.input_id
-        or registered.replay_input_id != common.common_fact.replay_input_id
-        or registered.replay_input_sha256 != runtime.replay_input.content_sha256
-        or registered.replay_input_sha256 != common.common_fact.replay_input_sha256
-        or registered.executable_identity
-        != (
-            common.source.jagua_executable_sha256,
-            common.source.jagua_executable_size_bytes,
-            common.source.jagua_executable_mode_bits,
+    try:
+        invalid = (
+            malformed_registry_keys
+            or type(guard) is not _M8UncheckedPreparedSourceGuard
+            or type(registered) is not _RegisteredUncheckedPreparedSourceGuard
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not guard
+            or type(registered.owner_pid) is not int
+            or registered.owner_pid != os.getpid()
+            or registered.token is not guard._token  # noqa: SLF001
+            or registered.runtime is not runtime
+            or type(registered.runtime_authority) is not M7AuthoritativeProofRuntime
+            or registered.runtime_authority.runtime is not runtime
+            or (scope_owner is not None and registered.scope_owner is not scope_owner)
+            or registered.prepared_layouts is not prepared_layouts
+            or registered.common is not common
+            or registered.common_fact is not common.common_fact
+            or registered.source is not common.source
+            or registered.semantic_runtime_sha256 != common.common_fact.semantic_runtime_sha256
+            or registered.semantic_runtime_sha256 != common.source.semantic_runtime_sha256
+            or registered.semantic_runtime_sha256 != registered.runtime_authority.semantic_sha256
+            or registered.replay_input_id != runtime.replay_input.input_id
+            or registered.replay_input_id != common.common_fact.replay_input_id
+            or registered.replay_input_sha256 != runtime.replay_input.content_sha256
+            or registered.replay_input_sha256 != common.common_fact.replay_input_sha256
+            or registered.executable_identity
+            != (
+                common.source.jagua_executable_sha256,
+                common.source.jagua_executable_size_bytes,
+                common.source.jagua_executable_mode_bits,
+            )
         )
-    ):
-        raise ValueError("M8 unchecked prepared source guard is invalid or inactive")
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: unchecked source guard invalid or inactive"
+        ) from error
+    if invalid:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: unchecked source guard invalid or inactive"
+        )
+    try:
+        registered.runtime_authority._require_active_identity(runtime)  # noqa: SLF001
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: unchecked runtime authority capability"
+        ) from error
+    try:
+        prepared_layouts.require_active(runtime)
+    except M8PreparedFrontierIntegrityError:
+        raise
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: unchecked layout capability"
+        ) from error
 
 
 @contextmanager
@@ -1870,6 +4715,14 @@ def _guard_unchecked_prepared_common_source(
     )
 
     def require_expensive_boundary() -> None:
+        try:
+            prepared_layouts.require_owned(runtime)
+        except M8PreparedFrontierIntegrityError:
+            raise
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: unchecked layout capability"
+            ) from error
         _require_unchecked_runtime_source_identity(
             runtime,
             semantic_runtime_sha256=common.common_fact.semantic_runtime_sha256,
@@ -1885,8 +4738,12 @@ def _guard_unchecked_prepared_common_source(
     key = id(guard)
 
     def discard(reference: weakref.ReferenceType[_M8UncheckedPreparedSourceGuard]) -> None:
+        _sanitize_unchecked_source_guard_registry_keys()
         registered = _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.get(key)
-        if registered is not None and registered.reference is reference:
+        if (
+            type(registered) is _RegisteredUncheckedPreparedSourceGuard
+            and registered.reference is reference
+        ):
             _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.pop(key, None)
 
     reference = weakref.ref(guard, discard)
@@ -1907,10 +4764,19 @@ def _guard_unchecked_prepared_common_source(
         executable_identity=expected_executable_identity,
     )
     _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY[key] = registered
+    body_error: BaseException | None = None
     try:
-        yield guard
+        with _activate_prepared_event_validation(
+            prepared_layouts,
+            runtime,
+            event_position=common.common_fact.event_position,
+        ):
+            yield guard
+    except BaseException as error:
+        body_error = error
+        raise
     finally:
-        integrity_error: ValueError | None = None
+        integrity_error: M8PreparedFrontierIntegrityError | None = None
         try:
             _require_unchecked_prepared_source_guard(
                 guard,
@@ -1919,25 +4785,34 @@ def _guard_unchecked_prepared_common_source(
                 scope_owner=scope_owner,
                 prepared_layouts=prepared_layouts,
             )
+        except M8PreparedFrontierIntegrityError as error:
+            integrity_error = error
         except (AttributeError, TypeError, ValueError) as error:
-            integrity_error = ValueError("M8 unchecked prepared source guard integrity differs")
+            integrity_error = M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: unchecked source guard"
+            )
             integrity_error.__cause__ = error
+        malformed_registry_keys = _sanitize_unchecked_source_guard_registry_keys()
         current = _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.get(key)
-        if current is registered:
-            _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.pop(key, None)
-        elif integrity_error is None:
-            integrity_error = ValueError("M8 unchecked prepared source guard cleanup differs")
+        _UNCHECKED_PREPARED_SOURCE_GUARD_REGISTRY.pop(key, None)
+        if (malformed_registry_keys or current is not registered) and integrity_error is None:
+            integrity_error = M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: unchecked source guard cleanup"
+            )
         try:
             # This detects persistent boundary changes. A swap restored between reads remains
             # explicitly unchecked producer provenance for the fresh Task-5 checker to audit.
             require_expensive_boundary()
         except (AttributeError, OSError, TypeError, ValueError) as error:
             if integrity_error is None:
-                integrity_error = ValueError(
-                    "M8 unchecked prepared source changed during branch traversal"
+                integrity_error = M8PreparedFrontierIntegrityError(
+                    "M8 prepared frontier integrity differs during branch traversal"
                 )
                 integrity_error.__cause__ = error
-        if integrity_error is not None:
+        if integrity_error is not None and not isinstance(
+            body_error,
+            M8PreparedFrontierIntegrityError,
+        ):
             raise integrity_error
 
 
@@ -1954,7 +4829,12 @@ def _require_unchecked_runtime_source_identity(
         if m7_semantic_runtime_sha256(runtime) != semantic_runtime_sha256:
             raise ValueError(f"M8 unchecked {operation} runtime fingerprint differs")
         return
-    runtime_authority.require_active(runtime)
+    try:
+        runtime_authority.require_active(runtime)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            f"M8 prepared frontier integrity differs: unchecked {operation} authority capability"
+        ) from error
     if runtime_authority.semantic_sha256 != semantic_runtime_sha256:
         raise ValueError(f"M8 unchecked {operation} authority fingerprint differs")
 
@@ -1969,13 +4849,14 @@ def _capture_unchecked_m8_common_transition(
 ) -> M8UncheckedProducerTransition:
     """Capture one producer-only common transition without issuing authority."""
 
+    captured_cursor = _capture_replay_cursor_source(cursor)
     _require_unchecked_runtime_source_identity(
         runtime,
         semantic_runtime_sha256=semantic_runtime_sha256,
         runtime_authority=runtime_authority,
         operation="common capture",
     )
-    event_position = cursor.next_event_position
+    event_position = captured_cursor.next_event_position
     source_runtime = (
         runtime
         if prepared_layouts is None
@@ -1993,17 +4874,21 @@ def _capture_unchecked_m8_common_transition(
         for item in source_runtime.replay_input.problems
         if item.problem_id == binding.problem_id
     )
-    compiled_standard = (
-        None
-        if prepared_layouts is None
-        else _prepared_standard_winner(
+    compiled_standard = None
+    if prepared_layouts is not None:
+        observed_standard = _prepared_standard_winner(
             prepared_layouts,
             runtime,
             event_position=event_position,
         )
-    )
+        compiled_standard = _consume_prepared_standard_winner(
+            prepared_layouts,
+            runtime,
+            event_position=event_position,
+            observed=observed_standard,
+        )
     compiled = None
-    if cursor.inventory:
+    if captured_cursor.inventory:
         if prepared_layouts is None:
             if not _verified_rejection_layouts_cover_candidates(verified):
                 compiled = None
@@ -2014,10 +4899,16 @@ def _capture_unchecked_m8_common_transition(
                 )
         else:
             if _verified_rejection_layouts_cover_candidates(verified):
-                compiled = _prepared_rejection_problem(
+                observed_compiled = _prepared_rejection_problem(
                     prepared_layouts,
                     runtime,
                     event_position=event_position,
+                )
+                compiled = _consume_prepared_rejection_problem(
+                    prepared_layouts,
+                    runtime,
+                    event_position=event_position,
+                    observed=observed_compiled,
                 )
 
     rejected: list[InventoryItem] = []
@@ -2025,7 +4916,7 @@ def _capture_unchecked_m8_common_transition(
     counted_searches: dict[str, tuple[LayoutFitSearchResult, ...]] = {}
     survivors: list[InventoryItem] = []
     classifications: list[M8UncheckedCommonInventoryCapture] = []
-    for item in cursor.inventory:
+    for item in captured_cursor.inventory:
         measured = (
             prepare_translation_rejection_remnant(item.remnant)
             if prepared_layouts is None
@@ -2178,19 +5069,19 @@ def _capture_unchecked_m8_common_transition(
             )
         catalog = enumerate_m7_action_catalog(
             execution_runtime,
-            cursor=cursor,
+            cursor=captured_cursor,
             complete=False,
         )
         _require_common_search_caches_match_authoritative(
             source_runtime,
             authoritative_runtime=execution_runtime,
             event_position=event_position,
-            inventory=cursor.inventory,
+            inventory=captured_cursor.inventory,
         )
     elif survivors and rejected:
         catalog = enumerate_m7_pruned_action_catalog(
             execution_runtime,
-            cursor=cursor,
+            cursor=captured_cursor,
             zero_generation_rejected_inventory=tuple(rejected),
             precomputed_standard_profiles=standard_profiles,
         )
@@ -2203,25 +5094,25 @@ def _capture_unchecked_m8_common_transition(
     elif survivors:
         catalog = enumerate_m7_action_catalog(
             execution_runtime,
-            cursor=cursor,
+            cursor=captured_cursor,
             complete=False,
         )
         _require_common_search_caches_match_authoritative(
             source_runtime,
             authoritative_runtime=execution_runtime,
             event_position=event_position,
-            inventory=cursor.inventory,
+            inventory=captured_cursor.inventory,
         )
     else:
         catalog = enumerate_m7_standard_only_catalog(
             execution_runtime,
-            cursor=cursor,
+            cursor=captured_cursor,
             zero_generation_rejected_inventory=tuple(rejected),
             precomputed_standard_profiles=standard_profiles,
         )
     fact = _common_transition_fact_from_catalog(
         source_runtime,
-        cursor=cursor,
+        cursor=captured_cursor,
         semantic_runtime_sha256=semantic_runtime_sha256,
         execution_runtime=execution_runtime,
         catalog=catalog,
@@ -2408,12 +5299,19 @@ def build_m8_common_transition_fact(
 ) -> M8CommonTransitionFact:
     """Build one deterministic portable fact; callers must validate it before use."""
 
+    try:
+        _preflight_prepared_source_runtime(runtime)
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: common fact runtime source capture"
+        ) from error
+    captured_cursor = _capture_replay_cursor_source(cursor)
     snapshot = snapshot_m7_replay_runtime(runtime)
     try:
         with snapshot.runtime_for_proof() as proof_runtime:
             fact = _derive_m8_common_transition_fact(
                 proof_runtime,
-                cursor=cursor,
+                cursor=captured_cursor,
                 semantic_runtime_sha256=snapshot.semantic_sha256,
             )
             _require_caller_runtime_stable(
@@ -2547,29 +5445,86 @@ def _common_registry_integrity_sha256(
 
 def _registered_common_entry(
     common: ValidatedCommonTransition,
+    *,
+    deep: bool = False,
 ) -> _ValidatedCommonEntry:
-    if type(common) is not ValidatedCommonTransition:
-        raise ValueError("M8 certifier requires a validated common transition capability")
+    malformed_registry_keys = _sanitize_validated_common_registry_keys()
     registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
-    if (
-        common._provenance_token is not _VALIDATED_COMMON_PROVENANCE
-        or registered is None
-        or registered.reference() is not common
-        or registered.binding_token is not common._binding_token
-        or registered.owner_pid != os.getpid()
-        or registered.snapshot._owner_pid != registered.owner_pid  # noqa: SLF001
-        or registered.snapshot.semantic_sha256 != registered.canonical_fact.semantic_runtime_sha256
-    ):
-        raise ValueError("M8 certifier requires a validated common transition capability")
+    try:
+        invalid = (
+            malformed_registry_keys
+            or type(common) is not ValidatedCommonTransition
+            or common._provenance_token is not _VALIDATED_COMMON_PROVENANCE
+            or type(registered) is not _ValidatedCommonEntry
+            or type(registered.reference) is not weakref.ReferenceType
+            or registered.reference() is not common
+            or registered.binding_token is not common._binding_token
+            or type(registered.owner_pid) is not int
+            or registered.owner_pid != os.getpid()
+            or type(registered.snapshot) is not M7SemanticRuntimeSnapshot
+            or registered.snapshot._owner_pid != registered.owner_pid  # noqa: SLF001
+            or type(registered.canonical_fact) is not M8CommonTransitionFact
+            or registered.snapshot.semantic_sha256
+            != registered.canonical_fact.semantic_runtime_sha256
+            or type(registered.canonical_fact_binding) is not tuple
+            or type(registered.integrity_sha256) is not str
+            or type(registered.owns_snapshot) is not bool
+            or (
+                registered.authority is not None
+                and type(registered.authority) is not M7AuthoritativeProofRuntime
+            )
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: validated common transition capability"
+        ) from error
+    if invalid:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: validated common transition capability"
+        )
+    try:
+        current_binding = _common_fact_registry_binding(registered.canonical_fact)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: common transition registry integrity differs"
+        ) from error
+    if registered.canonical_fact_binding != current_binding:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: common transition registry integrity differs"
+        )
     if registered.authority is not None:
-        registered.authority._require_active_identity()  # noqa: SLF001
-        if registered.checker_token is not None:
-            from yieldforge.oracle.fact_checker import _require_checker_registration_token
+        try:
+            registered.authority._require_active_identity()  # noqa: SLF001
+            if registered.checker_token is not None:
+                from yieldforge.oracle.fact_checker import _require_checker_registration_token
 
-            _require_checker_registration_token(
-                registered.checker_token,  # type: ignore[arg-type]
-                registered.authority,
+                _require_checker_registration_token(
+                    registered.checker_token,  # type: ignore[arg-type]
+                    registered.authority,
+                    registered.canonical_fact,
+                )
+        except M8PreparedFrontierIntegrityError:
+            raise
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "validated common transition authority capability"
+            ) from error
+    if deep:
+        try:
+            integrity_sha256 = _common_registry_integrity_sha256(
+                registered.snapshot.runtime,
                 registered.canonical_fact,
+            )
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "common transition registry integrity differs"
+            ) from error
+        if registered.integrity_sha256 != integrity_sha256:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "common transition registry integrity differs"
             )
     return registered
 
@@ -2594,8 +5549,9 @@ def _register_validated_common_transition(
     key = id(validated)
 
     def discard(reference: weakref.ReferenceType[ValidatedCommonTransition]) -> None:
+        _sanitize_validated_common_registry_keys()
         registered = _VALIDATED_COMMON_REGISTRY.get(key)
-        if registered is not None and registered.reference is reference:
+        if type(registered) is _ValidatedCommonEntry and registered.reference is reference:
             if os.getpid() != registered.owner_pid:
                 return
             _VALIDATED_COMMON_REGISTRY.pop(key, None)
@@ -2611,6 +5567,7 @@ def _register_validated_common_transition(
         authority=authority,
         owns_snapshot=owns_snapshot,
         canonical_fact=canonical_fact,
+        canonical_fact_binding=_common_fact_registry_binding(canonical_fact),
         integrity_sha256=_common_registry_integrity_sha256(
             snapshot.runtime,
             canonical_fact,
@@ -2630,10 +5587,10 @@ def _register_checker_validated_common_transition(
 
     from yieldforge.oracle.fact_checker import _consume_checker_registration_token
 
-    authority.require_active(authority.runtime)
-    _consume_checker_registration_token(checker_token, authority, fact)  # type: ignore[arg-type]
     result = None
     try:
+        authority.require_active(authority.runtime)
+        _consume_checker_registration_token(checker_token, authority, fact)  # type: ignore[arg-type]
         result = _register_validated_common_transition(
             fact,
             authority._snapshot,  # noqa: SLF001 - capability shares checker authority lifetime.
@@ -2644,34 +5601,59 @@ def _register_checker_validated_common_transition(
         )
         authority.require_active(authority.runtime)
         return result
-    except BaseException:
+    except BaseException as body_error:
+        cleanup_error = None
         if result is not None:
-            _release_validated_common_transition(result)
-        raise
+            try:
+                _release_validated_common_transition(result)
+            except BaseException as error:
+                cleanup_error = error
+        if isinstance(body_error, (KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(body_error, M8PreparedFrontierIntegrityError):
+            raise body_error
+        integrity_error = M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: checker common capability registration"
+        )
+        cause = cleanup_error or body_error
+        raise integrity_error from cause
 
 
 def _release_validated_common_transition(common: ValidatedCommonTransition) -> None:
     """Deep-check and retire one event-scoped private common fact."""
 
+    malformed_registry_keys = _sanitize_validated_common_registry_keys()
     registered = _VALIDATED_COMMON_REGISTRY.get(id(common))
-    integrity_error = None
+    integrity_error: M8PreparedFrontierIntegrityError | None = None
     try:
-        if registered is None or _registered_common_entry(common) is not registered:
-            raise ValueError("M8 certifier requires a validated common transition capability")
-        if registered.integrity_sha256 != _common_registry_integrity_sha256(
-            registered.snapshot.runtime,
-            registered.canonical_fact,
+        if (
+            malformed_registry_keys
+            or type(registered) is not _ValidatedCommonEntry
+            or _registered_common_entry(common, deep=True) is not registered
         ):
-            integrity_error = ValueError("M8 common transition registry integrity differs")
-    except (AttributeError, TypeError, ValueError) as error:
-        integrity_error = ValueError("M8 common transition registry integrity differs")
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "common transition registry integrity differs"
+            )
+    except M8PreparedFrontierIntegrityError as error:
+        integrity_error = error
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        integrity_error = M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: common transition registry integrity differs"
+        )
         integrity_error.__cause__ = error
     finally:
-        current = _VALIDATED_COMMON_REGISTRY.get(id(common))
-        if registered is not None and current is registered:
-            _VALIDATED_COMMON_REGISTRY.pop(id(common), None)
-        if registered is not None and registered.owns_snapshot:
-            registered.snapshot.close()
+        _sanitize_validated_common_registry_keys()
+        _VALIDATED_COMMON_REGISTRY.pop(id(common), None)
+        if type(registered) is _ValidatedCommonEntry and registered.owns_snapshot:
+            try:
+                registered.snapshot.close()
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+                if integrity_error is None:
+                    integrity_error = M8PreparedFrontierIntegrityError(
+                        "M8 prepared frontier integrity differs: common transition snapshot cleanup"
+                    )
+                    integrity_error.__cause__ = error
     if integrity_error is not None:
         raise integrity_error
 
@@ -2683,13 +5665,20 @@ def build_validated_m8_common_transition(
 ) -> ValidatedCommonTransition:
     """Reconstruct one exact local common transition and issue a process capability."""
 
+    try:
+        _preflight_prepared_source_runtime(runtime)
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 prepared frontier integrity differs: common capability runtime source capture"
+        ) from error
+    captured_cursor = _capture_replay_cursor_source(cursor)
     snapshot = snapshot_m7_replay_runtime(runtime)
     registered = False
     try:
         with snapshot.runtime_for_proof() as proof_runtime:
             fact = _derive_m8_common_transition_fact(
                 proof_runtime,
-                cursor=cursor,
+                cursor=captured_cursor,
                 semantic_runtime_sha256=snapshot.semantic_sha256,
             )
             _validate_portable_common_transition_fact(
@@ -2723,10 +5712,11 @@ def build_validated_m8_common_transition_in_context(
 ) -> ValidatedCommonTransition:
     """Derive one common capability inside an active shared proof runtime."""
 
+    captured_cursor = _capture_replay_cursor_source(cursor)
     authority._require_active_identity()  # noqa: SLF001 - bounded prepared operation.
     fact = _derive_m8_common_transition_fact(
         authority.runtime,
-        cursor=cursor,
+        cursor=captured_cursor,
         semantic_runtime_sha256=authority.semantic_sha256,
         prepared_layouts=prepared_layouts,
         differential=differential,
@@ -2737,7 +5727,7 @@ def build_validated_m8_common_transition_in_context(
         else _prepared_source_runtime(
             prepared_layouts,
             authority.runtime,
-            event_position=cursor.next_event_position,
+            event_position=captured_cursor.next_event_position,
         )
     )
     _validate_portable_common_transition_fact(
@@ -2763,29 +5753,39 @@ def validate_m8_common_transition_fact(
 ) -> ValidatedCommonTransition:
     """Independently reconstruct a portable fact before granting local authority."""
 
+    captured_cursor = _capture_replay_cursor_source(cursor)
+    submitted_portable, submitted_content_sha256 = _capture_common_transition_fact_source(
+        runtime,
+        fact,
+    )
     snapshot = snapshot_m7_replay_runtime(runtime)
     registered = False
     try:
         with snapshot.runtime_for_proof() as proof_runtime:
-            _validate_portable_common_transition_fact(
-                proof_runtime,
-                fact,
-                semantic_runtime_sha256=snapshot.semantic_sha256,
-            )
             authoritative = _derive_m8_common_transition_fact(
                 proof_runtime,
-                cursor=cursor,
+                cursor=captured_cursor,
                 semantic_runtime_sha256=snapshot.semantic_sha256,
             )
-            if fact != authoritative:
-                raise ValueError("M8 portable fact differs from authoritative common transition")
+            _validate_portable_common_transition_fact(
+                proof_runtime,
+                authoritative,
+                semantic_runtime_sha256=snapshot.semantic_sha256,
+            )
+            if (
+                submitted_content_sha256 != authoritative.content_sha256
+                or submitted_portable != _portable_common_transition(authoritative)
+            ):
+                raise ValueError(
+                    "M8 common transition fact differs from authoritative common transition"
+                )
             _require_caller_runtime_stable(
                 runtime,
                 expected_sha256=snapshot.semantic_sha256,
                 operation="M8 common capability validation",
             )
         result = _register_validated_common_transition(
-            fact,
+            authoritative,
             snapshot,
             registration_provenance=_VALIDATED_COMMON_REGISTRATION_PROVENANCE,
         )
@@ -2802,6 +5802,12 @@ def _require_caller_runtime_stable(
     expected_sha256: str,
     operation: str,
 ) -> None:
+    try:
+        _preflight_prepared_source_runtime(runtime)
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise M8PreparedFrontierIntegrityError(
+            f"M8 prepared frontier integrity differs: {operation} runtime source"
+        ) from error
     if m7_semantic_runtime_sha256(runtime) != expected_sha256:
         raise ValueError(f"M8 semantic runtime fingerprint changed during {operation}")
 
@@ -2824,7 +5830,13 @@ def _require_validated_common_transition(
             operation="M8 certificate capability entry",
         )
     else:
-        authority._require_active_identity(runtime)  # noqa: SLF001
+        try:
+            authority._require_active_identity(runtime)  # noqa: SLF001
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise M8PreparedFrontierIntegrityError(
+                "M8 prepared frontier integrity differs: "
+                "validated common transition authority capability"
+            ) from error
     return fact, registered.snapshot, authority
 
 
@@ -3602,10 +6614,10 @@ def _capture_unchecked_event_passivity_body(
     runtime: M7ReplayRuntime,
     *,
     common: M8UncheckedProducerTransition,
-    branch_cursor: M7ReplayCursor,
+    captured_branch_cursor: M7ReplayCursor,
     prepared_layouts: _PreparedTranslationLayoutBatch | None = None,
 ) -> M8UncheckedEventPassivityCapture:
-    """Build one unchecked branch result beneath the source-integrity boundary."""
+    """Build one unchecked branch result from caller state detached above the boundary."""
 
     if type(common) is not M8UncheckedProducerTransition:
         raise ValueError("M8 unchecked traversal requires a producer-only transition record")
@@ -3625,7 +6637,7 @@ def _capture_unchecked_event_passivity_body(
         or fact.replay_input_sha256 != source_runtime.replay_input.content_sha256
     ):
         raise ValueError("M8 unchecked producer transition differs from runtime context")
-    delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
+    delta = _derive_branch_inventory_delta(fact.cursor_before, captured_branch_cursor)
     if not delta.added and not delta.removed:
         return M8UncheckedEventPassivityCapture(
             passive=False,
@@ -3663,7 +6675,7 @@ def _capture_unchecked_event_passivity_body(
         )
     transition = apply_m7_frozen_action_evidence_with_commitments(
         source_runtime,
-        cursor=branch_cursor,
+        cursor=captured_branch_cursor,
         event_position=fact.event_position,
         action=fact.step.event.action,
     )
@@ -3726,6 +6738,7 @@ def _capture_unchecked_event_passivity(
 ) -> M8UncheckedEventPassivityCapture:
     """Traverse one branch using only a producer record and return unchecked source."""
 
+    captured_branch_cursor = _capture_replay_cursor_source(branch_cursor)
     if type(common) is not M8UncheckedProducerTransition:
         raise ValueError("M8 unchecked traversal requires a producer-only transition record")
     expected_executable_identity = (
@@ -3759,7 +6772,7 @@ def _capture_unchecked_event_passivity(
         return _capture_unchecked_event_passivity_body(
             runtime,
             common=common,
-            branch_cursor=branch_cursor,
+            captured_branch_cursor=captured_branch_cursor,
             prepared_layouts=prepared_layouts,
         )
     finally:
@@ -3775,6 +6788,7 @@ def certify_event_passivity(
 ) -> EventPassivityResult:
     """Prove one branch event selects the exact common M7 action, or fail closed."""
 
+    captured_branch_cursor = _capture_replay_cursor_source(branch_cursor)
     fact, snapshot, authority = _require_validated_common_transition(runtime, common)
     proof_context = (
         nullcontext(authority.runtime) if authority is not None else snapshot.runtime_for_proof()
@@ -3790,7 +6804,10 @@ def certify_event_passivity(
                     event_position=fact.event_position,
                 )
             )
-            delta = _derive_branch_inventory_delta(fact.cursor_before, branch_cursor)
+            delta = _derive_branch_inventory_delta(
+                fact.cursor_before,
+                captured_branch_cursor,
+            )
             if not delta.added and not delta.removed:
                 return EventPassivityResult(
                     passive=False,
@@ -3811,7 +6828,7 @@ def certify_event_passivity(
 
             transition = apply_m7_frozen_action_evidence_with_commitments(
                 source_runtime,
-                cursor=branch_cursor,
+                cursor=captured_branch_cursor,
                 event_position=fact.event_position,
                 action=fact.step.event.action,
             )
@@ -3865,7 +6882,13 @@ def certify_event_passivity(
                     operation="M8 certificate operation",
                 )
             else:
-                authority._require_active_identity(runtime)  # noqa: SLF001
+                try:
+                    authority._require_active_identity(runtime)  # noqa: SLF001
+                except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+                    raise M8PreparedFrontierIntegrityError(
+                        "M8 prepared frontier integrity differs: "
+                        "certificate proof authority capability"
+                    ) from error
 
 
 __all__ = [

@@ -11,9 +11,11 @@ from yieldforge.baseline.replay import (
     apply_m7_action_descriptor,
     authoritative_m7_proof_runtime,
     enumerate_m7_action_catalog,
+    m7_cursor_sha256,
     run_m7_continuation,
     select_m7_fallback,
 )
+from yieldforge.oracle.compiled import M8PreparedFrontierIntegrityError
 from yieldforge.oracle.contracts import M8ActionScore, M8OracleDecision, build_oracle_decision
 from yieldforge.oracle.visibility import FutureVisibility
 
@@ -52,13 +54,73 @@ def _isolated_runtime(
     )
 
 
-def _visible_stop(request: M8OracleRequest, *, event_position: int) -> int:
-    visible = request.visibility.visible_suffix(current_position=event_position)
-    registered = request.runtime.replay_input.instances
-    expected = registered[event_position + 1 : event_position + 1 + len(visible)]
-    if visible != expected:
-        raise ValueError("M8 visibility provider returned a non-prefix or mutated suffix")
-    return event_position + 1 + len(visible)
+def _capture_reference_action_ids_source(action_ids: tuple[str, ...]) -> tuple[str, ...]:
+    if type(action_ids) is not tuple:
+        raise M8PreparedFrontierIntegrityError(
+            "M8 reference action ID collection source differs"
+        )
+    captured = tuple(tuple.__iter__(action_ids))
+    if any(type(action_id) is not str for action_id in captured):
+        raise M8PreparedFrontierIntegrityError("M8 reference action ID source differs")
+    if not captured or any(not action_id for action_id in captured) or len(captured) != len(
+        set(captured)
+    ):
+        raise ValueError("M8 selected reference action IDs must be nonempty and unique")
+    return captured
+
+
+def _capture_reference_request_source(
+    request: M8OracleRequest,
+) -> tuple[M8OracleRequest, str, int]:
+    """Capture public request semantics before the authoritative reference scope."""
+
+    from yieldforge.oracle.certificates import (
+        _capture_replay_cursor_commitment_source,
+        _capture_replay_cursor_source,
+        _capture_visible_suffix_source,
+    )
+
+    if type(request) is not M8OracleRequest:
+        raise M8PreparedFrontierIntegrityError("M8 reference request source type differs")
+    state = object.__getattribute__(request, "__dict__")
+    if type(state) is not dict or set(state) != {"runtime", "cursor", "visibility"}:
+        raise M8PreparedFrontierIntegrityError("M8 reference request source state differs")
+    source_runtime = state["runtime"]
+    source_cursor = state["cursor"]
+    source_visibility = state["visibility"]
+    if type(source_runtime) is not M7ReplayRuntime or type(source_cursor) is not M7ReplayCursor:
+        raise M8PreparedFrontierIntegrityError("M8 reference request source graph differs")
+    cursor_position, cursor_sha256 = _capture_replay_cursor_commitment_source(source_cursor)
+    captured_visibility = _capture_visible_suffix_source(
+        source_runtime,
+        source_visibility,
+        current_position=cursor_position,
+    )
+    current_state = object.__getattribute__(request, "__dict__")
+    if (
+        type(current_state) is not dict
+        or current_state is not state
+        or set(current_state) != {"runtime", "cursor", "visibility"}
+        or current_state["runtime"] is not source_runtime
+        or current_state["cursor"] is not source_cursor
+        or current_state["visibility"] is not source_visibility
+    ):
+        raise M8PreparedFrontierIntegrityError("M8 reference request drifted during capture")
+    captured_cursor = _capture_replay_cursor_source(source_cursor)
+    if (
+        captured_cursor.next_event_position != cursor_position
+        or m7_cursor_sha256(captured_cursor) != cursor_sha256
+    ):
+        raise M8PreparedFrontierIntegrityError("M8 reference cursor drifted during capture")
+    return (
+        M8OracleRequest(
+            runtime=source_runtime,
+            cursor=captured_cursor,
+            visibility=captured_visibility,
+        ),
+        captured_visibility.semantic_runtime_sha256,
+        cursor_position + 1 + len(captured_visibility.bindings),
+    )
 
 
 def _score_reference_action_from_catalog(
@@ -192,26 +254,29 @@ def score_reference_actions(
 ) -> tuple[M8ActionScore, ...]:
     """Brute-score one ordered selected-action batch in a single stable snapshot."""
 
-    if not action_ids or action_ids != tuple(dict.fromkeys(action_ids)):
-        raise ValueError("M8 selected reference action IDs must be nonempty and unique")
-    with authoritative_m7_proof_runtime(request.runtime) as authority:
+    captured_action_ids = _capture_reference_action_ids_source(action_ids)
+    source, semantic_runtime_sha256, stop = _capture_reference_request_source(request)
+    with authoritative_m7_proof_runtime(source.runtime) as authority:
+        if authority.semantic_sha256 != semantic_runtime_sha256:
+            raise M8PreparedFrontierIntegrityError("M8 reference runtime source drifted")
         captured = M8OracleRequest(
             runtime=authority.runtime,
-            cursor=request.cursor,
-            visibility=request.visibility,
+            cursor=source.cursor,
+            visibility=source.visibility,
         )
         catalog = enumerate_m7_action_catalog(
             captured.runtime,
             cursor=captured.cursor,
         )
         present = {item.action_id for item in catalog.actions}
-        if any(action_id not in present for action_id in action_ids):
+        if any(action_id not in present for action_id in captured_action_ids):
             raise ValueError("M8 selected reference action is absent from the exact catalog")
-        stop = _visible_stop(captured, event_position=catalog.event_position)
+        if catalog.event_position != source.cursor.next_event_position:
+            raise M8PreparedFrontierIntegrityError("M8 reference catalog position differs")
         return _score_reference_actions_event_major(
             captured,
             catalog=catalog,
-            action_ids=action_ids,
+            action_ids=captured_action_ids,
             stop_event_position=stop,
         )
 
@@ -219,11 +284,14 @@ def score_reference_actions(
 def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
     """Score every exact current action by isolated suffix replay."""
 
-    with authoritative_m7_proof_runtime(request.runtime) as authority:
+    source, semantic_runtime_sha256, stop = _capture_reference_request_source(request)
+    with authoritative_m7_proof_runtime(source.runtime) as authority:
+        if authority.semantic_sha256 != semantic_runtime_sha256:
+            raise M8PreparedFrontierIntegrityError("M8 reference runtime source drifted")
         captured = M8OracleRequest(
             runtime=authority.runtime,
-            cursor=request.cursor,
-            visibility=request.visibility,
+            cursor=source.cursor,
+            visibility=source.visibility,
         )
         catalog = enumerate_m7_action_catalog(
             captured.runtime,
@@ -233,7 +301,8 @@ def score_reference_event(request: M8OracleRequest) -> M8ReferenceResult:
             catalog,
             policy=captured.runtime.replay_input.policy,
         )
-        stop = _visible_stop(captured, event_position=catalog.event_position)
+        if catalog.event_position != source.cursor.next_event_position:
+            raise M8PreparedFrontierIntegrityError("M8 reference catalog position differs")
         action_scores = _score_reference_actions_event_major(
             captured,
             catalog=catalog,
