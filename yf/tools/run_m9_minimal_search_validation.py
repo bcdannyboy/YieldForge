@@ -284,6 +284,16 @@ def _validate_two_ply_case(
         raise M9RunnerError("M9 repair baseline action is absent from the root catalog")
     if record.repaired_selected_action_id not in exact_ids:
         raise M9RunnerError("M9 repair selected action is absent from the root catalog")
+    expected_selected_action_id = min(
+        record.two_ply_root_scores,
+        key=lambda score: (
+            score.bounded_objective_cost,
+            score.action_id != record.baseline_action_id,
+            score.action_id,
+        ),
+    ).action_id
+    if record.repaired_selected_action_id != expected_selected_action_id:
+        raise M9RunnerError("M9 repair tie selection does not reconcile")
     exact_by_action = {
         score.action_id: score.final_net_cost for score in record.exact_root_scores
     }

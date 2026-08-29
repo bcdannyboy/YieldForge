@@ -118,6 +118,27 @@ def _inconsistent_repair_budget_result():  # type: ignore[no-untyped-def]
     )
 
 
+def _wrong_tied_repair_selection_result():  # type: ignore[no-untyped-def]
+    result = _repair_matrix()
+    first = result.primary.cases[0]
+    assert first.baseline_action_id == "m7-standard:candidate-one"
+    assert first.repaired_selected_action_id == "m7-standard:candidate-one"
+    assert tuple(
+        score.bounded_objective_cost for score in first.two_ply_root_scores
+    ) == (105.0, 105.0)
+    wrong_first = replace(
+        first,
+        repaired_selected_action_id="m7-standard:candidate-two",
+    )
+    return replace(
+        result,
+        primary=replace(
+            result.primary,
+            cases=(wrong_first, *result.primary.cases[1:]),
+        ),
+    )
+
+
 def test_exact_search_matches_hand_computed_high_retrieval_case() -> None:
     case = next(
         item
@@ -925,6 +946,19 @@ def test_two_ply_runner_publishes_nothing_on_repeat_or_aggregate_mismatch(
     assert not tuple(tmp_path.glob("m9-two-ply-repair-validation-*.json"))
 
 
+def test_two_ply_runner_rejects_nonbaseline_winner_in_bounded_tie() -> None:
+    runner = _load_runner()
+    ordered_case_ids = tuple(
+        case.case_id for case in exhaustive_certificate_cases()
+    )
+
+    with pytest.raises(runner.M9RunnerError, match="tie selection"):
+        runner._validate_two_ply_evaluator_result(
+            _wrong_tied_repair_selection_result(),
+            ordered_case_ids=ordered_case_ids,
+        )
+
+
 @pytest.mark.parametrize("destination_kind", ["different", "symlink", "directory"])
 def test_two_ply_runner_refuses_unsafe_existing_destination(
     tmp_path: Path,
@@ -1045,6 +1079,15 @@ def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
                 if cost == exact_optimum
             )
             selected = record["repaired_selected_action_id"]
+            expected_bounded_winner = min(
+                record["two_ply_root_scores"],
+                key=lambda score: (
+                    score["bounded_objective_cost"],
+                    score["action_id"] != record["baseline_action_id"],
+                    score["action_id"],
+                ),
+            )["action_id"]
+            assert selected == expected_bounded_winner
             assert tuple(record["exact_optimal_first_action_ids"]) == exact_optimal_ids
             assert selected in exact_optimal_ids
             assert record["exact_optimal_cost"] == exact_optimum
