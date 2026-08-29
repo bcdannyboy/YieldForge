@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import yieldforge.oracle.search_validation as search_validation
 from tests.oracle.fixtures import exhaustive_certificate_cases
 from yieldforge.baseline.contracts import M7ActionKind
 from yieldforge.oracle.reference import score_reference_event
@@ -480,6 +481,115 @@ def test_two_ply_repair_preserves_original_failure_evidence() -> None:
     assert original.primary.max_absolute_first_action_regret == 100.0
     assert repaired.decision == "pass_decision_feasibility"
     assert repaired.primary.counterexamples == ()
+
+
+def test_two_ply_repair_rejects_wrong_sensitivity_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_scorer = search_validation.score_two_ply_reoptimization
+
+    def wrong_sensitivity_scorer(request, *, objective_label):  # type: ignore[no-untyped-def]
+        return original_scorer(
+            request,
+            objective_label=(
+                "scrap_only"
+                if objective_label == "zero_total_terminal_credit"
+                else objective_label
+            ),
+        )
+
+    monkeypatch.setattr(
+        search_validation,
+        "score_two_ply_reoptimization",
+        wrong_sensitivity_scorer,
+    )
+
+    with pytest.raises(RuntimeError, match="objective identity"):
+        evaluate_two_ply_repair_validation(exhaustive_certificate_cases())
+
+
+def test_two_ply_terminal_credit_objective_changes_positive_credit_fixture() -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "remnant_first-zero-no-fit-equal-separated-two"
+    )
+    assert case.request.runtime.replay_input.rates.scrap_credit_per_area == 0.1
+
+    primary = score_two_ply_reoptimization(
+        case.request,
+        objective_label="scrap_only",
+    )
+    sensitivity = score_two_ply_reoptimization(
+        case.request,
+        objective_label="zero_total_terminal_credit",
+    )
+
+    assert tuple(score.action_id for score in primary.root_scores) == tuple(
+        score.action_id for score in sensitivity.root_scores
+    )
+    assert tuple(score.bounded_objective_cost for score in primary.root_scores) == (
+        197.8,
+        197.8,
+    )
+    assert tuple(score.bounded_objective_cost for score in sensitivity.root_scores) == (
+        204.8,
+        204.8,
+    )
+
+
+def test_two_ply_repair_rejects_bounded_root_cost_below_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "remnant_first-zero-fit-equal-same-two"
+    )
+    original_scorer = search_validation.score_two_ply_reoptimization
+
+    def underestimated_scorer(request, *, objective_label):  # type: ignore[no-untyped-def]
+        result = original_scorer(request, objective_label=objective_label)
+        underestimated = replace(
+            result.root_scores[0],
+            bounded_objective_cost=-1_000_000.0,
+        )
+        return replace(
+            result,
+            root_scores=(underestimated, *result.root_scores[1:]),
+        )
+
+    monkeypatch.setattr(
+        search_validation,
+        "score_two_ply_reoptimization",
+        underestimated_scorer,
+    )
+
+    with pytest.raises(RuntimeError, match="below its exact reachable cost"):
+        evaluate_two_ply_repair_validation((case,))
+
+
+def test_two_ply_repair_rejects_position_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = exhaustive_certificate_cases()[0]
+    original_scorer = search_validation.score_two_ply_reoptimization
+
+    def shifted_scorer(request, *, objective_label):  # type: ignore[no-untyped-def]
+        result = original_scorer(request, objective_label=objective_label)
+        return replace(
+            result,
+            stop_event_position=result.stop_event_position - 1,
+        )
+
+    monkeypatch.setattr(
+        search_validation,
+        "score_two_ply_reoptimization",
+        shifted_scorer,
+    )
+
+    with pytest.raises(RuntimeError, match="search positions"):
+        evaluate_two_ply_repair_validation((case,))
 
 
 def test_runner_rebuilds_twice_and_publishes_content_addressed_fail_result(

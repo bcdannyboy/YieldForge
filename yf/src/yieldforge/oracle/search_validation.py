@@ -824,14 +824,41 @@ def _compare_two_ply_case(
         case.request,
         objective_label=objective_label,
     )
+    if (
+        two_ply.objective_label != objective_label
+        or two_ply.objective_definition != objective_definition
+    ):
+        raise RuntimeError("M9 two-ply objective identity does not match the request")
     exact = solve_exact_search(
         case.request,
         include_terminal_credit=include_terminal_credit,
     )
+    if exact.include_terminal_credit != include_terminal_credit:
+        raise RuntimeError("M9 exact objective identity does not match the request")
+    expected_start, expected_stop = _visible_stop(case.request)
+    if (
+        two_ply.start_event_position != expected_start
+        or exact.start_event_position != expected_start
+        or two_ply.stop_event_position != expected_stop
+        or exact.stop_event_position != expected_stop
+    ):
+        raise RuntimeError("M9 two-ply and exact search positions do not reconcile")
     two_ply_action_ids = tuple(item.action_id for item in two_ply.root_scores)
     exact_action_ids = tuple(item.action_id for item in exact.root_scores)
     if two_ply_action_ids != exact_action_ids:
         raise RuntimeError("M9 two-ply and exact root action catalogs differ")
+    for bounded_score, exact_score in zip(
+        two_ply.root_scores,
+        exact.root_scores,
+        strict=True,
+    ):
+        signed_root_error = rounded_cost(
+            bounded_score.bounded_objective_cost - exact_score.final_net_cost
+        )
+        if signed_root_error < 0.0:
+            raise RuntimeError(
+                "M9 bounded root cost is below its exact reachable cost"
+            )
     exact_by_action = {item.action_id: item.final_net_cost for item in exact.root_scores}
     bounded_by_action = {
         item.action_id: item.bounded_objective_cost for item in two_ply.root_scores
