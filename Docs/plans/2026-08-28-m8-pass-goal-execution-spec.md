@@ -343,6 +343,7 @@ changes are the five expected inherited Task-2 files.
 - Modify: `yf/tests/oracle/test_sparse.py`
 - Modify: `yf/tests/oracle/test_checker.py`
 - Modify: `yf/tests/oracle/test_fact_checker.py`
+- Modify: `yf/tests/oracle/test_factored_generator.py`
 - Modify: `yf/tests/oracle/test_certificates.py`
 - Modify: `yf/tests/oracle/test_frontier.py`
 - Modify: `yf/tests/oracle/test_reference.py`
@@ -378,9 +379,9 @@ Required corrections:
 Run from `yf`:
 
 ```bash
-.venv/bin/pytest -q tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_certificates.py tests/oracle/test_frontier.py
+.venv/bin/pytest -q tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_factored_generator.py tests/oracle/test_certificates.py tests/oracle/test_frontier.py
 .venv/bin/pytest -q tests/oracle/test_sparse.py tests/oracle/test_checker.py tests/oracle/test_reference.py tests/oracle/test_m8_profiling.py
-.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/factored.py src/yieldforge/oracle/facts.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/reference.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_frontier.py tests/oracle/test_reference.py tests/oracle/test_sparse.py
+.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/factored.py src/yieldforge/oracle/facts.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/reference.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_factored_generator.py tests/oracle/test_frontier.py tests/oracle/test_reference.py tests/oracle/test_sparse.py
 git diff --check
 ```
 
@@ -401,6 +402,7 @@ git add -- src/yieldforge/oracle/certificates.py \
   tests/oracle/test_compiled.py \
   tests/oracle/test_fact_capture.py \
   tests/oracle/test_fact_checker.py \
+  tests/oracle/test_factored_generator.py \
   tests/oracle/test_frontier.py \
   tests/oracle/test_reference.py \
   tests/oracle/test_sparse.py
