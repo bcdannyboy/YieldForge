@@ -336,6 +336,8 @@ changes are the five expected inherited Task-2 files.
 - Modify: `yf/src/yieldforge/oracle/checker.py`
 - Modify: `yf/src/yieldforge/oracle/fact_checker.py`
 - Modify: `yf/src/yieldforge/oracle/factored.py`
+- Modify: `yf/src/yieldforge/oracle/facts.py`
+- Modify: `yf/src/yieldforge/oracle/reference.py`
 - Modify: `yf/tests/oracle/test_compiled.py`
 - Modify: `yf/tests/oracle/test_fact_capture.py`
 - Modify: `yf/tests/oracle/test_sparse.py`
@@ -343,13 +345,18 @@ changes are the five expected inherited Task-2 files.
 - Modify: `yf/tests/oracle/test_fact_checker.py`
 - Modify: `yf/tests/oracle/test_certificates.py`
 - Modify: `yf/tests/oracle/test_frontier.py`
+- Modify: `yf/tests/oracle/test_reference.py`
 
 This narrow allowlist amendment records the typed fact-checker propagation and certificate
 regressions discovered during RED-team repair. It also records the necessary frontier audit-copy
 identity regression: prepared accessors now return detached audit values, so equality remains exact
 while object identity must not be preserved. `factored.py` is included because the public unchecked
 bundle wrapper must be captured before generator authority and may not dispatch caller methods from
-inside the prepared context. `profiling.py` and `test_m8_profiling.py` remain
+inside the prepared context. `reference.py` and `test_reference.py` are included because the public
+correctness oracle must capture the request, cursor, visibility, and action identifiers before its
+authoritative scope. `facts.py` is included to make the portable replay-cursor schema faithfully
+represent the frozen M7 initial cursor sentinel (`timestamp_group_sequence == -1`). `profiling.py`
+and `test_m8_profiling.py` remain
 unchanged; the profiling suite remains a required regression execution below.
 
 Required corrections:
@@ -372,8 +379,8 @@ Run from `yf`:
 
 ```bash
 .venv/bin/pytest -q tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_certificates.py tests/oracle/test_frontier.py
-.venv/bin/pytest -q tests/oracle/test_sparse.py tests/oracle/test_checker.py tests/oracle/test_m8_profiling.py
-.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/factored.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_frontier.py tests/oracle/test_sparse.py
+.venv/bin/pytest -q tests/oracle/test_sparse.py tests/oracle/test_checker.py tests/oracle/test_reference.py tests/oracle/test_m8_profiling.py
+.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/factored.py src/yieldforge/oracle/facts.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/reference.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_frontier.py tests/oracle/test_reference.py tests/oracle/test_sparse.py
 git diff --check
 ```
 
@@ -385,7 +392,9 @@ git add -- src/yieldforge/oracle/certificates.py \
   src/yieldforge/oracle/compiled.py \
   src/yieldforge/oracle/fact_checker.py \
   src/yieldforge/oracle/factored.py \
+  src/yieldforge/oracle/facts.py \
   src/yieldforge/oracle/prepared.py \
+  src/yieldforge/oracle/reference.py \
   src/yieldforge/oracle/sparse.py \
   tests/oracle/test_certificates.py \
   tests/oracle/test_checker.py \
@@ -393,6 +402,7 @@ git add -- src/yieldforge/oracle/certificates.py \
   tests/oracle/test_fact_capture.py \
   tests/oracle/test_fact_checker.py \
   tests/oracle/test_frontier.py \
+  tests/oracle/test_reference.py \
   tests/oracle/test_sparse.py
 git diff --cached --name-only
 git commit -m "feat: bind M8 C0 queries to prepared evidence"
