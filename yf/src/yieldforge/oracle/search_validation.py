@@ -107,6 +107,46 @@ class M9OneStepResult:
 
 
 @dataclass(frozen=True)
+class M9TwoPlyRootScore:
+    """Bounded terminal cost reachable from one root action at depth two."""
+
+    action_id: str
+    kind: M7ActionKind
+    bounded_objective_cost: float
+
+
+@dataclass(frozen=True)
+class M9TwoPlySearchTelemetry:
+    """Structural work counts for one complete fixed-depth-two search."""
+
+    catalog_count: int
+    explicit_transition_count: int
+    continuation_event_count: int
+    continuation_call_count: int
+    direct_terminalization_count: int
+    peak_branching_factor: int
+    truncated_catalog_count: int
+    total_event_transition_count: int
+
+
+@dataclass(frozen=True)
+class M9TwoPlyResult:
+    """Complete fixed-depth-two root vector with the M8 exact tie rule."""
+
+    objective_label: M9ObjectiveLabel
+    objective_definition: str
+    depth: Literal[2]
+    start_event_position: int
+    stop_event_position: int
+    baseline_action_id: str
+    selected_action_id: str
+    root_scores: tuple[M9TwoPlyRootScore, ...]
+    action_catalog_complete: bool
+    complete: bool
+    telemetry: M9TwoPlySearchTelemetry
+
+
+@dataclass(frozen=True)
 class M9CaseComparison:
     """One registered case compared against globally reoptimized continuation."""
 
@@ -163,6 +203,17 @@ class _MutableTelemetry:
     catalog_count: int = 0
     explored_transition_count: int = 0
     terminal_leaf_count: int = 0
+    peak_branching_factor: int = 0
+    truncated_catalog_count: int = 0
+
+
+@dataclass
+class _MutableTwoPlyTelemetry:
+    catalog_count: int = 0
+    explicit_transition_count: int = 0
+    continuation_event_count: int = 0
+    continuation_call_count: int = 0
+    direct_terminalization_count: int = 0
     peak_branching_factor: int = 0
     truncated_catalog_count: int = 0
 
@@ -374,6 +425,157 @@ def score_one_step_rollout(
     )
 
 
+def _complete_two_ply_catalog(
+    runtime: M7ReplayRuntime,
+    cursor: M7ReplayCursor,
+    telemetry: _MutableTwoPlyTelemetry,
+) -> M7ActionCatalog:
+    catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
+    telemetry.catalog_count += 1
+    telemetry.peak_branching_factor = max(
+        telemetry.peak_branching_factor,
+        len(catalog.actions),
+    )
+    truncated = catalog.generated.fit_search_budget_truncated_count
+    telemetry.truncated_catalog_count += truncated
+    if truncated:
+        raise ValueError("M9 two-ply search encountered a truncated action catalog")
+    if not catalog.actions:
+        raise ValueError("M9 two-ply search encountered an empty action catalog")
+    return catalog
+
+
+def score_two_ply_reoptimization(
+    request: M9ExactSearchRequest,
+    *,
+    objective_label: M9ObjectiveLabel,
+) -> M9TwoPlyResult:
+    """Optimize the current and next decisions, then follow frozen M7."""
+
+    include_terminal_credit, objective_definition = _objective_parameters(objective_label)
+    runtime = request.runtime
+    start, stop = _visible_stop(request)
+    telemetry = _MutableTwoPlyTelemetry()
+    root_catalog = _complete_two_ply_catalog(runtime, request.cursor, telemetry)
+    fallback = select_m7_fallback(
+        root_catalog,
+        policy=runtime.replay_input.policy,
+    )
+    root_scores: list[M9TwoPlyRootScore] = []
+    for root_descriptor in root_catalog.actions:
+        telemetry.explicit_transition_count += 1
+        root_step = apply_m7_action_descriptor(
+            runtime,
+            cursor=request.cursor,
+            catalog=root_catalog,
+            descriptor=root_descriptor,
+            decision_key=(f"m9_two_ply_root_action_id={root_descriptor.action_id}",),
+        )
+        if root_step.cursor.next_event_position > stop:
+            raise RuntimeError("M9 two-ply search advanced beyond the visible suffix")
+        if root_step.cursor.next_event_position == stop:
+            telemetry.direct_terminalization_count += 1
+            root_cost = _terminal_cost(
+                runtime,
+                root_step.cursor,
+                stop,
+                include_terminal_credit=include_terminal_credit,
+            )
+        else:
+            second_catalog = _complete_two_ply_catalog(
+                runtime,
+                root_step.cursor,
+                telemetry,
+            )
+            second_costs: list[float] = []
+            for second_descriptor in second_catalog.actions:
+                telemetry.explicit_transition_count += 1
+                second_step = apply_m7_action_descriptor(
+                    runtime,
+                    cursor=root_step.cursor,
+                    catalog=second_catalog,
+                    descriptor=second_descriptor,
+                    decision_key=(
+                        f"m9_two_ply_second_action_id={second_descriptor.action_id}",
+                    ),
+                )
+                if second_step.cursor.next_event_position > stop:
+                    raise RuntimeError(
+                        "M9 two-ply search advanced beyond the visible suffix"
+                    )
+                if second_step.cursor.next_event_position == stop:
+                    telemetry.direct_terminalization_count += 1
+                    cost = _terminal_cost(
+                        runtime,
+                        second_step.cursor,
+                        stop,
+                        include_terminal_credit=include_terminal_credit,
+                    )
+                else:
+                    telemetry.continuation_call_count += 1
+                    terminal = run_m7_continuation(
+                        runtime,
+                        cursor=second_step.cursor,
+                        stop_event_position=stop,
+                    )
+                    expected_events = stop - second_step.cursor.next_event_position
+                    if len(terminal.events) != expected_events:
+                        raise RuntimeError(
+                            "M9 two-ply continuation event count does not reconcile"
+                        )
+                    telemetry.continuation_event_count += len(terminal.events)
+                    cost = terminal.final_costs.net_cost
+                    if not include_terminal_credit:
+                        cost = rounded_cost(
+                            cost + terminal.final_costs.terminal_scrap_credit
+                        )
+                second_costs.append(cost)
+            root_cost = min(second_costs)
+        root_scores.append(
+            M9TwoPlyRootScore(
+                action_id=root_descriptor.action_id,
+                kind=root_descriptor.kind,
+                bounded_objective_cost=root_cost,
+            )
+        )
+
+    score_tuple = tuple(root_scores)
+    selected = min(
+        score_tuple,
+        key=lambda item: (
+            item.bounded_objective_cost,
+            item.action_id != fallback.action_id,
+            item.action_id,
+        ),
+    )
+    immutable_telemetry = M9TwoPlySearchTelemetry(
+        catalog_count=telemetry.catalog_count,
+        explicit_transition_count=telemetry.explicit_transition_count,
+        continuation_event_count=telemetry.continuation_event_count,
+        continuation_call_count=telemetry.continuation_call_count,
+        direct_terminalization_count=telemetry.direct_terminalization_count,
+        peak_branching_factor=telemetry.peak_branching_factor,
+        truncated_catalog_count=telemetry.truncated_catalog_count,
+        total_event_transition_count=(
+            telemetry.explicit_transition_count
+            + telemetry.continuation_event_count
+        ),
+    )
+    return M9TwoPlyResult(
+        objective_label=objective_label,
+        objective_definition=objective_definition,
+        depth=2,
+        start_event_position=start,
+        stop_event_position=stop,
+        baseline_action_id=fallback.action_id,
+        selected_action_id=selected.action_id,
+        root_scores=score_tuple,
+        action_catalog_complete=immutable_telemetry.truncated_catalog_count == 0,
+        complete=immutable_telemetry.truncated_catalog_count == 0,
+        telemetry=immutable_telemetry,
+    )
+
+
 def _relative_regret(*, absolute_regret: float, optimum: float) -> float | None:
     if absolute_regret == 0.0:
         return 0.0
@@ -533,7 +735,11 @@ __all__ = [
     "M9OneStepScore",
     "M9RegisteredSearchCase",
     "M9SearchValidationResult",
+    "M9TwoPlyResult",
+    "M9TwoPlyRootScore",
+    "M9TwoPlySearchTelemetry",
     "evaluate_search_validation",
     "score_one_step_rollout",
+    "score_two_ply_reoptimization",
     "solve_exact_search",
 ]

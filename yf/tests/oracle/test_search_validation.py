@@ -16,6 +16,7 @@ from yieldforge.baseline.contracts import M7ActionKind
 from yieldforge.oracle.reference import score_reference_event
 from yieldforge.oracle.search_validation import (
     evaluate_search_validation,
+    score_two_ply_reoptimization,
     solve_exact_search,
 )
 
@@ -108,6 +109,87 @@ def test_exact_search_matches_hand_computed_high_retrieval_case() -> None:
     assert result.telemetry.truncated_catalog_count == 0
     assert result.telemetry.explored_transition_count > 0
     assert result.telemetry.terminal_leaf_count > 0
+
+
+def test_two_ply_counterexample_selects_standard_through_strict_advantage() -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "remnant_first-one-match-fit-unequal-high-retrieval-three"
+    )
+
+    result = score_two_ply_reoptimization(
+        case.request,
+        objective_label="scrap_only",
+    )
+
+    assert result.depth == 2
+    assert result.objective_label == "scrap_only"
+    assert result.objective_definition == (
+        "m7_final_net_cost_including_terminal_scrap_credit"
+    )
+    assert tuple(
+        score.bounded_objective_cost
+        for score in result.root_scores
+        if score.kind is M7ActionKind.OPEN_STANDARD_SHEET
+    ) == (400.0, 400.0)
+    assert tuple(
+        score.bounded_objective_cost
+        for score in result.root_scores
+        if score.kind is M7ActionKind.CONSUME_REMNANT
+    ) == (500.0, 500.0)
+    score_by_action = {
+        score.action_id: score.bounded_objective_cost for score in result.root_scores
+    }
+    kind_by_action = {score.action_id: score.kind for score in result.root_scores}
+    assert kind_by_action[result.selected_action_id] is M7ActionKind.OPEN_STANDARD_SHEET
+    assert score_by_action[result.selected_action_id] == 400.0
+    assert score_by_action[result.baseline_action_id] == 500.0
+    assert result.selected_action_id != result.baseline_action_id
+    assert result.action_catalog_complete is True
+    assert result.complete is True
+    assert result.telemetry.catalog_count > 0
+    assert result.telemetry.explicit_transition_count > 0
+    assert result.telemetry.continuation_call_count > 0
+    assert result.telemetry.continuation_event_count > 0
+    assert result.telemetry.direct_terminalization_count == 0
+    assert result.telemetry.truncated_catalog_count == 0
+    assert result.telemetry.total_event_transition_count == (
+        result.telemetry.explicit_transition_count
+        + result.telemetry.continuation_event_count
+    )
+
+    scorer_source = getsource(score_two_ply_reoptimization)
+    assert "solve_exact_search" not in scorer_source
+
+
+def test_two_ply_terminalizes_directly_after_second_explicit_decision() -> None:
+    case = next(
+        item
+        for item in exhaustive_certificate_cases()
+        if item.case_id == "remnant_first-zero-fit-equal-same-two"
+    )
+
+    result = score_two_ply_reoptimization(
+        case.request,
+        objective_label="scrap_only",
+    )
+
+    second_ply_transition_count = (
+        result.telemetry.explicit_transition_count - len(result.root_scores)
+    )
+    assert second_ply_transition_count > 0
+    assert result.telemetry.direct_terminalization_count == second_ply_transition_count
+    assert result.telemetry.continuation_call_count == 0
+    assert result.telemetry.continuation_event_count == 0
+    assert len({score.bounded_objective_cost for score in result.root_scores}) == 1
+    assert result.selected_action_id == result.baseline_action_id
+    assert (
+        result.telemetry.total_event_transition_count
+        == result.telemetry.explicit_transition_count
+    )
+    assert result.telemetry.truncated_catalog_count == 0
+    assert result.complete is True
 
 
 def test_search_validation_matrix_preserves_the_bounded_counterexample() -> None:
