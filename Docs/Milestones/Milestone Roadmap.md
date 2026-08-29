@@ -107,6 +107,35 @@ reproducibility SHA
 `sha256:327163a6d1bbb8fd6479f3a3227b522c4379a5f6882fc3d420388d07b9ac92f6`.
 The original publication runs took 15.2690 and 16.0135 seconds, operational measurements outside
 semantic identity. This finite result is not a universal, physical, savings, or commercial claim.
-No beam repair exists. The next explicit choice is bounded beam/shallow reoptimization versus
-accepting the observed one-step risk before separately considering M10; neither repair nor M10 is
-authorized by this result.
+At that checkpoint, no beam repair existed. The next explicit choice was bounded beam/shallow
+reoptimization versus accepting the observed one-step risk before separately considering M10;
+neither repair nor M10 was authorized by the original failure result.
+
+The minimal shallow-reoptimization repair is now complete. Canonical result
+`yfm9r-db0829451b1b0393f2d22559` uses fixed depth-two search: complete catalogs for the current and
+next decisions, then frozen M7 continuation, with the original baseline preference retained only as
+an exact-tie fallback. It is explicitly bound to unchanged failure result
+`yfm9-97e032de7a09247cc83e6c5a` and original raw-file SHA
+`sha256:9ae6d7fdf2252023a96de8773877bb50f3786f2f7c8b1c6c4bcb5a7de1ca82e3`.
+
+The repair selected an exact-optimal first action in `45/45` registered cases under both scrap-only
+and zero-total-terminal-credit objectives: zero regret, zero counterexamples, and all five
+information-null controls passing. Per objective it used `185` complete catalogs, `650` explicit
+transitions, `500` frozen-continuation event transitions, and `1,150` total transitions, including
+`480` continuation calls and `30` direct terminalizations. Peak branching factor was `8`, no catalog
+was truncated, and the registered `200`/`700`/`1,200` structural budgets all passed. The evaluation
+partition remained sealed.
+
+On the known high-retrieval-cost case, bounded two-ply values separate standard-first at `400.0`
+from remnant-first at `500.0`, while independent exact values are `300.0` and `400.0`. Thus the
+repair fixes action ordering but not every value estimate: bounded selected-action values were exact
+in `42/45` cases and conservatively high by at most `100.0` for the primary objective and `101.0`
+for the sensitivity. Semantic content SHA is
+`sha256:db0829451b1b0393f2d2255990ade1ce783b27a8527f73f3c7bf07e6716438ba`; evaluator
+reproducibility SHA is
+`sha256:9fc0664eaf4b97c67376def10b0dd83534eb5605ebc26823a2a7d5a2522e1d65`.
+
+M9 therefore passes only at the registered finite decision level. This is not universal search
+optimality, exact-value calibration, M6 evaluation, physical validation, savings evidence, or
+commercial proof. M8's formal performance gate remains unresolved, no evaluation was opened, and
+M10 remains a separate decision rather than an automatic next authorization.
