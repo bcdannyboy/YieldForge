@@ -355,14 +355,58 @@ def test_gate3_decision_publisher_is_atomic_idempotent_and_immutable(
 ) -> None:
     decision = _complete_decision()
     path = publish_gate3_decision(tmp_path, decision)
+    expected = (
+        json.dumps(
+            decision.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
 
     assert path.name == f"m8-gate3-decision-{decision.decision_id}.json"
+    assert path.read_bytes() == expected
     assert publish_gate3_decision(tmp_path, decision) == path
     assert type(decision).model_validate_json(path.read_bytes(), strict=True) == decision
 
     path.write_text("{}\n")
     with pytest.raises(ValueError, match="immutable"):
         publish_gate3_decision(tmp_path, decision)
+
+
+def test_gate3_decision_publisher_rejects_symlinked_output_parent(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="output|parent"):
+        publish_gate3_decision(alias_parent, _complete_decision())
+
+    assert tuple(real_parent.iterdir()) == ()
+
+
+@pytest.mark.parametrize("entry_kind", ("symlink", "directory"))
+def test_gate3_decision_publisher_preserves_existing_destination_error(
+    tmp_path: Path,
+    entry_kind: str,
+) -> None:
+    decision = _complete_decision()
+    path = tmp_path / f"m8-gate3-decision-{decision.decision_id}.json"
+    if entry_kind == "symlink":
+        foreign = tmp_path / "decision-foreign.json"
+        foreign.write_bytes(b"{}\n")
+        path.symlink_to(foreign)
+    else:
+        path.mkdir()
+
+    with pytest.raises(ValueError) as captured:
+        publish_gate3_decision(tmp_path, decision)
+
+    assert str(captured.value) == "M8 Gate-3 decision artifact is immutable and differs"
 
 
 def test_complete_executor_binds_all_phases_without_opening_evaluation(

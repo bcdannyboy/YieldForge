@@ -7,7 +7,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import secrets
 import stat
 import sys
 import threading
@@ -34,6 +33,10 @@ from yieldforge.oracle import gate3_evidence as gate3_evidence_module
 from yieldforge.oracle import gate3_normalization as normalization_module
 from yieldforge.oracle import reference as reference_module
 from yieldforge.oracle import sparse as sparse_module
+from yieldforge.oracle.artifact_publisher import (
+    M8ArtifactPublicationError,
+    publish_immutable_artifact,
+)
 from yieldforge.oracle.checker import M8ProofCheckResult, check_action_proofs
 from yieldforge.oracle.concurrency import (
     M8_GATE3_CONCURRENCY_BUDGET,
@@ -1436,39 +1439,43 @@ def publish_gate3_decision(
     output = Path(output_directory)
     if output.exists() and not output.is_dir():
         raise ValueError("M8 Gate-3 output must be a directory")
-    output.mkdir(parents=True, exist_ok=True)
     path = output / f"m8-gate3-decision-{strict.decision_id}.json"
-    data = (
+    data = _canonical_gate3_decision_artifact(strict)
+    try:
+        return publish_immutable_artifact(
+            path,
+            data,
+            validate=_validate_gate3_decision_artifact,
+            label="M8 Gate-3 decision artifact",
+        )
+    except M8ArtifactPublicationError as error:
+        if error.kind in {"conflict", "destination"}:
+            raise M8ArtifactPublicationError(
+                "M8 Gate-3 decision artifact",
+                error.kind,
+                "is immutable and differs",
+            ) from error
+        cause = error.__cause__
+        if error.kind in {"write", "fsync", "install"} and isinstance(cause, OSError):
+            raise cause from error
+        raise
+
+
+def _canonical_gate3_decision_artifact(decision: M8Gate3Decision) -> bytes:
+    return (
         json.dumps(
-            strict.model_dump(mode="json"),
+            decision.model_dump(mode="json"),
             allow_nan=False,
             indent=2,
             sort_keys=True,
         )
         + "\n"
     ).encode()
-    if path.exists():
-        if path.read_bytes() != data:
-            raise ValueError("M8 Gate-3 decision artifact is immutable and differs")
-        return path
-    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            if path.read_bytes() != data:
-                raise ValueError(
-                    "M8 Gate-3 decision artifact is immutable and differs"
-                ) from None
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return path
+
+
+def _validate_gate3_decision_artifact(data: bytes) -> bytes:
+    strict = M8Gate3Decision.model_validate_json(data, strict=True)
+    return _canonical_gate3_decision_artifact(strict)
 
 
 __all__ = [

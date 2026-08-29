@@ -43,6 +43,10 @@ from yieldforge.baseline.replay import (
     m7_semantic_runtime_sha256,
 )
 from yieldforge.experiments.contracts import M0ExperimentContract, semantic_sha256
+from yieldforge.oracle.artifact_publisher import (
+    M8ArtifactPublicationError,
+    publish_immutable_artifact,
+)
 from yieldforge.oracle.checker import (
     M8CheckedFactBundleResult,
     M8FactBundleCheckRequest,
@@ -5515,128 +5519,38 @@ def publish_certificate_profile(output_path: Path, result: dict[str, object]) ->
     return path
 
 
-def _open_portable_profile_parent(output_path: Path) -> tuple[Path, int]:
-    """Open/create every parent through no-follow directory descriptors."""
-
-    absolute = Path(os.path.abspath(Path(output_path)))
-    if not absolute.name:
-        raise ValueError("M8 portable profile output filename is absent")
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    parts = absolute.parent.parts
-    if not parts or parts[0] != absolute.anchor:
-        raise ValueError("M8 portable profile parent directory is malformed")
-    current = os.open(absolute.anchor, directory_flags)
-    try:
-        for component in parts[1:]:
-            try:
-                following = os.open(
-                    component,
-                    directory_flags,
-                    dir_fd=current,
-                )
-            except FileNotFoundError:
-                try:
-                    os.mkdir(component, 0o755, dir_fd=current)
-                except FileExistsError:
-                    pass
-                else:
-                    os.fsync(current)
-                try:
-                    following = os.open(
-                        component,
-                        directory_flags,
-                        dir_fd=current,
-                    )
-                except OSError as error:
-                    raise ValueError(
-                        "M8 portable profile parent directory is not a regular directory"
-                    ) from error
-            except OSError as error:
-                raise ValueError(
-                    "M8 portable profile parent directory is not a regular directory"
-                ) from error
-            metadata = os.fstat(following)
-            if not stat.S_ISDIR(metadata.st_mode):
-                os.close(following)
-                raise ValueError(
-                    "M8 portable profile parent directory is not a regular directory"
-                )
-            os.close(current)
-            current = following
-        return absolute, current
-    except BaseException:
-        os.close(current)
-        raise
-
-
-def _read_portable_profile_entry(
-    parent_descriptor: int,
-    filename: str,
-) -> tuple[bytes, os.stat_result] | None:
-    """Read one stable regular entry without following its final component."""
-
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(filename, flags, dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        raise ValueError("M8 portable existing profile differs") from error
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError("M8 portable existing profile differs")
-        chunks = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        entry = os.stat(
-            filename,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
+def _canonical_artifact_bytes(result: BaselineContractModel) -> bytes:
+    return (
+        json.dumps(
+            result.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
         )
-        before_identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-        )
-        after_identity = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        )
-        entry_identity = (
-            entry.st_dev,
-            entry.st_ino,
-            entry.st_size,
-            entry.st_mtime_ns,
-        )
-        if before_identity != after_identity or after_identity != entry_identity:
-            raise ValueError("M8 portable profile publication integrity differs")
-        return b"".join(chunks), after
-    except FileNotFoundError as error:
-        raise ValueError("M8 portable profile publication integrity differs") from error
-    finally:
-        os.close(descriptor)
+        + "\n"
+    ).encode()
 
 
-def _write_all(descriptor: int, data: bytes) -> None:
-    remaining = memoryview(data)
-    while remaining:
-        written = os.write(descriptor, remaining)
-        if written <= 0:
-            raise OSError("M8 portable profile write made no progress")
-        remaining = remaining[written:]
+def _validate_portable_profile_artifact(data: bytes) -> bytes:
+    strict = M8PortableHotspotProfileV2.model_validate_json(data, strict=True)
+    return _canonical_artifact_bytes(strict)
+
+
+def _validate_portable_gate3_artifact(data: bytes) -> bytes:
+    strict = M8PortableFactGate3Result.model_validate_json(data, strict=True)
+    return _canonical_artifact_bytes(strict)
+
+
+def _validate_certificate_proof_artifact(data: bytes) -> bytes:
+    strict = M8CertificateProofResult.model_validate_json(data, strict=True)
+    return _canonical_artifact_bytes(strict)
+
+
+def _raise_compatible_artifact_io(error: M8ArtifactPublicationError) -> None:
+    cause = error.__cause__
+    if error.kind in {"write", "fsync", "install"} and isinstance(cause, OSError):
+        raise cause
+    raise error
 
 
 def publish_portable_fact_profile(
@@ -5652,91 +5566,36 @@ def publish_portable_fact_profile(
         strict=True,
     )
     path = Path(output_path)
-    data = (
-        json.dumps(
-            strict.model_dump(mode="json"),
-            allow_nan=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode()
-    absolute, parent_descriptor = _open_portable_profile_parent(path)
-    filename = absolute.name
-    temporary = f".{filename}.tmp-{secrets.token_hex(16)}"
+    data = _canonical_artifact_bytes(strict)
+    if not Path(os.path.abspath(path)).name:
+        raise ValueError("M8 portable profile output filename is absent")
     try:
-        existing = _read_portable_profile_entry(parent_descriptor, filename)
-        if existing is not None:
-            if existing[0] != data:
-                raise ValueError("M8 portable existing profile differs")
-            return path
-        descriptor = os.open(
-            temporary,
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=parent_descriptor,
+        return publish_immutable_artifact(
+            path,
+            data,
+            validate=_validate_portable_profile_artifact,
+            label="M8 portable profile",
         )
-        linked_destination = False
-        try:
-            _write_all(descriptor, data)
-            os.fsync(descriptor)
-            source = os.fstat(descriptor)
-            source_entry = os.stat(
-                temporary,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-            if (
-                not stat.S_ISREG(source.st_mode)
-                or (source.st_dev, source.st_ino) != (source_entry.st_dev, source_entry.st_ino)
-            ):
-                raise ValueError("M8 portable profile publication integrity differs")
-            try:
-                os.link(
-                    temporary,
-                    filename,
-                    src_dir_fd=parent_descriptor,
-                    dst_dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-                linked_destination = True
-            except FileExistsError:
-                existing = _read_portable_profile_entry(parent_descriptor, filename)
-                if existing is None or existing[0] != data:
-                    raise ValueError("M8 portable existing profile differs") from None
-            else:
-                published = _read_portable_profile_entry(parent_descriptor, filename)
-                if (
-                    published is None
-                    or published[0] != data
-                    or (published[1].st_dev, published[1].st_ino)
-                    != (source.st_dev, source.st_ino)
-                ):
-                    raise ValueError("M8 portable profile publication integrity differs")
-                os.fsync(parent_descriptor)
-        except BaseException:
-            if linked_destination:
-                try:
-                    os.unlink(filename, dir_fd=parent_descriptor)
-                except FileNotFoundError:
-                    pass
-                os.fsync(parent_descriptor)
-            raise
-        finally:
-            os.close(descriptor)
-    finally:
-        try:
-            os.unlink(temporary, dir_fd=parent_descriptor)
-        except FileNotFoundError:
-            pass
-        else:
-            os.fsync(parent_descriptor)
-        os.close(parent_descriptor)
-    return path
+    except M8ArtifactPublicationError as error:
+        if error.kind in {"parent", "parent_identity"}:
+            raise ValueError(
+                "M8 portable profile parent directory is not a regular directory"
+            ) from error
+        if error.kind in {"conflict", "destination"}:
+            raise M8ArtifactPublicationError(
+                "M8 portable existing profile",
+                error.kind,
+                "differs",
+            ) from error
+        if error.kind in {"identity", "integrity"}:
+            raise M8ArtifactPublicationError(
+                "M8 portable profile publication",
+                error.kind,
+                "integrity differs",
+            ) from error
+        if error.kind == "write" and error.detail == "staging write made no progress":
+            raise OSError("M8 portable profile write made no progress") from error
+        _raise_compatible_artifact_io(error)
 
 
 def publish_portable_fact_gate3(
@@ -5754,37 +5613,23 @@ def publish_portable_fact_gate3(
     output = Path(output_directory)
     if output.exists() and not output.is_dir():
         raise ValueError("M8 portable Gate-3 output must be a directory")
-    output.mkdir(parents=True, exist_ok=True)
     path = output / f"m8-portable-fact-gate3-{strict.gate3_id}.json"
-    data = (
-        json.dumps(
-            strict.model_dump(mode="json"),
-            allow_nan=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode()
-    if path.exists():
-        if path.read_bytes() != data:
-            raise ValueError("M8 portable Gate-3 artifact is immutable and differs")
-        return path
-    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    data = _canonical_artifact_bytes(strict)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            if path.read_bytes() != data:
-                raise ValueError("M8 portable Gate-3 artifact is immutable and differs") from None
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return path
+        return publish_immutable_artifact(
+            path,
+            data,
+            validate=_validate_portable_gate3_artifact,
+            label="M8 portable Gate-3 artifact",
+        )
+    except M8ArtifactPublicationError as error:
+        if error.kind in {"conflict", "destination"}:
+            raise M8ArtifactPublicationError(
+                "M8 portable Gate-3 artifact",
+                error.kind,
+                "is immutable and differs",
+            ) from error
+        _raise_compatible_artifact_io(error)
 
 
 def _publish_sparse_proof_unprofiled(
@@ -5793,28 +5638,32 @@ def _publish_sparse_proof_unprofiled(
 ) -> Path:
     """Publish one immutable content-addressed M8 certificate proof."""
 
+    if type(result) is not M8CertificateProofResult:
+        raise TypeError("M8 certificate proof publisher requires the exact result model")
+    strict = M8CertificateProofResult.model_validate_json(
+        result.model_dump_json(),
+        strict=True,
+    )
     output = Path(output_directory)
     if output.exists() and not output.is_dir():
         raise ValueError("M8 certificate proof output must be a directory")
-    output.mkdir(parents=True, exist_ok=True)
-    path = output / f"m8-certificate-proof-{result.proof_id}.json"
-    data = (
-        json.dumps(result.model_dump(mode="json"), allow_nan=False, indent=2, sort_keys=True) + "\n"
-    ).encode()
-    if path.exists():
-        if path.read_bytes() != data:
-            raise ValueError("M8 certificate proof artifact is immutable and differs")
-        return path
-    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    path = output / f"m8-certificate-proof-{strict.proof_id}.json"
+    data = _canonical_artifact_bytes(strict)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-        temporary.rename(path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return path
+        return publish_immutable_artifact(
+            path,
+            data,
+            validate=_validate_certificate_proof_artifact,
+            label="M8 certificate proof artifact",
+        )
+    except M8ArtifactPublicationError as error:
+        if error.kind in {"conflict", "destination"}:
+            raise M8ArtifactPublicationError(
+                "M8 certificate proof artifact",
+                error.kind,
+                "is immutable and differs",
+            ) from error
+        _raise_compatible_artifact_io(error)
 
 
 def publish_sparse_proof(

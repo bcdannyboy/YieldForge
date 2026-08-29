@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import multiprocessing
 import os
 import signal
@@ -1995,7 +1996,18 @@ def test_publish_portable_profile_strictly_round_trips_the_v2_result(
         strict=True,
     )
     path = experiment.publish_portable_fact_profile(tmp_path / "profile.json", result)
+    expected = (
+        json.dumps(
+            result.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
 
+    assert path.name == "profile.json"
+    assert path.read_bytes() == expected
     assert M8PortableHotspotProfileV2.model_validate_json(
         path.read_bytes(),
         strict=True,
@@ -2052,13 +2064,32 @@ def test_publish_portable_profile_rejects_symlinked_parent_directory(
     alias_parent = tmp_path / "alias"
     alias_parent.symlink_to(real_parent, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="parent directory"):
+    with pytest.raises(ValueError) as captured:
         experiment.publish_portable_fact_profile(alias_parent / "profile.json", result)
 
+    assert str(captured.value) == (
+        "M8 portable profile parent directory is not a regular directory"
+    )
     assert not (real_parent / "profile.json").exists()
 
 
-def test_publish_portable_profile_rejects_replaced_temporary_name(
+def test_publish_portable_profile_preserves_absent_filename_error() -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import experiment
+    from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
+
+    result = M8PortableHotspotProfileV2.model_validate(
+        valid_profile_payload(),
+        strict=True,
+    )
+
+    with pytest.raises(ValueError) as captured:
+        experiment.publish_portable_fact_profile(Path("/"), result)
+
+    assert str(captured.value) == "M8 portable profile output filename is absent"
+
+
+def test_publish_portable_profile_preserves_zero_progress_write_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2070,15 +2101,35 @@ def test_publish_portable_profile_rejects_replaced_temporary_name(
         valid_profile_payload(),
         strict=True,
     )
-    original_link = experiment.os.link
+    monkeypatch.setattr(experiment.os, "write", lambda _descriptor, _data: 0)
 
-    def replace_then_link(
+    with pytest.raises(OSError) as captured:
+        experiment.publish_portable_fact_profile(tmp_path / "profile.json", result)
+
+    assert str(captured.value) == "M8 portable profile write made no progress"
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_publish_portable_profile_rejects_replaced_temporary_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tests.oracle.test_profile_evidence import valid_profile_payload
+    from yieldforge.oracle import artifact_publisher, experiment
+    from yieldforge.oracle.profile_evidence import M8PortableHotspotProfileV2
+
+    result = M8PortableHotspotProfileV2.model_validate(
+        valid_profile_payload(),
+        strict=True,
+    )
+    original_rename = artifact_publisher._rename_no_replace
+
+    def replace_then_install(
         source: str,
         destination: str,
         *,
         src_dir_fd: int,
         dst_dir_fd: int,
-        follow_symlinks: bool,
     ) -> None:
         experiment.os.unlink(source, dir_fd=src_dir_fd)
         replacement = experiment.os.open(
@@ -2091,21 +2142,25 @@ def test_publish_portable_profile_rejects_replaced_temporary_name(
             experiment.os.write(replacement, b"forged publication\n")
         finally:
             experiment.os.close(replacement)
-        original_link(
+        original_rename(
             source,
             destination,
             src_dir_fd=src_dir_fd,
             dst_dir_fd=dst_dir_fd,
-            follow_symlinks=follow_symlinks,
         )
 
-    monkeypatch.setattr(experiment.os, "link", replace_then_link)
+    monkeypatch.setattr(
+        artifact_publisher,
+        "_rename_no_replace",
+        replace_then_install,
+    )
 
     output = tmp_path / "profile.json"
     with pytest.raises(ValueError, match="publication integrity differs"):
         experiment.publish_portable_fact_profile(output, result)
 
-    assert not output.exists()
+    assert output.read_bytes() == b"forged publication\n"
+    assert not tuple(tmp_path.glob(".profile.json.tmp-*"))
 
 
 @pytest.mark.parametrize("worker_index", (0, 1, 2))
@@ -2277,8 +2332,18 @@ def test_publish_portable_gate3_is_atomic_idempotent_and_immutable(
 
     result = _portable_gate3_result()
     path = experiment.publish_portable_fact_gate3(tmp_path, result)
+    expected = (
+        json.dumps(
+            result.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
 
     assert path.name == f"m8-portable-fact-gate3-{result.gate3_id}.json"
+    assert path.read_bytes() == expected
     assert experiment.M8PortableFactGate3Result.model_validate_json(
         path.read_bytes(),
         strict=True,
@@ -2293,16 +2358,87 @@ def test_publish_portable_gate3_removes_temporary_file_on_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from yieldforge.oracle import experiment
+    from yieldforge.oracle import artifact_publisher, experiment
+
+    original_rename = artifact_publisher._rename_no_replace
+
+    def fail_install_only(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+    ) -> None:
+        if destination.startswith(".m8-publisher-cleanup-"):
+            original_rename(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+            return
+        raise OSError("forced link failure")
 
     monkeypatch.setattr(
-        experiment.os,
-        "link",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced link failure")),
+        artifact_publisher,
+        "_rename_no_replace",
+        fail_install_only,
     )
     with pytest.raises(OSError, match="forced link failure"):
         experiment.publish_portable_fact_gate3(tmp_path, _portable_gate3_result())
     assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_immutable_experiment_publishers_reject_symlinked_output_parent(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="output|parent"):
+        experiment.publish_portable_fact_gate3(alias_parent, _portable_gate3_result())
+    with pytest.raises(ValueError, match="output|parent"):
+        experiment.publish_sparse_proof(alias_parent, _finalize())
+
+    assert tuple(real_parent.iterdir()) == ()
+
+
+@pytest.mark.parametrize("entry_kind", ("symlink", "directory"))
+@pytest.mark.parametrize("publisher", ("portable_gate3", "sparse_proof"))
+def test_immutable_experiment_publishers_preserve_existing_destination_error(
+    tmp_path: Path,
+    publisher: str,
+    entry_kind: str,
+) -> None:
+    from yieldforge.oracle import experiment
+
+    if publisher == "portable_gate3":
+        result = _portable_gate3_result()
+        path = tmp_path / f"m8-portable-fact-gate3-{result.gate3_id}.json"
+        expected = "M8 portable Gate-3 artifact is immutable and differs"
+    else:
+        result = _finalize()
+        path = tmp_path / f"m8-certificate-proof-{result.proof_id}.json"
+        expected = "M8 certificate proof artifact is immutable and differs"
+
+    if entry_kind == "symlink":
+        foreign = tmp_path / f"{publisher}-foreign.json"
+        foreign.write_bytes(b"{}\n")
+        path.symlink_to(foreign)
+    else:
+        path.mkdir()
+
+    with pytest.raises(ValueError) as captured:
+        if publisher == "portable_gate3":
+            experiment.publish_portable_fact_gate3(tmp_path, result)
+        else:
+            experiment.publish_sparse_proof(tmp_path, result)
+
+    assert str(captured.value) == expected
 
 
 def test_portable_gate3_selector_opens_only_two_frozen_calibration_probes(
@@ -3034,7 +3170,17 @@ def test_certificate_artifact_strictly_reloads_and_refuses_conflicting_content(
 
     result = _finalize()
     path = publish_sparse_proof(tmp_path, result)
+    expected = (
+        json.dumps(
+            result.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
     assert path.name == f"m8-certificate-proof-{result.proof_id}.json"
+    assert path.read_bytes() == expected
     assert M8CertificateProofResult.model_validate_json(
         path.read_bytes(), strict=True
     ) == result
