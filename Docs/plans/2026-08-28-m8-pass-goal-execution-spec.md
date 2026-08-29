@@ -334,12 +334,17 @@ changes are the five expected inherited Task-2 files.
 - Modify: `yf/src/yieldforge/oracle/prepared.py`
 - Modify: `yf/src/yieldforge/oracle/sparse.py`
 - Modify: `yf/src/yieldforge/oracle/checker.py`
-- Modify: `yf/src/yieldforge/oracle/profiling.py` if the profile phase contract needs registration
+- Modify: `yf/src/yieldforge/oracle/fact_checker.py`
 - Modify: `yf/tests/oracle/test_compiled.py`
 - Modify: `yf/tests/oracle/test_fact_capture.py`
 - Modify: `yf/tests/oracle/test_sparse.py`
 - Modify: `yf/tests/oracle/test_checker.py`
-- Modify: `yf/tests/oracle/test_m8_profiling.py` only if the new phase contract changes
+- Modify: `yf/tests/oracle/test_fact_checker.py`
+- Modify: `yf/tests/oracle/test_certificates.py`
+
+This narrow allowlist amendment records the typed fact-checker propagation and certificate
+regressions discovered during RED-team repair. `profiling.py` and `test_m8_profiling.py` remain
+unchanged; the profiling suite remains a required regression execution below.
 
 Required corrections:
 
@@ -360,9 +365,9 @@ Required corrections:
 Run from `yf`:
 
 ```bash
-.venv/bin/pytest -q tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py
+.venv/bin/pytest -q tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_certificates.py
 .venv/bin/pytest -q tests/oracle/test_sparse.py tests/oracle/test_checker.py tests/oracle/test_m8_profiling.py
-.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/sparse.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/profiling.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py
+.venv/bin/ruff check src/yieldforge/oracle/certificates.py src/yieldforge/oracle/checker.py src/yieldforge/oracle/compiled.py src/yieldforge/oracle/fact_checker.py src/yieldforge/oracle/prepared.py src/yieldforge/oracle/sparse.py tests/oracle/test_certificates.py tests/oracle/test_checker.py tests/oracle/test_compiled.py tests/oracle/test_fact_capture.py tests/oracle/test_fact_checker.py tests/oracle/test_sparse.py
 git diff --check
 ```
 
@@ -370,16 +375,17 @@ Require both reviews to pass. Commit only accepted Task-2 files:
 
 ```bash
 git add -- src/yieldforge/oracle/certificates.py \
+  src/yieldforge/oracle/checker.py \
   src/yieldforge/oracle/compiled.py \
+  src/yieldforge/oracle/fact_checker.py \
   src/yieldforge/oracle/prepared.py \
   src/yieldforge/oracle/sparse.py \
-  src/yieldforge/oracle/checker.py \
-  src/yieldforge/oracle/profiling.py \
+  tests/oracle/test_certificates.py \
+  tests/oracle/test_checker.py \
   tests/oracle/test_compiled.py \
   tests/oracle/test_fact_capture.py \
-  tests/oracle/test_sparse.py \
-  tests/oracle/test_checker.py \
-  tests/oracle/test_m8_profiling.py
+  tests/oracle/test_fact_checker.py \
+  tests/oracle/test_sparse.py
 git diff --cached --name-only
 git commit -m "feat: bind M8 C0 queries to prepared evidence"
 ```
