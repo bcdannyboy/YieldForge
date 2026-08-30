@@ -109,7 +109,9 @@ def test_gate3_policy_registry_and_forecast_registry_are_finite_and_causal(
     )
     assert policy.search_depth == 2
     assert policy.tie_break == "bounded_cost_then_baseline_then_action_id"
-    assert policy.action_catalog_requirement == "complete_no_truncation"
+    assert policy.action_catalog_requirement == (
+        "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    )
     assert policy.shared_parity == "same_candidates_actions_algorithm_compute_and_tie_rule"
 
     forecast = config.forecast
@@ -144,6 +146,24 @@ def test_gate3_policy_registry_and_forecast_registry_are_finite_and_causal(
         "same_executor_and_selected_config_with_forecast_horizon_zero"
     )
     assert forecast.confirmation_inputs_used is False
+
+
+def test_gate3_policy_freezes_bounded_geometry_catalog_without_exhaustiveness_claim(
+    gate3: ModuleType,
+    config: Any,
+) -> None:
+    policy = config.policy
+    assert policy.action_catalog_requirement == (
+        "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    )
+    assert policy.geometry_placement_search_maximum_candidates == 256
+    assert policy.geometric_exhaustiveness_claim == "not_claimed"
+    assert policy.confirmation_inputs_used is False
+
+    payload = config.model_dump(mode="python", round_trip=True)
+    payload["policy"]["action_catalog_requirement"] = "complete_no_truncation"
+    with pytest.raises(ValidationError):
+        gate3.M11Gate3ConfirmationConfig.model_validate(payload, strict=True)
 
 
 def test_gate3_additional_baseline_freezes_age_regularity_fallback_and_continuation(

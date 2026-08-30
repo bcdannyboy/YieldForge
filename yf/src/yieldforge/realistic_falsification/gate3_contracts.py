@@ -248,7 +248,11 @@ class M11Gate3PolicyConfig(FrozenExperimentModel):
     tie_break: Literal["bounded_cost_then_baseline_then_action_id"] = (
         "bounded_cost_then_baseline_then_action_id"
     )
-    action_catalog_requirement: Literal["complete_no_truncation"] = "complete_no_truncation"
+    action_catalog_requirement: Literal[
+        "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    ] = "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    geometry_placement_search_maximum_candidates: Literal[256] = 256
+    geometric_exhaustiveness_claim: Literal["not_claimed"] = "not_claimed"
     shared_parity: Literal["same_candidates_actions_algorithm_compute_and_tie_rule"] = (
         "same_candidates_actions_algorithm_compute_and_tie_rule"
     )

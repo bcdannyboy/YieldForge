@@ -1,10 +1,10 @@
 {
   "calibration_streams_per_corpus": 8,
   "claim_ceiling": "modeled_semi_synthetic_hypothesis_disposition_only_may_abandon_or_authorize_a_bounded_real_history_operator_pilot_never_authorizes_productization_factory_representativeness_realized_roi_buyer_demand_adoption_integration_reliability_or_commercial_proof",
-  "config_id": "yfm11g3c-4645312b8ccdc72b552b6a17",
+  "config_id": "yfm11g3c-795010e6747d2c11d556ef82",
   "confirmation_inputs_used": false,
   "confirmation_streams_per_corpus": 20,
-  "content_sha256": "sha256:4645312b8ccdc72b552b6a17bf946d3dc45437c7f3ed52d3167b2e5dc53805c3",
+  "content_sha256": "sha256:795010e6747d2c11d556ef82071905d89fda757dd39273ab83d1c2a52606808b",
   "controls": {
     "accounting_rule": "complete_six_decimal_half_up_ledger_reconciliation",
     "candidate_parity_rule": "same_verified_candidate_hashes_projection_seeds_config_compute_eligibility_and_actions",
@@ -162,7 +162,7 @@
     "synthetic_timestamp_rule": "use_frozen_calendar_release_slots"
   },
   "policy": {
-    "action_catalog_requirement": "complete_no_truncation",
+    "action_catalog_requirement": "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search",
     "additional_baseline_fallback_and_continuation_policy": {
       "information_set": "released_work_and_current_inventory_only",
       "lookahead_availability": "not_applicable",
@@ -180,6 +180,8 @@
     "full_and_known_objective": "scrap_only",
     "full_and_known_objective_definition": "m7_final_net_cost_including_terminal_scrap_credit",
     "full_visibility": "complete_remaining_released_and_unreleased_suffix",
+    "geometric_exhaustiveness_claim": "not_claimed",
+    "geometry_placement_search_maximum_candidates": 256,
     "known_visibility": "firm_known_prefix_only_with_physical_unknown_mask",
     "registered_m7_policies": [
       {
