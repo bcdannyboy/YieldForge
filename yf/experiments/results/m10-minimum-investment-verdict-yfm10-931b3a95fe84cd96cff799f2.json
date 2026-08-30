@@ -1,0 +1,101 @@
+{
+  "additional_virtual_oracle_investment": "stop",
+  "claim_ceiling": "investment_decision_only_not_formal_m0_economic_band_oracle_savings_unknown_future_contribution_physical_recoverability_factory_representativeness_adoption_realized_roi_integration_reliability_buyer_demand_or_commercial_proof",
+  "content_sha256": "sha256:931b3a95fe84cd96cff799f2fd697c6a31393442cdd0da9903d1aa6eaf27385d",
+  "decision_basis": "current_evidence_ceiling_without_formal_numeric_m0_band",
+  "evidence": {
+    "baseline_repeat_count": 2,
+    "baseline_repeat_identity_match": true,
+    "baseline_stream_count": 36,
+    "chronology_provenance": "generated",
+    "economics_provenance": "generated",
+    "geometry_corpus_ids": [
+      "lectra-7030786-v1.1"
+    ],
+    "m8_decision": "hold_performance",
+    "m9_decision": "pass_decision_feasibility",
+    "material_provenance": "assumed",
+    "oracle_evaluation_opened": false,
+    "oracle_savings_percent": null,
+    "parents": [
+      {
+        "content_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+        "raw_file_sha256": "sha256:8ad20ca2ffaa4873588a4829d0d4fccfc85269429c6e2363b59d29be150d1c99",
+        "repository_path": "experiments/m0-contract-v1.json",
+        "role": "m0_contract",
+        "schema_version": "yieldforge.m0-contract.v1",
+        "semantic_id": "yfm0-29b7efe8ac2a0a9995c4f907"
+      },
+      {
+        "content_sha256": "sha256:3eeda3f4feb80813807c501ae71299a2add07ed76b75009e2f744daddae5a8aa",
+        "raw_file_sha256": "sha256:461220a0a0860a7d31df48f50c3c5f8034a0c5fb5896ab40ae72bd74578bdd35",
+        "repository_path": "benchmarks/temporal/m6-contract-v1.json",
+        "role": "m6_contract",
+        "schema_version": "yieldforge.temporal-benchmark-contract.v1",
+        "semantic_id": "yfm6-3eeda3f4feb80813807c501a"
+      },
+      {
+        "content_sha256": "sha256:49bd7ce5fd34b2779440c52fabdf2acb8ef80f39b025cdf5a9c6f8a1d2c958f9",
+        "raw_file_sha256": "sha256:f864f10b6d3dced65d0ba6acd2c7201b3b01d06865fec748b028bbc4802a1e5b",
+        "repository_path": "benchmarks/temporal/m6-population-v1.json",
+        "role": "m6_population",
+        "schema_version": "yieldforge.temporal-population.v1",
+        "semantic_id": "yftp-49bd7ce5fd34b2779440c52f"
+      },
+      {
+        "content_sha256": "sha256:f2cb310c4b7e879d119e8f940d5a3dc88cd4b26d48087b46323b7be848144931",
+        "raw_file_sha256": "sha256:ba8fdbeaddb2ec9c289ead27627fca6a59f83012cd0093f557848b35c710b91f",
+        "repository_path": "experiments/results/m7-evaluation-yfm7eval-f2cb310c4b7e879d119e8f94.json",
+        "role": "m7_evaluation",
+        "schema_version": "yieldforge.m7-evaluation-result.v1",
+        "semantic_id": "yfm7eval-f2cb310c4b7e879d119e8f94"
+      },
+      {
+        "content_sha256": "sha256:c13ec320e9fcd02873bf649c4f8d84a66c48fb5c4a8e67ebf2fb2f5de268b03c",
+        "raw_file_sha256": "sha256:8e1ca24321b5fd15445e06ebd680225ee42e10d895207cfbb496544d1613b551",
+        "repository_path": "experiments/results/m8-gate3-decision-yfm8g3decision-c13ec320e9fcd02873bf649c.json",
+        "role": "m8_gate3",
+        "schema_version": "yieldforge.m8-gate3-decision.v2",
+        "semantic_id": "yfm8g3decision-c13ec320e9fcd02873bf649c"
+      },
+      {
+        "content_sha256": "sha256:db0829451b1b0393f2d2255990ade1ce783b27a8527f73f3c7bf07e6716438ba",
+        "raw_file_sha256": "sha256:16444e2e0f1a6fa5fb57398b290a7b0b66fda271997a48202a403c499060b858",
+        "repository_path": "experiments/results/m9-two-ply-repair-validation-yfm9r-db0829451b1b0393f2d22559.json",
+        "role": "m9_repair",
+        "schema_version": "yieldforge.m9-two-ply-repair-validation.v1",
+        "semantic_id": "yfm9r-db0829451b1b0393f2d22559"
+      }
+    ],
+    "required_positive_geometry_corpus_count": 2,
+    "unknown_future_contribution_percentage_points": null
+  },
+  "formal_economic_band": "not_computed",
+  "formal_numeric_m10_complete": false,
+  "green_eligible": false,
+  "investment_verdict": "acquire_real_manufacturer_history",
+  "missing_formal_measurements": [
+    "oracle_savings_percent",
+    "unknown_future_contribution_percentage_points"
+  ],
+  "missing_required_controls": [
+    "full_future_oracle_evaluation",
+    "known_only_information_ablation",
+    "no_signal_oracle_control",
+    "terminal_value_evaluation_sensitivity",
+    "remnant_eligibility_evaluation_sensitivity",
+    "ordinary_vs_expanded_search_evaluation",
+    "rollout_vs_beam_evaluation",
+    "strong_vs_myopic_baseline_evaluation"
+  ],
+  "productization_decision": "do_not_productize",
+  "reopen_conditions": [
+    "permissioned_real_manufacturer_chronology_and_remnant_history",
+    "observed_material_identities_and_economically_meaningful_costs",
+    "independent_second_geometry_corpus",
+    "buyer_or_operator_owned_bounded_decision_and_cost"
+  ],
+  "result_id": "yfm10-931b3a95fe84cd96cff799f2",
+  "roadmap_decision_complete": true,
+  "schema_version": "yieldforge.m10-minimum-investment-verdict.v1"
+}
