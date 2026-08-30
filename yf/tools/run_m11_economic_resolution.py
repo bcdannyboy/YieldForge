@@ -153,6 +153,7 @@ def _load_repaired_sidecar(
         expected_source_lineage="repaired_runtime",
     )
     _require_observation_matches_receipt(observation, receipt)
+    del observation
 
 
 def _load_checkpoint(
@@ -351,6 +352,28 @@ def _rediscover_complete_checkpoints(
     return tuple(confirmed)
 
 
+def _validate_terminal_repaired_sidecars(
+    *,
+    output_directory: Path,
+    checkpoints: tuple[Gate3CalibrationAttemptCheckpoint, ...],
+) -> None:
+    """Fresh-load each final repaired sidecar sequentially without retaining graphs."""
+
+    if len(checkpoints) != 96:
+        raise M11EconomicResolutionRunnerError(
+            "terminal sidecar census requires exactly 96 final checkpoints"
+        )
+    for checkpoint in checkpoints:
+        if checkpoint.outcome_kind != "repaired_runtime_success":
+            continue
+        receipt = checkpoint.repaired_receipt
+        if receipt is None:
+            raise M11EconomicResolutionRunnerError(
+                "terminal repaired checkpoint omitted its sidecar receipt"
+            )
+        _load_repaired_sidecar(output_directory, receipt)
+
+
 def _publish_or_reuse_manifest(
     *,
     output_directory: Path,
@@ -485,10 +508,18 @@ def run_economic_resolution_calibration(
         legacy_scan=scan,
         expected=tuple(checkpoints),
     )
+    _validate_terminal_repaired_sidecars(
+        output_directory=output,
+        checkpoints=complete,
+    )
     manifest_path, manifest = _publish_or_reuse_manifest(
         output_directory=output,
         protocol=protocol,
         legacy_scan=scan,
+        checkpoints=complete,
+    )
+    _validate_terminal_repaired_sidecars(
+        output_directory=output,
         checkpoints=complete,
     )
     if (

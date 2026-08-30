@@ -188,6 +188,9 @@ def _install_fakes(
     sidecar_publication_error_position: int | None = None,
     late_checkpoint_competitor_position: int | None = None,
     late_manifest_competitor: bool = False,
+    late_sidecar_fault_position: int | None = None,
+    late_sidecar_fault_call: int = 2,
+    late_sidecar_fault_detail: str = "synthetic late sidecar fault",
 ) -> tuple[Any, _FakeBackend, list[tuple[str, int | None]]]:
     scan = _scan()
     log: list[tuple[str, int | None]] = []
@@ -205,6 +208,7 @@ def _install_fakes(
     manifest_paths: dict[Path, Any] = {}
     observation_refs: dict[int, weakref.ReferenceType[_FakeObservation]] = {}
     checkpoint_discovery_counts: Counter[int] = Counter()
+    sidecar_load_counts: Counter[int] = Counter()
     manifest_discovery_count = 0
     position_by_binding = {
         (item.corpus_id, item.stream_id, item.policy_id): item.execution_position
@@ -273,10 +277,16 @@ def _install_fakes(
     def load_sidecar(path: Path, *, receipt: Any, **kwargs: Any) -> object:
         position = position_by_binding[(receipt.corpus_id, receipt.stream_id, receipt.policy_id)]
         log.append(("load_sidecar", position))
+        sidecar_load_counts[position] += 1
         assert path == tmp_path / "output" / receipt.sidecar_name
         assert kwargs["expected_source_lineage"] == "repaired_runtime"
         if position == bad_sidecar_position:
             raise Gate3EconomicEvidenceError("synthetic bad sidecar")
+        if (
+            position == late_sidecar_fault_position
+            and sidecar_load_counts[position] == late_sidecar_fault_call
+        ):
+            raise Gate3EconomicEvidenceError(late_sidecar_fault_detail)
         if position in observation_refs:
             assert observation_refs[position]() is None
         return _observation_from_receipt(receipt)
@@ -381,7 +391,7 @@ def test_fresh_run_reuses_60_and_executes_only_36_with_exact_success_order(
             "execute": 36,
             "publish_sidecar": 36,
             "release": 36,
-            "load_sidecar": 36,
+            "load_sidecar": 108,
             "publish_checkpoint": 96,
             "load_checkpoint": 96,
             "discover_manifest": 2,
@@ -408,6 +418,8 @@ def test_fresh_run_reuses_60_and_executes_only_36_with_exact_success_order(
         "publish_checkpoint",
         "load_checkpoint",
         "discover_checkpoint",
+        "load_sidecar",
+        "load_sidecar",
     ]
     assert [name for name, position in log if position == 0] == [
         "discover_checkpoint",
@@ -446,6 +458,8 @@ def test_partial_resume_validates_sidecar_before_any_mutation_and_skips_complete
         "discover_checkpoint",
         "load_sidecar",
         "discover_checkpoint",
+        "load_sidecar",
+        "load_sidecar",
     ]
     assert [name for name, position in log if position == 51] == [
         "discover_checkpoint",
@@ -484,7 +498,7 @@ def test_full_resume_reuses_existing_equal_manifest_without_writes_or_execution(
 
     counts = Counter(name for name, _position in log)
     assert outcome.manifest == manifest
-    assert counts["load_sidecar"] == 36
+    assert counts["load_sidecar"] == 108
     assert counts["execute"] == 0
     assert counts["publish_sidecar"] == 0
     assert counts["publish_checkpoint"] == 0
@@ -749,6 +763,41 @@ def test_late_manifest_competitor_aborts_after_publication_and_readback(
     assert counts["load_manifest"] == 1
 
 
+@pytest.mark.parametrize(
+    ("fault_call", "detail", "expected_manifest_discoveries", "expected_loads"),
+    (
+        (2, "synthetic late deleted sidecar", 0, 37),
+        (3, "synthetic late corrupted sidecar", 2, 73),
+    ),
+)
+def test_terminal_sidecar_census_catches_late_delete_or_corruption(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: ModuleType,
+    tmp_path: Path,
+    fault_call: int,
+    detail: str,
+    expected_manifest_discoveries: int,
+    expected_loads: int,
+) -> None:
+    _scan_result, _backend, log = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        late_sidecar_fault_position=50,
+        late_sidecar_fault_call=fault_call,
+        late_sidecar_fault_detail=detail,
+    )
+
+    with pytest.raises(Gate3EconomicEvidenceError, match=detail):
+        _run(runner, tmp_path)
+
+    counts = Counter(name for name, _position in log)
+    assert counts["discover_checkpoint"] == 192
+    assert counts["load_sidecar"] == expected_loads
+    assert counts["discover_manifest"] == expected_manifest_discoveries
+    assert counts["publish_manifest"] == (1 if fault_call == 3 else 0)
+
+
 def test_real_immutable_sidecar_checkpoint_discovery_and_resume_wiring(
     monkeypatch: pytest.MonkeyPatch,
     runner: ModuleType,
@@ -823,6 +872,22 @@ def test_real_immutable_sidecar_checkpoint_discovery_and_resume_wiring(
         legacy_reference=reference,
     )
     assert resumed == discovered
+
+    checkpoints = list(_valid_checkpoints(resolution))
+    checkpoints[reference.execution_position] = checkpoint
+    sidecar_path = output / receipt.sidecar_name
+    sidecar_path.unlink()
+    with pytest.raises(Gate3EconomicEvidenceError):
+        runner._validate_terminal_repaired_sidecars(
+            output_directory=output,
+            checkpoints=tuple(checkpoints),
+        )
+    sidecar_path.write_bytes(b"corrupted-sidecar")
+    with pytest.raises(Gate3EconomicEvidenceError):
+        runner._validate_terminal_repaired_sidecars(
+            output_directory=output,
+            checkpoints=tuple(checkpoints),
+        )
 
 
 @pytest.mark.parametrize(
