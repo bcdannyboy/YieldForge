@@ -94,6 +94,17 @@ def _certificate_json(certificate: TranslationRejectionCertificate) -> str:
     return json.dumps(asdict(certificate), sort_keys=True, separators=(",", ":"))
 
 
+def test_material_reconciliation_delta_matches_contract_summation_order() -> None:
+    categories = (3079.4000000000005, 0.0, 1048.3, 215.10000000000008)
+    expected = abs(
+        4342.8
+        - (((categories[0] + categories[1]) + categories[2]) + categories[3])
+    )
+
+    assert geometry_module._material_reconciliation_delta(4342.8, categories) == expected
+    assert expected == 9.094947017729282e-13
+
+
 def test_safe_certificate_never_rejects_registered_known_fit() -> None:
     runtime, remnant = _returned_remnant()
     problem = runtime.replay_input.problems[0]

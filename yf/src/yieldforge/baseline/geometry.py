@@ -513,6 +513,15 @@ def search_layout_translation(
     )
 
 
+def _material_reconciliation_delta(
+    parent_area: float,
+    category_areas: tuple[float, float, float, float],
+) -> float:
+    placed, process_loss, retained, scrap = category_areas
+    accounted = placed + process_loss + retained + scrap
+    return abs(float(parent_area) - accounted)
+
+
 def consume_layout(
     stock: RemnantStock,
     problem: StripPackingProblem,
@@ -617,7 +626,7 @@ def consume_layout(
         primary.retained_area,
         primary.scrap_area,
     )
-    delta = abs(parent.area - sum(category_areas))
+    delta = _material_reconciliation_delta(float(parent.area), category_areas)
     if delta > area_tolerance:
         raise ValueError("complete-layout material accounting does not reconcile")
     accounting = ReuseAccounting(
