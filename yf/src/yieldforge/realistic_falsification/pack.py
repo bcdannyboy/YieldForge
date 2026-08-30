@@ -279,6 +279,25 @@ class M11Payload(FrozenExperimentModel):
                 raise ValueError(
                     "LOCo payload must isolate eight rows and bind its feasible fallback"
                 )
+            expected_boxes = {
+                (reference.reference_id, copy_index): (
+                    reference.bbox_width,
+                    reference.bbox_height,
+                )
+                for reference, quantity in zip(
+                    self.geometry_references, self.quantities, strict=True
+                )
+                for copy_index in range(quantity)
+            }
+            actual_boxes = {
+                (placement.geometry_reference_id, placement.copy_index): (
+                    placement.width,
+                    placement.height,
+                )
+                for placement in self.fallback_stock.placements
+            }
+            if actual_boxes != expected_boxes:
+                raise ValueError("LOCo fallback placements do not match payload geometry copies")
         digest = semantic_sha256(self, excluded_fields={"payload_id", "content_sha256"})
         if self.payload_id != f"yfm11pl-{digest[:24]}" or self.content_sha256 != f"sha256:{digest}":
             raise ValueError("M11 payload identity does not match semantic content")
@@ -351,6 +370,22 @@ class M11Stream(FrozenExperimentModel):
         releases = tuple(_parse_timestamp(item.released_at) for item in self.events)
         if releases != _release_schedule():
             raise ValueError("M11 stream release chronology differs from the frozen schedule")
+        if Counter(item.due_hours for item in self.events) != {
+            12: 4,
+            24: 8,
+            48: 8,
+            72: 4,
+        }:
+            raise ValueError("M11 stream due-bucket multiplicities differ")
+        if sorted(Counter(item.customer_id for item in self.events).values()) != [
+            2,
+            3,
+            4,
+            4,
+            5,
+            6,
+        ]:
+            raise ValueError("M11 stream customer multiplicities differ")
         if self.stream_kind == "primary":
             if self.source_stream_id is not None or self.no_signal_control:
                 raise ValueError("primary streams cannot carry twin lineage")
@@ -365,6 +400,10 @@ class M11Stream(FrozenExperimentModel):
                 item.family_id for item in self.events[:12]
             }.isdisjoint({item.family_id for item in self.events[12:]}):
                 raise ValueError("regime-shift halves must use disjoint holdout-family subsets")
+            if self.corpus_id == "lectra-m3-m4" and sorted(
+                Counter(item.material_key for item in self.events).values()
+            ) != [3, 3, 4, 6, 8]:
+                raise ValueError("Lectra stream material multiplicities differ")
         elif (
             self.partition != "confirmation"
             or self.source_stream_id is None
@@ -446,6 +485,24 @@ class M11EconomicProfile(FrozenExperimentModel):
     retrieval_handling: StrictFloat
     storage_per_reference_area_30_days: StrictFloat
     provenance: Literal["assumed"] = "assumed"
+
+    @model_validator(mode="after")
+    def require_frozen_rates(self) -> Self:
+        expected = {
+            "optimistic": (100.0, 0.0, 0.0, 0.0, 0.0),
+            "central": (100.0, 10.0, 0.25, 0.25, 0.5),
+            "adverse": (100.0, 25.0, 1.0, 1.0, 2.0),
+        }[self.arm]
+        actual = (
+            self.virgin_cost_per_reference_area,
+            self.scrap_and_terminal_credit,
+            self.return_handling,
+            self.retrieval_handling,
+            self.storage_per_reference_area_30_days,
+        )
+        if actual != expected:
+            raise ValueError("M11 frozen economic profile rates differ")
+        return self
 
 
 class M11ReferenceAreas(FrozenExperimentModel):
@@ -583,6 +640,25 @@ class M11Population(FrozenExperimentModel):
             raise ValueError("M11 reference-area registry differs")
         if len(self.source_partitions) != 4:
             raise ValueError("M11 population requires two partitions for each corpus")
+        partition_specs = (
+            ("lectra-m3-m4", "calibration", 17, 58),
+            ("lectra-m3-m4", "confirmation", 52, 145),
+            ("loco-2dics", "calibration", 5, 146),
+            ("loco-2dics", "confirmation", 4, 365),
+        )
+        actual_partitions = tuple(
+            (
+                item.corpus_id,
+                item.partition,
+                item.family_count,
+                item.source_case_count,
+            )
+            for item in self.source_partitions
+        )
+        if actual_partitions != partition_specs:
+            raise ValueError("M11 source partitions differ from the frozen family census")
+        if self.source_partitions[2].source_instances != tuple(sorted(_CALIBRATION_LOCO_INSTANCES)):
+            raise ValueError("M11 LOCo calibration instances differ from the frozen singletons")
         payload_ids = tuple(item.payload_id for item in self.payloads)
         if payload_ids != tuple(sorted(set(payload_ids))):
             raise ValueError("M11 payload catalog must be sorted and unique")
@@ -602,13 +678,18 @@ class M11Population(FrozenExperimentModel):
             raise ValueError("M11 stream census differs from the frozen population")
         if len(self.hard_nulls) != 6 or len(self.exact_audits) != 12:
             raise ValueError("M11 control census differs from the frozen population")
-        payload_set = set(payload_ids)
-        if any(
-            event.payload_id not in payload_set
-            for stream in self.streams
-            for event in stream.events
-        ):
-            raise ValueError("M11 event references an absent compact payload")
+        payloads_by_id = {item.payload_id: item for item in self.payloads}
+        for stream in self.streams:
+            for event in stream.events:
+                payload = payloads_by_id.get(event.payload_id)
+                if payload is None:
+                    raise ValueError("M11 event references an absent compact payload")
+                if event.family_id != payload.family_id:
+                    raise ValueError("M11 event family does not match its compact payload")
+                if stream.stream_kind == "primary" and payload.source_kind == "loco_2dics":
+                    expected_material = f"loco:{payload.geometry_references[0].instance_name}"
+                    if event.material_key != expected_material:
+                        raise ValueError("M11 LOCo event material crosses its source instance")
         streams_by_id = {item.stream_id: item for item in self.streams}
         for twin in twins:
             source = streams_by_id.get(twin.source_stream_id or "")
@@ -1487,16 +1568,8 @@ def _parent_bindings(root: Path):
         raise PackEvidenceError("M11 parent artifacts do not satisfy the Task 1 binding") from error
 
 
-def _build_contract(
-    *,
-    root: Path,
-    source_manifest: M11SourceManifest,
-    streams: tuple[M11Stream, ...],
-    hard_nulls: tuple[M11HardNull, ...],
-    audits: tuple[M11ExactAuditEpisode, ...],
-    provenance: tuple[M11FieldProvenance, ...],
-) -> M11ExperimentContract:
-    source_bindings = (
+def _source_bindings(source_manifest: M11SourceManifest):
+    return (
         build_m11_source_binding(
             corpus_id="lectra-m3-m4",
             lineage_kind="lectra",
@@ -1516,6 +1589,18 @@ def _build_contract(
             geometry_provenance="source_observed",
         ),
     )
+
+
+def _build_contract(
+    *,
+    root: Path,
+    source_manifest: M11SourceManifest,
+    streams: tuple[M11Stream, ...],
+    hard_nulls: tuple[M11HardNull, ...],
+    audits: tuple[M11ExactAuditEpisode, ...],
+    provenance: tuple[M11FieldProvenance, ...],
+) -> M11ExperimentContract:
+    source_bindings = _source_bindings(source_manifest)
     corpora: list[M11CorpusContract] = []
     for binding in source_bindings:
         corpus_id = binding.corpus_id
@@ -1761,10 +1846,18 @@ def _validate_pack_cross_binding(bundle: M11PackBundle) -> M11PackBundle:
             for item in population.streams
             if item.corpus_id == corpus_id and item.stream_kind == "shuffled_twin"
         )
+        expected_nulls = tuple(
+            item.null_id for item in population.hard_nulls if item.corpus_id == corpus_id
+        )
+        expected_audits = tuple(
+            item.audit_id for item in population.exact_audits if item.corpus_id == corpus_id
+        )
         if (
             corpus.calibration_stream_ids != expected_calibration
             or corpus.confirmation_stream_ids != expected_confirmation
             or corpus.shuffled_twin_stream_ids != expected_twins
+            or corpus.hard_null_fixture_ids != expected_nulls
+            or corpus.exact_audit_episode_ids != expected_audits
             or not set(corpus.hard_null_fixture_ids).issubset(nulls)
             or not set(corpus.exact_audit_episode_ids).issubset(audits)
             or any(
@@ -1850,6 +1943,10 @@ def load_m11_pack_bundle(
         or source_manifest.loco.catalog_manifest_id != population.source_catalog_manifest_id
     ):
         raise PackEvidenceError("M11 population does not bind the supplied Task 2 source bundle")
+    if tuple(corpus.source for corpus in bundle.contract.corpora) != _source_bindings(
+        source_manifest
+    ):
+        raise PackEvidenceError("M11 contract does not bind the supplied Task 2 source manifest")
     parents = _parent_bindings(root)
     if bundle.contract.parents != parents:
         raise PackEvidenceError("M11 contract does not bind the supplied Task 1 parent files")

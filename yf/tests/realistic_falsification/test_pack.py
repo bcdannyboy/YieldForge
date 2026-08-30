@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from yieldforge.experiments.contracts import semantic_sha256
+from yieldforge.experiments.contracts import canonical_pretty_json_bytes, semantic_sha256
 from yieldforge.experiments.residual_geometry import load_m3_input_pack
+from yieldforge.realistic_falsification.contracts import M11ExperimentContract
 from yieldforge.realistic_falsification.pack import (
     LECTRA_REFERENCE_AREA,
     LOCO_TARGET_WIDTH_MULTIPLIERS,
@@ -19,7 +20,10 @@ from yieldforge.realistic_falsification.pack import (
     M11_PROHIBITED_SELECTION_FIELDS,
     M11_REGIMES,
     M11_ROOT_SEED,
+    M11EconomicProfile,
+    M11Payload,
     M11Population,
+    M11Stream,
     PackEvidenceError,
     canonical_pack_artifact_bytes,
     derive_lectra_holdout_partitions,
@@ -50,6 +54,15 @@ def _corpus_streams(population: M11Population, corpus_id: str, *, kind: str | No
     if kind is not None:
         streams = tuple(item for item in streams if item.stream_kind == kind)
     return streams
+
+
+def _rehash(payload: dict[str, object], *, id_field: str, prefix: str) -> None:
+    semantic = dict(payload)
+    semantic.pop(id_field)
+    semantic.pop("content_sha256")
+    digest = semantic_sha256(semantic)
+    payload[id_field] = f"{prefix}{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
 
 
 def test_generation_is_byte_identical_and_committed_artifacts_strict_read_back(generated) -> None:
@@ -352,6 +365,73 @@ def test_closed_models_semantic_identity_and_task1_task2_cross_binding(generated
         "lectra",
         "loco_2dics",
     )
+
+
+def test_rehashed_cross_object_fallback_and_frozen_profile_forgeries_fail(generated) -> None:
+    loco_payload = next(
+        item for item in generated.population.payloads if item.source_kind == "loco_2dics"
+    ).model_dump(mode="python")
+    fallback = loco_payload["fallback_stock"]
+    fallback["placements"][0]["geometry_reference_id"] = "unregistered-source-item"
+    _rehash(fallback, id_field="stock_id", prefix="yfm11fb-")
+    loco_payload["candidate_references"][0]["candidate_id"] = fallback["stock_id"]
+    loco_payload["candidate_references"][0]["content_sha256"] = fallback["content_sha256"]
+    _rehash(loco_payload, id_field="payload_id", prefix="yfm11pl-")
+    with pytest.raises(ValidationError, match="placements do not match"):
+        M11Payload.model_validate(loco_payload, strict=True)
+
+    with pytest.raises(ValidationError, match="frozen economic profile"):
+        M11EconomicProfile(
+            arm="central",
+            virgin_cost_per_reference_area=100.0,
+            scrap_and_terminal_credit=11.0,
+            return_handling=0.25,
+            retrieval_handling=0.25,
+            storage_per_reference_area_30_days=0.5,
+        )
+
+    stream = next(
+        item for item in generated.population.streams if item.stream_kind == "primary"
+    ).model_dump(mode="python")
+    for index, event in enumerate(stream["events"]):
+        event["customer_id"] = f"forged-customer-{index}"
+        _rehash(event, id_field="event_id", prefix="yfm11e-")
+    _rehash(stream, id_field="stream_id", prefix="yfm11st-")
+    with pytest.raises(ValidationError, match="customer multiplicities"):
+        M11Stream.model_validate(stream, strict=True)
+
+
+def test_rehashed_contract_source_forgery_cannot_cross_bind_task2(
+    tmp_path: Path, generated
+) -> None:
+    contract_payload = generated.contract.model_dump(mode="json")
+    source = contract_payload["corpora"][0]["source"]
+    source["upstream_sha256"] = "sha256:" + "0" * 64
+    _rehash(source, id_field="source_id", prefix="yfm11s-")
+    _rehash(contract_payload, id_field="contract_id", prefix="yfm11c-")
+    contract = M11ExperimentContract.model_validate_json(
+        json.dumps(contract_payload, allow_nan=False), strict=True
+    )
+
+    population_payload = generated.population.model_dump(mode="json")
+    population_payload["contract_id"] = contract.contract_id
+    population_payload["contract_content_sha256"] = contract.content_sha256
+    _rehash(population_payload, id_field="population_id", prefix="yfm11pop-")
+    population = M11Population.model_validate_json(
+        json.dumps(population_payload, allow_nan=False), strict=True
+    )
+
+    contract_path = tmp_path / "contract.json"
+    population_path = tmp_path / "population.json"
+    contract_path.write_bytes(canonical_pretty_json_bytes(contract))
+    population_path.write_bytes(canonical_pretty_json_bytes(population))
+    with pytest.raises(PackEvidenceError, match="Task 2 source"):
+        load_m11_pack_bundle(
+            repository_root=REPO_ROOT,
+            contract_path=contract_path,
+            population_path=population_path,
+            source_manifest_path=SOURCE_MANIFEST_PATH,
+        )
 
 
 def test_noncanonical_or_crossed_artifacts_fail_closed(tmp_path: Path, generated) -> None:
