@@ -752,6 +752,230 @@ def test_discard_incomplete_calibration_stream_evidence_validates_exact_tuple_an
     assert backend._projection_cache[projection_key] is projection
 
 
+def _cached_central_case(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    roots = object()
+    backend = _backend(roots=roots)
+    freeze = SimpleNamespace(
+        roots=roots,
+        corpus_id="loco-2dics",
+        freeze_id="yfm11g3bf-" + "1" * 24,
+        content_sha256="sha256:" + "1" * 64,
+        selected_policy_id="age_regularity",
+        calibration_stream_ids=backend.calibration_stream_ids("loco-2dics"),
+    )
+    cell = SimpleNamespace(
+        cell_id="yfm11g3cell-" + "2" * 24,
+        content_sha256="sha256:" + "2" * 64,
+    )
+    monkeypatch.setattr(impl, "_strict_roots", lambda value: value)
+    monkeypatch.setattr(impl, "_strict_freeze", lambda value: value)
+    central_key = ("loco-con-0", freeze.content_sha256)
+    projection_key = ("loco-con-0", "central", freeze.selected_policy_id)
+    backend._central_cache[central_key] = cell  # type: ignore[assignment]
+    backend._projection_cache[projection_key] = (object(),)  # type: ignore[assignment]
+    return roots, backend, freeze, cell, central_key, projection_key
+
+
+def test_release_central_stream_evidence_removes_only_exact_projection_then_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, backend, freeze, cell, central_key, projection_key = _cached_central_case(monkeypatch)
+    other_projection_key = ("loco-con-1", "central", "age_regularity")
+    other_central_key = ("loco-con-1", freeze.content_sha256)
+    other_projection = (object(),)
+    other_cell = object()
+    backend._projection_cache[other_projection_key] = other_projection  # type: ignore[assignment]
+    backend._central_cache[other_central_key] = other_cell  # type: ignore[assignment]
+    calibration_key = ("loco-2dics", "loco-cal-0", "age_regularity")
+    validity_key = ("sha256:a", "sha256:b")
+    backend._calibration_cache[calibration_key] = object()  # type: ignore[assignment]
+    backend._validity_cache[validity_key] = object()  # type: ignore[assignment]
+
+    backend.release_central_stream_evidence(
+        roots=roots,
+        corpus_id="loco-2dics",
+        stream_id="loco-con-0",
+        baseline_freeze=freeze,
+        expected_cell_id=cell.cell_id,
+        expected_cell_content_sha256=cell.content_sha256,
+    )
+
+    assert projection_key not in backend._projection_cache
+    assert central_key not in backend._central_cache
+    assert backend._projection_cache[other_projection_key] is other_projection
+    assert backend._central_cache[other_central_key] is other_cell
+    assert calibration_key in backend._calibration_cache
+    assert validity_key in backend._validity_cache
+
+
+@pytest.mark.parametrize("mismatch", ("id", "sha", "missing", "freeze", "stream"))
+def test_release_central_stream_mismatch_releases_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    roots, backend, freeze, cell, central_key, projection_key = _cached_central_case(monkeypatch)
+    expected_id = cell.cell_id
+    expected_sha = cell.content_sha256
+    selected_freeze = freeze
+    selected_stream = "loco-con-0"
+    if mismatch == "id":
+        expected_id = "yfm11g3cell-" + "f" * 24
+    elif mismatch == "sha":
+        expected_sha = "sha256:" + "f" * 64
+    elif mismatch == "missing":
+        del backend._central_cache[central_key]
+    elif mismatch == "freeze":
+        selected_freeze = SimpleNamespace(
+            **(vars(freeze) | {"calibration_stream_ids": tuple(f"forged-{i}" for i in range(8))})
+        )
+    else:
+        selected_stream = "loco-cal-0"
+
+    with pytest.raises(
+        AdapterGate3BackendError,
+        match="(?:central .*cell|central freeze|confirmation stream)",
+    ):
+        backend.release_central_stream_evidence(
+            roots=roots,
+            corpus_id="loco-2dics",
+            stream_id=selected_stream,
+            baseline_freeze=selected_freeze,
+            expected_cell_id=expected_id,
+            expected_cell_content_sha256=expected_sha,
+        )
+
+    if mismatch != "missing":
+        assert backend._central_cache[central_key] is cell
+    assert projection_key in backend._projection_cache
+
+
+def test_release_central_keeps_retry_handle_if_projection_pop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingProjectionCache(dict):
+        def pop(self, key, default=None):  # type: ignore[no-untyped-def]
+            raise RuntimeError("injected central projection release failure")
+
+    roots, backend, freeze, cell, central_key, projection_key = _cached_central_case(monkeypatch)
+    projection = backend._projection_cache[projection_key]
+    backend._projection_cache = FailingProjectionCache(  # type: ignore[assignment]
+        {projection_key: projection}
+    )
+
+    with pytest.raises(RuntimeError, match="central projection release failure"):
+        backend.release_central_stream_evidence(
+            roots=roots,
+            corpus_id="loco-2dics",
+            stream_id="loco-con-0",
+            baseline_freeze=freeze,
+            expected_cell_id=cell.cell_id,
+            expected_cell_content_sha256=cell.content_sha256,
+        )
+
+    assert backend._central_cache[central_key] is cell
+    assert backend._projection_cache[projection_key] is projection
+
+
+def test_release_central_rejects_internally_inconsistent_cached_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, backend, freeze, _cell, central_key, projection_key = _cached_central_case(monkeypatch)
+    inconsistent = SimpleNamespace(
+        cell_id="yfm11g3cell-" + "2" * 24,
+        content_sha256="sha256:" + "3" * 64,
+    )
+    backend._central_cache[central_key] = inconsistent  # type: ignore[assignment]
+    projection = backend._projection_cache[projection_key]
+
+    with pytest.raises(AdapterGate3BackendError, match="identity differs"):
+        backend.release_central_stream_evidence(
+            roots=roots,
+            corpus_id="loco-2dics",
+            stream_id="loco-con-0",
+            baseline_freeze=freeze,
+            expected_cell_id=inconsistent.cell_id,
+            expected_cell_content_sha256=inconsistent.content_sha256,
+        )
+
+    assert backend._central_cache[central_key] is inconsistent
+    assert backend._projection_cache[projection_key] is projection
+
+
+def test_discard_incomplete_central_stream_removes_only_exact_projection_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, backend, freeze, _cell, central_key, projection_key = _cached_central_case(monkeypatch)
+    del backend._central_cache[central_key]
+    other_keys = (
+        ("loco-con-0", "adverse", "age_regularity"),
+        ("loco-con-0", "central", "remnant_first"),
+        ("loco-con-1", "central", "age_regularity"),
+    )
+    others = {}
+    for key in other_keys:
+        value = (object(),)
+        others[key] = value
+        backend._projection_cache[key] = value  # type: ignore[assignment]
+    unrelated_central_key = ("loco-con-1", freeze.content_sha256)
+    unrelated_central = object()
+    backend._central_cache[unrelated_central_key] = unrelated_central  # type: ignore[assignment]
+
+    backend.discard_incomplete_central_stream_evidence(
+        roots=roots,
+        corpus_id="loco-2dics",
+        stream_id="loco-con-0",
+        baseline_freeze=freeze,
+    )
+    backend.discard_incomplete_central_stream_evidence(
+        roots=roots,
+        corpus_id="loco-2dics",
+        stream_id="loco-con-0",
+        baseline_freeze=freeze,
+    )
+
+    assert projection_key not in backend._projection_cache
+    assert all(backend._projection_cache[key] is value for key, value in others.items())
+    assert backend._central_cache[unrelated_central_key] is unrelated_central
+
+
+def test_discard_incomplete_central_refuses_completed_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, backend, freeze, cell, central_key, projection_key = _cached_central_case(monkeypatch)
+    projection = backend._projection_cache[projection_key]
+
+    with pytest.raises(AdapterGate3BackendError, match="completed central cell"):
+        backend.discard_incomplete_central_stream_evidence(
+            roots=roots,
+            corpus_id="loco-2dics",
+            stream_id="loco-con-0",
+            baseline_freeze=freeze,
+        )
+
+    assert backend._central_cache[central_key] is cell
+    assert backend._projection_cache[projection_key] is projection
+
+
+def test_central_cache_lifecycle_methods_require_keyword_arguments() -> None:
+    backend = _backend()
+    with pytest.raises(TypeError):
+        backend.release_central_stream_evidence(  # type: ignore[misc]
+            object(),
+            "loco-2dics",
+            "loco-con-0",
+            object(),
+            "yfm11g3cell-" + "1" * 24,
+            "sha256:" + "2" * 64,
+        )
+    with pytest.raises(TypeError):
+        backend.discard_incomplete_central_stream_evidence(  # type: ignore[misc]
+            object(),
+            "loco-2dics",
+            "loco-con-0",
+            object(),
+        )
+
+
 def test_factory_consumes_authenticated_parents_and_reconstructs_context_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -401,9 +401,7 @@ class AdapterGate3Backend:
         calibration_key = (corpus_id, stream_id, policy)
         observation = self._calibration_cache.get(calibration_key)
         if observation is None:
-            raise AdapterGate3BackendError(
-                "Gate 3 cached calibration observation is missing"
-            )
+            raise AdapterGate3BackendError("Gate 3 cached calibration observation is missing")
         if (
             type(expected_observation_id) is not str
             or re.fullmatch(r"yfm11g3calobs-[0-9a-f]{24}", expected_observation_id) is None
@@ -416,9 +414,7 @@ class AdapterGate3Backend:
             or observation.observation_id != expected_observation_id
             or observation.content_sha256 != expected_observation_content_sha256
         ):
-            raise AdapterGate3BackendError(
-                "Gate 3 cached calibration observation identity differs"
-            )
+            raise AdapterGate3BackendError("Gate 3 cached calibration observation identity differs")
         self._projection_cache.pop((stream_id, "central", policy), None)
         del self._calibration_cache[calibration_key]
 
@@ -598,6 +594,82 @@ class AdapterGate3Backend:
         )
         self._central_cache[cache_key] = cell
         return cell
+
+    def release_central_stream_evidence(
+        self,
+        *,
+        roots: Gate3RootBinding,
+        corpus_id: Gate3CorpusId,
+        stream_id: str,
+        baseline_freeze: Gate3BaselineCalibrationFreeze,
+        expected_cell_id: str,
+        expected_cell_content_sha256: str,
+    ) -> None:
+        """Release one persisted central cell from only its exact cache slots."""
+
+        self._require_roots(roots)
+        self._require_stream(
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            partition="confirmation",
+        )
+        freeze = _strict_freeze(baseline_freeze)
+        if (
+            freeze.roots != self.roots
+            or freeze.corpus_id != corpus_id
+            or freeze.calibration_stream_ids != self._calibration_ids[corpus_id]
+        ):
+            raise AdapterGate3BackendError(
+                "Gate 3 central freeze differs from backend roots, corpus, or stream registry"
+            )
+        policy = self._require_policy(freeze.selected_policy_id)
+        central_key = (stream_id, freeze.content_sha256)
+        cell = self._central_cache.get(central_key)
+        if cell is None:
+            raise AdapterGate3BackendError("Gate 3 central cached cell is missing")
+        if (
+            type(expected_cell_id) is not str
+            or re.fullmatch(r"yfm11g3cell-[0-9a-f]{24}", expected_cell_id) is None
+            or type(expected_cell_content_sha256) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_cell_content_sha256) is None
+            or expected_cell_id
+            != ("yfm11g3cell-" + expected_cell_content_sha256.removeprefix("sha256:")[:24])
+            or cell.cell_id != expected_cell_id
+            or cell.content_sha256 != expected_cell_content_sha256
+        ):
+            raise AdapterGate3BackendError("Gate 3 central cached cell identity differs")
+        self._projection_cache.pop((stream_id, "central", policy), None)
+        del self._central_cache[central_key]
+
+    def discard_incomplete_central_stream_evidence(
+        self,
+        *,
+        roots: Gate3RootBinding,
+        corpus_id: Gate3CorpusId,
+        stream_id: str,
+        baseline_freeze: Gate3BaselineCalibrationFreeze,
+    ) -> None:
+        """Discard only an incomplete central projection so execution can retry."""
+
+        self._require_roots(roots)
+        self._require_stream(
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            partition="confirmation",
+        )
+        freeze = _strict_freeze(baseline_freeze)
+        if (
+            freeze.roots != self.roots
+            or freeze.corpus_id != corpus_id
+            or freeze.calibration_stream_ids != self._calibration_ids[corpus_id]
+        ):
+            raise AdapterGate3BackendError(
+                "Gate 3 central freeze differs from backend roots, corpus, or stream registry"
+            )
+        policy = self._require_policy(freeze.selected_policy_id)
+        if (stream_id, freeze.content_sha256) in self._central_cache:
+            raise AdapterGate3BackendError("Gate 3 completed central cell cannot be discarded")
+        self._projection_cache.pop((stream_id, "central", policy), None)
 
 
 def build_adapter_gate3_backend(
