@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from collections import Counter
 from decimal import Decimal
+from fractions import Fraction
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import (
@@ -25,6 +27,13 @@ from yieldforge.realistic_falsification.bounds import (
     Gate1StreamCell,
     Gate1TinyAudit,
     _open_official_gate1_session,
+    audit_tiny_gate1_bounds,
+    build_gate1_demand_record,
+    build_gate1_feasible_opening,
+    build_gate1_feasible_policy_cost,
+    build_gate1_stream_cell_from_evidence,
+    build_preregistered_gate1_tiny_problem,
+    calculate_relaxed_lower_bound,
     verify_gate1_tiny_audit,
 )
 from yieldforge.realistic_falsification.contracts import (
@@ -756,12 +765,117 @@ def evaluate_gate1_confirmation(
     )
 
 
+def _build_registered_tiny_audit() -> Gate1TinyAudit:
+    """Build the exact preregistered tiny certificate without supplied evidence."""
+
+    demand = build_gate1_demand_record(
+        event_position=0,
+        event_id="tiny-event-0",
+        geometry_reference_id="tiny-shape-0",
+        geometry_sha256="a" * 64,
+        source_binding_sha256="sha256:" + "b" * 64,
+        source_kind="tiny",
+        source_instance=None,
+        material_group="material-a",
+        reference_area_key="material-a",
+        unit_area=Fraction(6),
+        quantity=1,
+        reference_area=Fraction(10),
+    )
+    lower_bound = calculate_relaxed_lower_bound(
+        stream_id="tiny-stream",
+        demands=(demand,),
+    )
+    opening = build_gate1_feasible_opening(
+        event_position=0,
+        event_id="tiny-event-0",
+        payload_id="tiny-payload-0",
+        material_group="material-a",
+        reference_area_key="material-a",
+        source_kind="tiny",
+        candidate_options=(("tiny-candidate-0", "sha256:" + "c" * 64),),
+        selected_candidate_id="tiny-candidate-0",
+        selection_rule="exhaustive_tiny_case",
+        verification_kind="exhaustive_tiny_case",
+        geometry_witness_sha256="sha256:" + "d" * 64,
+        known_positions_at_release=(0,),
+        stock_area=Fraction(11, 10),
+        reference_area=Fraction(1),
+    )
+    baseline, known_only = tuple(
+        build_gate1_feasible_policy_cost(
+            stream_id="tiny-stream",
+            policy_kind=policy_kind,
+            openings=(opening,),
+        )
+        for policy_kind in ("baseline_as_of", "known_only")
+    )
+    cell = build_gate1_stream_cell_from_evidence(
+        stream_id="tiny-stream",
+        corpus_id="tiny",
+        lower_bound=lower_bound,
+        baseline=baseline,
+        known_only=known_only,
+    )
+    return audit_tiny_gate1_bounds(
+        cell,
+        problem=build_preregistered_gate1_tiny_problem(),
+    )
+
+
+def authenticate_official_gate1_evaluation(
+    result: Gate1EvaluationResult,
+    *,
+    repository_root: Path,
+) -> Gate1EvaluationResult:
+    """Authoritatively reload and reconstruct one complete official Gate 1 result."""
+
+    try:
+        supplied = Gate1EvaluationResult.model_validate(
+            result.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValueError, ValidationError) as error:
+        raise Gate1EvaluationError(
+            "supplied Gate 1 result is not a valid semantic artifact"
+        ) from error
+    if supplied.audit_receipt is None:
+        raise Gate1EvaluationError(
+            "official Gate 1 authentication requires a complete persisted audit receipt"
+        )
+
+    try:
+        session = _open_official_gate1_session(repository_root)
+        canonical_context = session.context
+        _require_official_root_values(canonical_context)
+        stream_ids = tuple(
+            stream_id
+            for corpus in canonical_context.bundle.contract.corpora
+            for stream_id in corpus.confirmation_stream_ids
+        )
+        if len(stream_ids) != 40 or len(set(stream_ids)) != 40:
+            raise Gate1EvidenceError("official Gate 1 confirmation census is not exact")
+        canonical_cells = tuple(session.build_stream_cell(stream_id) for stream_id in stream_ids)
+        canonical_result = _build_gate1_valid_result(
+            context=canonical_context,
+            cells=canonical_cells,
+            baseline_selections=session.baseline_selections,
+            tiny_audit=_build_registered_tiny_audit(),
+            repair_count=supplied.repair_count,
+        )
+    except (AttributeError, OSError, TypeError, ValueError, ValidationError) as error:
+        raise Gate1EvaluationError(
+            "official Gate 1 sources could not reconstruct the canonical result"
+        ) from error
+
+    if supplied != canonical_result:
+        raise Gate1EvaluationError(
+            "supplied Gate 1 result differs from freshly reconstructed official evidence"
+        )
+    return canonical_result
+
+
 __all__ = [
-    "Gate1AuditReceipt",
-    "Gate1EvaluationConfig",
     "Gate1EvaluationError",
-    "Gate1EvaluationResult",
-    "Gate1EvaluationStatus",
-    "build_gate1_audit_receipt",
-    "evaluate_gate1_confirmation",
+    "authenticate_official_gate1_evaluation",
 ]

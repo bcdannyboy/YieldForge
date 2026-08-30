@@ -125,50 +125,52 @@ def _synthetic_confirmation_cells(
     return tuple(cells)
 
 
-@pytest.fixture(scope="module")
-def tiny_audit():
+def _build_tiny_audit_fixture(*, identity_prefix: str = ""):
     bounds = _bounds()
+    event_id = f"{identity_prefix}tiny-event-0"
+    material_group = f"{identity_prefix}material-a"
+    stream_id = f"{identity_prefix}tiny-stream"
     demand = bounds.build_gate1_demand_record(
         event_position=0,
-        event_id="tiny-event-0",
-        geometry_reference_id="tiny-shape-0",
-        geometry_sha256="a" * 64,
+        event_id=event_id,
+        geometry_reference_id=f"{identity_prefix}tiny-shape-0",
+        geometry_sha256=("e" if identity_prefix else "a") * 64,
         source_binding_sha256="sha256:" + "b" * 64,
         source_kind="tiny",
         source_instance=None,
-        material_group="material-a",
-        reference_area_key="material-a",
+        material_group=material_group,
+        reference_area_key=material_group,
         unit_area=Fraction(6),
         quantity=1,
         reference_area=Fraction(10),
     )
-    lower = bounds.calculate_relaxed_lower_bound(stream_id="tiny-stream", demands=(demand,))
+    lower = bounds.calculate_relaxed_lower_bound(stream_id=stream_id, demands=(demand,))
     opening = bounds.build_gate1_feasible_opening(
         event_position=0,
-        event_id="tiny-event-0",
-        payload_id="tiny-payload-0",
-        material_group="material-a",
-        reference_area_key="material-a",
+        event_id=event_id,
+        payload_id=f"{identity_prefix}tiny-payload-0",
+        material_group=material_group,
+        reference_area_key=material_group,
         source_kind="tiny",
-        candidate_options=(("tiny-candidate-0", "sha256:" + "c" * 64),),
-        selected_candidate_id="tiny-candidate-0",
+        candidate_options=((f"{identity_prefix}tiny-candidate-0", "sha256:" + "c" * 64),),
+        selected_candidate_id=f"{identity_prefix}tiny-candidate-0",
         selection_rule="exhaustive_tiny_case",
         verification_kind="exhaustive_tiny_case",
-        geometry_witness_sha256="sha256:" + "d" * 64,
+        geometry_witness_sha256="sha256:" + ("f" if identity_prefix else "d") * 64,
         known_positions_at_release=(0,),
         stock_area=Fraction(11, 10),
         reference_area=Fraction(1),
     )
     policies = tuple(
         bounds.build_gate1_feasible_policy_cost(
-            stream_id="tiny-stream",
+            stream_id=stream_id,
             policy_kind=kind,
             openings=(opening,),
         )
         for kind in ("baseline_as_of", "known_only")
     )
     cell = bounds.build_gate1_stream_cell_from_evidence(
-        stream_id="tiny-stream",
+        stream_id=stream_id,
         corpus_id="tiny",
         lower_bound=lower,
         baseline=policies[0],
@@ -178,6 +180,11 @@ def tiny_audit():
         cell,
         problem=bounds.build_preregistered_gate1_tiny_problem(),
     )
+
+
+@pytest.fixture(scope="module")
+def tiny_audit():
+    return _build_tiny_audit_fixture()
 
 
 @pytest.fixture(scope="module")
@@ -230,6 +237,92 @@ def _rehash(payload: dict[str, object], *, id_field: str, prefix: str) -> None:
     digest = semantic_sha256(semantic)
     payload[id_field] = f"{prefix}{digest[:24]}"
     payload["content_sha256"] = f"sha256:{digest}"
+
+
+def _install_fake_official_session(
+    monkeypatch,
+    evaluate,
+    *,
+    context,
+    selections,
+    cells,
+):
+    cells_by_stream = {item.stream_id: item for item in cells}
+    calls = {"repository_roots": [], "stream_ids": []}
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.context = context
+            self.baseline_selections = selections
+
+        def build_stream_cell(self, stream_id):
+            calls["stream_ids"].append(stream_id)
+            return cells_by_stream[stream_id]
+
+    def open_session(repository_root):
+        calls["repository_roots"].append(repository_root)
+        return FakeSession()
+
+    monkeypatch.setattr(evaluate, "_open_official_gate1_session", open_session)
+    return calls
+
+
+def _forge_calibration_selection_and_bound_cells(
+    *,
+    context,
+    selections,
+    cells,
+    tiny_audit,
+):
+    evaluate = _evaluate()
+    bounds = _bounds()
+    original_selection = selections[0]
+    selection_payload = original_selection.model_dump(mode="python", round_trip=True)
+    replacement_policy_id = next(
+        policy_id
+        for policy_id in selection_payload["eligible_policy_ids"]
+        if policy_id != selection_payload["selected_policy_id"]
+    )
+    for score in selection_payload["policy_scores"]:
+        per_stream_cost = 1.0 if score["policy_id"] == replacement_policy_id else 2.0
+        score["calibration_stream_costs"] = tuple(
+            (stream_id, per_stream_cost) for stream_id, _cost in score["calibration_stream_costs"]
+        )
+        score["total_cost_exact"] = str(
+            len(score["calibration_stream_costs"]) * int(per_stream_cost)
+        )
+        score["total_cost"] = len(score["calibration_stream_costs"]) * per_stream_cost
+        _rehash(score, id_field="score_id", prefix="yfm11bsc-")
+    selection_payload["selected_policy_id"] = replacement_policy_id
+    selection_payload["tied_lowest_policy_ids"] = (replacement_policy_id,)
+    _rehash(selection_payload, id_field="selection_id", prefix="yfm11bs-")
+    forged_selection = bounds.Gate1BaselineSelectionEvidence.model_validate(
+        selection_payload,
+        strict=True,
+    )
+
+    forged_cells = []
+    for cell in cells:
+        if cell.corpus_id != forged_selection.corpus_id:
+            forged_cells.append(cell)
+            continue
+        cell_payload = cell.model_dump(mode="python", round_trip=True)
+        for evidence_name in ("baseline", "known_only"):
+            feasible = cell_payload[evidence_name]
+            feasible["registered_policy_id"] = replacement_policy_id
+            feasible["calibration_selection_id"] = forged_selection.selection_id
+            _rehash(feasible, id_field="witness_id", prefix="yfm11fp-")
+        _rehash(cell_payload, id_field="cell_id", prefix="yfm11g1-")
+        forged_cells.append(bounds.Gate1StreamCell.model_validate(cell_payload, strict=True))
+
+    forged_selections = (forged_selection, *selections[1:])
+    return evaluate._build_gate1_valid_result(
+        context=context,
+        cells=tuple(forged_cells),
+        baseline_selections=forged_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
 
 
 def test_confirmation_census_is_exact_contract_order_and_five_per_regime(
@@ -530,6 +623,164 @@ def test_evaluator_uses_one_session_and_routes_all_forty_cells_through_it(
     assert result.status == "falsified_by_optimistic_ceiling"
 
 
+def test_official_authenticator_reconstructs_and_exact_compares_all_evidence(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+    monkeypatch,
+) -> None:
+    evaluate = _evaluate()
+    result = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+    calls = _install_fake_official_session(
+        monkeypatch,
+        evaluate,
+        context=official_context,
+        selections=official_selections,
+        cells=falsified_cells,
+    )
+
+    authenticated = evaluate.authenticate_official_gate1_evaluation(
+        result,
+        repository_root=REPO_ROOT,
+    )
+
+    assert authenticated == result
+    assert calls == {
+        "repository_roots": [REPO_ROOT],
+        "stream_ids": [item.stream_id for item in falsified_cells],
+    }
+
+
+def test_official_authenticator_rejects_all_forty_replaced_and_resigned_cells(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+    surviving_cells,
+    monkeypatch,
+) -> None:
+    evaluate = _evaluate()
+    forged = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=surviving_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+    assert (
+        evaluate.Gate1EvaluationResult.model_validate(
+            forged.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+        == forged
+    )
+    calls = _install_fake_official_session(
+        monkeypatch,
+        evaluate,
+        context=official_context,
+        selections=official_selections,
+        cells=falsified_cells,
+    )
+
+    with pytest.raises(ValueError, match="official|canonical|reconstructed|differ"):
+        evaluate.authenticate_official_gate1_evaluation(
+            forged,
+            repository_root=REPO_ROOT,
+        )
+
+    assert calls["repository_roots"] == [REPO_ROOT]
+    assert calls["stream_ids"] == [item.stream_id for item in falsified_cells]
+
+
+def test_official_authenticator_rejects_forged_selection_and_all_affected_cells(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+    monkeypatch,
+) -> None:
+    evaluate = _evaluate()
+    forged = _forge_calibration_selection_and_bound_cells(
+        context=official_context,
+        selections=official_selections,
+        cells=falsified_cells,
+        tiny_audit=tiny_audit,
+    )
+    assert (
+        evaluate.Gate1EvaluationResult.model_validate(
+            forged.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+        == forged
+    )
+    calls = _install_fake_official_session(
+        monkeypatch,
+        evaluate,
+        context=official_context,
+        selections=official_selections,
+        cells=falsified_cells,
+    )
+
+    with pytest.raises(ValueError, match="official|canonical|reconstructed|differ"):
+        evaluate.authenticate_official_gate1_evaluation(
+            forged,
+            repository_root=REPO_ROOT,
+        )
+
+    assert calls["repository_roots"] == [REPO_ROOT]
+    assert calls["stream_ids"] == [item.stream_id for item in falsified_cells]
+
+
+def test_official_authenticator_rejects_alternate_resigned_tiny_audit(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+    monkeypatch,
+) -> None:
+    evaluate = _evaluate()
+    result = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+    alternate_tiny = _build_tiny_audit_fixture(identity_prefix="alternate-")
+    assert alternate_tiny != tiny_audit
+    payload = result.model_dump(mode="python", round_trip=True)
+    payload["audit_receipt"]["tiny_audit"] = alternate_tiny.model_dump(
+        mode="python",
+        round_trip=True,
+    )
+    _rehash(payload["audit_receipt"], id_field="receipt_id", prefix="yfm11g1a-")
+    _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
+    forged = evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
+    calls = _install_fake_official_session(
+        monkeypatch,
+        evaluate,
+        context=official_context,
+        selections=official_selections,
+        cells=falsified_cells,
+    )
+
+    with pytest.raises(ValueError, match="official|canonical|reconstructed|differ"):
+        evaluate.authenticate_official_gate1_evaluation(
+            forged,
+            repository_root=REPO_ROOT,
+        )
+
+    assert calls["repository_roots"] == [REPO_ROOT]
+    assert calls["stream_ids"] == [item.stream_id for item in falsified_cells]
+
+
 def test_result_config_receipt_and_roots_reject_resigned_tampering(
     official_context,
     official_selections,
@@ -748,7 +999,23 @@ def test_task5_public_api_is_exported_from_package() -> None:
     package = importlib.import_module("yieldforge.realistic_falsification")
     evaluate = _evaluate()
 
-    assert package.Gate1EvaluationResult is evaluate.Gate1EvaluationResult
+    assert (
+        package.authenticate_official_gate1_evaluation
+        is evaluate.authenticate_official_gate1_evaluation
+    )
+    assert package.Gate1EvaluationError is evaluate.Gate1EvaluationError
+    assert evaluate.__all__ == [
+        "Gate1EvaluationError",
+        "authenticate_official_gate1_evaluation",
+    ]
+    for semantic_only_name in (
+        "Gate1AuditReceipt",
+        "Gate1EvaluationConfig",
+        "Gate1EvaluationResult",
+        "Gate1EvaluationStatus",
+        "build_gate1_audit_receipt",
+        "evaluate_gate1_confirmation",
+    ):
+        assert not hasattr(package, semantic_only_name)
     assert not hasattr(package, "bootstrap_gate1_statistics")
     assert not hasattr(package, "draw_gate1_bootstrap_indices")
-    assert package.evaluate_gate1_confirmation is evaluate.evaluate_gate1_confirmation
