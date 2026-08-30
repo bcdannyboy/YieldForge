@@ -20,7 +20,12 @@ from pydantic import (
 )
 
 from yieldforge.baseline.experiment import M7FrozenBaseline
-from yieldforge.baseline.policies import M7PolicyIdentity, registered_policy_identities
+from yieldforge.baseline.policies import (
+    M7PolicyIdentity,
+    M7PolicyName,
+    policy_identity,
+    registered_policy_identities,
+)
 from yieldforge.experiments.contracts import (
     FrozenExperimentModel,
     M0ExperimentContract,
@@ -222,6 +227,9 @@ class M11Gate3PolicyConfig(FrozenExperimentModel):
     additional_baseline_policy_id: Literal["known_only_m9_two_ply_scrap"] = (
         "known_only_m9_two_ply_scrap"
     )
+    additional_baseline_fallback_and_continuation_policy: M7PolicyIdentity = policy_identity(
+        M7PolicyName.AGE_REGULARITY
+    )
     baseline_selection_unit: Literal["per_corpus_eight_calibration_streams"] = (
         "per_corpus_eight_calibration_streams"
     )
@@ -256,6 +264,13 @@ class M11Gate3PolicyConfig(FrozenExperimentModel):
     def require_exact_policy_registry(self) -> Self:
         if self.registered_m7_policies != registered_policy_identities():
             raise ValueError("Gate 3 baseline registry differs from all five M7 policies")
+        if self.additional_baseline_fallback_and_continuation_policy != policy_identity(
+            M7PolicyName.AGE_REGULARITY
+        ):
+            raise ValueError(
+                "Gate 3 additional baseline fallback and continuation policy differs from "
+                "the frozen M7 winner"
+            )
         return self
 
 

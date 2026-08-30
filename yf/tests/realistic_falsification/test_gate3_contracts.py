@@ -146,6 +146,28 @@ def test_gate3_policy_registry_and_forecast_registry_are_finite_and_causal(
     assert forecast.confirmation_inputs_used is False
 
 
+def test_gate3_additional_baseline_freezes_age_regularity_fallback_and_continuation(
+    gate3: ModuleType,
+    config: Any,
+) -> None:
+    policy = config.policy
+    assert policy.additional_baseline_fallback_and_continuation_policy.model_dump(mode="json") == {
+        "schema_version": "yieldforge.m7-policy.v1",
+        "name": "age_regularity",
+        "version": "1.0.0",
+        "seed": 0,
+        "information_set": "released_work_and_current_inventory_only",
+        "lookahead_availability": "not_applicable",
+    }
+
+    payload = config.model_dump(mode="python", round_trip=True)
+    payload["policy"]["additional_baseline_fallback_and_continuation_policy"] = payload["policy"][
+        "registered_m7_policies"
+    ][1]
+    with pytest.raises(ValidationError, match="fallback and continuation"):
+        gate3.M11Gate3ConfirmationConfig.model_validate(payload, strict=True)
+
+
 def test_gate3_candidate_eligibility_terminal_and_adverse_controls_are_complete(
     config: Any,
 ) -> None:

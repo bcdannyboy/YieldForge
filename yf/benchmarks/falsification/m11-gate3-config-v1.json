@@ -1,10 +1,10 @@
 {
   "calibration_streams_per_corpus": 8,
   "claim_ceiling": "modeled_semi_synthetic_hypothesis_disposition_only_may_abandon_or_authorize_a_bounded_real_history_operator_pilot_never_authorizes_productization_factory_representativeness_realized_roi_buyer_demand_adoption_integration_reliability_or_commercial_proof",
-  "config_id": "yfm11g3c-7ddc185d488357c13504f20c",
+  "config_id": "yfm11g3c-4645312b8ccdc72b552b6a17",
   "confirmation_inputs_used": false,
   "confirmation_streams_per_corpus": 20,
-  "content_sha256": "sha256:7ddc185d488357c13504f20c8a101edd285046ddec9d02d6d20529f06d9efa4c",
+  "content_sha256": "sha256:4645312b8ccdc72b552b6a17bf946d3dc45437c7f3ed52d3167b2e5dc53805c3",
   "controls": {
     "accounting_rule": "complete_six_decimal_half_up_ledger_reconciliation",
     "candidate_parity_rule": "same_verified_candidate_hashes_projection_seeds_config_compute_eligibility_and_actions",
@@ -163,6 +163,14 @@
   },
   "policy": {
     "action_catalog_requirement": "complete_no_truncation",
+    "additional_baseline_fallback_and_continuation_policy": {
+      "information_set": "released_work_and_current_inventory_only",
+      "lookahead_availability": "not_applicable",
+      "name": "age_regularity",
+      "schema_version": "yieldforge.m7-policy.v1",
+      "seed": 0,
+      "version": "1.0.0"
+    },
     "additional_baseline_policy_id": "known_only_m9_two_ply_scrap",
     "baseline_economic_arm": "central",
     "baseline_selection_rule": "lowest_mean_net_cost_then_invalid_median_sheet_openings_policy_id",
