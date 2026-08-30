@@ -37,7 +37,7 @@ Gate3CalibrationSourceLineage = Literal[
     "legacy_success_output_equivalent",
     "repaired_runtime",
 ]
-_COMPRESSION = "gzip-level-6-mtime-0-no-filename"
+_COMPRESSION = "gzip-level-6-mtime-0-flags-0"
 _MAX_COMPRESSED_BYTES = 128 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 
@@ -80,20 +80,27 @@ class Gate3CalibrationObservationReceipt(FrozenExperimentModel):
     exact_event_census: Literal[True] = True
     source_lineage: Gate3CalibrationSourceLineage
     sidecar_name: StrictStr = Field(
-        pattern=r"^m11-gate3-calibration-observation-[0-9a-f]{64}\.json\.gz$"
+        pattern=(
+            r"^m11-gate3-calibration-observation-"
+            r"[0-9a-f]{64}-[0-9a-f]{64}\.json\.gz$"
+        )
     )
     compressed_raw_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     compressed_byte_count: StrictInt = Field(gt=0, le=_MAX_COMPRESSED_BYTES)
     uncompressed_byte_count: StrictInt = Field(gt=0, le=_MAX_UNCOMPRESSED_BYTES)
-    compression: Literal["gzip-level-6-mtime-0-no-filename"] = _COMPRESSION
+    compression: Literal["gzip-level-6-mtime-0-flags-0"] = _COMPRESSION
 
     @model_validator(mode="after")
     def require_observation_binding_and_identity(self) -> Self:
         observation_hash = self.observation_content_sha256.removeprefix("sha256:")
+        compressed_hash = self.compressed_raw_sha256.removeprefix("sha256:")
         if (
             self.observation_id != f"yfm11g3calobs-{observation_hash[:24]}"
             or self.sidecar_name
-            != f"m11-gate3-calibration-observation-{observation_hash}.json.gz"
+            != (
+                "m11-gate3-calibration-observation-"
+                f"{observation_hash}-{compressed_hash}.json.gz"
+            )
         ):
             raise ValueError("Gate 3 calibration receipt observation binding differs")
         digest = semantic_sha256(self, excluded_fields={"receipt_id", "content_sha256"})
@@ -140,6 +147,7 @@ def _build_receipt_from_prepared_bytes(
     source_lineage: Gate3CalibrationSourceLineage,
 ) -> Gate3CalibrationObservationReceipt:
     observation_hash = observation.content_sha256.removeprefix("sha256:")
+    compressed_hash = hashlib.sha256(compressed_bytes).hexdigest()
     semantic = {
         "schema_version": "yieldforge.m11-gate3-calibration-receipt.v1",
         "roots": observation.roots.model_dump(mode="json"),
@@ -153,11 +161,10 @@ def _build_receipt_from_prepared_bytes(
         "exact_event_census": True,
         "source_lineage": source_lineage,
         "sidecar_name": (
-            f"m11-gate3-calibration-observation-{observation_hash}.json.gz"
+            "m11-gate3-calibration-observation-"
+            f"{observation_hash}-{compressed_hash}.json.gz"
         ),
-        "compressed_raw_sha256": (
-            f"sha256:{hashlib.sha256(compressed_bytes).hexdigest()}"
-        ),
+        "compressed_raw_sha256": f"sha256:{compressed_hash}",
         "compressed_byte_count": len(compressed_bytes),
         "uncompressed_byte_count": len(canonical_bytes),
         "compression": _COMPRESSION,
@@ -185,6 +192,7 @@ def _prepare_calibration_observation_evidence(
             "Gate 3 calibration sidecar exceeds the uncompressed byte bound"
         )
     compressed = deterministic_gzip(canonical)
+    _validate_gzip_header(compressed)
     if len(compressed) > _MAX_COMPRESSED_BYTES:
         raise Gate3EconomicEvidenceError(
             "Gate 3 calibration sidecar exceeds the compressed byte bound"
@@ -341,6 +349,19 @@ def _bounded_gzip_decompress(data: bytes) -> bytes:
     return raw
 
 
+def _validate_gzip_header(data: bytes) -> None:
+    if (
+        type(data) is not bytes
+        or len(data) < 10
+        or data[:3] != b"\x1f\x8b\x08"
+        or data[3] != 0
+        or data[4:8] != b"\x00\x00\x00\x00"
+    ):
+        raise Gate3EconomicEvidenceError(
+            "Gate 3 calibration gzip header differs from the frozen contract"
+        )
+
+
 def _validate_sidecar_bytes(
     data: bytes,
     *,
@@ -348,6 +369,7 @@ def _validate_sidecar_bytes(
 ) -> Gate3CalibrationObservation:
     if type(data) is not bytes:
         raise Gate3EconomicEvidenceError("Gate 3 calibration sidecar requires exact bytes")
+    _validate_gzip_header(data)
     if len(data) > _MAX_COMPRESSED_BYTES:
         raise Gate3EconomicEvidenceError(
             "Gate 3 calibration sidecar exceeds the compressed byte bound"
@@ -366,7 +388,7 @@ def _validate_sidecar_bytes(
         raise Gate3EconomicEvidenceError(
             "Gate 3 calibration observation failed strict validation"
         ) from error
-    canonical = canonical_gate3_calibration_observation_bytes(observation)
+    canonical = _canonical_strict_gate3_calibration_observation_bytes(observation)
     if raw != canonical:
         raise Gate3EconomicEvidenceError(
             "Gate 3 calibration observation encoding is not canonical"

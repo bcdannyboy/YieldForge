@@ -29,6 +29,7 @@ def test_deterministic_gzip_uses_frozen_header_and_round_trips() -> None:
     second = store.deterministic_gzip(raw)
 
     assert first == second
+    assert first[:3] == b"\x1f\x8b\x08"
     assert first[3] == 0  # no original filename flag
     assert first[4:8] == b"\x00\x00\x00\x00"  # frozen mtime
     assert gzip.decompress(first) == raw
@@ -49,6 +50,7 @@ def test_calibration_receipt_exactly_binds_strict_observation() -> None:
     )
 
     semantic_hash = observation.content_sha256.removeprefix("sha256:")
+    compressed_hash = receipt.compressed_raw_sha256.removeprefix("sha256:")
     assert receipt.roots == observation.roots
     assert receipt.corpus_id == observation.corpus_id
     assert receipt.stream_id == observation.stream_id
@@ -60,9 +62,10 @@ def test_calibration_receipt_exactly_binds_strict_observation() -> None:
     assert receipt.exact_event_census is True
     assert receipt.source_lineage == "repaired_runtime"
     assert receipt.sidecar_name == (
-        f"m11-gate3-calibration-observation-{semantic_hash}.json.gz"
+        "m11-gate3-calibration-observation-"
+        f"{semantic_hash}-{compressed_hash}.json.gz"
     )
-    assert receipt.compression == "gzip-level-6-mtime-0-no-filename"
+    assert receipt.compression == "gzip-level-6-mtime-0-flags-0"
 
     legacy = store.build_gate3_calibration_observation_receipt(
         observation,
@@ -216,6 +219,20 @@ def _resign_receipt(receipt, **updates):  # type: ignore[no-untyped-def]
         receipt_id=f"yfm11g3calrcpt-{digest[:24]}",
         content_sha256=f"sha256:{digest}",
         **semantic,
+    )
+
+
+def _resign_transport_receipt(receipt, transport: bytes):  # type: ignore[no-untyped-def]
+    compressed_hash = hashlib.sha256(transport).hexdigest()
+    observation_hash = receipt.observation_content_sha256.removeprefix("sha256:")
+    return _resign_receipt(
+        receipt,
+        compressed_raw_sha256=f"sha256:{compressed_hash}",
+        compressed_byte_count=len(transport),
+        sidecar_name=(
+            "m11-gate3-calibration-observation-"
+            f"{observation_hash}-{compressed_hash}.json.gz"
+        ),
     )
 
 
@@ -376,16 +393,10 @@ def test_loader_wraps_malformed_deflate_as_evidence_error(tmp_path: Path) -> Non
         b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
         b"\xff\xff\xff\xff\xff"
     )
-    substituted_receipt = _resign_receipt(
-        receipt,
-        compressed_raw_sha256=(
-            f"sha256:{hashlib.sha256(malformed).hexdigest()}"
-        ),
-        compressed_byte_count=len(malformed),
-    )
+    substituted_receipt = _resign_transport_receipt(receipt, malformed)
     candidate_directory = tmp_path / "malformed"
     candidate_directory.mkdir()
-    candidate = candidate_directory / receipt.sidecar_name
+    candidate = candidate_directory / substituted_receipt.sidecar_name
     candidate.write_bytes(malformed)
 
     with pytest.raises(store.Gate3EconomicEvidenceError, match="not valid gzip"):
@@ -406,6 +417,90 @@ def test_loader_treats_bound_gzip_as_transport_without_recompression(
     monkeypatch.setattr(store, "deterministic_gzip", reject_recompression)
 
     assert _load_observation(published, receipt, observation) == observation
+
+
+def test_distinct_valid_gzip_transports_use_distinct_immutable_paths_and_load(
+    tmp_path: Path,
+) -> None:
+    observation, published, receipt = _publish_observation(tmp_path)
+    alternate = bytearray(published.read_bytes())
+    alternate[9] = 3 if alternate[9] != 3 else 255
+    alternate_bytes = bytes(alternate)
+    alternate_receipt = _resign_transport_receipt(receipt, alternate_bytes)
+    alternate_path = tmp_path / alternate_receipt.sidecar_name
+    alternate_path.write_bytes(alternate_bytes)
+
+    assert alternate_path != published
+    assert alternate_receipt.sidecar_name != receipt.sidecar_name
+    assert gzip.decompress(alternate_bytes) == gzip.decompress(published.read_bytes())
+    assert _load_observation(published, receipt, observation) == observation
+    assert _load_observation(alternate_path, alternate_receipt, observation) == observation
+
+
+@pytest.mark.parametrize("header_mutation", ("mtime", "fname"))
+def test_loader_rejects_resigned_noncanonical_gzip_headers(
+    tmp_path: Path,
+    header_mutation: str,
+) -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation, published, receipt = _publish_observation(tmp_path)
+    mutated = bytearray(published.read_bytes())
+    if header_mutation == "mtime":
+        mutated[4] = 1
+    else:
+        mutated[3] |= 0x08
+        mutated[10:10] = b"forged-name.json\x00"
+    mutated_bytes = bytes(mutated)
+    mutated_receipt = _resign_transport_receipt(receipt, mutated_bytes)
+    mutated_path = tmp_path / mutated_receipt.sidecar_name
+    mutated_path.write_bytes(mutated_bytes)
+    assert gzip.decompress(mutated_bytes) == gzip.decompress(published.read_bytes())
+
+    with pytest.raises(store.Gate3EconomicEvidenceError, match="gzip header"):
+        _load_observation(mutated_path, mutated_receipt, observation)
+
+
+def test_loader_parses_once_and_serializes_already_strict_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation, published, receipt = _publish_observation(tmp_path)
+    parse = store.Gate3CalibrationObservation.model_validate_json
+    serialize = store._canonical_strict_gate3_calibration_observation_bytes
+    calls = {"parse": 0, "strict_serialize": 0}
+
+    def counted_parse(cls, data, *, strict):  # type: ignore[no-untyped-def]
+        calls["parse"] += 1
+        return parse(data, strict=strict)
+
+    def counted_strict_serialize(value):  # type: ignore[no-untyped-def]
+        calls["strict_serialize"] += 1
+        return serialize(value)
+
+    def reject_detached_revalidation(value):  # type: ignore[no-untyped-def]
+        raise AssertionError("loader must not clone an already-strict parsed observation")
+
+    monkeypatch.setattr(
+        store.Gate3CalibrationObservation,
+        "model_validate_json",
+        classmethod(counted_parse),
+    )
+    monkeypatch.setattr(
+        store,
+        "_canonical_strict_gate3_calibration_observation_bytes",
+        counted_strict_serialize,
+    )
+    monkeypatch.setattr(
+        store,
+        "canonical_gate3_calibration_observation_bytes",
+        reject_detached_revalidation,
+    )
+
+    assert _load_observation(published, receipt, observation) == observation
+    assert calls == {"parse": 1, "strict_serialize": 1}
 
 
 def test_loader_rejects_expected_ledger_and_opening_mismatch(tmp_path: Path) -> None:
