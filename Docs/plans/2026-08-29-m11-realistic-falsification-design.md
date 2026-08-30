@@ -114,6 +114,12 @@ Define:
 - `CeilingSavings_i = 100 * (B_opt_i - L_i) / B_opt_i`
 - `CeilingUnknown_i = 100 * (K_opt_i - L_i) / B_opt_i`
 
+Here `B_opt_i` is a verified feasible cost from the strongest frozen as-of-time optimistic-arm
+baseline and `K_opt_i` is a verified feasible cost from the identical frozen known-only algorithm
+with unknown events masked. Neither may be a lower bound or another relaxation. Subtracting the
+full-information lower bound `L_i` from those feasible costs is what makes both quantities certified
+upper bounds; subtracting a known-only lower bound would not be valid.
+
 If the joint one-sided 95% upper confidence bound is below either the 1.5% savings floor or the
 0.5-point unknown-future floor on every corpus and the equal-corpus pool, issue
 `falsified_by_optimistic_ceiling` and stop.
