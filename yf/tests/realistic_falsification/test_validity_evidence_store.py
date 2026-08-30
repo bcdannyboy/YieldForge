@@ -1047,6 +1047,57 @@ def test_recovery_enforces_strict_receipt_cap_before_json_parse(
     assert parsed == []
 
 
+def test_build_rejects_deep_model_copy_graph_as_public_store_error(
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    nested: object = "leaf"
+    for _ in range(2000):
+        nested = [nested]
+    forged = validity.model_copy(update={"roots": nested})
+
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="nesting depth"):
+        store.build_gate3_validity_evidence_receipt(
+            forged,
+            baseline_freezes=freezes,
+        )
+
+
+def test_json_nesting_depth_accepts_exact_limit_and_rejects_next_level() -> None:
+    store = _store()
+    exact = b"[" * store._MAX_JSON_NESTING_DEPTH + b"0" + b"]" * (store._MAX_JSON_NESTING_DEPTH)
+    too_deep = b"[" + exact + b"]"
+
+    store._validate_json_nesting_depth(exact)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="nesting depth"):
+        store._validate_json_nesting_depth(too_deep)
+
+
+def test_load_and_recover_reject_deep_json_as_public_store_error(
+    tmp_path: Path,
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, _, evidence = _publish_validity(tmp_path, validity_case)
+    raw = b"[" * 10_000 + b"0" + b"]" * 10_000
+    assert len(raw) < store._MAX_STRICT_RECEIPT_BYTES
+    transport = store.deterministic_gzip(raw)
+    resigned = _resign_transport(evidence, transport, raw)
+    candidate = tmp_path / "deep-json" / resigned.sidecar_name
+    candidate.parent.mkdir()
+    candidate.write_bytes(transport)
+
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="nesting depth"):
+        _load_validity(candidate, freezes, validity, resigned)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="nesting depth"):
+        store.recover_gate3_validity_evidence_receipt(
+            candidate,
+            expected_roots=validity.roots,
+            expected_baseline_freezes=freezes,
+        )
+
+
 def test_builder_normalizes_decimal_failure_from_allowed_large_cost_string(
     validity_case,
 ) -> None:  # type: ignore[no-untyped-def]

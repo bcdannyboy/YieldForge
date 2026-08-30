@@ -52,6 +52,7 @@ _COMPRESSION = "gzip-level-6-mtime-0-flags-0"
 _MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 _MAX_STRICT_RECEIPT_BYTES = 32 * 1024 * 1024
+_MAX_JSON_NESTING_DEPTH = 128
 _COST_PATTERN = r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _SIGNED_COST_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _METRIC_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{12}$"
@@ -478,6 +479,10 @@ def _count_canonical_json_value(
     *,
     depth: int,
 ) -> None:
+    if depth > _MAX_JSON_NESTING_DEPTH:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity receipt exceeds the JSON nesting depth bound"
+        )
     if isinstance(value, BaseModel):
         fields = type(value).model_fields
         if not fields:
@@ -583,6 +588,10 @@ def _bounded_existing_canonical_size(
 def _iter_pretty_json_bytes(value: object, *, depth: int) -> Iterator[bytes]:
     """Traverse the existing receipt graph using the canonical JSON layout."""
 
+    if depth > _MAX_JSON_NESTING_DEPTH:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity receipt exceeds the JSON nesting depth bound"
+        )
     if isinstance(value, BaseModel):
         fields = type(value).model_fields
         items = tuple((name, getattr(value, name)) for name in sorted(fields))
@@ -747,6 +756,7 @@ def _strict_validity_receipt_and_canonical(
     except (
         AttributeError,
         DecimalException,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
@@ -782,6 +792,7 @@ def _strict_baseline_freezes(
     except (
         AttributeError,
         DecimalException,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
@@ -977,6 +988,7 @@ def _build_evidence_receipt(
     except (
         AttributeError,
         DecimalException,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
@@ -1038,6 +1050,7 @@ def _strict_evidence_receipt(
     except (
         AttributeError,
         DecimalException,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
@@ -1192,12 +1205,40 @@ def _reject_nonfinite_json(value: str):
     raise Gate3ValidityEvidenceError(f"Gate 3 validity JSON contains non-finite value {value}")
 
 
+def _validate_json_nesting_depth(raw: bytes | bytearray) -> None:
+    """Reject deep JSON before either recursive parser sees the payload."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_JSON_NESTING_DEPTH:
+                raise Gate3ValidityEvidenceError(
+                    "Gate 3 validity JSON exceeds the nesting depth bound"
+                )
+        elif byte in (0x5D, 0x7D) and depth > 0:
+            depth -= 1
+
+
 def _parse_strict_validity_json(raw: bytes | bytearray) -> Gate3ValidityReceipt:
     if len(raw) > _MAX_STRICT_RECEIPT_BYTES:
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity receipt exceeds the strict receipt byte bound"
         )
     try:
+        _validate_json_nesting_depth(raw)
         json.loads(
             raw,
             object_pairs_hook=_json_object_without_duplicates,
@@ -1210,6 +1251,7 @@ def _parse_strict_validity_json(raw: bytes | bytearray) -> Gate3ValidityReceipt:
         UnicodeDecodeError,
         DecimalException,
         json.JSONDecodeError,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
@@ -1286,6 +1328,7 @@ def _strict_compact_tuple(values, model, expected_length: int, label: str):  # t
     except (
         AttributeError,
         DecimalException,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
@@ -1304,6 +1347,7 @@ def _strict_expected_roots(expected_roots: Gate3RootBinding) -> Gate3RootBinding
     except (
         AttributeError,
         DecimalException,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,
