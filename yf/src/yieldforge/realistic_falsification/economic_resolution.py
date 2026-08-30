@@ -71,6 +71,12 @@ _MAX_REPAIRED_SOURCE_BYTES = 4 * 1024 * 1024
 _MAX_GIT_METADATA_BYTES = 4096
 _MAX_GIT_STDERR_BYTES = 16 * 1024
 _GIT_TIMEOUT_SECONDS = 10.0
+_MAX_DISCOVERY_DIRECTORY_ENTRIES = 4096
+_DISCOVERY_DIRECTORY_SCAN_SECONDS = 2.0
+
+
+def _discovery_monotonic() -> float:
+    return time.monotonic()
 
 
 class EconomicResolutionEvidenceError(ValueError):
@@ -233,17 +239,30 @@ def _run_git_bounded(
             "GIT_INDEX_FILE",
             "GIT_OBJECT_DIRECTORY",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_NAMESPACE",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_SHALLOW_FILE",
+            "GIT_GRAFT_FILE",
         ):
             environment.pop(variable, None)
         environment.update(
             {
+                "GIT_NO_REPLACE_OBJECTS": "1",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_PAGER": "cat",
                 "LC_ALL": "C",
             }
         )
         process = subprocess.Popen(
-            ("git", "--no-pager", "-C", os.fspath(cwd), *arguments),
+            (
+                "git",
+                "--no-replace-objects",
+                "--no-pager",
+                "-C",
+                os.fspath(cwd),
+                *arguments,
+            ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -307,6 +326,40 @@ def _one_git_output_line(result: _BoundedGitResult, *, label: str) -> bytes:
     if len(lines) != 1 or not lines[0]:
         raise EconomicResolutionEvidenceError(f"{label} Git output is malformed")
     return lines[0]
+
+
+def _require_non_symlink_source_components(
+    repository_root: Path,
+    relative_source_path: str,
+) -> Path:
+    relative = Path(relative_source_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise EconomicResolutionEvidenceError("runtime repaired source path is malformed")
+    current = repository_root
+    for index, part in enumerate(relative.parts):
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise EconomicResolutionEvidenceError(
+                "runtime repaired source path could not be inspected"
+            ) from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise EconomicResolutionEvidenceError(
+                "runtime repaired source path contains a symlink component"
+            )
+        is_final = index == len(relative.parts) - 1
+        if (not is_final and not stat.S_ISDIR(metadata.st_mode)) or (
+            is_final and not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise EconomicResolutionEvidenceError(
+                "runtime repaired source path components have unexpected types"
+            )
+    return current
 
 
 def verify_economic_resolution_runtime_lineage(
@@ -438,7 +491,10 @@ def verify_economic_resolution_runtime_lineage(
     ):
         raise EconomicResolutionEvidenceError("repair commit blob raw SHA-256 differs")
 
-    current_source = top_level / strict_protocol.repaired_source_path
+    current_source = _require_non_symlink_source_components(
+        top_level,
+        strict_protocol.repaired_source_path,
+    )
     current_raw = _read_bounded_regular_file(
         current_source,
         max_bytes=_MAX_REPAIRED_SOURCE_BYTES,
@@ -1535,6 +1591,33 @@ publish_gate3_calibration_checkpoint = publish_gate3_calibration_attempt_checkpo
 load_gate3_calibration_checkpoint = load_gate3_calibration_attempt_checkpoint
 
 
+@dataclass(frozen=True, slots=True)
+class _PrefixedFileDiscovery:
+    path: Path
+    filename_match: re.Match[str]
+    directory: Path
+    directory_fingerprint: _FileFingerprint
+
+
+def _require_discovery_directory_unchanged(
+    discovery: _PrefixedFileDiscovery,
+    *,
+    label: str,
+) -> None:
+    try:
+        metadata = discovery.directory.lstat()
+    except OSError as error:
+        raise EconomicResolutionEvidenceError(
+            f"{label} directory could not be re-inspected"
+        ) from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or _fingerprint(metadata) != discovery.directory_fingerprint
+    ):
+        raise EconomicResolutionEvidenceError(f"{label} directory changed during discovery")
+
+
 def _discover_single_prefixed_regular_file(
     output_directory: Path,
     *,
@@ -1542,8 +1625,9 @@ def _discover_single_prefixed_regular_file(
     filename_pattern: re.Pattern[str],
     max_bytes: int,
     label: str,
-) -> tuple[Path, re.Match[str]] | None:
+) -> _PrefixedFileDiscovery | None:
     directory = Path(output_directory)
+    descriptor: int | None = None
     try:
         metadata = directory.lstat()
     except FileNotFoundError:
@@ -1554,10 +1638,33 @@ def _discover_single_prefixed_regular_file(
         ) from error
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise EconomicResolutionEvidenceError(f"{label} directory must be a non-symlink directory")
+    before_fingerprint = _fingerprint(metadata)
     candidate: tuple[Path, re.Match[str]] | None = None
     try:
-        with os.scandir(directory) as entries:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or _fingerprint(opened) != before_fingerprint:
+            raise EconomicResolutionEvidenceError(f"{label} directory identity changed during open")
+        deadline = _discovery_monotonic() + _DISCOVERY_DIRECTORY_SCAN_SECONDS
+        entry_count = 0
+        with os.scandir(descriptor) as entries:
             for entry in entries:
+                entry_count += 1
+                if entry_count > _MAX_DISCOVERY_DIRECTORY_ENTRIES:
+                    raise EconomicResolutionEvidenceError(
+                        f"{label} exceeded the directory entry bound"
+                    )
+                if _discovery_monotonic() > deadline:
+                    raise EconomicResolutionEvidenceError(
+                        f"{label} exceeded the directory scan deadline"
+                    )
                 if not entry.name.startswith(prefix):
                     continue
                 match = filename_pattern.fullmatch(entry.name)
@@ -1576,12 +1683,39 @@ def _discover_single_prefixed_regular_file(
                     raise EconomicResolutionEvidenceError(
                         f"{label} has competing prefixed candidates"
                     )
-                candidate = Path(entry.path), match
+                candidate = directory / entry.name, match
+        if _discovery_monotonic() > deadline:
+            raise EconomicResolutionEvidenceError(f"{label} exceeded the directory scan deadline")
+        during = os.fstat(descriptor)
     except EconomicResolutionEvidenceError:
         raise
-    except OSError as error:
+    except (OSError, OverflowError) as error:
         raise EconomicResolutionEvidenceError(f"{label} directory scan failed safely") from error
-    return candidate
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        after = directory.lstat()
+    except OSError as error:
+        raise EconomicResolutionEvidenceError(
+            f"{label} directory could not be re-inspected"
+        ) from error
+    if (
+        stat.S_ISLNK(after.st_mode)
+        or not stat.S_ISDIR(after.st_mode)
+        or _fingerprint(during) != before_fingerprint
+        or _fingerprint(after) != before_fingerprint
+    ):
+        raise EconomicResolutionEvidenceError(f"{label} directory changed during scan")
+    if candidate is None:
+        return None
+    path, filename_match = candidate
+    return _PrefixedFileDiscovery(
+        path=path,
+        filename_match=filename_match,
+        directory=directory,
+        directory_fingerprint=before_fingerprint,
+    )
 
 
 def discover_gate3_calibration_attempt_checkpoint(
@@ -1620,8 +1754,8 @@ def discover_gate3_calibration_attempt_checkpoint(
     )
     if discovered is None:
         return None
-    path, filename_match = discovered
-    content_digest = filename_match.group(1)
+    path = discovered.path
+    content_digest = discovered.filename_match.group(1)
     checkpoint = load_gate3_calibration_attempt_checkpoint(
         path,
         expected_protocol=strict_protocol,
@@ -1646,6 +1780,10 @@ def discover_gate3_calibration_attempt_checkpoint(
         raise EconomicResolutionEvidenceError(
             "discovered checkpoint replaced legacy failure reference differs"
         )
+    _require_discovery_directory_unchanged(
+        discovered,
+        label="calibration checkpoint discovery",
+    )
     return path, checkpoint
 
 
@@ -2036,8 +2174,8 @@ def discover_gate3_calibration_manifest(
     )
     if discovered is None:
         return None
-    path, filename_match = discovered
-    content_digest = filename_match.group(1)
+    path = discovered.path
+    content_digest = discovered.filename_match.group(1)
     manifest = load_gate3_calibration_manifest(
         path,
         expected_protocol=strict_protocol,
@@ -2049,4 +2187,8 @@ def discover_gate3_calibration_manifest(
         raise EconomicResolutionEvidenceError(
             "discovered calibration manifest differs from rederived state"
         )
+    _require_discovery_directory_unchanged(
+        discovered,
+        label="calibration manifest discovery",
+    )
     return path, manifest

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1477,6 +1479,144 @@ def _install_lineage_git_stub(
     monkeypatch.setattr(resolution, "_run_git_bounded", fake_git)
 
 
+def _install_real_fake_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    binary_directory = tmp_path / "bin"
+    binary_directory.mkdir()
+    binary = binary_directory / "git"
+    binary.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import sys
+import time
+
+mode = os.environ["YF_FAKE_GIT_MODE"]
+if mode == "argv_env":
+    print(json.dumps({{
+        "argv": sys.argv[1:],
+        "environment": {{
+            key: os.environ.get(key)
+            for key in (
+                "GIT_NO_REPLACE_OBJECTS",
+                "GIT_NAMESPACE",
+                "GIT_REPLACE_REF_BASE",
+                "GIT_COMMON_DIR",
+                "GIT_SHALLOW_FILE",
+            )
+        }},
+    }}))
+elif mode == "stdout_overflow":
+    sys.stdout.write("x" * 100000)
+    sys.stdout.flush()
+elif mode == "stderr_overflow":
+    sys.stderr.write("x" * 100000)
+    sys.stderr.flush()
+elif mode == "timeout":
+    with open(os.environ["YF_FAKE_GIT_PID_PATH"], "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+    time.sleep(5)
+else:
+    raise RuntimeError(mode)
+"""
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary_directory}{os.pathsep}{os.environ['PATH']}")
+    return binary
+
+
+def test_bounded_git_uses_argument_vector_and_disables_replace_namespaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    _install_real_fake_git(tmp_path, monkeypatch)
+    monkeypatch.setenv("YF_FAKE_GIT_MODE", "argv_env")
+    monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "0")
+    monkeypatch.setenv("GIT_NAMESPACE", "forged")
+    monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/forged/")
+    monkeypatch.setenv("GIT_COMMON_DIR", "/tmp/forged-common-dir")
+    monkeypatch.setenv("GIT_SHALLOW_FILE", "/tmp/forged-shallow-file")
+    marker = tmp_path / "shell-was-used"
+    injected_argument = f"HEAD; touch {marker}"
+
+    result = resolution._run_git_bounded(
+        tmp_path,
+        ("rev-parse", "--verify", injected_argument),
+        max_stdout_bytes=4096,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["argv"] == [
+        "--no-replace-objects",
+        "--no-pager",
+        "-C",
+        str(tmp_path),
+        "rev-parse",
+        "--verify",
+        injected_argument,
+    ]
+    assert payload["environment"] == {
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NAMESPACE": None,
+        "GIT_REPLACE_REF_BASE": None,
+        "GIT_COMMON_DIR": None,
+        "GIT_SHALLOW_FILE": None,
+    }
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "max_stdout_bytes"),
+    (("stdout_overflow", 32), ("stderr_overflow", 0)),
+)
+def test_bounded_git_rejects_stdout_and_stderr_overflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mode: str,
+    max_stdout_bytes: int,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    _install_real_fake_git(tmp_path, monkeypatch)
+    monkeypatch.setenv("YF_FAKE_GIT_MODE", mode)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="output bound"):
+        resolution._run_git_bounded(
+            tmp_path,
+            ("rev-parse", "--show-toplevel"),
+            max_stdout_bytes=max_stdout_bytes,
+        )
+
+
+def test_bounded_git_timeout_kills_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    _install_real_fake_git(tmp_path, monkeypatch)
+    monkeypatch.setenv("YF_FAKE_GIT_MODE", "timeout")
+    pid_path = tmp_path / "fake-git.pid"
+    monkeypatch.setenv("YF_FAKE_GIT_PID_PATH", str(pid_path))
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="timed out"):
+        resolution._run_git_bounded(
+            tmp_path,
+            ("rev-parse", "--show-toplevel"),
+            max_stdout_bytes=0,
+            timeout_seconds=0.5,
+        )
+
+    pid = int(pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def _prepare_lineage_repository(
     tmp_path: Path,
     resolution,  # type: ignore[no-untyped-def]
@@ -1583,8 +1723,33 @@ def test_runtime_lineage_rejects_changed_commit_blob_current_source_and_symlink(
     target = repository_root / "geometry-target.py"
     target.write_bytes(source_raw)
     source_path.symlink_to(target)
-    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="non-symlink"):
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="symlink"):
         resolution.verify_economic_resolution_runtime_lineage(repository_root, protocol)
+
+
+def test_runtime_lineage_rejects_symlinked_intermediate_source_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    repository_root, source_raw = _prepare_lineage_repository(tmp_path, resolution)
+    _install_lineage_git_stub(
+        monkeypatch,
+        resolution,
+        repository_root=repository_root,
+        source_raw=source_raw,
+    )
+    baseline = repository_root / "yf/src/yieldforge/baseline"
+    real_baseline = baseline.with_name("baseline-real")
+    baseline.rename(real_baseline)
+    baseline.symlink_to(real_baseline.name, target_is_directory=True)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="symlink component"):
+        resolution.verify_economic_resolution_runtime_lineage(
+            repository_root,
+            resolution.build_economic_resolution_protocol(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1685,6 +1850,171 @@ def test_checkpoint_discovery_rejects_outcome_that_does_not_match_legacy_referen
     resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, changed_checkpoint)
 
     with pytest.raises(resolution.EconomicResolutionEvidenceError, match="legacy reference"):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            tmp_path,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+
+
+def test_checkpoint_discovery_rejects_directory_swap_during_descriptor_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    checkpoint = _valid_checkpoints(resolution)[0]
+    reference = checkpoint.legacy_reference
+    assert reference is not None
+    resolution.publish_gate3_calibration_attempt_checkpoint(output_directory, checkpoint)
+    original_scandir = resolution.os.scandir
+    moved_directory = tmp_path / "moved-output"
+    swapped = False
+
+    def swapping_scandir(path):  # type: ignore[no-untyped-def]
+        nonlocal swapped
+        if type(path) is int and not swapped:
+            swapped = True
+            output_directory.rename(moved_directory)
+            output_directory.mkdir()
+        return original_scandir(path)
+
+    monkeypatch.setattr(resolution.os, "scandir", swapping_scandir)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="changed|identity"):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            output_directory,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+    assert swapped
+
+
+def test_checkpoint_discovery_rejects_directory_addition_during_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    checkpoint = _valid_checkpoints(resolution)[0]
+    reference = checkpoint.legacy_reference
+    assert reference is not None
+    resolution.publish_gate3_calibration_attempt_checkpoint(output_directory, checkpoint)
+    original_scandir = resolution.os.scandir
+    mutated = False
+
+    class AddingScandir:
+        def __init__(self, inner):  # type: ignore[no-untyped-def]
+            self.inner = inner
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            self.inner.close()
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __next__(self):  # type: ignore[no-untyped-def]
+            nonlocal mutated
+            entry = next(self.inner)
+            if not mutated:
+                mutated = True
+                (output_directory / "injected-during-scan").write_text("mutation")
+            return entry
+
+    def adding_scandir(path):  # type: ignore[no-untyped-def]
+        inner = original_scandir(path)
+        return AddingScandir(inner) if type(path) is int else inner
+
+    monkeypatch.setattr(resolution.os, "scandir", adding_scandir)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="changed"):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            output_directory,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+    assert mutated
+
+
+def test_checkpoint_discovery_rechecks_directory_after_bound_file_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    reference = checkpoint.legacy_reference
+    assert reference is not None
+    resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, checkpoint)
+    original_loader = resolution.load_gate3_calibration_attempt_checkpoint
+
+    def mutating_loader(*args, **kwargs):  # type: ignore[no-untyped-def]
+        loaded = original_loader(*args, **kwargs)
+        (tmp_path / "injected-after-scan").write_text("mutation")
+        return loaded
+
+    monkeypatch.setattr(
+        resolution,
+        "load_gate3_calibration_attempt_checkpoint",
+        mutating_loader,
+    )
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="changed"):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            tmp_path,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+
+
+def test_checkpoint_discovery_bounds_directory_entries_and_scan_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    reference = checkpoint.legacy_reference
+    assert reference is not None
+    for index in range(3):
+        (tmp_path / f"unrelated-{index}").write_text("x")
+    monkeypatch.setattr(
+        resolution,
+        "_MAX_DISCOVERY_DIRECTORY_ENTRIES",
+        2,
+        raising=False,
+    )
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="entry bound"):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            tmp_path,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+
+    for path in tmp_path.iterdir():
+        path.unlink()
+    (tmp_path / "one-entry").write_text("x")
+    ticks = iter((0.0, 3.0, 3.0))
+    monkeypatch.setattr(
+        resolution,
+        "_DISCOVERY_DIRECTORY_SCAN_SECONDS",
+        2.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        resolution,
+        "_discovery_monotonic",
+        lambda: next(ticks, 3.0),
+        raising=False,
+    )
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="deadline"):
         resolution.discover_gate3_calibration_attempt_checkpoint(
             tmp_path,
             protocol=checkpoint.protocol,
