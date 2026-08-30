@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.realistic_falsification.central_evidence_store import (
     Gate3CentralCellReceipt,
     Gate3CentralEvidenceError,
@@ -27,16 +28,20 @@ from yieldforge.realistic_falsification.confirmation import (
 )
 from yieldforge.realistic_falsification.economic_central import (
     Gate3CentralCellCheckpoint,
+    Gate3CentralCellFailureReceipt,
     Gate3EconomicCentralManifest,
     Gate3EconomicSegmentSummary,
     build_gate3_central_cell_checkpoint,
+    build_gate3_central_cell_failure_receipt,
     build_gate3_economic_central_manifest,
     build_gate3_economic_segment_summary,
     discover_gate3_central_cell_checkpoints,
+    discover_gate3_central_cell_failure_receipts,
     discover_gate3_economic_central_manifest,
     discover_gate3_economic_segment_summaries,
     load_gate3_central_cell_checkpoint,
     publish_gate3_central_cell_checkpoint,
+    publish_gate3_central_cell_failure_receipt,
     publish_gate3_economic_central_manifest,
     publish_gate3_economic_segment_summary,
 )
@@ -75,6 +80,7 @@ _CENTRAL_SIDECAR_PREFIX = "m11-gate3-central-cell-"
 _CENTRAL_SIDECAR_PATTERN = re.compile(r"m11-gate3-central-cell-[0-9a-f]{64}-[0-9a-f]{64}\.json\.gz")
 _MAX_DISCOVERY_ENTRIES = 4096
 _MAX_CENTRAL_SIDECAR_BYTES = 64 * 1024 * 1024
+_MAX_FAILURE_RECEIPT_BYTES = 16 * 1024
 _REGIMES: tuple[Literal["recurrent", "mixed", "high_mix", "regime_shift"], ...] = (
     "recurrent",
     "mixed",
@@ -94,6 +100,7 @@ class EconomicCentralStageRun:
     calibration_manifest: Gate3CalibrationManifest
     validity_manifest: Gate3ValidityStageManifest
     checkpoints: tuple[Gate3CentralCellCheckpoint, ...]
+    failure_receipts: tuple[Gate3CentralCellFailureReceipt, ...]
     segment_summaries: tuple[Gate3EconomicSegmentSummary, ...]
     manifest: Gate3EconomicCentralManifest
     manifest_path: Path
@@ -260,6 +267,36 @@ def _sidecar_census(
     return by_name, unbound, fingerprints
 
 
+def _failure_receipt_fingerprints(
+    discovered: tuple[tuple[Path, Gate3CentralCellFailureReceipt], ...],
+) -> dict[str, tuple[int, int, int, int, int]]:
+    fingerprints: dict[str, tuple[int, int, int, int, int]] = {}
+    for path, _receipt in discovered:
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise M11EconomicCentralRunnerError(
+                "central failure receipt changed during stage validation"
+            ) from error
+        if (
+            path.name in fingerprints
+            or stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > _MAX_FAILURE_RECEIPT_BYTES
+        ):
+            raise M11EconomicCentralRunnerError(
+                "central failure receipt changed during stage validation"
+            )
+        fingerprints[path.name] = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+    return fingerprints
+
+
 def _freeze_map(
     freezes: tuple[Gate3BaselineCalibrationFreeze, Gate3BaselineCalibrationFreeze],
 ) -> dict[Gate3CorpusId, Gate3BaselineCalibrationFreeze]:
@@ -344,6 +381,54 @@ def _require_checkpoint_prefix(
         )
 
 
+def _require_failure_history(
+    failure_receipts: tuple[Gate3CentralCellFailureReceipt, ...],
+    *,
+    checkpoints: tuple[Gate3CentralCellCheckpoint, ...],
+    canonical_streams: tuple[str, ...],
+    freezes: dict[Gate3CorpusId, Gate3BaselineCalibrationFreeze],
+    allow_pending_next: bool,
+) -> None:
+    if type(failure_receipts) is not tuple:
+        raise M11EconomicCentralRunnerError("central failure history must be a tuple")
+    for receipt in failure_receipts:
+        position = receipt.execution_position
+        expected_corpus: Gate3CorpusId = "loco-2dics" if position < 20 else "lectra-m3-m4"
+        expected_prefix_sha = "sha256:" + semantic_sha256(
+            tuple((item.checkpoint_id, item.content_sha256) for item in checkpoints[:position])
+        )
+        if (
+            position > len(checkpoints)
+            or (position == len(checkpoints) and not allow_pending_next)
+            or receipt.corpus_id != expected_corpus
+            or receipt.stream_id != canonical_streams[position]
+            or receipt.baseline_freeze_id != freezes[expected_corpus].freeze_id
+            or receipt.baseline_freeze_content_sha256 != freezes[expected_corpus].content_sha256
+            or receipt.completed_checkpoint_count != position
+            or receipt.completed_checkpoint_prefix_content_sha256 != expected_prefix_sha
+        ):
+            raise M11EconomicCentralRunnerError(
+                "central failure history differs from the canonical checkpoint prefix"
+            )
+    for checkpoint in checkpoints:
+        chain = tuple(
+            item
+            for item in failure_receipts
+            if item.execution_position == checkpoint.execution_position
+        )
+        head = chain[-1] if chain else None
+        if (
+            checkpoint.prior_failure_attempt_count != len(chain)
+            or checkpoint.prior_failure_receipt_id
+            != (head.failure_receipt_id if head is not None else None)
+            or checkpoint.prior_failure_receipt_content_sha256
+            != (head.content_sha256 if head is not None else None)
+        ):
+            raise M11EconomicCentralRunnerError(
+                "central checkpoint does not anchor its exact failure history"
+            )
+
+
 def _fresh_validate_checkpoints(
     output: Path,
     checkpoints: tuple[Gate3CentralCellCheckpoint, ...],
@@ -386,6 +471,7 @@ def _recover_orphan(
     validity: Gate3ValidityStageManifest,
     addendum: EconomicDecisionAddendum,
     freeze: Gate3BaselineCalibrationFreeze,
+    failure_receipts: tuple[Gate3CentralCellFailureReceipt, ...],
 ) -> tuple[Path, Gate3CentralCellCheckpoint]:
     recovered: list[Gate3CentralCellReceipt] = []
     for regime in _REGIMES:
@@ -412,6 +498,9 @@ def _recover_orphan(
         calibration_manifest=calibration,
         validity_manifest=validity,
         decision_addendum=addendum,
+        prior_failure_receipts=tuple(
+            item for item in failure_receipts if item.execution_position == position
+        ),
     )
     path = publish_gate3_central_cell_checkpoint(
         output,
@@ -433,6 +522,115 @@ def _recover_orphan(
     return path, loaded
 
 
+def _record_failed_cell_attempt(
+    *,
+    backend: AdapterGate3Backend,
+    error: Exception,
+    cell: Gate3StreamCell | None,
+    position: int,
+    corpus_id: Gate3CorpusId,
+    stream_id: str,
+    output: Path,
+    calibration: Gate3CalibrationManifest,
+    validity: Gate3ValidityStageManifest,
+    addendum: EconomicDecisionAddendum,
+    freeze: Gate3BaselineCalibrationFreeze,
+    checkpoints: tuple[Gate3CentralCellCheckpoint, ...],
+    canonical_streams: tuple[str, ...],
+    all_freezes: dict[Gate3CorpusId, Gate3BaselineCalibrationFreeze],
+    expected_failure_fingerprints: dict[str, tuple[int, int, int, int, int]],
+) -> None:
+    receipt_error: Exception | None = None
+    try:
+        failure_state = discover_gate3_central_cell_failure_receipts(
+            output,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+        if _failure_receipt_fingerprints(failure_state) != expected_failure_fingerprints:
+            raise M11EconomicCentralRunnerError(
+                "central failure receipt evidence changed before recording"
+            )
+        failure_history = tuple(item for _path, item in failure_state)
+        _require_failure_history(
+            failure_history,
+            checkpoints=checkpoints,
+            canonical_streams=canonical_streams,
+            freezes=all_freezes,
+            allow_pending_next=True,
+        )
+        chain = tuple(item for item in failure_history if item.execution_position == position)
+        try:
+            detail = str(error).strip()
+        except Exception:
+            detail = "exception detail could not be rendered"
+        failure_receipt = build_gate3_central_cell_failure_receipt(
+            execution_position=position,
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            completed_checkpoints=checkpoints,
+            previous_failure_receipt=chain[-1] if chain else None,
+            exception_type=f"{type(error).__module__}.{type(error).__qualname__}",
+            failure_detail=detail or "exception carried no detail",
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+        failure_path = publish_gate3_central_cell_failure_receipt(
+            output,
+            failure_receipt,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+        refreshed_state = discover_gate3_central_cell_failure_receipts(
+            output,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+        refreshed_history = tuple(item for _path, item in refreshed_state)
+        refreshed_fingerprints = _failure_receipt_fingerprints(refreshed_state)
+        if (
+            len(refreshed_history) != len(failure_history) + 1
+            or refreshed_history[-1] != failure_receipt
+            or (failure_path, failure_receipt) not in refreshed_state
+            or any(
+                refreshed_fingerprints.get(name) != fingerprint
+                for name, fingerprint in expected_failure_fingerprints.items()
+            )
+        ):
+            raise M11EconomicCentralRunnerError("central failure receipt differs after publication")
+    except Exception as persistence_error:
+        receipt_error = persistence_error
+    try:
+        if cell is None:
+            backend.discard_incomplete_central_stream_evidence(
+                roots=calibration.roots,
+                corpus_id=corpus_id,
+                stream_id=stream_id,
+                baseline_freeze=freeze,
+            )
+        else:
+            backend.release_central_stream_evidence(
+                roots=calibration.roots,
+                corpus_id=corpus_id,
+                stream_id=stream_id,
+                baseline_freeze=freeze,
+                expected_cell_id=cell.cell_id,
+                expected_cell_content_sha256=cell.content_sha256,
+            )
+    except Exception as cleanup_error:
+        raise M11EconomicCentralRunnerError(
+            "central failed attempt evidence cleanup did not complete exactly"
+        ) from cleanup_error
+    if receipt_error is not None:
+        raise M11EconomicCentralRunnerError(
+            "central failed attempt receipt did not persist safely"
+        ) from receipt_error
+
+
 def _execute_cell(
     *,
     backend: AdapterGate3Backend,
@@ -444,7 +642,12 @@ def _execute_cell(
     validity: Gate3ValidityStageManifest,
     addendum: EconomicDecisionAddendum,
     freeze: Gate3BaselineCalibrationFreeze,
+    checkpoints: tuple[Gate3CentralCellCheckpoint, ...],
+    canonical_streams: tuple[str, ...],
+    all_freezes: dict[Gate3CorpusId, Gate3BaselineCalibrationFreeze],
+    expected_failure_fingerprints: dict[str, tuple[int, int, int, int, int]],
 ) -> tuple[Path, Gate3CentralCellCheckpoint]:
+    cell: Gate3StreamCell | None = None
     try:
         cell = backend.execute_central_stream(
             roots=calibration.roots,
@@ -452,54 +655,91 @@ def _execute_cell(
             stream_id=stream_id,
             baseline_freeze=freeze,
         )
-    except Exception as error:
-        try:
-            backend.discard_incomplete_central_stream_evidence(
-                roots=calibration.roots,
-                corpus_id=corpus_id,
-                stream_id=stream_id,
-                baseline_freeze=freeze,
-            )
-        except Exception as discard_error:
+        if (
+            cell.roots != calibration.roots
+            or cell.corpus_id != corpus_id
+            or cell.stream_id != stream_id
+            or cell.baseline_freeze_id != freeze.freeze_id
+            or cell.baseline_freeze_content_sha256 != freeze.content_sha256
+        ):
             raise M11EconomicCentralRunnerError(
-                "central execution and exact partial-cache discard both failed"
-            ) from discard_error
-        raise error
-    if (
-        cell.roots != calibration.roots
-        or cell.corpus_id != corpus_id
-        or cell.stream_id != stream_id
-        or cell.baseline_freeze_id != freeze.freeze_id
-        or cell.baseline_freeze_content_sha256 != freeze.content_sha256
-    ):
-        raise M11EconomicCentralRunnerError(
-            "executed central cell differs from exact stream bindings"
+                "executed central cell differs from exact stream bindings"
+            )
+        sidecar_path, receipt = publish_gate3_central_cell_evidence(
+            output,
+            cell,
+            decision_addendum=addendum,
         )
-    sidecar_path, receipt = publish_gate3_central_cell_evidence(
-        output,
-        cell,
-        decision_addendum=addendum,
-    )
-    if sidecar_path != output / receipt.sidecar_name:
-        raise M11EconomicCentralRunnerError(
-            "central sidecar publication path differs from its receipt"
+        if sidecar_path != output / receipt.sidecar_name:
+            raise M11EconomicCentralRunnerError(
+                "central sidecar publication path differs from its receipt"
+            )
+        persisted = _load_cell_sidecar(output, receipt, addendum=addendum, freeze=freeze)
+        del persisted
+        failure_state = discover_gate3_central_cell_failure_receipts(
+            output,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
         )
-    persisted = _load_cell_sidecar(output, receipt, addendum=addendum, freeze=freeze)
-    del persisted
-    checkpoint = build_gate3_central_cell_checkpoint(
-        receipt,
-        execution_position=position,
-        calibration_manifest=calibration,
-        validity_manifest=validity,
-        decision_addendum=addendum,
+        if _failure_receipt_fingerprints(failure_state) != expected_failure_fingerprints:
+            raise M11EconomicCentralRunnerError(
+                "central failure receipt evidence changed before checkpointing"
+            )
+        failure_history = tuple(item for _path, item in failure_state)
+        _require_failure_history(
+            failure_history,
+            checkpoints=checkpoints,
+            canonical_streams=canonical_streams,
+            freezes=all_freezes,
+            allow_pending_next=True,
+        )
+        prior_failures = tuple(
+            item for item in failure_history if item.execution_position == position
+        )
+        checkpoint = build_gate3_central_cell_checkpoint(
+            receipt,
+            execution_position=position,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+            prior_failure_receipts=prior_failures,
+        )
+        checkpoint_path = publish_gate3_central_cell_checkpoint(
+            output,
+            checkpoint,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+    except Exception as error:
+        _record_failed_cell_attempt(
+            backend=backend,
+            error=error,
+            cell=cell,
+            position=position,
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            output=output,
+            calibration=calibration,
+            validity=validity,
+            addendum=addendum,
+            freeze=freeze,
+            checkpoints=checkpoints,
+            canonical_streams=canonical_streams,
+            all_freezes=all_freezes,
+            expected_failure_fingerprints=expected_failure_fingerprints,
+        )
+        raise
+    backend.release_central_stream_evidence(
+        roots=calibration.roots,
+        corpus_id=corpus_id,
+        stream_id=stream_id,
+        baseline_freeze=freeze,
+        expected_cell_id=receipt.cell_id,
+        expected_cell_content_sha256=receipt.cell_content_sha256,
     )
-    checkpoint_path = publish_gate3_central_cell_checkpoint(
-        output,
-        checkpoint,
-        calibration_manifest=calibration,
-        validity_manifest=validity,
-        decision_addendum=addendum,
-    )
+    del cell
     loaded_checkpoint = load_gate3_central_cell_checkpoint(
         checkpoint_path,
         expected_checkpoint_id=checkpoint.checkpoint_id,
@@ -522,15 +762,6 @@ def _execute_cell(
         raise M11EconomicCentralRunnerError(
             "central checkpoint discovery differs after publication"
         )
-    backend.release_central_stream_evidence(
-        roots=calibration.roots,
-        corpus_id=corpus_id,
-        stream_id=stream_id,
-        baseline_freeze=freeze,
-        expected_cell_id=receipt.cell_id,
-        expected_cell_content_sha256=receipt.cell_content_sha256,
-    )
-    del cell
     return checkpoint_path, checkpoint
 
 
@@ -766,6 +997,14 @@ def run_economic_central_stage(
     )
     checkpoints = tuple(item for _path, item in discovered_checkpoints)
     _require_checkpoint_prefix(checkpoints, canonical_streams=canonical_streams)
+    failure_state = discover_gate3_central_cell_failure_receipts(
+        output,
+        calibration_manifest=calibration,
+        validity_manifest=validity,
+        decision_addendum=addendum,
+    )
+    failure_receipts = tuple(item for _path, item in failure_state)
+    failure_fingerprints = _failure_receipt_fingerprints(failure_state)
     summaries_state = discover_gate3_economic_segment_summaries(
         output,
         calibration_manifest=calibration,
@@ -777,6 +1016,13 @@ def run_economic_central_stage(
         calibration_manifest=calibration,
         validity_manifest=validity,
         decision_addendum=addendum,
+    )
+    _require_failure_history(
+        failure_receipts,
+        checkpoints=checkpoints,
+        canonical_streams=canonical_streams,
+        freezes=freezes,
+        allow_pending_next=manifest_state is None,
     )
     _by_name, unbound, _fingerprints = _sidecar_census(
         output,
@@ -806,10 +1052,31 @@ def run_economic_central_stage(
             validity=validity,
             addendum=addendum,
             freeze=freezes[corpus_id],
+            failure_receipts=failure_receipts,
         )
         checkpoints = (*checkpoints, recovered)
         _require_checkpoint_prefix(checkpoints, canonical_streams=canonical_streams)
+        _require_failure_history(
+            failure_receipts,
+            checkpoints=checkpoints,
+            canonical_streams=canonical_streams,
+            freezes=freezes,
+            allow_pending_next=False,
+        )
         _sidecar_census(output, checkpoints, allow_one_orphan=False)
+
+    pending_failures = tuple(
+        item for item in failure_receipts if item.execution_position == len(checkpoints)
+    )
+    if pending_failures:
+        position = len(checkpoints)
+        corpus_id = "loco-2dics" if position < 20 else "lectra-m3-m4"
+        backend.discard_incomplete_central_stream_evidence(
+            roots=calibration.roots,
+            corpus_id=corpus_id,
+            stream_id=canonical_streams[position],
+            baseline_freeze=freezes[corpus_id],
+        )
 
     if manifest_state is not None:
         manifest_path, manifest = manifest_state
@@ -842,6 +1109,27 @@ def run_economic_central_stage(
             validity_manifest=validity,
             decision_addendum=addendum,
         )
+        terminal_failure_state = discover_gate3_central_cell_failure_receipts(
+            output,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+        terminal_failures = tuple(item for _path, item in terminal_failure_state)
+        _require_failure_history(
+            terminal_failures,
+            checkpoints=checkpoints,
+            canonical_streams=canonical_streams,
+            freezes=freezes,
+            allow_pending_next=False,
+        )
+        if (
+            terminal_failures != failure_receipts
+            or _failure_receipt_fingerprints(terminal_failure_state) != failure_fingerprints
+        ):
+            raise M11EconomicCentralRunnerError(
+                "central failure receipt evidence changed during terminal validation"
+            )
         if (
             tuple(item for _path, item in terminal_checkpoints) != checkpoints
             or tuple(item for _path, item in terminal_summaries) != summaries
@@ -864,6 +1152,7 @@ def run_economic_central_stage(
             calibration_manifest=calibration,
             validity_manifest=validity,
             checkpoints=checkpoints,
+            failure_receipts=failure_receipts,
             segment_summaries=summaries,
             manifest=manifest,
             manifest_path=manifest_path,
@@ -880,6 +1169,10 @@ def run_economic_central_stage(
             validity=validity,
             addendum=addendum,
             freeze=freezes["loco-2dics"],
+            checkpoints=checkpoints,
+            canonical_streams=canonical_streams,
+            all_freezes=freezes,
+            expected_failure_fingerprints=failure_fingerprints,
         )
         checkpoints = (*checkpoints, checkpoint)
     _fresh_validate_checkpoints(
@@ -912,6 +1205,10 @@ def run_economic_central_stage(
                 validity=validity,
                 addendum=addendum,
                 freeze=freezes["lectra-m3-m4"],
+                checkpoints=checkpoints,
+                canonical_streams=canonical_streams,
+                all_freezes=freezes,
+                expected_failure_fingerprints=failure_fingerprints,
             )
             checkpoints = (*checkpoints, checkpoint)
         _fresh_validate_checkpoints(
@@ -965,6 +1262,27 @@ def run_economic_central_stage(
         validity_manifest=validity,
         decision_addendum=addendum,
     )
+    terminal_failure_state = discover_gate3_central_cell_failure_receipts(
+        output,
+        calibration_manifest=calibration,
+        validity_manifest=validity,
+        decision_addendum=addendum,
+    )
+    terminal_failures = tuple(item for _path, item in terminal_failure_state)
+    _require_failure_history(
+        terminal_failures,
+        checkpoints=checkpoints,
+        canonical_streams=canonical_streams,
+        freezes=freezes,
+        allow_pending_next=False,
+    )
+    if (
+        terminal_failures != failure_receipts
+        or _failure_receipt_fingerprints(terminal_failure_state) != failure_fingerprints
+    ):
+        raise M11EconomicCentralRunnerError(
+            "central failure receipt evidence changed during final validation"
+        )
     if (
         tuple(item for _path, item in terminal_checkpoints) != checkpoints
         or tuple(item for _path, item in terminal_summaries) != summaries
@@ -987,6 +1305,7 @@ def run_economic_central_stage(
         calibration_manifest=calibration,
         validity_manifest=validity,
         checkpoints=checkpoints,
+        failure_receipts=failure_receipts,
         segment_summaries=summaries,
         manifest=manifest,
         manifest_path=manifest_path,

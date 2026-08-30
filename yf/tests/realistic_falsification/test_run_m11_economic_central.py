@@ -16,6 +16,7 @@ from tests.realistic_falsification.test_economic_central import (
     _receipts,
     _upstream,
 )
+from yieldforge.experiments.contracts import semantic_sha256
 
 
 def test_economic_central_runner_module_exists() -> None:
@@ -493,12 +494,186 @@ def test_invalid_validity_aborts_before_backend_or_economic_classification(
         _run(runner, tmp_path)
 
 
-def test_execution_failure_discards_exact_partial_and_never_becomes_economic_red(
+def test_execution_failure_persists_bounded_chained_receipts_before_discard_and_rethrows(
     monkeypatch: pytest.MonkeyPatch,
     runner: ModuleType,
     tmp_path: Path,
 ) -> None:
-    _calibration, _validity, _addendum, _backend, log, state = _install_fakes(
+    calibration, validity, addendum, backend, log, state = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        failure_position=3,
+    )
+    output = tmp_path / "output"
+    failing_stream = "loco-confirmation-03"
+
+    def execute_with_huge_failure(**kwargs: Any) -> _FakeCell:
+        stream_id = kwargs["stream_id"]
+        log.append(("execute", stream_id))
+        if stream_id == failing_stream:
+            raise RuntimeError("X" * 1_000_000)
+        return _FakeCell(backend.receipts[stream_id], backend.freezes[kwargs["corpus_id"]])
+
+    receipt_censuses_at_discard: list[tuple[Path, ...]] = []
+
+    def require_receipt_before_discard(**kwargs: Any) -> None:
+        receipts = tuple(sorted(output.glob("m11-economic-central-cell-failure-*.json")))
+        receipt_censuses_at_discard.append(receipts)
+        assert len(receipts) == (1, 1, 2)[len(receipt_censuses_at_discard) - 1]
+        log.append(("discard", kwargs["stream_id"]))
+
+    monkeypatch.setattr(backend, "execute_central_stream", execute_with_huge_failure)
+    monkeypatch.setattr(
+        backend,
+        "discard_incomplete_central_stream_evidence",
+        require_receipt_before_discard,
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="X{1000}"):
+            _run(runner, tmp_path)
+
+    central = importlib.import_module("yieldforge.realistic_falsification.economic_central")
+    discovered = central.discover_gate3_central_cell_failure_receipts(
+        output,
+        calibration_manifest=calibration,
+        validity_manifest=validity,
+        decision_addendum=addendum,
+    )
+    receipts = tuple(item for _path, item in discovered)
+    checkpoints = tuple(
+        checkpoint
+        for _path, checkpoint in sorted(
+            state["checkpoints"].items(),
+            key=lambda item: item[1].execution_position,
+        )
+    )
+    freeze = next(item for item in calibration.baseline_freezes if item.corpus_id == "loco-2dics")
+
+    assert tuple(item.attempt_number for item in receipts) == (1, 2)
+    assert tuple(item.execution_position for item in receipts) == (3, 3)
+    assert tuple(item.stream_id for item in receipts) == (failing_stream, failing_stream)
+    assert receipts[0].previous_failure_receipt_id is None
+    assert receipts[0].previous_failure_receipt_content_sha256 is None
+    assert receipts[1].previous_failure_receipt_id == receipts[0].failure_receipt_id
+    assert receipts[1].previous_failure_receipt_content_sha256 == receipts[0].content_sha256
+    assert all(item.roots == calibration.roots for item in receipts)
+    assert all(item.calibration_manifest_id == calibration.manifest_id for item in receipts)
+    assert all(item.validity_manifest_id == validity.manifest_id for item in receipts)
+    assert all(item.decision_addendum_id == addendum.addendum_id for item in receipts)
+    assert all(item.baseline_freeze_id == freeze.freeze_id for item in receipts)
+    checkpoint_prefix_sha = "sha256:" + semantic_sha256(
+        tuple((item.checkpoint_id, item.content_sha256) for item in checkpoints)
+    )
+    assert all(item.completed_checkpoint_count == len(checkpoints) for item in receipts)
+    assert all(
+        item.completed_checkpoint_prefix_content_sha256 == checkpoint_prefix_sha
+        for item in receipts
+    )
+    assert all(item.status == "infrastructure_failure" for item in receipts)
+    assert all(item.economic_value_resolved is False for item in receipts)
+    assert all(len(item.failure_detail) == 1000 for item in receipts)
+    assert all(path.stat().st_size < 16 * 1024 for path, _item in discovered)
+    assert tuple(len(paths) for paths in receipt_censuses_at_discard) == (1, 1, 2)
+    assert tuple(value for name, value in log if name == "discard") == (
+        failing_stream,
+        failing_stream,
+        failing_stream,
+    )
+    assert state["manifest"] is None
+    assert not tuple(output.glob("m11-economic-central-manifest-*.json"))
+
+    tampered = bytearray(discovered[0][0].read_bytes())
+    detail_offset = tampered.index(b"X")
+    tampered[detail_offset] = ord("Y")
+    discovered[0][0].write_bytes(tampered)
+    with pytest.raises(central.Gate3EconomicCentralEvidenceError):
+        central.discover_gate3_central_cell_failure_receipts(
+            output,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_phase,error_match",
+    (
+        ("returned_cell_validation", "exact stream bindings"),
+        ("sidecar_publication", "synthetic sidecar publication failure"),
+        ("checkpoint_publication", "synthetic checkpoint publication failure"),
+    ),
+)
+def test_precheckpoint_failure_records_before_exact_completed_cache_release(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: ModuleType,
+    tmp_path: Path,
+    failure_phase: str,
+    error_match: str,
+) -> None:
+    _calibration, _validity, _addendum, backend, _log, state = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+    )
+    failing_stream = "loco-confirmation-03"
+    output = tmp_path / "output"
+    original_execute = backend.execute_central_stream
+    original_sidecar_publish = runner.publish_gate3_central_cell_evidence
+    original_checkpoint_publish = runner.publish_gate3_central_cell_checkpoint
+    original_release = backend.release_central_stream_evidence
+    failed_stream_released = False
+
+    if failure_phase == "returned_cell_validation":
+
+        def invalid_cell(**kwargs: Any) -> _FakeCell:
+            cell = original_execute(**kwargs)
+            if kwargs["stream_id"] == failing_stream:
+                cell.stream_id = "wrong-stream"
+            return cell
+
+        monkeypatch.setattr(backend, "execute_central_stream", invalid_cell)
+    elif failure_phase == "sidecar_publication":
+
+        def fail_sidecar(output_directory: Path, cell: _FakeCell, **kwargs: Any):
+            if cell.stream_id == failing_stream:
+                raise RuntimeError("synthetic sidecar publication failure")
+            return original_sidecar_publish(output_directory, cell, **kwargs)
+
+        monkeypatch.setattr(runner, "publish_gate3_central_cell_evidence", fail_sidecar)
+    else:
+
+        def fail_checkpoint(output_directory: Path, checkpoint: Any, **kwargs: Any):
+            if checkpoint.stream_id == failing_stream:
+                raise RuntimeError("synthetic checkpoint publication failure")
+            return original_checkpoint_publish(output_directory, checkpoint, **kwargs)
+
+        monkeypatch.setattr(runner, "publish_gate3_central_cell_checkpoint", fail_checkpoint)
+
+    def require_receipt_before_release(**kwargs: Any) -> None:
+        nonlocal failed_stream_released
+        if kwargs["stream_id"] == failing_stream:
+            assert len(tuple(output.glob("m11-economic-central-cell-failure-*.json"))) == 1
+            failed_stream_released = True
+        original_release(**kwargs)
+
+    monkeypatch.setattr(backend, "release_central_stream_evidence", require_receipt_before_release)
+
+    with pytest.raises(Exception, match=error_match):
+        _run(runner, tmp_path)
+
+    assert failed_stream_released is True
+    assert state["manifest"] is None
+    assert len(tuple(output.glob("m11-economic-central-cell-failure-*.json"))) == 1
+
+
+def test_successful_retry_checkpoint_anchors_history_and_detects_later_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: ModuleType,
+    tmp_path: Path,
+) -> None:
+    _calibration, _validity, _addendum, backend, _log, state = _install_fakes(
         monkeypatch,
         runner,
         tmp_path,
@@ -508,8 +683,85 @@ def test_execution_failure_discards_exact_partial_and_never_becomes_economic_red
     with pytest.raises(RuntimeError, match="synthetic central execution failure"):
         _run(runner, tmp_path)
 
-    assert ("discard", "loco-confirmation-03") in log
-    assert state["manifest"] is None
+    failure_path = next((tmp_path / "output").glob("m11-economic-central-cell-failure-*.json"))
+    backend.failure_stream = None
+    outcome = _run(runner, tmp_path)
+    retry_checkpoint = outcome.checkpoints[3]
+
+    assert retry_checkpoint.prior_failure_attempt_count == 1
+    assert retry_checkpoint.prior_failure_receipt_id is not None
+    assert retry_checkpoint.prior_failure_receipt_content_sha256 is not None
+    assert state["manifest"] is not None
+
+    failure_path.unlink()
+    with pytest.raises(runner.M11EconomicCentralRunnerError, match="anchor"):
+        _run(runner, tmp_path)
+
+
+def test_terminal_resume_rejects_same_name_failure_receipt_replacement_between_phases(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: ModuleType,
+    tmp_path: Path,
+) -> None:
+    _calibration, _validity, _addendum, backend, _log, _state = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        failure_position=3,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic central execution failure"):
+        _run(runner, tmp_path)
+    backend.failure_stream = None
+    _run(runner, tmp_path)
+
+    failure_path = next((tmp_path / "output").glob("m11-economic-central-cell-failure-*.json"))
+    replacement = tmp_path / "same-bytes-replacement.json"
+    replacement.write_bytes(failure_path.read_bytes())
+    original_load = runner._load_cell_sidecar
+    replaced = False
+
+    def replace_during_later_sidecar_load(*args: Any, **kwargs: Any):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            os.replace(replacement, failure_path)
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_load_cell_sidecar", replace_during_later_sidecar_load)
+
+    with pytest.raises(runner.M11EconomicCentralRunnerError, match="failure.*changed"):
+        _run(runner, tmp_path)
+
+
+def test_orphan_success_recovery_preserves_prior_failure_history_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: ModuleType,
+    tmp_path: Path,
+) -> None:
+    _calibration, _validity, _addendum, backend, _log, state = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        failure_position=3,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic central execution failure"):
+        _run(runner, tmp_path)
+
+    receipt = backend.receipts["loco-confirmation-03"]
+    orphan_path = tmp_path / "output" / receipt.sidecar_name
+    orphan_path.write_bytes(receipt.content_sha256.encode())
+    state["sidecars"][receipt.sidecar_name] = orphan_path
+    backend.failure_stream = None
+
+    outcome = _run(runner, tmp_path)
+    recovered = outcome.checkpoints[3]
+
+    assert recovered.stream_id == "loco-confirmation-03"
+    assert recovered.prior_failure_attempt_count == 1
+    assert recovered.prior_failure_receipt_id is not None
+    assert recovered.prior_failure_receipt_content_sha256 is not None
 
 
 def test_main_prints_only_terminal_status_and_next_action(

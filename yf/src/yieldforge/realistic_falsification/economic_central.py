@@ -53,7 +53,9 @@ _CORPUS_ORDER: tuple[Gate3CorpusId, Gate3CorpusId] = (
 _METRIC_PATTERN = r"^-?(?:0|[1-9][0-9]{0,6})\.[0-9]{12}$"
 _METRIC_QUANTUM = Decimal("0.000000000001")
 _MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+_MAX_FAILURE_ARTIFACT_BYTES = 16 * 1024
 _MAX_DISCOVERY_ENTRIES = 4096
+_FAILURE_PREFIX = "m11-economic-central-cell-failure-"
 _CHECKPOINT_PREFIX = "m11-economic-central-cell-checkpoint-"
 _SUMMARY_PREFIX = "m11-economic-central-segment-"
 _MANIFEST_PREFIX = "m11-economic-central-manifest-"
@@ -552,11 +554,233 @@ def build_gate3_economic_segment_summary(
         raise Gate3EconomicCentralEvidenceError(str(error)) from error
 
 
+class Gate3CentralCellFailureReceipt(FrozenExperimentModel):
+    """Bounded authenticated record of one failed central-cell attempt."""
+
+    schema_version: Literal["yieldforge.m11-economic-central-cell-failure.v1"] = (
+        "yieldforge.m11-economic-central-cell-failure.v1"
+    )
+    failure_receipt_id: StrictStr = Field(pattern=r"^yfm11econcellfail-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    base_protocol_id: StrictStr = Field(pattern=r"^yfm11econp-[0-9a-f]{24}$")
+    base_protocol_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    decision_addendum_id: StrictStr = Field(pattern=r"^yfm11econdec-[0-9a-f]{24}$")
+    decision_addendum_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    roots: Gate3RootBinding
+    calibration_manifest_id: StrictStr = Field(pattern=r"^yfm11econcalman-[0-9a-f]{24}$")
+    calibration_manifest_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    validity_manifest_id: StrictStr = Field(pattern=r"^yfm11econvalman-[0-9a-f]{24}$")
+    validity_manifest_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    validity_evidence_id: StrictStr = Field(pattern=r"^yfm11g3valrcpt-[0-9a-f]{24}$")
+    validity_evidence_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    execution_position: StrictInt = Field(ge=0, le=39)
+    attempt_number: StrictInt = Field(ge=1, le=999)
+    corpus_id: Gate3CorpusId
+    stream_id: StrictStr = Field(min_length=1, max_length=128)
+    baseline_freeze_id: StrictStr = Field(pattern=r"^yfm11g3bf-[0-9a-f]{24}$")
+    baseline_freeze_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    completed_checkpoint_count: StrictInt = Field(ge=0, le=39)
+    completed_checkpoint_prefix_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    previous_failure_receipt_id: StrictStr | None = Field(
+        default=None, pattern=r"^yfm11econcellfail-[0-9a-f]{24}$"
+    )
+    previous_failure_receipt_content_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    exception_type: StrictStr = Field(min_length=1, max_length=240)
+    failure_detail: StrictStr = Field(min_length=1, max_length=1000)
+    status: Literal["infrastructure_failure"] = "infrastructure_failure"
+    economic_value_resolved: Literal[False] = False
+    productization_authorized: Literal[False] = False
+    bounded_pilot_authorized: Literal[False] = False
+    complete: Literal[True] = True
+
+    @model_validator(mode="after")
+    def require_exact_failure_bindings_and_identity(self) -> Self:
+        protocol = build_economic_resolution_protocol()
+        addendum = build_economic_decision_addendum(base_protocol=protocol)
+        expected_range = range(0, 20) if self.corpus_id == "loco-2dics" else range(20, 40)
+        prior = (
+            self.previous_failure_receipt_id,
+            self.previous_failure_receipt_content_sha256,
+        )
+        if (
+            (self.base_protocol_id, self.base_protocol_content_sha256)
+            != (protocol.protocol_id, protocol.content_sha256)
+            or (self.decision_addendum_id, self.decision_addendum_content_sha256)
+            != (addendum.addendum_id, addendum.content_sha256)
+            or self.roots.content_sha256 != protocol.legacy_root_content_sha256
+            or self.execution_position not in expected_range
+            or self.completed_checkpoint_count != self.execution_position
+            or (self.attempt_number == 1 and prior != (None, None))
+            or (self.attempt_number > 1 and None in prior)
+        ):
+            raise ValueError("central failure receipt bindings do not reconcile")
+        digest = semantic_sha256(self, excluded_fields={"failure_receipt_id", "content_sha256"})
+        if self.failure_receipt_id != f"yfm11econcellfail-{digest[:24]}" or (
+            self.content_sha256 != f"sha256:{digest}"
+        ):
+            raise ValueError("central failure receipt identity does not reconcile")
+        return self
+
+
+def build_gate3_central_cell_failure_receipt(
+    *,
+    execution_position: int,
+    corpus_id: Gate3CorpusId,
+    stream_id: str,
+    completed_checkpoints: tuple[Gate3CentralCellCheckpoint, ...],
+    previous_failure_receipt: Gate3CentralCellFailureReceipt | None,
+    exception_type: str,
+    failure_detail: str,
+    calibration_manifest: Gate3CalibrationManifest,
+    validity_manifest: Gate3ValidityStageManifest,
+    decision_addendum: EconomicDecisionAddendum,
+) -> Gate3CentralCellFailureReceipt:
+    """Bind one bounded failed attempt to its exact upstream and retry prefix."""
+
+    calibration, validity, addendum = _strict_upstream(
+        calibration_manifest=calibration_manifest,
+        validity_manifest=validity_manifest,
+        decision_addendum=decision_addendum,
+    )
+    if type(completed_checkpoints) is not tuple:
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt checkpoint prefix must be a tuple"
+        )
+    try:
+        checkpoints = tuple(
+            Gate3CentralCellCheckpoint.model_validate(
+                item.model_dump(mode="python", round_trip=True), strict=True
+            )
+            for item in completed_checkpoints
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt checkpoint prefix is malformed"
+        ) from error
+    if (
+        type(execution_position) is not int
+        or execution_position not in range(40)
+        or len(checkpoints) != execution_position
+        or tuple(item.execution_position for item in checkpoints)
+        != tuple(range(execution_position))
+        or any(
+            item.roots != calibration.roots
+            or item.calibration_manifest_id != calibration.manifest_id
+            or item.calibration_manifest_content_sha256 != calibration.content_sha256
+            or item.validity_manifest_id != validity.manifest_id
+            or item.validity_manifest_content_sha256 != validity.content_sha256
+            or item.decision_addendum_id != addendum.addendum_id
+            or item.decision_addendum_content_sha256 != addendum.content_sha256
+            for item in checkpoints
+        )
+    ):
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt checkpoint prefix differs from stage state"
+        )
+    expected_corpus: Gate3CorpusId = "loco-2dics" if execution_position < 20 else "lectra-m3-m4"
+    if corpus_id != expected_corpus or type(stream_id) is not str or not stream_id:
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt stream differs from canonical position"
+        )
+    freeze = _freeze_for(calibration, corpus_id)
+    checkpoint_prefix_sha = "sha256:" + semantic_sha256(
+        tuple((item.checkpoint_id, item.content_sha256) for item in checkpoints)
+    )
+    previous: Gate3CentralCellFailureReceipt | None
+    if previous_failure_receipt is None:
+        previous = None
+        attempt_number = 1
+    else:
+        try:
+            previous = Gate3CentralCellFailureReceipt.model_validate(
+                previous_failure_receipt.model_dump(mode="python", round_trip=True),
+                strict=True,
+            )
+        except (AttributeError, TypeError, ValidationError, ValueError) as error:
+            raise Gate3EconomicCentralEvidenceError(
+                "central prior failure receipt is malformed"
+            ) from error
+        _require_artifact_upstream(
+            previous,
+            calibration=calibration,
+            validity=validity,
+            addendum=addendum,
+        )
+        if (
+            previous.execution_position != execution_position
+            or previous.corpus_id != corpus_id
+            or previous.stream_id != stream_id
+            or previous.roots != calibration.roots
+            or previous.calibration_manifest_id != calibration.manifest_id
+            or previous.validity_manifest_id != validity.manifest_id
+            or previous.decision_addendum_id != addendum.addendum_id
+            or previous.completed_checkpoint_count != len(checkpoints)
+            or previous.completed_checkpoint_prefix_content_sha256 != checkpoint_prefix_sha
+            or previous.attempt_number >= 999
+        ):
+            raise Gate3EconomicCentralEvidenceError(
+                "central prior failure receipt differs from the exact retry prefix"
+            )
+        attempt_number = previous.attempt_number + 1
+    if type(exception_type) is not str or type(failure_detail) is not str:
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt requires textual bounded failure fields"
+        )
+    bounded_type = exception_type.strip()[:240] or "builtins.Exception"
+    bounded_detail = failure_detail.strip()[:1000] or "exception carried no detail"
+    semantic = {
+        "schema_version": "yieldforge.m11-economic-central-cell-failure.v1",
+        "base_protocol_id": calibration.protocol.protocol_id,
+        "base_protocol_content_sha256": calibration.protocol.content_sha256,
+        "decision_addendum_id": addendum.addendum_id,
+        "decision_addendum_content_sha256": addendum.content_sha256,
+        "roots": calibration.roots,
+        "calibration_manifest_id": calibration.manifest_id,
+        "calibration_manifest_content_sha256": calibration.content_sha256,
+        "validity_manifest_id": validity.manifest_id,
+        "validity_manifest_content_sha256": validity.content_sha256,
+        "validity_evidence_id": validity.validity_evidence.evidence_id,
+        "validity_evidence_content_sha256": validity.validity_evidence.content_sha256,
+        "execution_position": execution_position,
+        "attempt_number": attempt_number,
+        "corpus_id": corpus_id,
+        "stream_id": stream_id,
+        "baseline_freeze_id": freeze.freeze_id,
+        "baseline_freeze_content_sha256": freeze.content_sha256,
+        "completed_checkpoint_count": len(checkpoints),
+        "completed_checkpoint_prefix_content_sha256": checkpoint_prefix_sha,
+        "previous_failure_receipt_id": (
+            previous.failure_receipt_id if previous is not None else None
+        ),
+        "previous_failure_receipt_content_sha256": (
+            previous.content_sha256 if previous is not None else None
+        ),
+        "exception_type": bounded_type,
+        "failure_detail": bounded_detail,
+        "status": "infrastructure_failure",
+        "economic_value_resolved": False,
+        "productization_authorized": False,
+        "bounded_pilot_authorized": False,
+        "complete": True,
+    }
+    digest = semantic_sha256({key: _json_value(value) for key, value in semantic.items()})
+    try:
+        return Gate3CentralCellFailureReceipt(
+            failure_receipt_id=f"yfm11econcellfail-{digest[:24]}",
+            content_sha256=f"sha256:{digest}",
+            **semantic,
+        )
+    except (TypeError, ValidationError, ValueError) as error:
+        raise Gate3EconomicCentralEvidenceError(str(error)) from error
+
+
 class Gate3CentralCellCheckpoint(FrozenExperimentModel):
     """Immediate durable binding from one compact sidecar receipt to the stage."""
 
-    schema_version: Literal["yieldforge.m11-economic-central-cell-checkpoint.v1"] = (
-        "yieldforge.m11-economic-central-cell-checkpoint.v1"
+    schema_version: Literal["yieldforge.m11-economic-central-cell-checkpoint.v2"] = (
+        "yieldforge.m11-economic-central-cell-checkpoint.v2"
     )
     checkpoint_id: StrictStr = Field(pattern=r"^yfm11econcellcp-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -579,6 +803,13 @@ class Gate3CentralCellCheckpoint(FrozenExperimentModel):
     receipt_id: StrictStr = Field(pattern=r"^yfm11g3cellrcpt-[0-9a-f]{24}$")
     receipt_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     receipt: Gate3CentralCellReceipt
+    prior_failure_attempt_count: StrictInt = Field(ge=0, le=999)
+    prior_failure_receipt_id: StrictStr | None = Field(
+        default=None, pattern=r"^yfm11econcellfail-[0-9a-f]{24}$"
+    )
+    prior_failure_receipt_content_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
     complete: Literal[True] = True
 
     @model_validator(mode="after")
@@ -600,6 +831,22 @@ class Gate3CentralCellCheckpoint(FrozenExperimentModel):
             or self.receipt.baseline_freeze_content_sha256 != self.baseline_freeze_content_sha256
             or self.receipt_id != self.receipt.receipt_id
             or self.receipt_content_sha256 != self.receipt.content_sha256
+            or (
+                self.prior_failure_attempt_count == 0
+                and (
+                    self.prior_failure_receipt_id,
+                    self.prior_failure_receipt_content_sha256,
+                )
+                != (None, None)
+            )
+            or (
+                self.prior_failure_attempt_count > 0
+                and None
+                in (
+                    self.prior_failure_receipt_id,
+                    self.prior_failure_receipt_content_sha256,
+                )
+            )
         ):
             raise ValueError("central cell checkpoint bindings do not reconcile")
         digest = semantic_sha256(self, excluded_fields={"checkpoint_id", "content_sha256"})
@@ -617,6 +864,7 @@ def build_gate3_central_cell_checkpoint(
     calibration_manifest: Gate3CalibrationManifest,
     validity_manifest: Gate3ValidityStageManifest,
     decision_addendum: EconomicDecisionAddendum,
+    prior_failure_receipts: tuple[Gate3CentralCellFailureReceipt, ...] = (),
 ) -> Gate3CentralCellCheckpoint:
     """Bind one persisted cell receipt to the exact authorizing parents."""
 
@@ -645,8 +893,61 @@ def build_gate3_central_cell_checkpoint(
         raise Gate3EconomicCentralEvidenceError(
             "central checkpoint receipt differs from authorizing parents"
         )
+    if type(prior_failure_receipts) is not tuple:
+        raise Gate3EconomicCentralEvidenceError(
+            "central checkpoint prior-failure chain must be a tuple"
+        )
+    try:
+        failures = tuple(
+            Gate3CentralCellFailureReceipt.model_validate(
+                item.model_dump(mode="python", round_trip=True), strict=True
+            )
+            for item in prior_failure_receipts
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3EconomicCentralEvidenceError(
+            "central checkpoint prior-failure chain is malformed"
+        ) from error
+    for failure in failures:
+        _require_artifact_upstream(
+            failure,
+            calibration=calibration,
+            validity=validity,
+            addendum=addendum,
+        )
+    if (
+        len(failures) > 999
+        or tuple(item.attempt_number for item in failures) != tuple(range(1, len(failures) + 1))
+        or any(
+            item.execution_position != execution_position
+            or item.corpus_id != strict_receipt.corpus_id
+            or item.stream_id != strict_receipt.stream_id
+            or item.roots != calibration.roots
+            or item.calibration_manifest_id != calibration.manifest_id
+            or item.validity_manifest_id != validity.manifest_id
+            or item.decision_addendum_id != addendum.addendum_id
+            or item.baseline_freeze_id != freeze.freeze_id
+            or item.baseline_freeze_content_sha256 != freeze.content_sha256
+            or (
+                index > 0
+                and (
+                    item.previous_failure_receipt_id,
+                    item.previous_failure_receipt_content_sha256,
+                )
+                != (
+                    failures[index - 1].failure_receipt_id,
+                    failures[index - 1].content_sha256,
+                )
+            )
+            for index, item in enumerate(failures)
+        )
+    ):
+        raise Gate3EconomicCentralEvidenceError(
+            "central checkpoint prior-failure chain differs from the exact cell"
+        )
+    failure_head = failures[-1] if failures else None
     semantic = {
-        "schema_version": "yieldforge.m11-economic-central-cell-checkpoint.v1",
+        "schema_version": "yieldforge.m11-economic-central-cell-checkpoint.v2",
         "base_protocol_id": calibration.protocol.protocol_id,
         "base_protocol_content_sha256": calibration.protocol.content_sha256,
         "decision_addendum_id": addendum.addendum_id,
@@ -666,6 +967,13 @@ def build_gate3_central_cell_checkpoint(
         "receipt_id": strict_receipt.receipt_id,
         "receipt_content_sha256": strict_receipt.content_sha256,
         "receipt": strict_receipt,
+        "prior_failure_attempt_count": len(failures),
+        "prior_failure_receipt_id": (
+            failure_head.failure_receipt_id if failure_head is not None else None
+        ),
+        "prior_failure_receipt_content_sha256": (
+            failure_head.content_sha256 if failure_head is not None else None
+        ),
         "complete": True,
     }
     digest = semantic_sha256({key: _json_value(value) for key, value in semantic.items()})
@@ -1132,6 +1440,190 @@ def _require_artifact_upstream(
         raise Gate3EconomicCentralEvidenceError(
             "central artifact differs from exact upstream bindings"
         )
+    if isinstance(value, Gate3CentralCellFailureReceipt):
+        freeze = _freeze_for(calibration, value.corpus_id)
+        if (
+            value.baseline_freeze_id != freeze.freeze_id
+            or value.baseline_freeze_content_sha256 != freeze.content_sha256
+        ):
+            raise Gate3EconomicCentralEvidenceError(
+                "central failure receipt differs from the exact baseline freeze"
+            )
+
+
+def _failure_filename(receipt: Gate3CentralCellFailureReceipt) -> str:
+    return f"{_FAILURE_PREFIX}{receipt.execution_position:02d}-{receipt.attempt_number:03d}.json"
+
+
+def publish_gate3_central_cell_failure_receipt(
+    output_directory: Path,
+    receipt: Gate3CentralCellFailureReceipt,
+    *,
+    calibration_manifest: Gate3CalibrationManifest,
+    validity_manifest: Gate3ValidityStageManifest,
+    decision_addendum: EconomicDecisionAddendum,
+) -> Path:
+    """Immutably append one authenticated failed-attempt receipt."""
+
+    calibration, validity, addendum = _strict_upstream(
+        calibration_manifest=calibration_manifest,
+        validity_manifest=validity_manifest,
+        decision_addendum=decision_addendum,
+    )
+    try:
+        strict = Gate3CentralCellFailureReceipt.model_validate(
+            receipt.model_dump(mode="python", round_trip=True), strict=True
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3EconomicCentralEvidenceError("central failure receipt is malformed") from error
+    _require_artifact_upstream(
+        strict, calibration=calibration, validity=validity, addendum=addendum
+    )
+    existing = discover_gate3_central_cell_failure_receipts(
+        output_directory,
+        calibration_manifest=calibration,
+        validity_manifest=validity,
+        decision_addendum=addendum,
+    )
+    same_attempt = tuple(
+        item
+        for item in existing
+        if (item[1].execution_position, item[1].attempt_number)
+        == (strict.execution_position, strict.attempt_number)
+    )
+    if same_attempt:
+        if len(same_attempt) != 1 or same_attempt[0][1] != strict:
+            raise Gate3EconomicCentralEvidenceError(
+                "central failure receipt publication found a competitor"
+            )
+        return same_attempt[0][0]
+    chain = tuple(
+        item for _path, item in existing if item.execution_position == strict.execution_position
+    )
+    tail = chain[-1] if chain else None
+    if strict.attempt_number != len(chain) + 1 or (
+        strict.previous_failure_receipt_id,
+        strict.previous_failure_receipt_content_sha256,
+    ) != (
+        tail.failure_receipt_id if tail is not None else None,
+        tail.content_sha256 if tail is not None else None,
+    ):
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt is not the exact append-only tail"
+        )
+    if len(canonical_pretty_json_bytes(strict)) > _MAX_FAILURE_ARTIFACT_BYTES:
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt exceeds its dedicated byte bound"
+        )
+    return _publish(
+        Path(output_directory) / _failure_filename(strict),
+        strict,
+        label="M11 economic central-cell failure receipt",
+    )
+
+
+def discover_gate3_central_cell_failure_receipts(
+    output_directory: Path,
+    *,
+    calibration_manifest: Gate3CalibrationManifest,
+    validity_manifest: Gate3ValidityStageManifest,
+    decision_addendum: EconomicDecisionAddendum,
+) -> tuple[tuple[Path, Gate3CentralCellFailureReceipt], ...]:
+    """Discover and verify every append-only failed-attempt chain."""
+
+    calibration, validity, addendum = _strict_upstream(
+        calibration_manifest=calibration_manifest,
+        validity_manifest=validity_manifest,
+        decision_addendum=decision_addendum,
+    )
+    paths = _discover_paths(
+        output_directory,
+        prefix=_FAILURE_PREFIX,
+        pattern=re.compile(rf"{re.escape(_FAILURE_PREFIX)}[0-3][0-9]-[0-9]{{3}}\.json"),
+    )
+
+    def fingerprints(candidates: tuple[Path, ...]) -> dict[str, tuple[int, int, int, int, int]]:
+        result: dict[str, tuple[int, int, int, int, int]] = {}
+        for candidate in candidates:
+            try:
+                metadata = candidate.lstat()
+            except OSError as error:
+                raise Gate3EconomicCentralEvidenceError(
+                    "central failure receipt changed during discovery"
+                ) from error
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > _MAX_FAILURE_ARTIFACT_BYTES
+            ):
+                raise Gate3EconomicCentralEvidenceError(
+                    "central failure receipt changed during discovery"
+                )
+            result[candidate.name] = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+        return result
+
+    before_fingerprints = fingerprints(paths)
+    found: list[tuple[Path, Gate3CentralCellFailureReceipt]] = []
+    for path in paths:
+        value = cast(
+            Gate3CentralCellFailureReceipt,
+            _parse_artifact(path, Gate3CentralCellFailureReceipt),
+        )
+        _require_artifact_upstream(
+            value, calibration=calibration, validity=validity, addendum=addendum
+        )
+        if path.name != _failure_filename(value):
+            raise Gate3EconomicCentralEvidenceError(
+                "central failure receipt filename binding differs"
+            )
+        found.append((path, value))
+    found.sort(key=lambda item: (item[1].execution_position, item[1].attempt_number))
+    keys = tuple((item.execution_position, item.attempt_number) for _, item in found)
+    if len(set(keys)) != len(keys):
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt discovery found competitors"
+        )
+    for position in sorted({item.execution_position for _, item in found}):
+        chain = tuple(item for _, item in found if item.execution_position == position)
+        if tuple(item.attempt_number for item in chain) != tuple(range(1, len(chain) + 1)):
+            raise Gate3EconomicCentralEvidenceError(
+                "central failure receipt chain is not contiguous"
+            )
+        for index, item in enumerate(chain):
+            prior = chain[index - 1] if index else None
+            if (
+                (item.previous_failure_receipt_id, item.previous_failure_receipt_content_sha256)
+                != (
+                    prior.failure_receipt_id if prior is not None else None,
+                    prior.content_sha256 if prior is not None else None,
+                )
+                or item.corpus_id != chain[0].corpus_id
+                or item.stream_id != chain[0].stream_id
+                or item.baseline_freeze_id != chain[0].baseline_freeze_id
+                or item.baseline_freeze_content_sha256 != chain[0].baseline_freeze_content_sha256
+                or item.completed_checkpoint_count != chain[0].completed_checkpoint_count
+                or item.completed_checkpoint_prefix_content_sha256
+                != chain[0].completed_checkpoint_prefix_content_sha256
+            ):
+                raise Gate3EconomicCentralEvidenceError(
+                    "central failure receipt retry chain does not reconcile"
+                )
+    after_paths = _discover_paths(
+        output_directory,
+        prefix=_FAILURE_PREFIX,
+        pattern=re.compile(rf"{re.escape(_FAILURE_PREFIX)}[0-3][0-9]-[0-9]{{3}}\.json"),
+    )
+    if after_paths != paths or fingerprints(after_paths) != before_fingerprints:
+        raise Gate3EconomicCentralEvidenceError(
+            "central failure receipt set changed during discovery"
+        )
+    return tuple(found)
 
 
 def publish_gate3_central_cell_checkpoint(
@@ -1390,17 +1882,21 @@ __all__ = [
     "CentralManifestStatus",
     "CentralSegmentNextAction",
     "Gate3CentralCellCheckpoint",
+    "Gate3CentralCellFailureReceipt",
     "Gate3EconomicCentralEvidenceError",
     "Gate3EconomicCentralManifest",
     "Gate3EconomicSegmentSummary",
     "build_gate3_central_cell_checkpoint",
+    "build_gate3_central_cell_failure_receipt",
     "build_gate3_economic_central_manifest",
     "build_gate3_economic_segment_summary",
     "discover_gate3_central_cell_checkpoints",
+    "discover_gate3_central_cell_failure_receipts",
     "discover_gate3_economic_central_manifest",
     "discover_gate3_economic_segment_summaries",
     "load_gate3_central_cell_checkpoint",
     "publish_gate3_central_cell_checkpoint",
+    "publish_gate3_central_cell_failure_receipt",
     "publish_gate3_economic_central_manifest",
     "publish_gate3_economic_segment_summary",
 ]

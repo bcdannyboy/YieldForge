@@ -445,6 +445,128 @@ def _checkpoints_for(
     )
 
 
+def _failure_chain_for_position_three():  # type: ignore[no-untyped-def]
+    central = _central()
+    calibration, validity, addendum = _upstream()
+    checkpoints = _checkpoints_for(_receipts()[:3], start=0)
+    first = central.build_gate3_central_cell_failure_receipt(
+        execution_position=3,
+        corpus_id="loco-2dics",
+        stream_id="loco-confirmation-03",
+        completed_checkpoints=checkpoints,
+        previous_failure_receipt=None,
+        exception_type="builtins.RuntimeError",
+        failure_detail="first synthetic failure",
+        calibration_manifest=calibration,
+        validity_manifest=validity,
+        decision_addendum=addendum,
+    )
+    second = central.build_gate3_central_cell_failure_receipt(
+        execution_position=3,
+        corpus_id="loco-2dics",
+        stream_id="loco-confirmation-03",
+        completed_checkpoints=checkpoints,
+        previous_failure_receipt=first,
+        exception_type="builtins.RuntimeError",
+        failure_detail="second synthetic failure",
+        calibration_manifest=calibration,
+        validity_manifest=validity,
+        decision_addendum=addendum,
+    )
+    return calibration, validity, addendum, first, second
+
+
+def test_failure_receipt_publication_rejects_wrong_baseline_freeze(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    central = _central()
+    calibration, validity, addendum, first, _second = _failure_chain_for_position_three()
+    payload = first.model_dump(mode="python", round_trip=True)
+    payload["baseline_freeze_id"] = "yfm11g3bf-" + "f" * 24
+    payload["baseline_freeze_content_sha256"] = "sha256:" + "f" * 64
+    semantic = dict(payload)
+    semantic.pop("failure_receipt_id")
+    semantic.pop("content_sha256")
+    digest = semantic_sha256(_jsonish(semantic))
+    payload["failure_receipt_id"] = f"yfm11econcellfail-{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
+    forged = central.Gate3CentralCellFailureReceipt.model_validate(payload, strict=True)
+
+    with pytest.raises(central.Gate3EconomicCentralEvidenceError, match="freeze"):
+        central.publish_gate3_central_cell_failure_receipt(
+            tmp_path,
+            forged,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+
+
+def test_failure_receipt_builder_rejects_prior_receipt_with_wrong_freeze() -> None:
+    central = _central()
+    calibration, validity, addendum, first, _second = _failure_chain_for_position_three()
+    payload = first.model_dump(mode="python", round_trip=True)
+    payload["baseline_freeze_id"] = "yfm11g3bf-" + "f" * 24
+    payload["baseline_freeze_content_sha256"] = "sha256:" + "f" * 64
+    semantic = dict(payload)
+    semantic.pop("failure_receipt_id")
+    semantic.pop("content_sha256")
+    digest = semantic_sha256(_jsonish(semantic))
+    payload["failure_receipt_id"] = f"yfm11econcellfail-{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
+    forged = central.Gate3CentralCellFailureReceipt.model_validate(payload, strict=True)
+
+    with pytest.raises(central.Gate3EconomicCentralEvidenceError, match="freeze"):
+        central.build_gate3_central_cell_failure_receipt(
+            execution_position=3,
+            corpus_id="loco-2dics",
+            stream_id="loco-confirmation-03",
+            completed_checkpoints=_checkpoints_for(_receipts()[:3], start=0),
+            previous_failure_receipt=forged,
+            exception_type="builtins.RuntimeError",
+            failure_detail="next synthetic failure",
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+
+
+def test_checkpoint_builder_rejects_prior_failure_with_forged_full_parent_hash() -> None:
+    central = _central()
+    calibration, validity, addendum, first, _second = _failure_chain_for_position_three()
+    payload = first.model_dump(mode="python", round_trip=True)
+    payload["calibration_manifest_content_sha256"] = "sha256:" + "f" * 64
+    semantic = dict(payload)
+    semantic.pop("failure_receipt_id")
+    semantic.pop("content_sha256")
+    digest = semantic_sha256(_jsonish(semantic))
+    payload["failure_receipt_id"] = f"yfm11econcellfail-{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
+    forged = central.Gate3CentralCellFailureReceipt.model_validate(payload, strict=True)
+
+    with pytest.raises(central.Gate3EconomicCentralEvidenceError, match="upstream"):
+        central.build_gate3_central_cell_checkpoint(
+            _receipts()[3],
+            execution_position=3,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+            prior_failure_receipts=(forged,),
+        )
+
+
+def test_failure_receipt_publication_rejects_unpublished_off_tail_attempt(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    central = _central()
+    calibration, validity, addendum, _first, second = _failure_chain_for_position_three()
+
+    with pytest.raises(central.Gate3EconomicCentralEvidenceError, match="tail"):
+        central.publish_gate3_central_cell_failure_receipt(
+            tmp_path,
+            second,
+            calibration_manifest=calibration,
+            validity_manifest=validity,
+            decision_addendum=addendum,
+        )
+
+
 def test_terminal_manifest_stops_on_loco_candidate_without_lectra() -> None:
     central = _central()
     calibration, validity, addendum = _upstream()
