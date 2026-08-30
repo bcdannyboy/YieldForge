@@ -27,10 +27,16 @@ from yieldforge.realistic_falsification.economic_resolution import (
     verify_economic_resolution_runtime_lineage,
 )
 from yieldforge.realistic_falsification.economic_validity import (
+    Gate3ValidityEvidenceCheckpoint,
     Gate3ValidityStageManifest,
+    build_gate3_validity_evidence_checkpoint,
     build_gate3_validity_stage_manifest,
+    discover_gate3_validity_evidence_checkpoint,
     discover_gate3_validity_stage_manifest,
+    discover_sole_gate3_validity_sidecar,
+    load_gate3_validity_evidence_checkpoint,
     load_gate3_validity_stage_manifest,
+    publish_gate3_validity_evidence_checkpoint,
     publish_gate3_validity_stage_manifest,
     require_gate3_validity_sidecar_census,
 )
@@ -45,6 +51,7 @@ from yieldforge.realistic_falsification.validity_evidence_store import (
     Gate3ValidityEvidenceReceipt,
     load_gate3_validity_evidence,
     publish_gate3_validity_evidence,
+    recover_gate3_validity_evidence_receipt,
 )
 
 _DEFAULT_GATE1 = "experiments/results/m11-gate1-yfm11g1run-c35f10fa4f4d7b6b01c59c29.json"
@@ -64,6 +71,8 @@ class M11EconomicValidityRunnerError(ValueError):
 class EconomicValidityStageRun:
     protocol: EconomicResolutionProtocol
     calibration_manifest: Gate3CalibrationManifest
+    evidence_checkpoint: Gate3ValidityEvidenceCheckpoint
+    evidence_checkpoint_path: Path
     manifest: Gate3ValidityStageManifest
     manifest_path: Path
 
@@ -185,6 +194,200 @@ def _load_validity_sidecar(
     return receipt
 
 
+def _load_evidence_checkpoint(
+    path: Path,
+    checkpoint: Gate3ValidityEvidenceCheckpoint,
+    *,
+    calibration: Gate3CalibrationManifest,
+) -> Gate3ValidityEvidenceCheckpoint:
+    loaded = load_gate3_validity_evidence_checkpoint(
+        path,
+        expected_protocol=calibration.protocol,
+        expected_roots=calibration.roots,
+        expected_calibration_manifest=calibration,
+        expected_checkpoint_id=checkpoint.checkpoint_id,
+        expected_content_sha256=checkpoint.content_sha256,
+    )
+    if loaded != checkpoint:
+        raise M11EconomicValidityRunnerError(
+            "validity-evidence checkpoint read-back differs from derived state"
+        )
+    return loaded
+
+
+def _publish_and_confirm_evidence_checkpoint(
+    *,
+    output: Path,
+    calibration: Gate3CalibrationManifest,
+    evidence: Gate3ValidityEvidenceReceipt,
+) -> tuple[Path, Gate3ValidityEvidenceCheckpoint]:
+    checkpoint = build_gate3_validity_evidence_checkpoint(
+        calibration_manifest=calibration,
+        validity_evidence=evidence,
+    )
+    path = publish_gate3_validity_evidence_checkpoint(
+        output,
+        checkpoint,
+        calibration_manifest=calibration,
+    )
+    loaded = _load_evidence_checkpoint(
+        path,
+        checkpoint,
+        calibration=calibration,
+    )
+    discovered = discover_gate3_validity_evidence_checkpoint(
+        output,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    )
+    if discovered != (path, loaded):
+        raise M11EconomicValidityRunnerError(
+            "validity-evidence checkpoint discovery differs after publication"
+        )
+    return path, loaded
+
+
+def _discover_or_recover_evidence_checkpoint(
+    *,
+    output: Path,
+    calibration: Gate3CalibrationManifest,
+    freezes: tuple[
+        Gate3BaselineCalibrationFreeze,
+        Gate3BaselineCalibrationFreeze,
+    ],
+) -> tuple[Path, Gate3ValidityEvidenceCheckpoint] | None:
+    discovered = discover_gate3_validity_evidence_checkpoint(
+        output,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    )
+    if discovered is not None:
+        return discovered
+    sidecar_path = discover_sole_gate3_validity_sidecar(output)
+    if sidecar_path is None:
+        return None
+    evidence = recover_gate3_validity_evidence_receipt(
+        sidecar_path,
+        expected_roots=calibration.roots,
+        expected_baseline_freezes=freezes,
+    )
+    return _publish_and_confirm_evidence_checkpoint(
+        output=output,
+        calibration=calibration,
+        evidence=evidence,
+    )
+
+
+def _require_terminal_discovery_after_sidecar_load(
+    *,
+    output: Path,
+    calibration: Gate3CalibrationManifest,
+    checkpoint_path: Path,
+    checkpoint: Gate3ValidityEvidenceCheckpoint,
+    manifest_path: Path,
+    manifest: Gate3ValidityStageManifest,
+) -> None:
+    stage_discovery = discover_gate3_validity_stage_manifest(
+        output,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    )
+    if stage_discovery != (manifest_path, manifest):
+        raise M11EconomicValidityRunnerError(
+            "post-sidecar stage discovery differs from terminal state"
+        )
+    checkpoint_discovery = discover_gate3_validity_evidence_checkpoint(
+        output,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    )
+    if checkpoint_discovery != (checkpoint_path, checkpoint):
+        raise M11EconomicValidityRunnerError(
+            "post-sidecar checkpoint discovery differs from terminal state"
+        )
+    require_gate3_validity_sidecar_census(
+        output,
+        expected_evidence=checkpoint.validity_evidence,
+    )
+
+
+def _publish_or_confirm_stage(
+    *,
+    output: Path,
+    calibration: Gate3CalibrationManifest,
+    checkpoint_path: Path,
+    checkpoint: Gate3ValidityEvidenceCheckpoint,
+    freezes: tuple[
+        Gate3BaselineCalibrationFreeze,
+        Gate3BaselineCalibrationFreeze,
+    ],
+) -> tuple[Path, Gate3ValidityStageManifest]:
+    derived = build_gate3_validity_stage_manifest(
+        calibration_manifest=calibration,
+        validity_evidence=checkpoint.validity_evidence,
+    )
+    existing = discover_gate3_validity_stage_manifest(
+        output,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    )
+    if existing is not None:
+        if existing[1] != derived:
+            raise M11EconomicValidityRunnerError(
+                "existing validity stage differs from evidence checkpoint"
+            )
+        manifest_path, manifest = existing
+    else:
+        manifest_path = publish_gate3_validity_stage_manifest(
+            output,
+            derived,
+            calibration_manifest=calibration,
+        )
+        manifest = load_gate3_validity_stage_manifest(
+            manifest_path,
+            expected_protocol=calibration.protocol,
+            expected_roots=calibration.roots,
+            expected_calibration_manifest=calibration,
+            expected_manifest_id=derived.manifest_id,
+            expected_content_sha256=derived.content_sha256,
+        )
+        if manifest != derived:
+            raise M11EconomicValidityRunnerError(
+                "validity-stage manifest read-back differs from derived state"
+            )
+        discovered = discover_gate3_validity_stage_manifest(
+            output,
+            protocol=calibration.protocol,
+            roots=calibration.roots,
+            calibration_manifest=calibration,
+        )
+        if discovered != (manifest_path, manifest):
+            raise M11EconomicValidityRunnerError(
+                "terminal validity-stage discovery differs from published state"
+            )
+    terminal = _load_validity_sidecar(
+        output,
+        checkpoint.validity_evidence,
+        roots=calibration.roots,
+        baseline_freezes=freezes,
+    )
+    del terminal
+    _require_terminal_discovery_after_sidecar_load(
+        output=output,
+        calibration=calibration,
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+        manifest_path=manifest_path,
+        manifest=manifest,
+    )
+    return manifest_path, manifest
+
+
 def run_economic_validity_stage(
     *,
     repository_root: Path,
@@ -229,14 +432,28 @@ def run_economic_validity_stage(
             roots=authenticated.roots,
         ),
     )
-    existing = discover_gate3_validity_stage_manifest(
+    existing_stage = discover_gate3_validity_stage_manifest(
         output,
         protocol=protocol,
         roots=authenticated.roots,
         calibration_manifest=calibration,
     )
-    if existing is not None:
-        manifest_path, manifest = existing
+    checkpoint_state = _discover_or_recover_evidence_checkpoint(
+        output=output,
+        calibration=calibration,
+        freezes=freezes,
+    )
+    if existing_stage is not None:
+        if checkpoint_state is None:
+            raise M11EconomicValidityRunnerError(
+                "terminal validity stage is missing its evidence checkpoint"
+            )
+        manifest_path, manifest = existing_stage
+        checkpoint_path, checkpoint = checkpoint_state
+        if manifest.validity_evidence != checkpoint.validity_evidence:
+            raise M11EconomicValidityRunnerError(
+                "terminal validity stage differs from its evidence checkpoint"
+            )
         require_gate3_validity_sidecar_census(
             output,
             expected_evidence=manifest.validity_evidence,
@@ -248,17 +465,53 @@ def run_economic_validity_stage(
             baseline_freezes=freezes,
         )
         del loaded
+        _require_terminal_discovery_after_sidecar_load(
+            output=output,
+            calibration=calibration,
+            checkpoint_path=checkpoint_path,
+            checkpoint=checkpoint,
+            manifest_path=manifest_path,
+            manifest=manifest,
+        )
         return EconomicValidityStageRun(
             protocol=protocol,
             calibration_manifest=calibration,
+            evidence_checkpoint=checkpoint,
+            evidence_checkpoint_path=checkpoint_path,
             manifest=manifest,
             manifest_path=manifest_path,
         )
 
-    require_gate3_validity_sidecar_census(
-        output,
-        expected_evidence=None,
-    )
+    if checkpoint_state is not None:
+        checkpoint_path, checkpoint = checkpoint_state
+        require_gate3_validity_sidecar_census(
+            output,
+            expected_evidence=checkpoint.validity_evidence,
+        )
+        loaded = _load_validity_sidecar(
+            output,
+            checkpoint.validity_evidence,
+            roots=authenticated.roots,
+            baseline_freezes=freezes,
+        )
+        del loaded
+        manifest_path, manifest = _publish_or_confirm_stage(
+            output=output,
+            calibration=calibration,
+            checkpoint_path=checkpoint_path,
+            checkpoint=checkpoint,
+            freezes=freezes,
+        )
+        return EconomicValidityStageRun(
+            protocol=protocol,
+            calibration_manifest=calibration,
+            evidence_checkpoint=checkpoint,
+            evidence_checkpoint_path=checkpoint_path,
+            manifest=manifest,
+            manifest_path=manifest_path,
+        )
+
+    require_gate3_validity_sidecar_census(output, expected_evidence=None)
 
     executed = backend.execute_validity_controls(
         roots=authenticated.roots,
@@ -301,61 +554,23 @@ def run_economic_validity_stage(
         baseline_freezes=freezes,
     )
     del loaded
-    derived = build_gate3_validity_stage_manifest(
-        calibration_manifest=calibration,
-        validity_evidence=evidence,
+    checkpoint_path, checkpoint = _publish_and_confirm_evidence_checkpoint(
+        output=output,
+        calibration=calibration,
+        evidence=evidence,
     )
-    late = discover_gate3_validity_stage_manifest(
-        output,
-        protocol=protocol,
-        roots=authenticated.roots,
-        calibration_manifest=calibration,
+    manifest_path, manifest = _publish_or_confirm_stage(
+        output=output,
+        calibration=calibration,
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+        freezes=freezes,
     )
-    if late is not None:
-        raise M11EconomicValidityRunnerError(
-            "validity stage found a late competing manifest before publication"
-        )
-    manifest_path = publish_gate3_validity_stage_manifest(
-        output,
-        derived,
-        calibration_manifest=calibration,
-    )
-    manifest = load_gate3_validity_stage_manifest(
-        manifest_path,
-        expected_protocol=protocol,
-        expected_roots=authenticated.roots,
-        expected_calibration_manifest=calibration,
-        expected_manifest_id=derived.manifest_id,
-        expected_content_sha256=derived.content_sha256,
-    )
-    if manifest != derived:
-        raise M11EconomicValidityRunnerError(
-            "validity-stage manifest read-back differs from derived state"
-        )
-    discovered = discover_gate3_validity_stage_manifest(
-        output,
-        protocol=protocol,
-        roots=authenticated.roots,
-        calibration_manifest=calibration,
-    )
-    if discovered != (manifest_path, manifest):
-        raise M11EconomicValidityRunnerError(
-            "terminal validity-stage discovery differs from published state"
-        )
-    require_gate3_validity_sidecar_census(
-        output,
-        expected_evidence=manifest.validity_evidence,
-    )
-    terminal = _load_validity_sidecar(
-        output,
-        manifest.validity_evidence,
-        roots=authenticated.roots,
-        baseline_freezes=freezes,
-    )
-    del terminal
     return EconomicValidityStageRun(
         protocol=protocol,
         calibration_manifest=calibration,
+        evidence_checkpoint=checkpoint,
+        evidence_checkpoint_path=checkpoint_path,
         manifest=manifest,
         manifest_path=manifest_path,
     )

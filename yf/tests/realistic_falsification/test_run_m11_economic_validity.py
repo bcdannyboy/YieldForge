@@ -12,7 +12,11 @@ import pytest
 from tests.realistic_falsification.test_economic_validity import (
     _calibration_manifest,
     _compact_evidence,
+    _real_official_validity_case,
     _validity,
+)
+from yieldforge.realistic_falsification.validity_evidence_store import (
+    publish_gate3_validity_evidence,
 )
 
 
@@ -53,14 +57,17 @@ class _FakeBackend:
         log: list[str],
         receipt_ref: list[weakref.ReferenceType[_FullReceipt]],
         execute_error: BaseException | None,
+        state: Any,
     ) -> None:
         self.evidence = evidence
         self.log = log
         self.receipt_ref = receipt_ref
         self.execute_error = execute_error
+        self.state = state
 
     def execute_validity_controls(self, *, roots: Any, baseline_freezes: Any) -> _FullReceipt:
         self.log.append("execute")
+        self.state.execute_count += 1
         assert roots == self.evidence.roots
         if self.execute_error is not None:
             raise self.execute_error
@@ -77,12 +84,16 @@ class _FakeBackend:
         expected_receipt_content_sha256: str,
     ) -> None:
         self.log.append("release")
+        self.state.release_count += 1
         assert self.receipt_ref[-1]() is not None
         assert roots == self.evidence.roots
         assert (expected_receipt_id, expected_receipt_content_sha256) == (
             self.evidence.validity_receipt_id,
             self.evidence.validity_receipt_content_sha256,
         )
+        if self.state.release_failures_remaining:
+            self.state.release_failures_remaining -= 1
+            raise RuntimeError("release fault")
 
 
 def _install_fakes(
@@ -97,6 +108,13 @@ def _install_fakes(
     late_competitor: bool = False,
     late_sidecar_competitor: bool = False,
     calibration_override: Any = None,
+    shared_state: Any = None,
+    release_failures: int = 0,
+    sidecar_load_failures: int = 0,
+    stage_publish_failures: int = 0,
+    late_stage_competitor_on_call: int | None = None,
+    late_checkpoint_competitor_on_call: int | None = None,
+    late_sidecar_competitor_on_call: int | None = None,
 ):  # type: ignore[no-untyped-def]
     calibration = _calibration_manifest()
     loaded_calibration = calibration if calibration_override is None else calibration_override
@@ -106,18 +124,44 @@ def _install_fakes(
         calibration_manifest=calibration,
         validity_evidence=evidence,
     )
-    log: list[str] = []
+    checkpoint = validity.build_gate3_validity_evidence_checkpoint(
+        calibration_manifest=calibration,
+        validity_evidence=evidence,
+    )
+    state = shared_state
+    if state is None:
+        state = SimpleNamespace(
+            stage=None,
+            checkpoint=None,
+            sidecar_present=False,
+            stage_discovery_count=0,
+            checkpoint_discovery_count=0,
+            sidecar_discovery_count=0,
+            sidecar_census_count=0,
+            sidecar_load_count=0,
+            execute_count=0,
+            release_count=0,
+            release_failures_remaining=release_failures,
+            sidecar_load_failures_remaining=sidecar_load_failures,
+            stage_publish_failures_remaining=stage_publish_failures,
+            log=[],
+        )
+        if resume:
+            state.stage = (tmp_path / "resumed-stage.json", stage)
+            state.checkpoint = (tmp_path / "resumed-checkpoint.json", checkpoint)
+            state.sidecar_present = True
+    else:
+        state.release_failures_remaining += release_failures
+        state.sidecar_load_failures_remaining += sidecar_load_failures
+        state.stage_publish_failures_remaining += stage_publish_failures
+    log: list[str] = state.log
     receipt_ref: list[weakref.ReferenceType[_FullReceipt]] = []
     backend = _FakeBackend(
         evidence=evidence,
         log=log,
         receipt_ref=receipt_ref,
         execute_error=execute_error,
-    )
-    state = SimpleNamespace(
-        stage=(tmp_path / "resumed-stage.json", stage) if resume else None,
-        discovery_count=0,
-        sidecar_census_count=0,
+        state=state,
     )
 
     def verify(*_args: Any, **_kwargs: Any) -> None:
@@ -142,8 +186,9 @@ def _install_fakes(
 
     def discover_stage(*_args: Any, **_kwargs: Any):  # type: ignore[no-untyped-def]
         log.append("discover_stage")
-        state.discovery_count += 1
-        if late_competitor and state.discovery_count == 2:
+        state.stage_discovery_count += 1
+        competitor_call = 2 if late_competitor else late_stage_competitor_on_call
+        if competitor_call is not None and state.stage_discovery_count == competitor_call:
             competing = validity.build_gate3_validity_stage_manifest(
                 calibration_manifest=calibration,
                 validity_evidence=_compact_evidence(calibration, status="invalid"),
@@ -151,19 +196,65 @@ def _install_fakes(
             return tmp_path / "competing-stage.json", competing
         return state.stage
 
+    def discover_checkpoint(*_args: Any, **_kwargs: Any):  # type: ignore[no-untyped-def]
+        log.append("discover_checkpoint")
+        state.checkpoint_discovery_count += 1
+        if (
+            late_checkpoint_competitor_on_call is not None
+            and state.checkpoint_discovery_count == late_checkpoint_competitor_on_call
+        ):
+            competing = validity.build_gate3_validity_evidence_checkpoint(
+                calibration_manifest=calibration,
+                validity_evidence=_compact_evidence(calibration, status="invalid"),
+            )
+            return tmp_path / "competing-checkpoint.json", competing
+        return state.checkpoint
+
+    def discover_sidecar(*_args: Any, **_kwargs: Any) -> Path | None:
+        log.append("discover_sidecar")
+        state.sidecar_discovery_count += 1
+        return tmp_path / evidence.sidecar_name if state.sidecar_present else None
+
     def publish_sidecar(_output: Path, receipt: _FullReceipt, **_kwargs: Any):  # type: ignore[no-untyped-def]
         log.append("persist_sidecar")
         assert receipt is receipt_ref[-1]()
         if sidecar_error is not None:
             raise sidecar_error
+        state.sidecar_present = True
         return tmp_path / evidence.sidecar_name, evidence
 
     def load_sidecar(_path: Path, **kwargs: Any) -> _FullReceipt:
         log.append("read_sidecar")
+        state.sidecar_load_count += 1
+        if state.sidecar_load_failures_remaining:
+            state.sidecar_load_failures_remaining -= 1
+            raise RuntimeError("sidecar readback fault")
         if receipt_ref:
             assert receipt_ref[-1]() is None
+        assert state.sidecar_present
         assert kwargs["expected_status"] == evidence.status
         return _FullReceipt(evidence)
+
+    def recover_sidecar(_path: Path, **_kwargs: Any) -> Any:
+        log.append("recover_sidecar")
+        assert state.sidecar_present
+        return evidence
+
+    def publish_checkpoint(
+        _output: Path,
+        candidate: Any,
+        *,
+        calibration_manifest: Any,
+    ) -> Path:
+        log.append("publish_checkpoint")
+        assert calibration_manifest == calibration
+        state.checkpoint = (tmp_path / "published-checkpoint.json", candidate)
+        return state.checkpoint[0]
+
+    def load_checkpoint(_path: Path, **_kwargs: Any) -> Any:
+        log.append("load_checkpoint")
+        assert state.checkpoint is not None
+        return state.checkpoint[1]
 
     def publish_stage(
         _output: Path,
@@ -173,6 +264,9 @@ def _install_fakes(
     ) -> Path:
         log.append("publish_stage")
         assert calibration_manifest == calibration
+        if state.stage_publish_failures_remaining:
+            state.stage_publish_failures_remaining -= 1
+            raise RuntimeError("stage publication fault")
         state.stage = (tmp_path / "published-stage.json", manifest)
         return state.stage[0]
 
@@ -183,11 +277,22 @@ def _install_fakes(
     ) -> Path | None:
         state.sidecar_census_count += 1
         log.append("sidecar_census_empty" if expected_evidence is None else "sidecar_census_exact")
-        if late_sidecar_competitor and state.sidecar_census_count == 2:
+        competitor_call = 2 if late_sidecar_competitor else late_sidecar_competitor_on_call
+        if competitor_call is not None and state.sidecar_census_count == competitor_call:
             raise validity.Gate3ValidityStageEvidenceError(
                 "validity sidecar census has competing candidates"
             )
-        return None if expected_evidence is None else tmp_path / evidence.sidecar_name
+        if expected_evidence is None:
+            if state.sidecar_present:
+                raise validity.Gate3ValidityStageEvidenceError(
+                    "validity sidecar census has an unbound candidate"
+                )
+            return None
+        if not state.sidecar_present:
+            raise validity.Gate3ValidityStageEvidenceError(
+                "validity sidecar census is missing its expected receipt"
+            )
+        return tmp_path / evidence.sidecar_name
 
     def load_stage(_path: Path, **_kwargs: Any) -> Any:
         log.append("load_stage")
@@ -199,8 +304,29 @@ def _install_fakes(
     monkeypatch.setattr(runner, "load_gate3_calibration_manifest", load_calibration)
     monkeypatch.setattr(runner, "build_adapter_gate3_backend", build_backend)
     monkeypatch.setattr(runner, "discover_gate3_validity_stage_manifest", discover_stage)
+    monkeypatch.setattr(
+        runner,
+        "discover_gate3_validity_evidence_checkpoint",
+        discover_checkpoint,
+    )
+    monkeypatch.setattr(runner, "discover_sole_gate3_validity_sidecar", discover_sidecar)
+    monkeypatch.setattr(
+        runner,
+        "recover_gate3_validity_evidence_receipt",
+        recover_sidecar,
+    )
     monkeypatch.setattr(runner, "publish_gate3_validity_evidence", publish_sidecar)
     monkeypatch.setattr(runner, "load_gate3_validity_evidence", load_sidecar)
+    monkeypatch.setattr(
+        runner,
+        "publish_gate3_validity_evidence_checkpoint",
+        publish_checkpoint,
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_gate3_validity_evidence_checkpoint",
+        load_checkpoint,
+    )
     monkeypatch.setattr(runner, "publish_gate3_validity_stage_manifest", publish_stage)
     monkeypatch.setattr(runner, "load_gate3_validity_stage_manifest", load_stage)
     monkeypatch.setattr(runner, "require_gate3_validity_sidecar_census", require_sidecar_census)
@@ -208,6 +334,7 @@ def _install_fakes(
     return SimpleNamespace(
         calibration=calibration,
         evidence=evidence,
+        checkpoint=checkpoint,
         stage=stage,
         log=log,
         state=state,
@@ -251,18 +378,25 @@ def test_runner_executes_once_and_returns_exact_scientific_decision(
         "load_calibration",
         "build_backend",
         "discover_stage",
+        "discover_checkpoint",
+        "discover_sidecar",
         "sidecar_census_empty",
         "execute",
         "persist_sidecar",
         "release",
         "sidecar_census_exact",
         "read_sidecar",
+        "publish_checkpoint",
+        "load_checkpoint",
+        "discover_checkpoint",
         "discover_stage",
         "publish_stage",
         "load_stage",
         "discover_stage",
-        "sidecar_census_exact",
         "read_sidecar",
+        "discover_stage",
+        "discover_checkpoint",
+        "sidecar_census_exact",
     ]
     assert world.receipt_ref[-1]() is None
 
@@ -283,9 +417,79 @@ def test_runner_full_resume_fresh_loads_sidecar_without_execute(
         "load_calibration",
         "build_backend",
         "discover_stage",
+        "discover_checkpoint",
         "sidecar_census_exact",
         "read_sidecar",
+        "discover_stage",
+        "discover_checkpoint",
+        "sidecar_census_exact",
     ]
+    assert world.state.execute_count == 0
+
+
+def test_runner_real_filesystem_orphan_recovery_and_terminal_resume_never_execute(
+    runner: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validity = _validity()
+    calibration, freezes, receipt = _real_official_validity_case(monkeypatch)
+    sidecar_path, evidence = publish_gate3_validity_evidence(
+        tmp_path,
+        receipt,
+        baseline_freezes=freezes,
+    )
+    calls: list[str] = []
+
+    class NeverExecuteBackend:
+        def execute_validity_controls(self, **_kwargs: Any) -> Any:
+            pytest.fail("terminal resume must not execute validity controls")
+
+    monkeypatch.setattr(
+        runner,
+        "verify_economic_resolution_runtime_lineage",
+        lambda *_args, **_kwargs: calls.append("lineage"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "authenticate_official_gate3_early_inputs",
+        lambda **_kwargs: SimpleNamespace(
+            roots=calibration.roots,
+            gate1_artifact=object(),
+            gate2_artifact=object(),
+            gate3_config=object(),
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_gate3_calibration_manifest",
+        lambda *_args, **_kwargs: calibration,
+    )
+    monkeypatch.setattr(
+        runner,
+        "build_adapter_gate3_backend",
+        lambda **_kwargs: NeverExecuteBackend(),
+    )
+
+    recovered = _run(runner, tmp_path)
+    resumed = _run(runner, tmp_path)
+
+    assert recovered.manifest.validity_evidence == evidence
+    assert resumed == recovered
+    assert validity.discover_gate3_validity_evidence_checkpoint(
+        tmp_path,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    ) == (recovered.evidence_checkpoint_path, recovered.evidence_checkpoint)
+    assert validity.discover_gate3_validity_stage_manifest(
+        tmp_path,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    ) == (recovered.manifest_path, recovered.manifest)
+    assert sidecar_path == tmp_path / evidence.sidecar_name
+    assert calls == ["lineage", "lineage"]
 
 
 @pytest.mark.parametrize(
@@ -365,9 +569,106 @@ def test_runner_aborts_before_stage_on_sidecar_or_late_competitor(
 
     monkeypatch.undo()
     world = _install_fakes(monkeypatch, runner, tmp_path, late_competitor=True)
-    with pytest.raises(runner.M11EconomicValidityRunnerError, match="late competing"):
+    with pytest.raises(runner.M11EconomicValidityRunnerError, match="differs"):
         _run(runner, tmp_path)
     assert "publish_stage" not in world.log
+
+
+@pytest.mark.parametrize(
+    "failure_phase",
+    ["release", "readback", "stage_publication"],
+)
+def test_runner_resumes_after_post_persistence_fault_without_reexecution(
+    runner: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+) -> None:
+    world = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        release_failures=1 if failure_phase == "release" else 0,
+        sidecar_load_failures=1 if failure_phase == "readback" else 0,
+        stage_publish_failures=1 if failure_phase == "stage_publication" else 0,
+    )
+
+    with pytest.raises(RuntimeError, match="fault"):
+        _run(runner, tmp_path)
+
+    assert world.state.sidecar_present is True
+    assert world.state.stage is None
+    if failure_phase == "stage_publication":
+        assert world.state.checkpoint is not None
+    first_log_length = len(world.log)
+    monkeypatch.undo()
+    resumed = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        shared_state=world.state,
+    )
+
+    result = _run(runner, tmp_path)
+
+    assert result.manifest == world.stage
+    assert resumed.state.execute_count == 1
+    assert resumed.state.release_count == 1
+    resumed_log = resumed.log[first_log_length:]
+    assert "execute" not in resumed_log
+    assert "persist_sidecar" not in resumed_log
+    if failure_phase in {"release", "readback"}:
+        assert "recover_sidecar" in resumed_log
+        assert "publish_checkpoint" in resumed_log
+    else:
+        assert "recover_sidecar" not in resumed_log
+
+
+@pytest.mark.parametrize(
+    ("resume", "late_stage_call", "late_checkpoint_call", "late_sidecar_call"),
+    [
+        (False, 4, None, None),
+        (False, None, 3, None),
+        (False, None, None, 3),
+        (True, 2, None, None),
+        (True, None, 2, None),
+        (True, None, None, 2),
+    ],
+)
+def test_runner_final_sidecar_read_is_followed_by_all_three_competitor_checks(
+    runner: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+    late_stage_call: int | None,
+    late_checkpoint_call: int | None,
+    late_sidecar_call: int | None,
+) -> None:
+    world = _install_fakes(
+        monkeypatch,
+        runner,
+        tmp_path,
+        resume=resume,
+        late_stage_competitor_on_call=late_stage_call,
+        late_checkpoint_competitor_on_call=late_checkpoint_call,
+        late_sidecar_competitor_on_call=late_sidecar_call,
+    )
+
+    with pytest.raises(
+        (
+            runner.M11EconomicValidityRunnerError,
+            _validity().Gate3ValidityStageEvidenceError,
+        )
+    ):
+        _run(runner, tmp_path)
+
+    last_read = len(world.log) - 1 - world.log[::-1].index("read_sidecar")
+    expected_suffix = ["discover_stage"]
+    if late_stage_call is None:
+        expected_suffix.append("discover_checkpoint")
+    if late_stage_call is None and late_checkpoint_call is None:
+        expected_suffix.append("sidecar_census_exact")
+    assert world.log[last_read + 1 :] == expected_suffix
 
 
 @pytest.mark.parametrize(

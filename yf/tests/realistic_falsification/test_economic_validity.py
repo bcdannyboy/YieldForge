@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tests.realistic_falsification import test_confirmation as confirmation_cases
 from tests.realistic_falsification.test_confirmation import (
     _baseline_freeze,
     _exact_audits,
@@ -28,6 +29,9 @@ from yieldforge.realistic_falsification.validity_evidence_store import (
     Gate3ValidityBaselineFreezeBinding,
     Gate3ValidityEvidenceReceipt,
     build_gate3_validity_evidence_receipt,
+    load_gate3_validity_evidence,
+    publish_gate3_validity_evidence,
+    recover_gate3_validity_evidence_receipt,
 )
 
 
@@ -163,6 +167,34 @@ def _compact_evidence(calibration, *, status: str = "valid"):  # type: ignore[no
         content_sha256=f"sha256:{digest}",
         **semantic,
     )
+
+
+def _real_official_validity_case(
+    monkeypatch: pytest.MonkeyPatch,
+):  # type: ignore[no-untyped-def]
+    calibration = _calibration_manifest()
+    freezes = calibration.baseline_freezes
+    monkeypatch.setattr(confirmation_cases, "_roots", _official_roots)
+    receipt = evaluate_gate3_validity_controls(
+        roots=_official_roots(),
+        hard_nulls=confirmation_cases._hard_null_controls(
+            baseline_freezes=freezes,
+        ),
+        twin_controls=(
+            confirmation_cases._twin_controls(
+                corpus_id="lectra-m3-m4",
+                savings="0.000000",
+            )
+            + confirmation_cases._twin_controls(
+                corpus_id="loco-2dics",
+                savings="0.000000",
+            )
+        ),
+        exact_audits=confirmation_cases._exact_audits(
+            baseline_freezes=freezes,
+        ),
+    )
+    return calibration, freezes, receipt
 
 
 def test_stage_manifest_derives_scientific_status_and_authorization() -> None:
@@ -426,3 +458,175 @@ def test_validity_sidecar_census_requires_exactly_the_manifest_bound_receipt(
             tmp_path,
             expected_evidence=evidence,
         )
+
+
+def test_validity_evidence_checkpoint_round_trip_and_competing_discovery(
+    tmp_path: Path,
+) -> None:
+    validity = _validity()
+    calibration = _calibration_manifest()
+    evidence = _compact_evidence(calibration)
+    checkpoint = validity.build_gate3_validity_evidence_checkpoint(
+        calibration_manifest=calibration,
+        validity_evidence=evidence,
+    )
+
+    assert checkpoint.protocol == calibration.protocol
+    assert checkpoint.roots == calibration.roots
+    assert checkpoint.calibration_manifest_id == calibration.manifest_id
+    assert checkpoint.calibration_manifest_content_sha256 == calibration.content_sha256
+    assert checkpoint.baseline_freezes == calibration.baseline_freezes
+    assert checkpoint.validity_evidence == evidence
+    assert checkpoint.complete is True
+
+    path = validity.publish_gate3_validity_evidence_checkpoint(
+        tmp_path,
+        checkpoint,
+        calibration_manifest=calibration,
+    )
+    loaded = validity.load_gate3_validity_evidence_checkpoint(
+        path,
+        expected_protocol=calibration.protocol,
+        expected_roots=calibration.roots,
+        expected_calibration_manifest=calibration,
+        expected_checkpoint_id=checkpoint.checkpoint_id,
+        expected_content_sha256=checkpoint.content_sha256,
+    )
+    assert loaded == checkpoint
+    assert validity.discover_gate3_validity_evidence_checkpoint(
+        tmp_path,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    ) == (path, checkpoint)
+
+    competitor = tmp_path / (f"m11-economic-validity-evidence-checkpoint-{'4' * 64}.json")
+    competitor.write_bytes(path.read_bytes())
+    with pytest.raises(validity.Gate3ValidityStageEvidenceError, match="competing"):
+        validity.discover_gate3_validity_evidence_checkpoint(
+            tmp_path,
+            protocol=calibration.protocol,
+            roots=calibration.roots,
+            calibration_manifest=calibration,
+        )
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "nonfinite", "noncanonical"])
+def test_validity_evidence_checkpoint_load_rejects_untrusted_json_encoding(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    validity = _validity()
+    calibration = _calibration_manifest()
+    checkpoint = validity.build_gate3_validity_evidence_checkpoint(
+        calibration_manifest=calibration,
+        validity_evidence=_compact_evidence(calibration),
+    )
+    path = validity.publish_gate3_validity_evidence_checkpoint(
+        tmp_path,
+        checkpoint,
+        calibration_manifest=calibration,
+    )
+    raw = path.read_bytes()
+    if kind == "duplicate":
+        raw = raw.replace(b'  "complete": true,', b'  "complete": true,\n  "complete": true,')
+        match = "duplicate"
+    elif kind == "nonfinite":
+        raw = raw.replace(
+            b'  "calibration_failure_count": 0,', b'  "calibration_failure_count": NaN,'
+        )
+        match = "non-finite"
+    else:
+        raw = json.dumps(json.loads(raw), allow_nan=False, sort_keys=True).encode()
+        match = "canonical"
+    path.write_bytes(raw)
+
+    with pytest.raises(validity.Gate3ValidityStageEvidenceError, match=match):
+        validity.load_gate3_validity_evidence_checkpoint(
+            path,
+            expected_protocol=calibration.protocol,
+            expected_roots=calibration.roots,
+            expected_calibration_manifest=calibration,
+            expected_checkpoint_id=checkpoint.checkpoint_id,
+            expected_content_sha256=checkpoint.content_sha256,
+        )
+
+
+def test_real_synthetic_validity_sidecar_recovers_checkpoint_and_terminal_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validity = _validity()
+    calibration, freezes, receipt = _real_official_validity_case(monkeypatch)
+    sidecar_path, evidence = publish_gate3_validity_evidence(
+        tmp_path,
+        receipt,
+        baseline_freezes=freezes,
+    )
+
+    assert validity.discover_sole_gate3_validity_sidecar(tmp_path) == sidecar_path
+    recovered_evidence = recover_gate3_validity_evidence_receipt(
+        sidecar_path,
+        expected_roots=calibration.roots,
+        expected_baseline_freezes=freezes,
+    )
+    assert recovered_evidence == evidence
+
+    loaded = load_gate3_validity_evidence(
+        sidecar_path,
+        evidence_receipt=evidence,
+        expected_roots=calibration.roots,
+        expected_baseline_freezes=freezes,
+        expected_validity_receipt_id=evidence.validity_receipt_id,
+        expected_validity_receipt_content_sha256=(evidence.validity_receipt_content_sha256),
+        expected_hard_nulls=evidence.hard_nulls,
+        expected_twin_controls=evidence.twin_controls,
+        expected_exact_audits=evidence.exact_audits,
+        expected_no_signal_summaries=evidence.no_signal_summaries,
+        expected_failure_codes=evidence.failure_codes,
+        expected_diagnosis_codes=evidence.diagnosis_codes,
+        expected_status=evidence.status,
+        expected_exact_control_census=True,
+        expected_raw_controls_revalidated=True,
+        expected_source_lineage="repaired_runtime",
+    )
+    assert loaded == receipt
+
+    checkpoint = validity.build_gate3_validity_evidence_checkpoint(
+        calibration_manifest=calibration,
+        validity_evidence=recovered_evidence,
+    )
+    checkpoint_path = validity.publish_gate3_validity_evidence_checkpoint(
+        tmp_path,
+        checkpoint,
+        calibration_manifest=calibration,
+    )
+    stage = validity.build_gate3_validity_stage_manifest(
+        calibration_manifest=calibration,
+        validity_evidence=recovered_evidence,
+    )
+    stage_path = validity.publish_gate3_validity_stage_manifest(
+        tmp_path,
+        stage,
+        calibration_manifest=calibration,
+    )
+
+    assert validity.discover_gate3_validity_evidence_checkpoint(
+        tmp_path,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    ) == (checkpoint_path, checkpoint)
+    assert validity.discover_gate3_validity_stage_manifest(
+        tmp_path,
+        protocol=calibration.protocol,
+        roots=calibration.roots,
+        calibration_manifest=calibration,
+    ) == (stage_path, stage)
+    assert (
+        validity.require_gate3_validity_sidecar_census(
+            tmp_path,
+            expected_evidence=evidence,
+        )
+        == sidecar_path
+    )

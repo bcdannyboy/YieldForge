@@ -42,12 +42,76 @@ _MAX_VALIDITY_SIDECAR_BYTES = 32 * 1024 * 1024
 _MAX_DISCOVERY_DIRECTORY_ENTRIES = 4096
 _DISCOVERY_DIRECTORY_SCAN_SECONDS = 2.0
 _MANIFEST_PREFIX = "m11-economic-validity-stage-"
+_CHECKPOINT_PREFIX = "m11-economic-validity-evidence-checkpoint-"
 _VALIDITY_SIDECAR_PREFIX = "m11-gate3-validity-receipt-"
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 
 
 class Gate3ValidityStageEvidenceError(ValueError):
     """A validity-stage artifact failed a bounded fail-closed check."""
+
+
+def _freeze_bindings(
+    freezes: tuple[
+        Gate3BaselineCalibrationFreeze,
+        Gate3BaselineCalibrationFreeze,
+    ],
+) -> tuple[Gate3ValidityBaselineFreezeBinding, Gate3ValidityBaselineFreezeBinding]:
+    bindings = tuple(
+        Gate3ValidityBaselineFreezeBinding(
+            corpus_id=item.corpus_id,
+            freeze_id=item.freeze_id,
+            freeze_content_sha256=item.content_sha256,
+            selected_policy_id=item.selected_policy_id,
+        )
+        for item in freezes
+    )
+    return bindings  # type: ignore[return-value]
+
+
+class Gate3ValidityEvidenceCheckpoint(FrozenExperimentModel):
+    """Durable compact bridge from a persisted sidecar to stage publication."""
+
+    schema_version: Literal["yieldforge.m11-economic-validity-evidence-checkpoint.v1"] = (
+        "yieldforge.m11-economic-validity-evidence-checkpoint.v1"
+    )
+    checkpoint_id: StrictStr = Field(pattern=r"^yfm11econvalcp-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    protocol: EconomicResolutionProtocol
+    roots: Gate3RootBinding
+    calibration_manifest_id: StrictStr = Field(pattern=r"^yfm11econcalman-[0-9a-f]{24}$")
+    calibration_manifest_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    calibration_status: Literal["complete_valid"] = "complete_valid"
+    calibration_success_count: Literal[96] = 96
+    calibration_failure_count: Literal[0] = 0
+    baseline_freezes: tuple[
+        Gate3BaselineCalibrationFreeze,
+        Gate3BaselineCalibrationFreeze,
+    ]
+    validity_evidence: Gate3ValidityEvidenceReceipt
+    complete: Literal[True] = True
+
+    @model_validator(mode="after")
+    def require_exact_bindings_and_identity(self) -> Self:
+        if self.protocol != build_economic_resolution_protocol():
+            raise ValueError("validity-evidence checkpoint protocol binding differs")
+        if (
+            self.roots.content_sha256 != self.protocol.legacy_root_content_sha256
+            or tuple(item.corpus_id for item in self.baseline_freezes) != _CORPUS_ORDER
+            or any(item.roots != self.roots for item in self.baseline_freezes)
+            or self.validity_evidence.roots != self.roots
+            or self.validity_evidence.baseline_freezes != _freeze_bindings(self.baseline_freezes)
+        ):
+            raise ValueError("validity-evidence checkpoint roots or freeze binding differs")
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"checkpoint_id", "content_sha256"},
+        )
+        if self.checkpoint_id != f"yfm11econvalcp-{digest[:24]}" or (
+            self.content_sha256 != f"sha256:{digest}"
+        ):
+            raise ValueError("validity-evidence checkpoint identity differs from content")
+        return self
 
 
 class Gate3ValidityStageManifest(FrozenExperimentModel):
@@ -84,15 +148,7 @@ class Gate3ValidityStageManifest(FrozenExperimentModel):
             or any(item.roots != self.roots for item in self.baseline_freezes)
         ):
             raise ValueError("validity-stage root or baseline-freeze binding differs")
-        expected_freeze_bindings = tuple(
-            Gate3ValidityBaselineFreezeBinding(
-                corpus_id=item.corpus_id,
-                freeze_id=item.freeze_id,
-                freeze_content_sha256=item.content_sha256,
-                selected_policy_id=item.selected_policy_id,
-            )
-            for item in self.baseline_freezes
-        )
+        expected_freeze_bindings = _freeze_bindings(self.baseline_freezes)
         if (
             self.validity_evidence.roots != self.roots
             or self.validity_evidence.baseline_freezes != expected_freeze_bindings
@@ -195,6 +251,48 @@ def build_gate3_validity_stage_manifest(
         raise Gate3ValidityStageEvidenceError(str(error)) from error
 
 
+def build_gate3_validity_evidence_checkpoint(
+    *,
+    calibration_manifest: Gate3CalibrationManifest,
+    validity_evidence: Gate3ValidityEvidenceReceipt,
+) -> Gate3ValidityEvidenceCheckpoint:
+    """Bind a persisted compact receipt to exact complete calibration."""
+
+    calibration = _strict_calibration_manifest(calibration_manifest)
+    evidence = _strict_validity_evidence(validity_evidence)
+    semantic = {
+        "schema_version": "yieldforge.m11-economic-validity-evidence-checkpoint.v1",
+        "protocol": calibration.protocol.model_dump(mode="json"),
+        "roots": calibration.roots.model_dump(mode="json"),
+        "calibration_manifest_id": calibration.manifest_id,
+        "calibration_manifest_content_sha256": calibration.content_sha256,
+        "calibration_status": calibration.status,
+        "calibration_success_count": calibration.success_count,
+        "calibration_failure_count": calibration.failure_count,
+        "baseline_freezes": [item.model_dump(mode="json") for item in calibration.baseline_freezes],
+        "validity_evidence": evidence.model_dump(mode="json"),
+        "complete": True,
+    }
+    digest = semantic_sha256(semantic)
+    try:
+        return Gate3ValidityEvidenceCheckpoint(
+            checkpoint_id=f"yfm11econvalcp-{digest[:24]}",
+            content_sha256=f"sha256:{digest}",
+            protocol=calibration.protocol,
+            roots=calibration.roots,
+            calibration_manifest_id=calibration.manifest_id,
+            calibration_manifest_content_sha256=calibration.content_sha256,
+            calibration_status="complete_valid",
+            calibration_success_count=96,
+            calibration_failure_count=0,
+            baseline_freezes=calibration.baseline_freezes,
+            validity_evidence=evidence,
+            complete=True,
+        )
+    except (ValidationError, ValueError) as error:
+        raise Gate3ValidityStageEvidenceError(str(error)) from error
+
+
 @dataclass(frozen=True, slots=True)
 class _FileFingerprint:
     device: int
@@ -274,7 +372,7 @@ def _reject_duplicate_json_keys(pairs):  # type: ignore[no-untyped-def]
     for key, value in pairs:
         if key in output:
             raise Gate3ValidityStageEvidenceError(
-                "validity-stage manifest JSON contains a duplicate object key"
+                "validity-stage artifact JSON contains a duplicate object key"
             )
         output[key] = value
     return output
@@ -282,7 +380,7 @@ def _reject_duplicate_json_keys(pairs):  # type: ignore[no-untyped-def]
 
 def _reject_nonfinite_json_constant(value: str) -> None:
     raise Gate3ValidityStageEvidenceError(
-        f"validity-stage manifest JSON contains non-finite value {value}"
+        f"validity-stage artifact JSON contains non-finite value {value}"
     )
 
 
@@ -295,7 +393,13 @@ def _parse_canonical_manifest(raw: bytes) -> Gate3ValidityStageManifest:
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_nonfinite_json_constant,
         )
-        manifest = Gate3ValidityStageManifest.model_validate_json(raw, strict=True)
+        # JSON arrays must import into tuple-backed fields; canonical byte equality
+        # below rejects every coercion that would alter the encoded semantics.
+        imported = Gate3ValidityStageManifest.model_validate_json(raw, strict=False)
+        manifest = Gate3ValidityStageManifest.model_validate(
+            imported.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
     except Gate3ValidityStageEvidenceError:
         raise
     except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError) as error:
@@ -652,14 +756,237 @@ def discover_gate3_validity_stage_manifest(
     return discovered.path, manifest
 
 
-def require_gate3_validity_sidecar_census(
+def _strict_validity_evidence_checkpoint(
+    checkpoint: Gate3ValidityEvidenceCheckpoint,
+) -> Gate3ValidityEvidenceCheckpoint:
+    try:
+        return Gate3ValidityEvidenceCheckpoint.model_validate(
+            checkpoint.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint failed strict validation"
+        ) from error
+
+
+def _parse_canonical_checkpoint(raw: bytes) -> Gate3ValidityEvidenceCheckpoint:
+    if type(raw) is not bytes or len(raw) > _MAX_MANIFEST_BYTES:
+        raise Gate3ValidityStageEvidenceError("validity-evidence checkpoint exceeds byte bound")
+    try:
+        json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+        # See the stage parser: import JSON containers, then strict-check the model
+        # graph and require byte-for-byte canonical re-encoding.
+        imported = Gate3ValidityEvidenceCheckpoint.model_validate_json(raw, strict=False)
+        checkpoint = Gate3ValidityEvidenceCheckpoint.model_validate(
+            imported.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except Gate3ValidityStageEvidenceError:
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, ValueError) as error:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint failed strict validation"
+        ) from error
+    if canonical_pretty_json_bytes(checkpoint) != raw:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint encoding is not canonical"
+        )
+    return checkpoint
+
+
+def _require_checkpoint_matches_calibration(
+    checkpoint: Gate3ValidityEvidenceCheckpoint,
+    calibration: Gate3CalibrationManifest,
+) -> None:
+    if (
+        checkpoint.protocol != calibration.protocol
+        or checkpoint.roots != calibration.roots
+        or checkpoint.calibration_manifest_id != calibration.manifest_id
+        or checkpoint.calibration_manifest_content_sha256 != calibration.content_sha256
+        or checkpoint.baseline_freezes != calibration.baseline_freezes
+    ):
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint differs from exact calibration"
+        )
+
+
+def publish_gate3_validity_evidence_checkpoint(
+    output_directory: Path,
+    checkpoint: Gate3ValidityEvidenceCheckpoint,
+    *,
+    calibration_manifest: Gate3CalibrationManifest,
+) -> Path:
+    """Publish one compact validity-evidence checkpoint immutably."""
+
+    strict = _strict_validity_evidence_checkpoint(checkpoint)
+    calibration = _strict_calibration_manifest(calibration_manifest)
+    _require_checkpoint_matches_calibration(strict, calibration)
+    existing = _discover_single_prefixed_regular_file(
+        output_directory,
+        prefix=_CHECKPOINT_PREFIX,
+        filename_pattern=re.compile(rf"{re.escape(_CHECKPOINT_PREFIX)}([0-9a-f]{{64}})\.json"),
+        max_bytes=_MAX_MANIFEST_BYTES,
+        label="validity-evidence checkpoint publication",
+    )
+    if existing is not None:
+        current = _parse_canonical_checkpoint(
+            _read_bounded_regular_file(
+                existing.path,
+                label="validity-evidence checkpoint",
+            )
+        )
+        _require_discovery_directory_unchanged(
+            existing,
+            label="validity-evidence checkpoint publication",
+        )
+        if current != strict:
+            raise Gate3ValidityStageEvidenceError(
+                "validity-evidence checkpoint publication found a competing checkpoint"
+            )
+        return existing.path
+    raw = canonical_pretty_json_bytes(strict)
+    if len(raw) > _MAX_MANIFEST_BYTES:
+        raise Gate3ValidityStageEvidenceError("validity-evidence checkpoint exceeds byte bound")
+    destination = Path(output_directory) / (
+        f"{_CHECKPOINT_PREFIX}{strict.content_sha256.removeprefix('sha256:')}.json"
+    )
+    try:
+        return publish_immutable_artifact(
+            destination,
+            raw,
+            validate=lambda data: canonical_pretty_json_bytes(_parse_canonical_checkpoint(data)),
+            label="M11 economic validity-evidence checkpoint",
+        )
+    except M8ArtifactPublicationError as error:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint immutable publication failed"
+        ) from error
+
+
+def load_gate3_validity_evidence_checkpoint(
+    path: Path,
+    *,
+    expected_protocol: EconomicResolutionProtocol,
+    expected_roots: Gate3RootBinding,
+    expected_calibration_manifest: Gate3CalibrationManifest,
+    expected_checkpoint_id: str,
+    expected_content_sha256: str,
+) -> Gate3ValidityEvidenceCheckpoint:
+    """Load a checkpoint only under exact calibration and filename bindings."""
+
+    calibration = _strict_calibration_manifest(expected_calibration_manifest)
+    try:
+        protocol = EconomicResolutionProtocol.model_validate(
+            expected_protocol.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+        roots = Gate3RootBinding.model_validate(
+            expected_roots.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint expected binding is malformed"
+        ) from error
+    if (
+        protocol != build_economic_resolution_protocol()
+        or calibration.protocol != protocol
+        or calibration.roots != roots
+        or type(expected_checkpoint_id) is not str
+        or re.fullmatch(r"yfm11econvalcp-[0-9a-f]{24}", expected_checkpoint_id) is None
+        or type(expected_content_sha256) is not str
+        or re.fullmatch(_SHA256_PATTERN, expected_content_sha256) is None
+    ):
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint expected binding is malformed"
+        )
+    candidate = Path(path)
+    expected_name = f"{_CHECKPOINT_PREFIX}{expected_content_sha256.removeprefix('sha256:')}.json"
+    if candidate.name != expected_name:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint path differs from expected binding"
+        )
+    checkpoint = _parse_canonical_checkpoint(
+        _read_bounded_regular_file(
+            candidate,
+            label="validity-evidence checkpoint",
+        )
+    )
+    _require_checkpoint_matches_calibration(checkpoint, calibration)
+    if (
+        checkpoint.checkpoint_id,
+        checkpoint.content_sha256,
+    ) != (expected_checkpoint_id, expected_content_sha256):
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint differs from expected identity"
+        )
+    return checkpoint
+
+
+def discover_gate3_validity_evidence_checkpoint(
     output_directory: Path,
     *,
-    expected_evidence: Gate3ValidityEvidenceReceipt | None,
-) -> Path | None:
-    """Require zero unbound sidecars or one exact manifest-bound sidecar."""
+    protocol: EconomicResolutionProtocol,
+    roots: Gate3RootBinding,
+    calibration_manifest: Gate3CalibrationManifest,
+) -> tuple[Path, Gate3ValidityEvidenceCheckpoint] | None:
+    """Discover the sole exact validity-evidence checkpoint."""
 
-    evidence = None if expected_evidence is None else _strict_validity_evidence(expected_evidence)
+    calibration = _strict_calibration_manifest(calibration_manifest)
+    try:
+        strict_protocol = EconomicResolutionProtocol.model_validate(
+            protocol.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+        strict_roots = Gate3RootBinding.model_validate(
+            roots.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint discovery binding differs"
+        ) from error
+    if (
+        strict_protocol != build_economic_resolution_protocol()
+        or calibration.protocol != strict_protocol
+        or calibration.roots != strict_roots
+    ):
+        raise Gate3ValidityStageEvidenceError(
+            "validity-evidence checkpoint discovery binding differs"
+        )
+    discovered = _discover_single_prefixed_regular_file(
+        output_directory,
+        prefix=_CHECKPOINT_PREFIX,
+        filename_pattern=re.compile(rf"{re.escape(_CHECKPOINT_PREFIX)}([0-9a-f]{{64}})\.json"),
+        max_bytes=_MAX_MANIFEST_BYTES,
+        label="validity-evidence checkpoint discovery",
+    )
+    if discovered is None:
+        return None
+    digest = discovered.filename_match.group(1)
+    checkpoint = load_gate3_validity_evidence_checkpoint(
+        discovered.path,
+        expected_protocol=strict_protocol,
+        expected_roots=strict_roots,
+        expected_calibration_manifest=calibration,
+        expected_checkpoint_id=f"yfm11econvalcp-{digest[:24]}",
+        expected_content_sha256=f"sha256:{digest}",
+    )
+    _require_discovery_directory_unchanged(
+        discovered,
+        label="validity-evidence checkpoint discovery",
+    )
+    return discovered.path, checkpoint
+
+
+def discover_sole_gate3_validity_sidecar(output_directory: Path) -> Path | None:
+    """Discover the sole bounded validity sidecar without yet trusting its content."""
+
     discovered = _discover_single_prefixed_regular_file(
         output_directory,
         prefix=_VALIDITY_SIDECAR_PREFIX,
@@ -668,20 +995,34 @@ def require_gate3_validity_sidecar_census(
             r"([0-9a-f]{64})-([0-9a-f]{64})\.json\.gz"
         ),
         max_bytes=_MAX_VALIDITY_SIDECAR_BYTES,
-        label="validity sidecar census",
+        label="validity sidecar discovery",
     )
+    if discovered is None:
+        return None
+    _require_discovery_directory_unchanged(
+        discovered,
+        label="validity sidecar discovery",
+    )
+    return discovered.path
+
+
+def require_gate3_validity_sidecar_census(
+    output_directory: Path,
+    *,
+    expected_evidence: Gate3ValidityEvidenceReceipt | None,
+) -> Path | None:
+    """Require zero unbound sidecars or one exact manifest-bound sidecar."""
+
+    evidence = None if expected_evidence is None else _strict_validity_evidence(expected_evidence)
+    discovered = discover_sole_gate3_validity_sidecar(output_directory)
     if discovered is None:
         if evidence is None:
             return None
         raise Gate3ValidityStageEvidenceError(
             "validity sidecar census is missing its expected receipt"
         )
-    if evidence is None or discovered.path.name != evidence.sidecar_name:
+    if evidence is None or discovered.name != evidence.sidecar_name:
         raise Gate3ValidityStageEvidenceError(
             "validity sidecar census has an unbound or competing candidate"
         )
-    _require_discovery_directory_unchanged(
-        discovered,
-        label="validity sidecar census",
-    )
-    return discovered.path
+    return discovered
