@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -137,6 +137,182 @@ def test_adapter_runtime_config_hash_is_deterministic_and_domain_separated(
     assert len(first) == 71
     assert first != gate3_config.content_sha256
     assert first == "sha256:dc71929bc462040f310c6e4570c75175ca0213645f53b1265015b907a08079d7"
+
+
+def test_gate3_inputs_are_fully_authenticated_once_into_an_immutable_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    gate3_runner: ModuleType,
+    gate3_config: Any,
+    tmp_path: Path,
+) -> None:
+    gate1, gate2, parent_calls = _install_parent_loaders(
+        monkeypatch,
+        gate3_runner,
+        gate3_config,
+    )
+
+    authenticated = gate3_runner.authenticate_official_gate3_early_inputs(
+        repository_root=REPO_ROOT,
+        gate1_artifact_path=tmp_path / "gate1.json",
+        gate2_artifact_path=tmp_path / "gate2.json",
+        gate3_config_path=tmp_path / "gate3-config.json",
+    )
+
+    assert authenticated.repository_root == REPO_ROOT
+    assert authenticated.gate1_artifact is gate1
+    assert authenticated.gate2_artifact is gate2
+    assert authenticated.gate3_config is gate3_config
+    assert authenticated.roots == gate3_runner._build_roots(gate1, gate2, gate3_config)
+    assert tuple(name for name, _path in parent_calls) == ("gate1", "gate2", "config")
+    with pytest.raises(FrozenInstanceError):
+        authenticated.repository_root = tmp_path
+
+
+def test_preauthenticated_bundle_cannot_be_constructed_without_full_authenticator(
+    gate3_runner: ModuleType,
+    gate3_config: Any,
+) -> None:
+    gate1, gate2 = _fake_authenticated_parents(gate3_config)
+
+    with pytest.raises(gate3_runner.M11Gate3RunnerError, match="full authenticator"):
+        gate3_runner.Gate3PreauthenticatedInputs(
+            repository_root=REPO_ROOT,
+            gate1_artifact=gate1,
+            gate2_artifact=gate2,
+            gate3_config=gate3_config,
+            roots=gate3_runner._build_roots(gate1, gate2, gate3_config),
+        )
+
+
+def test_preauthenticated_gate3_api_is_explicitly_public(
+    gate3_runner: ModuleType,
+) -> None:
+    assert {
+        "Gate3PreauthenticatedInputs",
+        "authenticate_official_gate3_early_inputs",
+        "load_official_gate3_early_run_preauthenticated",
+        "run_and_publish_official_gate3_early_preauthenticated",
+    }.issubset(gate3_runner.__all__)
+
+
+def test_preauthenticated_gate3_run_publishes_and_reads_back_without_parent_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    gate3_runner: ModuleType,
+    gate3_config: Any,
+    tmp_path: Path,
+) -> None:
+    gate1, gate2, parent_calls = _install_parent_loaders(
+        monkeypatch,
+        gate3_runner,
+        gate3_config,
+    )
+    authenticated = gate3_runner.authenticate_official_gate3_early_inputs(
+        repository_root=REPO_ROOT,
+        gate1_artifact_path=tmp_path / "gate1.json",
+        gate2_artifact_path=tmp_path / "gate2.json",
+        gate3_config_path=tmp_path / "gate3-config.json",
+    )
+    factory_calls: list[dict[str, object]] = []
+
+    def backend_factory(**kwargs: object) -> _FailingCalibrationBackend:
+        factory_calls.append(kwargs)
+        return _FailingCalibrationBackend()
+
+    artifact, path = gate3_runner.run_and_publish_official_gate3_early_preauthenticated(
+        authenticated_inputs=authenticated,
+        output_directory=tmp_path,
+        backend_factory=backend_factory,
+    )
+    readback = gate3_runner.load_official_gate3_early_run_preauthenticated(
+        path,
+        authenticated_inputs=authenticated,
+    )
+
+    assert readback == artifact
+    assert path.read_bytes() == gate3_runner.canonical_gate3_early_run_bytes(artifact)
+    assert tuple(name for name, _path in parent_calls) == ("gate1", "gate2", "config")
+    assert factory_calls == [
+        {
+            "repository_root": REPO_ROOT,
+            "gate1_artifact": gate1,
+            "gate2_artifact": gate2,
+            "gate3_config": gate3_config,
+            "roots": authenticated.roots,
+        }
+    ]
+
+
+def test_preauthenticated_gate3_run_rejects_in_memory_parent_drift_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    gate3_runner: ModuleType,
+    gate3_config: Any,
+    tmp_path: Path,
+) -> None:
+    _gate1, gate2, _parent_calls = _install_parent_loaders(
+        monkeypatch,
+        gate3_runner,
+        gate3_config,
+    )
+    authenticated = gate3_runner.authenticate_official_gate3_early_inputs(
+        repository_root=REPO_ROOT,
+        gate1_artifact_path=tmp_path / "gate1.json",
+        gate2_artifact_path=tmp_path / "gate2.json",
+        gate3_config_path=tmp_path / "gate3-config.json",
+    )
+    gate2.status = "gate_2_failed"
+    factory_called = False
+
+    def backend_factory(**_kwargs: object) -> _FailingCalibrationBackend:
+        nonlocal factory_called
+        factory_called = True
+        return _FailingCalibrationBackend()
+
+    with pytest.raises(gate3_runner.M11Gate3RunnerError, match="parents|roots"):
+        gate3_runner.run_and_publish_official_gate3_early_preauthenticated(
+            authenticated_inputs=authenticated,
+            output_directory=tmp_path,
+            backend_factory=backend_factory,
+        )
+    assert factory_called is False
+
+
+def test_preauthenticated_gate3_readback_rejects_nested_result_tampering_without_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    gate3_runner: ModuleType,
+    gate3_config: Any,
+    tmp_path: Path,
+) -> None:
+    _gate1, _gate2, parent_calls = _install_parent_loaders(
+        monkeypatch,
+        gate3_runner,
+        gate3_config,
+    )
+    authenticated = gate3_runner.authenticate_official_gate3_early_inputs(
+        repository_root=REPO_ROOT,
+        gate1_artifact_path=tmp_path / "gate1.json",
+        gate2_artifact_path=tmp_path / "gate2.json",
+        gate3_config_path=tmp_path / "gate3-config.json",
+    )
+    artifact, path = gate3_runner.run_and_publish_official_gate3_early_preauthenticated(
+        authenticated_inputs=authenticated,
+        output_directory=tmp_path,
+        backend_factory=lambda **_kwargs: _FailingCalibrationBackend(),
+    )
+    tampered = tmp_path / "preauthenticated-tampered.json"
+    tampered.write_bytes(
+        path.read_bytes().replace(
+            artifact.result_id.encode("ascii"),
+            ("yfm11g3early-" + "0" * 24).encode("ascii"),
+            1,
+        )
+    )
+
+    with pytest.raises(gate3_runner.M11Gate3RunnerError, match="canonical evidence"):
+        gate3_runner.load_official_gate3_early_run_preauthenticated(
+            tampered,
+            authenticated_inputs=authenticated,
+        )
+    assert tuple(name for name, _path in parent_calls) == ("gate1", "gate2", "config")
 
 
 def test_official_gate3_runner_authenticates_injects_publishes_and_reads_back(

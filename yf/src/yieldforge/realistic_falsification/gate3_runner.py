@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, Self
 
@@ -72,6 +73,58 @@ class Gate3BackendFactory(Protocol):
         gate3_config: M11Gate3ConfirmationConfig,
         roots: Gate3RootBinding,
     ) -> Gate3ConfirmationBackend: ...
+
+
+_GATE3_PREAUTHENTICATED_INPUTS_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class Gate3PreauthenticatedInputs:
+    """One fully authenticated in-memory parent/config bundle for a single Gate 3 run."""
+
+    repository_root: Path
+    gate1_artifact: M11Gate1RunArtifact
+    gate2_artifact: M11Gate2RunArtifact
+    gate3_config: M11Gate3ConfirmationConfig
+    roots: Gate3RootBinding
+
+    def __init__(
+        self,
+        *,
+        repository_root: Path,
+        gate1_artifact: M11Gate1RunArtifact,
+        gate2_artifact: M11Gate2RunArtifact,
+        gate3_config: M11Gate3ConfirmationConfig,
+        roots: Gate3RootBinding,
+        _authentication_token: object | None = None,
+    ) -> None:
+        if _authentication_token is not _GATE3_PREAUTHENTICATED_INPUTS_TOKEN:
+            raise M11Gate3RunnerError(
+                "Gate 3 preauthenticated inputs must be created by the full authenticator"
+            )
+        object.__setattr__(self, "repository_root", repository_root)
+        object.__setattr__(self, "gate1_artifact", gate1_artifact)
+        object.__setattr__(self, "gate2_artifact", gate2_artifact)
+        object.__setattr__(self, "gate3_config", gate3_config)
+        object.__setattr__(self, "roots", roots)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        root = Path(self.repository_root).resolve()
+        object.__setattr__(self, "repository_root", root)
+        _require_authenticated_parent_alignment(
+            self.gate1_artifact,
+            self.gate2_artifact,
+            self.gate3_config,
+        )
+        if self.roots != _build_roots(
+            self.gate1_artifact,
+            self.gate2_artifact,
+            self.gate3_config,
+        ):
+            raise M11Gate3RunnerError(
+                "preauthenticated Gate 3 roots differ from their in-memory parents"
+            )
 
 
 def gate3_adapter_runtime_config_sha256(config: M11Gate3ConfirmationConfig) -> str:
@@ -287,6 +340,32 @@ def _build_roots(
     )
 
 
+def authenticate_official_gate3_early_inputs(
+    *,
+    repository_root: Path,
+    gate1_artifact_path: Path,
+    gate2_artifact_path: Path,
+    gate3_config_path: Path,
+) -> Gate3PreauthenticatedInputs:
+    """Fully authenticate Gate 3 parents/config once for the preauthenticated run path."""
+
+    root = Path(repository_root).resolve()
+    gate1, gate2, config = _load_authenticated_inputs(
+        repository_root=root,
+        gate1_artifact_path=Path(gate1_artifact_path),
+        gate2_artifact_path=Path(gate2_artifact_path),
+        gate3_config_path=Path(gate3_config_path),
+    )
+    return Gate3PreauthenticatedInputs(
+        repository_root=root,
+        gate1_artifact=gate1,
+        gate2_artifact=gate2,
+        gate3_config=config,
+        roots=_build_roots(gate1, gate2, config),
+        _authentication_token=_GATE3_PREAUTHENTICATED_INPUTS_TOKEN,
+    )
+
+
 def build_gate3_early_run_artifact(
     *,
     roots: Gate3RootBinding,
@@ -448,6 +527,65 @@ def _reject_nonfinite(value: str) -> None:
     raise M11Gate3RunnerError(f"nonfinite Gate 3 run constant: {value}")
 
 
+def _require_preauthenticated_inputs(
+    authenticated_inputs: Gate3PreauthenticatedInputs,
+) -> None:
+    if not isinstance(authenticated_inputs, Gate3PreauthenticatedInputs):
+        raise M11Gate3RunnerError("Gate 3 preauthenticated inputs have the wrong type")
+    _require_authenticated_parent_alignment(
+        authenticated_inputs.gate1_artifact,
+        authenticated_inputs.gate2_artifact,
+        authenticated_inputs.gate3_config,
+    )
+    if authenticated_inputs.roots != _build_roots(
+        authenticated_inputs.gate1_artifact,
+        authenticated_inputs.gate2_artifact,
+        authenticated_inputs.gate3_config,
+    ):
+        raise M11Gate3RunnerError(
+            "preauthenticated Gate 3 roots differ from their in-memory parents"
+        )
+
+
+def load_official_gate3_early_run_preauthenticated(
+    path: Path,
+    *,
+    authenticated_inputs: Gate3PreauthenticatedInputs,
+) -> M11Gate3EarlyRunArtifact:
+    """Strict-read one run against already fully authenticated in-memory roots."""
+
+    _require_preauthenticated_inputs(authenticated_inputs)
+    raw = _read_bounded_regular_file(path)
+    try:
+        json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+        artifact = M11Gate3EarlyRunArtifact.model_validate_json(raw, strict=True)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ) as error:
+        raise M11Gate3RunnerError("Gate 3 run is not strict canonical evidence") from error
+    if raw != canonical_gate3_early_run_bytes(artifact):
+        raise M11Gate3RunnerError("Gate 3 run encoding is not canonical")
+    if artifact.roots != authenticated_inputs.roots:
+        raise M11Gate3RunnerError(
+            "Gate 3 run roots differ from preauthenticated in-memory evidence"
+        )
+    expected = build_gate3_early_run_artifact(
+        roots=authenticated_inputs.roots,
+        result=artifact.result,
+    )
+    if artifact != expected:
+        raise M11Gate3RunnerError("Gate 3 run envelope differs from its nested result")
+    return artifact
+
+
 def load_official_gate3_early_run(
     path: Path,
     *,
@@ -493,6 +631,47 @@ def load_official_gate3_early_run(
     if artifact != expected:
         raise M11Gate3RunnerError("Gate 3 run envelope differs from its nested result")
     return artifact
+
+
+def run_and_publish_official_gate3_early_preauthenticated(
+    *,
+    authenticated_inputs: Gate3PreauthenticatedInputs,
+    output_directory: Path,
+    backend_factory: Gate3BackendFactory,
+) -> tuple[M11Gate3EarlyRunArtifact, Path]:
+    """Execute and publish using one previously fully authenticated input bundle."""
+
+    _require_preauthenticated_inputs(authenticated_inputs)
+    root = authenticated_inputs.repository_root
+    gate1 = authenticated_inputs.gate1_artifact
+    gate2 = authenticated_inputs.gate2_artifact
+    config = authenticated_inputs.gate3_config
+    roots = authenticated_inputs.roots
+    try:
+        backend = backend_factory(
+            repository_root=root,
+            gate1_artifact=gate1,
+            gate2_artifact=gate2,
+            gate3_config=config,
+            roots=roots,
+        )
+        result = run_gate3_early_confirmation(roots=roots, backend=backend)
+        artifact = build_gate3_early_run_artifact(roots=roots, result=result)
+    except Exception as error:
+        raise M11Gate3RunnerError("Gate 3 early-confirmation execution failed") from error
+    try:
+        path = publish_gate3_early_run(Path(output_directory), artifact)
+        readback = load_official_gate3_early_run_preauthenticated(
+            path,
+            authenticated_inputs=authenticated_inputs,
+        )
+    except (OSError, TypeError, ValueError, ValidationError) as error:
+        if isinstance(error, M11Gate3RunnerError):
+            raise
+        raise M11Gate3RunnerError("Gate 3 publication or read-back failed") from error
+    if readback != artifact:
+        raise M11Gate3RunnerError("Gate 3 read-back differs from the published run")
+    return readback, path
 
 
 def run_and_publish_official_gate3_early(
@@ -549,12 +728,16 @@ def run_and_publish_official_gate3_early(
 
 __all__ = [
     "Gate3BackendFactory",
+    "Gate3PreauthenticatedInputs",
     "M11Gate3EarlyRunArtifact",
     "M11Gate3RunnerError",
+    "authenticate_official_gate3_early_inputs",
     "build_gate3_early_run_artifact",
     "canonical_gate3_early_run_bytes",
     "gate3_adapter_runtime_config_sha256",
     "load_official_gate3_early_run",
+    "load_official_gate3_early_run_preauthenticated",
     "publish_gate3_early_run",
     "run_and_publish_official_gate3_early",
+    "run_and_publish_official_gate3_early_preauthenticated",
 ]
