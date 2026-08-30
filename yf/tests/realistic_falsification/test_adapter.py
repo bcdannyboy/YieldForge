@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,10 +9,16 @@ from types import SimpleNamespace
 import pytest
 
 import yieldforge.realistic_falsification.adapter as adapter_module
+from yieldforge.baseline.policies import (
+    M7PolicyName,
+    policy_identity,
+    registered_policy_identities,
+)
 from yieldforge.baseline.replay import enumerate_m7_action_catalog, initial_m7_cursor
 from yieldforge.realistic_falsification.adapter import (
     AdapterEvidenceError,
     M11M7AdapterContext,
+    M11M7ProjectionAttestation,
     _adapter_context_from_authenticated,
     load_authenticated_adapter_context,
     project_exact_audit,
@@ -27,6 +34,7 @@ from yieldforge.realistic_falsification.runner import M11Gate1RunArtifact
 
 _ROOT = Path(__file__).parents[2]
 _GATE1_RUN = _ROOT / "experiments/results/m11-gate1-yfm11g1run-c35f10fa4f4d7b6b01c59c29.json"
+_REMNANT_FIRST = policy_identity(M7PolicyName.REMNANT_FIRST)
 
 
 @pytest.fixture(scope="module")
@@ -81,6 +89,108 @@ def _population(context):
     return context.population
 
 
+def test_every_registered_policy_is_bound_to_a_distinct_replay_identity(
+    adapter_context,
+) -> None:
+    audit = next(
+        item
+        for item in _population(adapter_context).exact_audits
+        if item.corpus_id == "loco-2dics" and item.economic_arm == "central"
+    )
+    projected_by_policy = tuple(
+        project_exact_audit(adapter_context, audit.audit_id, policy=policy)
+        for policy in registered_policy_identities()
+    )
+
+    assert all(
+        all(
+            projection.attestation.policy == policy
+            and projection.runtime.replay_input.policy == policy
+            for projection in projections
+        )
+        for policy, projections in zip(
+            registered_policy_identities(), projected_by_policy, strict=True
+        )
+    )
+    assert len(
+        {
+            tuple(item.attestation.m7_replay_input_id for item in projections)
+            for projections in projected_by_policy
+        }
+    ) == len(registered_policy_identities())
+    assert len(
+        {
+            tuple(item.attestation.attestation_id for item in projections)
+            for projections in projected_by_policy
+        }
+    ) == len(registered_policy_identities())
+
+    source_roots = {
+        tuple(
+            (
+                item.attestation.gate1_result_content_sha256,
+                item.attestation.gate2_result_content_sha256,
+                item.attestation.population_content_sha256,
+                item.attestation.source_registration_content_sha256,
+                tuple(parity.source_binding_sha256s for parity in item.candidate_action_parity),
+            )
+            for item in projections
+        )
+        for projections in projected_by_policy
+    }
+    assert len(source_roots) == 1
+    source = projected_by_policy[0][0].attestation
+    assert (
+        source.gate3_config_id,
+        source.gate3_config_content_sha256,
+    ) == (
+        adapter_context.gate3_config.config_id,
+        adapter_context.gate3_config.content_sha256,
+    )
+    substituted = source.model_dump(mode="python", round_trip=True)
+    substituted["policy"] = registered_policy_identities()[1].model_dump(
+        mode="python",
+        round_trip=True,
+    )
+    with pytest.raises(ValueError, match="identity"):
+        M11M7ProjectionAttestation.model_validate(substituted, strict=True)
+
+
+def test_exact_audit_arm_and_null_transform_are_derived_from_frozen_registration(
+    adapter_context,
+) -> None:
+    assert "arm" not in inspect.signature(project_exact_audit).parameters
+    population = _population(adapter_context)
+    expected_profiles = {"central": "central", "adverse": "adverse", "null": "central"}
+    for audit_arm, expected_profile in expected_profiles.items():
+        audit = next(
+            item
+            for item in population.exact_audits
+            if item.corpus_id == "lectra-m3-m4" and item.economic_arm == audit_arm
+        )
+        projections = project_exact_audit(
+            adapter_context,
+            audit.audit_id,
+            policy=_REMNANT_FIRST,
+        )
+        assert all(
+            item.attestation.registered_exact_audit_arm == audit_arm
+            and item.attestation.economic_arm == expected_profile
+            for item in projections
+        )
+        mappings = tuple(mapping for item in projections for mapping in item.source_event_map)
+        if audit_arm == "null":
+            assert len({item.projected_material_key for item in mappings}) == len(mappings)
+            assert all(item.projected_material_key != item.source_material_key for item in mappings)
+        else:
+            assert all(item.projected_material_key == item.source_material_key for item in mappings)
+        assert all(
+            parity.projected_candidate_ids == parity.source_candidate_ids
+            for item in projections
+            for parity in item.candidate_action_parity
+        )
+
+
 def test_real_lectra_and_loco_audit_slices_reconstruct_every_candidate_option(
     adapter_context,
 ) -> None:
@@ -94,7 +204,11 @@ def test_real_lectra_and_loco_audit_slices_reconstruct_every_candidate_option(
             for item in population.exact_audits
             if item.corpus_id == corpus_id and item.economic_arm == "central"
         )
-        projections = project_exact_audit(adapter_context, audit.audit_id, "central")
+        projections = project_exact_audit(
+            adapter_context,
+            audit.audit_id,
+            policy=_REMNANT_FIRST,
+        )
         assert sum(len(item.source_event_map) for item in projections) == 3
         assert {
             mapping.source_event_position
@@ -134,7 +248,12 @@ def test_stream_projection_is_material_additive_and_rates_are_per_area_hour(
         and item.partition == "calibration"
         and item.stream_kind == "primary"
     )
-    projections = project_stream(adapter_context, stream.stream_id, "central")
+    projections = project_stream(
+        adapter_context,
+        stream.stream_id,
+        "central",
+        policy=_REMNANT_FIRST,
+    )
     mapped = tuple(
         mapping.source_event_position for item in projections for mapping in item.source_event_map
     )
@@ -171,7 +290,12 @@ def test_known_visible_prefix_is_filtered_to_the_local_material_substream(
         and item.partition == "calibration"
         and item.stream_kind == "primary"
     )
-    for projection in project_stream(adapter_context, stream.stream_id, "adverse"):
+    for projection in project_stream(
+        adapter_context,
+        stream.stream_id,
+        "adverse",
+        policy=_REMNANT_FIRST,
+    ):
         local_by_source = {
             item.source_event_position: item.local_event_position
             for item in projection.source_event_map
@@ -191,7 +315,12 @@ def test_shuffled_twin_and_all_three_hard_null_kinds_remain_distinct(
 ) -> None:
     population = _population(adapter_context)
     twin = next(item for item in population.streams if item.stream_kind == "shuffled_twin")
-    twin_projections = project_stream(adapter_context, twin.stream_id, "central")
+    twin_projections = project_stream(
+        adapter_context,
+        twin.stream_id,
+        "central",
+        policy=_REMNANT_FIRST,
+    )
     assert len(twin_projections) == 24
     assert all(item.attestation.registration_kind == "shuffled_twin" for item in twin_projections)
 
@@ -202,7 +331,12 @@ def test_shuffled_twin_and_all_three_hard_null_kinds_remain_distinct(
         "all_work_known_single_action",
     }
     for control in lectra_nulls:
-        projections = project_hard_null(adapter_context, control.null_id, "central")
+        projections = project_hard_null(
+            adapter_context,
+            control.null_id,
+            "central",
+            policy=_REMNANT_FIRST,
+        )
         assert sum(len(item.source_event_map) for item in projections) == 3
         assert all(item.attestation.control_kind == control.null_kind for item in projections)
         assert all(
@@ -236,8 +370,8 @@ def test_projection_is_deterministic_and_tampered_jagua_falls_back(
         gate2_result=_gate2_root(geometry, official_gate1_result),
     )
     audit = next(item for item in context.population.exact_audits if item.corpus_id == "loco-2dics")
-    first = project_exact_audit(context, audit.audit_id, "adverse")
-    second = project_exact_audit(context, audit.audit_id, "adverse")
+    first = project_exact_audit(context, audit.audit_id, policy=_REMNANT_FIRST)
+    second = project_exact_audit(context, audit.audit_id, policy=_REMNANT_FIRST)
     assert tuple(item.attestation for item in first) == tuple(item.attestation for item in second)
     assert all(item.runtime.jagua_executable is None for item in first)
     assert all(
@@ -249,6 +383,7 @@ def test_authenticated_loader_fails_closed_on_tamper_and_source_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     official_geometry_context,
     official_gate1_result,
+    adapter_context,
 ) -> None:
     gate2 = _gate2_root(official_geometry_context, official_gate1_result)
     monkeypatch.setattr(
@@ -291,7 +426,31 @@ def test_authenticated_loader_fails_closed_on_tamper_and_source_mismatch(
         gate1_result=official_gate1_result,
         gate2_result=gate2,
         geometry_context=official_geometry_context,
+        gate3_config=adapter_context.gate3_config,
     )
     stream_id = forged.population.streams[0].stream_id
     with pytest.raises(AdapterEvidenceError, match="authenticated authority"):
-        project_stream(forged, stream_id, "central")
+        project_stream(
+            forged,
+            stream_id,
+            "central",
+            policy=_REMNANT_FIRST,
+        )
+
+
+def test_adapter_context_rejects_an_unavailable_gate3_arm_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    official_geometry_context,
+    official_gate1_result,
+) -> None:
+    def reject_config(*args, **kwargs):
+        raise ValueError("tampered Gate 3 config")
+
+    monkeypatch.setattr(adapter_module, "load_gate3_confirmation_config", reject_config)
+    with pytest.raises(AdapterEvidenceError, match="Gate 3 configuration"):
+        _adapter_context_from_authenticated(
+            repository_root=_ROOT,
+            geometry_context=official_geometry_context,
+            gate1_result=official_gate1_result,
+            gate2_result=_gate2_root(official_geometry_context, official_gate1_result),
+        )

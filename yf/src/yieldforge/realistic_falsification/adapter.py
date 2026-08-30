@@ -28,7 +28,7 @@ from yieldforge.baseline.contracts import (
     TemporalInstanceBinding,
 )
 from yieldforge.baseline.geometry import prepare_layout_footprint
-from yieldforge.baseline.policies import M7PolicyName, policy_identity
+from yieldforge.baseline.policies import M7PolicyIdentity, registered_policy_identities
 from yieldforge.baseline.replay import (
     M7ReplayRuntime,
     build_m7_replay_input,
@@ -44,6 +44,12 @@ from yieldforge.experiments.contracts import FrozenExperimentModel, semantic_sha
 from yieldforge.realistic_falsification.evaluate import (
     Gate1EvaluationResult,
     authenticate_official_gate1_evaluation,
+)
+from yieldforge.realistic_falsification.gate3_contracts import (
+    GATE3_CONFIG_FILENAME,
+    M11Gate3ConfirmationConfig,
+    M11Gate3ExactAuditArmRule,
+    load_gate3_confirmation_config,
 )
 from yieldforge.realistic_falsification.geometry_gate import (
     Gate2EvaluationResult,
@@ -210,17 +216,27 @@ class M11M7ProjectionAttestation(FrozenExperimentModel):
     gate1_result_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     gate2_result_id: StrictStr = Field(pattern=r"^yfm11g2r-[0-9a-f]{24}$")
     gate2_result_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    gate3_config_id: StrictStr = Field(pattern=r"^yfm11g3c-[0-9a-f]{24}$")
+    gate3_config_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     population_id: StrictStr = Field(pattern=r"^yfm11pop-[0-9a-f]{24}$")
     population_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     registration_kind: RegistrationKind
     control_kind: ControlKind | None
     registered_exact_audit_arm: Literal["central", "adverse", "null"] | None
+    registered_exact_audit_material_rule: (
+        Literal[
+            "preserve_registered_material_keys",
+            "unique_material_key_per_event_information_null",
+        ]
+        | None
+    )
     source_registration_id: StrictStr = Field(min_length=1)
     source_registration_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source_stream_id: StrictStr = Field(pattern=r"^yfm11st-[0-9a-f]{24}$")
     source_stream_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     corpus_id: Literal["lectra-m3-m4", "loco-2dics"]
     economic_arm: EconomicArm
+    policy: M7PolicyIdentity
     material_key: StrictStr = Field(min_length=1)
     reference_area_key: StrictStr = Field(min_length=1)
     reference_area: StrictFloat = Field(gt=0)
@@ -272,13 +288,35 @@ class M11M7ProjectionAttestation(FrozenExperimentModel):
         )
         if self.rates != expected_rates:
             raise ValueError("M11 adapter rates differ from the frozen M11 profile conversion")
+        if self.policy not in registered_policy_identities():
+            raise ValueError("M11 adapter policy differs from the registered M7 identities")
         if self.registration_kind == "hard_null":
-            if self.control_kind is None or self.registered_exact_audit_arm is not None:
+            if (
+                self.control_kind is None
+                or self.registered_exact_audit_arm is not None
+                or self.registered_exact_audit_material_rule is not None
+            ):
                 raise ValueError("M11 hard-null adapter metadata is incomplete")
         elif self.registration_kind == "exact_audit":
-            if self.control_kind is not None or self.registered_exact_audit_arm is None:
+            expected_audit = {
+                "central": ("central", "preserve_registered_material_keys"),
+                "adverse": ("adverse", "preserve_registered_material_keys"),
+                "null": (
+                    "central",
+                    "unique_material_key_per_event_information_null",
+                ),
+            }.get(self.registered_exact_audit_arm)
+            if (
+                self.control_kind is not None
+                or expected_audit is None
+                or (self.economic_arm, self.registered_exact_audit_material_rule) != expected_audit
+            ):
                 raise ValueError("M11 exact-audit adapter metadata is incomplete")
-        elif self.control_kind is not None or self.registered_exact_audit_arm is not None:
+        elif (
+            self.control_kind is not None
+            or self.registered_exact_audit_arm is not None
+            or self.registered_exact_audit_material_rule is not None
+        ):
             raise ValueError("ordinary M11 adapter projection carries control metadata")
         digest = semantic_sha256(self, excluded_fields={"attestation_id", "content_sha256"})
         if self.attestation_id != f"yfm11m7a-{digest[:24]}" or self.content_sha256 != (
@@ -301,6 +339,7 @@ class M11MaterialRuntimeProjection:
             replay.input_id != self.attestation.m7_replay_input_id
             or replay.content_sha256 != self.attestation.m7_replay_input_content_sha256
             or replay.rates != self.attestation.rates
+            or replay.policy != self.attestation.policy
             or replay.collision_backend != self.attestation.collision_backend
             or m7_semantic_runtime_sha256(self.runtime)
             != self.attestation.m7_runtime_semantic_sha256
@@ -340,6 +379,7 @@ class M11M7AdapterContext:
     gate1_result: Gate1EvaluationResult
     gate2_result: Gate2EvaluationResult
     geometry_context: _OfficialGate2Context
+    gate3_config: M11Gate3ConfirmationConfig
 
     @property
     def population(self) -> M11Population:
@@ -366,6 +406,9 @@ def _context_fingerprint(context: M11M7AdapterContext) -> str:
                 'gate2_object_id': id(context.gate2_result),
                 'gate2_result_id': context.gate2_result.result_id,
                 'gate2_result_content_sha256': context.gate2_result.content_sha256,
+                'gate3_config_object_id': id(context.gate3_config),
+                'gate3_config_id': context.gate3_config.config_id,
+                'gate3_config_content_sha256': context.gate3_config.content_sha256,
                 'geometry_context_object_id': id(geometry),
                 'population_object_id': id(geometry.gate1.bundle.population),
                 'population_id': geometry.gate1.bundle.population.population_id,
@@ -410,6 +453,13 @@ class _Registration:
     registration_kind: RegistrationKind
     control_kind: ControlKind | None
     registered_exact_audit_arm: Literal["central", "adverse", "null"] | None
+    registered_exact_audit_material_rule: (
+        Literal[
+            "preserve_registered_material_keys",
+            "unique_material_key_per_event_information_null",
+        ]
+        | None
+    )
     registration_id: str
     registration_content_sha256: str
     source_stream: M11Stream
@@ -492,17 +542,28 @@ def _adapter_context_from_authenticated(
 ) -> M11M7AdapterContext:
     """Bind already-authenticated roots; private seam used by focused reconstruction tests."""
 
+    root = Path(repository_root).resolve()
     _require_context_roots(
-        repository_root=repository_root,
+        repository_root=root,
         geometry_context=geometry_context,
         gate1_result=gate1_result,
         gate2_result=gate2_result,
     )
+    try:
+        gate3_config = load_gate3_confirmation_config(
+            root / "benchmarks/falsification" / GATE3_CONFIG_FILENAME,
+            repository_root=root,
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise AdapterEvidenceError(
+            "M11 adapter Gate 3 configuration authentication failed"
+        ) from error
     context = M11M7AdapterContext(
-        repository_root=Path(repository_root).resolve(),
+        repository_root=root,
         gate1_result=gate1_result,
         gate2_result=gate2_result,
         geometry_context=geometry_context,
+        gate3_config=gate3_config,
     )
     _register_authenticated_context(context)
     return context
@@ -636,6 +697,7 @@ def _registration_for_stream(context: M11M7AdapterContext, stream_id: str) -> _R
         registration_kind=kind,
         control_kind=None,
         registered_exact_audit_arm=None,
+        registered_exact_audit_material_rule=None,
         registration_id=stream.stream_id,
         registration_content_sha256=stream.content_sha256,
         source_stream=stream,
@@ -712,12 +774,27 @@ def _registration_for_hard_null(
         registration_kind="hard_null",
         control_kind=control.null_kind,
         registered_exact_audit_arm=None,
+        registered_exact_audit_material_rule=None,
         registration_id=control.null_id,
         registration_content_sha256=control.content_sha256,
         source_stream=source,
         selected_events=tuple(selected),
         all_work_known=control.all_work_known,
     )
+
+
+def _exact_audit_rule(
+    context: M11M7AdapterContext,
+    audit_arm: Literal["central", "adverse", "null"],
+) -> M11Gate3ExactAuditArmRule:
+    matches = tuple(
+        item
+        for item in context.gate3_config.controls.exact_audit_arm_registry
+        if item.audit_arm == audit_arm
+    )
+    if len(matches) != 1:
+        raise AdapterEvidenceError("M11 exact-audit arm lacks one authenticated Gate 3 rule")
+    return matches[0]
 
 
 def _registration_for_exact_audit(
@@ -735,20 +812,26 @@ def _registration_for_exact_audit(
     events = tuple(source.events[position] for position in audit.event_positions)
     if tuple(item.event_id for item in events) != audit.event_ids:
         raise AdapterEvidenceError("M11 exact-audit event slice differs from its registry")
+    rule = _exact_audit_rule(context, audit.economic_arm)
     return _Registration(
         registration_kind="exact_audit",
         control_kind=None,
         registered_exact_audit_arm=audit.economic_arm,
+        registered_exact_audit_material_rule=rule.material_rule,
         registration_id=audit.audit_id,
         registration_content_sha256=audit.content_sha256,
         source_stream=source,
         selected_events=tuple(
             _SelectedEvent(
                 event=item,
-                projected_material_key=item.material_key,
+                projected_material_key=(
+                    item.material_key
+                    if rule.material_rule == "preserve_registered_material_keys"
+                    else f"exact-audit-null:{audit.audit_id}:{ordinal:02d}"
+                ),
                 reference_area_key=_reference_area_key_for_event(population, source, item),
             )
-            for item in events
+            for ordinal, item in enumerate(events)
         ),
     )
 
@@ -758,6 +841,21 @@ def _rates(population: M11Population, arm: EconomicArm, reference_area: float):
     if profile is None:
         raise AdapterEvidenceError("M11 adapter economic arm is absent")
     return _rates_for_profile(profile, reference_area)
+
+
+def _registered_policy(policy: M7PolicyIdentity) -> M7PolicyIdentity:
+    try:
+        canonical = M7PolicyIdentity.model_validate(
+            policy.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise AdapterEvidenceError(
+            "M11 adapter requires a concrete registered M7 policy identity"
+        ) from error
+    if canonical not in registered_policy_identities():
+        raise AdapterEvidenceError("M11 adapter policy differs from the registered M7 identities")
+    return canonical
 
 
 def _rates_for_profile(
@@ -1187,6 +1285,7 @@ def _build_material_projection(
     material_key: str,
     selected: tuple[_SelectedEvent, ...],
     arm: EconomicArm,
+    policy: M7PolicyIdentity,
     horizon_end: datetime,
 ) -> M11MaterialRuntimeProjection:
     population = context.population
@@ -1308,7 +1407,7 @@ def _build_material_projection(
         m6_contract_sha256=m6_contract_sha,
         m6_population_id=m6_population_id,
         m6_population_sha256=m6_population_sha,
-        policy=policy_identity(M7PolicyName.REMNANT_FIRST),
+        policy=policy,
         rates=rates,
         fit_config=context.geometry_context.fit_config,
         search_config=context.geometry_context.search_config,
@@ -1365,17 +1464,21 @@ def _build_material_projection(
         "gate1_result_content_sha256": context.gate1_result.content_sha256,
         "gate2_result_id": context.gate2_result.result_id,
         "gate2_result_content_sha256": context.gate2_result.content_sha256,
+        "gate3_config_id": context.gate3_config.config_id,
+        "gate3_config_content_sha256": context.gate3_config.content_sha256,
         "population_id": population.population_id,
         "population_content_sha256": population.content_sha256,
         "registration_kind": registration.registration_kind,
         "control_kind": registration.control_kind,
         "registered_exact_audit_arm": registration.registered_exact_audit_arm,
+        "registered_exact_audit_material_rule": (registration.registered_exact_audit_material_rule),
         "source_registration_id": registration.registration_id,
         "source_registration_content_sha256": registration.registration_content_sha256,
         "source_stream_id": registration.source_stream.stream_id,
         "source_stream_content_sha256": registration.source_stream.content_sha256,
         "corpus_id": registration.source_stream.corpus_id,
         "economic_arm": arm,
+        "policy": policy.model_dump(mode="json"),
         "material_key": material_key,
         "reference_area_key": reference_area_key,
         "reference_area": reference_area,
@@ -1395,6 +1498,7 @@ def _build_material_projection(
     constructor_values = {
         **semantic,
         "rates": rates,
+        "policy": policy,
         "source_event_map": event_map,
         "known_visible_local_prefixes": visibility,
         "candidate_action_parity": parity,
@@ -1411,10 +1515,25 @@ def _project_registration(
     context: M11M7AdapterContext,
     registration: _Registration,
     arm: EconomicArm,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
     _require_live_context(context)
+    canonical_policy = _registered_policy(policy)
     if arm not in ("central", "adverse"):
         raise AdapterEvidenceError("M11 adapter economic arm must be central or adverse")
+    if registration.registration_kind == "exact_audit":
+        audit_arm = registration.registered_exact_audit_arm
+        if audit_arm is None:
+            raise AdapterEvidenceError("M11 exact-audit registration lacks its arm")
+        rule = _exact_audit_rule(context, audit_arm)
+        if (
+            arm != rule.economic_profile
+            or registration.registered_exact_audit_material_rule != rule.material_rule
+        ):
+            raise AdapterEvidenceError(
+                "M11 exact-audit projection differs from its authenticated Gate 3 arm"
+            )
     grouped: dict[str, list[_SelectedEvent]] = {}
     for item in registration.selected_events:
         grouped.setdefault(item.projected_material_key, []).append(item)
@@ -1426,6 +1545,7 @@ def _project_registration(
             material_key=material_key,
             selected=tuple(grouped[material_key]),
             arm=arm,
+            policy=canonical_policy,
             horizon_end=horizon_end,
         )
         for material_key in sorted(grouped)
@@ -1436,30 +1556,55 @@ def project_stream(
     context: M11M7AdapterContext,
     stream_id: str,
     arm: EconomicArm,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
     """Project one registered primary or shuffled-twin stream by exact material."""
 
-    return _project_registration(context, _registration_for_stream(context, stream_id), arm)
+    return _project_registration(
+        context,
+        _registration_for_stream(context, stream_id),
+        arm,
+        policy=policy,
+    )
 
 
 def project_hard_null(
     context: M11M7AdapterContext,
     null_id: str,
     arm: EconomicArm,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
     """Project one registered three-event hard null with its frozen control semantics."""
 
-    return _project_registration(context, _registration_for_hard_null(context, null_id), arm)
+    return _project_registration(
+        context,
+        _registration_for_hard_null(context, null_id),
+        arm,
+        policy=policy,
+    )
 
 
 def project_exact_audit(
     context: M11M7AdapterContext,
     audit_id: str,
-    arm: EconomicArm,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    """Project one registered three-event exact-audit slice without widening it."""
+    """Project one exact-audit slice using only its authenticated registered arm."""
 
-    return _project_registration(context, _registration_for_exact_audit(context, audit_id), arm)
+    registration = _registration_for_exact_audit(context, audit_id)
+    audit_arm = registration.registered_exact_audit_arm
+    if audit_arm is None:  # pragma: no cover - registration constructor closes this branch.
+        raise AdapterEvidenceError("M11 exact-audit registration lacks its arm")
+    rule = _exact_audit_rule(context, audit_arm)
+    return _project_registration(
+        context,
+        registration,
+        rule.economic_profile,
+        policy=policy,
+    )
 
 
 def _stream_cohort(
@@ -1467,6 +1612,7 @@ def _stream_cohort(
     *,
     arm: EconomicArm,
     kind: Literal["calibration", "confirmation", "shuffled_twin"],
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
     streams = tuple(
         item
@@ -1481,7 +1627,12 @@ def _stream_cohort(
     return tuple(
         projection
         for stream in streams
-        for projection in project_stream(context, stream.stream_id, arm)
+        for projection in project_stream(
+            context,
+            stream.stream_id,
+            arm,
+            policy=policy,
+        )
     )
 
 
@@ -1489,64 +1640,121 @@ def _control_cohort(
     context: M11M7AdapterContext,
     *,
     arm: EconomicArm,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
     return tuple(
         projection
         for control in context.population.hard_nulls
-        for projection in project_hard_null(context, control.null_id, arm)
+        for projection in project_hard_null(
+            context,
+            control.null_id,
+            arm,
+            policy=policy,
+        )
     ) + tuple(
         projection
         for audit in context.population.exact_audits
-        for projection in project_exact_audit(context, audit.audit_id, arm)
+        if _exact_audit_rule(context, audit.economic_arm).economic_profile == arm
+        for projection in project_exact_audit(
+            context,
+            audit.audit_id,
+            policy=policy,
+        )
     )
 
 
 def central_calibration_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _stream_cohort(context, arm="central", kind="calibration")
+    return _stream_cohort(
+        context,
+        arm="central",
+        kind="calibration",
+        policy=policy,
+    )
 
 
 def adverse_calibration_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _stream_cohort(context, arm="adverse", kind="calibration")
+    return _stream_cohort(
+        context,
+        arm="adverse",
+        kind="calibration",
+        policy=policy,
+    )
 
 
 def central_confirmation_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _stream_cohort(context, arm="central", kind="confirmation")
+    return _stream_cohort(
+        context,
+        arm="central",
+        kind="confirmation",
+        policy=policy,
+    )
 
 
 def adverse_confirmation_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _stream_cohort(context, arm="adverse", kind="confirmation")
+    return _stream_cohort(
+        context,
+        arm="adverse",
+        kind="confirmation",
+        policy=policy,
+    )
 
 
 def central_twin_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _stream_cohort(context, arm="central", kind="shuffled_twin")
+    return _stream_cohort(
+        context,
+        arm="central",
+        kind="shuffled_twin",
+        policy=policy,
+    )
 
 
 def adverse_twin_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _stream_cohort(context, arm="adverse", kind="shuffled_twin")
+    return _stream_cohort(
+        context,
+        arm="adverse",
+        kind="shuffled_twin",
+        policy=policy,
+    )
 
 
 def central_control_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _control_cohort(context, arm="central")
+    return _control_cohort(context, arm="central", policy=policy)
 
 
 def adverse_control_runtimes(
     context: M11M7AdapterContext,
+    *,
+    policy: M7PolicyIdentity,
 ) -> tuple[M11MaterialRuntimeProjection, ...]:
-    return _control_cohort(context, arm="adverse")
+    return _control_cohort(context, arm="adverse", policy=policy)
 
 
 __all__ = [
