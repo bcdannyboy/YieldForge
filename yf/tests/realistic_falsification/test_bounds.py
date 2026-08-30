@@ -982,3 +982,117 @@ def test_content_addressing_and_recomputed_fields_reject_tampering(
 
     with pytest.raises(ValidationError, match="lower-bound|identity|reconcile"):
         bounds.Gate1LowerBound.model_validate(payload, strict=True)
+
+
+def test_official_session_authenticates_once_selects_before_confirmation_and_is_fresh(
+    monkeypatch,
+) -> None:
+    bounds = _bounds()
+    events: list[object] = []
+    registry_ids: list[tuple[int, int, int]] = []
+    original_load = bounds.load_official_gate1_context
+    original_select = bounds._select_gate1_baseline_policy_authenticated
+    original_registry = bounds._official_confirmation_stream_registry
+    original_cell = bounds._build_gate1_stream_cell_authenticated
+
+    def traced_load(repository_root):
+        events.append("load")
+        return original_load(repository_root)
+
+    def traced_select(context, corpus_id, *, payloads, references, proof_cache):
+        events.append(("select", corpus_id))
+        registry_ids.append((id(payloads), id(references), id(proof_cache)))
+        return original_select(
+            context,
+            corpus_id,
+            payloads=payloads,
+            references=references,
+            proof_cache=proof_cache,
+        )
+
+    def traced_registry(context):
+        events.append("confirmation_registry")
+        return original_registry(context)
+
+    def traced_cell(
+        context,
+        stream,
+        *,
+        baseline_selection,
+        canonical_selection,
+        payloads,
+        references,
+        proof_cache,
+    ):
+        events.append(("cell", stream.stream_id))
+        registry_ids.append((id(payloads), id(references), id(proof_cache)))
+        return original_cell(
+            context,
+            stream,
+            baseline_selection=baseline_selection,
+            canonical_selection=canonical_selection,
+            payloads=payloads,
+            references=references,
+            proof_cache=proof_cache,
+        )
+
+    monkeypatch.setattr(bounds, "load_official_gate1_context", traced_load)
+    monkeypatch.setattr(bounds, "_select_gate1_baseline_policy_authenticated", traced_select)
+    monkeypatch.setattr(bounds, "_official_confirmation_stream_registry", traced_registry)
+    monkeypatch.setattr(bounds, "_build_gate1_stream_cell_authenticated", traced_cell)
+
+    session = bounds._open_official_gate1_session(REPO_ROOT)
+    first_stream_id = session.context.bundle.contract.corpora[0].confirmation_stream_ids[0]
+    session.build_stream_cell(first_stream_id)
+
+    assert events[:4] == [
+        "load",
+        ("select", "lectra-m3-m4"),
+        ("select", "loco-2dics"),
+        "confirmation_registry",
+    ]
+    assert events[4] == ("cell", first_stream_id)
+    assert len(set(registry_ids)) == 1
+    assert tuple(item.corpus_id for item in session.baseline_selections) == (
+        "lectra-m3-m4",
+        "loco-2dics",
+    )
+
+    population = session.context.bundle.population
+    rejected_ids = (
+        next(
+            item.stream_id
+            for item in population.streams
+            if item.partition == "calibration" and item.stream_kind == "primary"
+        ),
+        next(item.stream_id for item in population.streams if item.stream_kind == "shuffled_twin"),
+        population.hard_nulls[0].null_id,
+        "not-an-official-stream",
+    )
+    for stream_id in rejected_ids:
+        with pytest.raises(bounds.Gate1EvidenceError, match="confirmation|official|stream"):
+            session.build_stream_cell(stream_id)
+    assert len([item for item in events if isinstance(item, tuple) and item[0] == "cell"]) == 1
+
+    bounds._open_official_gate1_session(REPO_ROOT)
+    assert events.count("load") == 2
+    assert events.count("confirmation_registry") == 2
+    assert len([item for item in events if isinstance(item, tuple) and item[0] == "select"]) == 4
+
+
+def test_session_cell_matches_fully_authenticating_public_wrapper() -> None:
+    bounds = _bounds()
+    session = bounds._open_official_gate1_session(REPO_ROOT)
+    stream_id = session.context.bundle.contract.corpora[1].confirmation_stream_ids[0]
+    stream = next(
+        item for item in session.context.bundle.population.streams if item.stream_id == stream_id
+    )
+    selection = next(
+        item for item in session.baseline_selections if item.corpus_id == stream.corpus_id
+    )
+
+    assert session.build_stream_cell(stream_id) == bounds.build_gate1_stream_cell(
+        session.context,
+        stream,
+        baseline_selection=selection,
+    )

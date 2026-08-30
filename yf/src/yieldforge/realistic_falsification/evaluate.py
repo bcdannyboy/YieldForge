@@ -24,20 +24,19 @@ from yieldforge.realistic_falsification.bounds import (
     Gate1SourceContext,
     Gate1StreamCell,
     Gate1TinyAudit,
-    build_gate1_stream_cell,
-    load_official_gate1_context,
-    select_gate1_baseline_policy,
+    _open_official_gate1_session,
     verify_gate1_tiny_audit,
 )
 from yieldforge.realistic_falsification.contracts import (
     M11EvidenceState,
+    M11ExperimentContract,
     M11InvalidReason,
     M11InvalidReasonCategory,
     M11InvalidReasonCode,
     M11VerdictResult,
     build_m11_verdict,
 )
-from yieldforge.realistic_falsification.pack import M11Stream
+from yieldforge.realistic_falsification.pack import M11Regime, M11Stream
 from yieldforge.realistic_falsification.statistics import (
     GATE1_BOOTSTRAP_RESAMPLES,
     GATE1_BOOTSTRAP_SEED,
@@ -46,7 +45,7 @@ from yieldforge.realistic_falsification.statistics import (
     GATE1_UNKNOWN_THRESHOLD_POINTS,
     Gate1BootstrapSummary,
     Gate1CellMetricPair,
-    bootstrap_gate1_statistics,
+    _bootstrap_gate1_statistics,
     calculate_gate1_cell_metrics,
 )
 
@@ -58,12 +57,19 @@ _SOURCE_MANIFEST_ID = "yfm11sm-54426d56dcccc07b667da56f"
 _SOURCE_MANIFEST_SHA256 = "sha256:54426d56dcccc07b667da56fd1106f2e463baf3aaf57358a50f47e76fc073605"
 _CORPUS_ORDER = ("lectra-m3-m4", "loco-2dics")
 _REGIME_ORDER = ("recurrent", "mixed", "high_mix", "regime_shift")
+_OFFICIAL_CONFIRMATION_BINDING_SHA256 = (
+    "639dc66fe1e3feedc9f7d68563f72398c219e708741caa19ac25873b6b894977"
+)
 
 Gate1EvaluationStatus = Literal[
     "invalid_test",
     "falsified_by_optimistic_ceiling",
     "gate_1_survived",
 ]
+
+
+class Gate1EvaluationError(ValueError):
+    """Gate 1 evaluation cannot safely authenticate or classify the submitted evidence."""
 
 
 class Gate1EvaluationConfig(FrozenExperimentModel):
@@ -105,16 +111,22 @@ class Gate1EvaluationConfig(FrozenExperimentModel):
 
 
 class Gate1AuditReceipt(FrozenExperimentModel):
-    """Content-addressed receipt proving every prerequisite audit completed."""
+    """Complete content-addressed evidence envelope for a valid Gate 1 result."""
 
-    schema_version: Literal["yieldforge.m11-gate1-audit-receipt.v1"] = (
-        "yieldforge.m11-gate1-audit-receipt.v1"
+    model_config = ConfigDict(revalidate_instances="always")
+
+    schema_version: Literal["yieldforge.m11-gate1-audit-receipt.v2"] = (
+        "yieldforge.m11-gate1-audit-receipt.v2"
     )
     receipt_id: StrictStr = Field(pattern=r"^yfm11g1a-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    cell_ids: tuple[StrictStr, ...] = Field(min_length=40, max_length=40)
-    selection_ids: tuple[StrictStr, ...] = Field(min_length=2, max_length=2)
-    tiny_audit_id: StrictStr = Field(pattern=r"^yfm11ta-[0-9a-f]{24}$")
+    confirmation_cells: tuple[Gate1StreamCell, ...] = Field(min_length=40, max_length=40)
+    confirmation_regimes: tuple[M11Regime, ...] = Field(min_length=40, max_length=40)
+    baseline_selections: tuple[Gate1BaselineSelectionEvidence, ...] = Field(
+        min_length=2,
+        max_length=2,
+    )
+    tiny_audit: Gate1TinyAudit
     roots_authenticated: Literal[True] = True
     exact_confirmation_census: Literal[True] = True
     regime_census: Literal[True] = True
@@ -126,10 +138,61 @@ class Gate1AuditReceipt(FrozenExperimentModel):
 
     @model_validator(mode="after")
     def require_complete_unique_receipt(self) -> Self:
-        if len(set(self.cell_ids)) != 40:
+        canonical_cells = tuple(
+            Gate1StreamCell.model_validate(
+                item.model_dump(mode="python", round_trip=True), strict=True
+            )
+            for item in self.confirmation_cells
+        )
+        canonical_selections = tuple(
+            Gate1BaselineSelectionEvidence.model_validate(
+                item.model_dump(mode="python", round_trip=True), strict=True
+            )
+            for item in self.baseline_selections
+        )
+        canonical_tiny = verify_gate1_tiny_audit(self.tiny_audit)
+        if (
+            canonical_cells != self.confirmation_cells
+            or canonical_selections != self.baseline_selections
+            or canonical_tiny != self.tiny_audit
+        ):
+            raise ValueError("Gate 1 receipt evidence differs after strict revalidation")
+        if len(set(self.cell_ids)) != 40 or len(set(self.cell_content_sha256s)) != 40:
             raise ValueError("Gate 1 receipt cell IDs must be unique")
-        if len(set(self.selection_ids)) != 2:
+        if len(set(self.selection_ids)) != 2 or len(set(self.selection_content_sha256s)) != 2:
             raise ValueError("Gate 1 receipt selection IDs must be unique")
+        if tuple(item.corpus_id for item in self.baseline_selections) != _CORPUS_ORDER:
+            raise ValueError("Gate 1 receipt selections differ from the frozen corpus order")
+        if any(
+            item.contract_id != _CONTRACT_ID
+            or item.contract_content_sha256 != _CONTRACT_SHA256
+            or item.population_id != _POPULATION_ID
+            or item.population_content_sha256 != _POPULATION_SHA256
+            for item in self.baseline_selections
+        ):
+            raise ValueError("Gate 1 receipt selection roots differ from the official bundle")
+        selection_by_corpus = {item.corpus_id: item for item in self.baseline_selections}
+        if any(
+            (selection := selection_by_corpus.get(cell.corpus_id)) is None
+            or cell.baseline.calibration_selection_id != selection.selection_id
+            or cell.baseline.registered_policy_id != selection.selected_policy_id
+            for cell in self.confirmation_cells
+        ):
+            raise ValueError("Gate 1 receipt cell selection and policy binding differs")
+        binding_digest = semantic_sha256(
+            {
+                "bindings": [
+                    [cell.stream_id, cell.corpus_id, regime]
+                    for cell, regime in zip(
+                        self.confirmation_cells,
+                        self.confirmation_regimes,
+                        strict=True,
+                    )
+                ]
+            }
+        )
+        if binding_digest != _OFFICIAL_CONFIRMATION_BINDING_SHA256:
+            raise ValueError("Gate 1 receipt stream/corpus/regime binding differs from official")
         digest = semantic_sha256(self, excluded_fields={"receipt_id", "content_sha256"})
         if self.receipt_id != f"yfm11g1a-{digest[:24]}" or self.content_sha256 != (
             f"sha256:{digest}"
@@ -137,14 +200,38 @@ class Gate1AuditReceipt(FrozenExperimentModel):
             raise ValueError("Gate 1 audit receipt identity does not match semantic content")
         return self
 
+    @property
+    def cell_ids(self) -> tuple[str, ...]:
+        return tuple(item.cell_id for item in self.confirmation_cells)
+
+    @property
+    def cell_content_sha256s(self) -> tuple[str, ...]:
+        return tuple(item.content_sha256 for item in self.confirmation_cells)
+
+    @property
+    def selection_ids(self) -> tuple[str, ...]:
+        return tuple(item.selection_id for item in self.baseline_selections)
+
+    @property
+    def selection_content_sha256s(self) -> tuple[str, ...]:
+        return tuple(item.content_sha256 for item in self.baseline_selections)
+
+    @property
+    def tiny_audit_id(self) -> str:
+        return self.tiny_audit.audit_id
+
+    @property
+    def tiny_audit_content_sha256(self) -> str:
+        return self.tiny_audit.content_sha256
+
 
 class Gate1EvaluationResult(FrozenExperimentModel):
     """A closed Gate 1 branch result bound to the exact official evidence roots."""
 
     model_config = ConfigDict(revalidate_instances="always")
 
-    schema_version: Literal["yieldforge.m11-gate1-evaluation-result.v1"] = (
-        "yieldforge.m11-gate1-evaluation-result.v1"
+    schema_version: Literal["yieldforge.m11-gate1-evaluation-result.v2"] = (
+        "yieldforge.m11-gate1-evaluation-result.v2"
     )
     result_id: StrictStr = Field(pattern=r"^yfm11g1r-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -161,6 +248,7 @@ class Gate1EvaluationResult(FrozenExperimentModel):
     source_manifest_content_sha256: Literal[
         "sha256:54426d56dcccc07b667da56fd1106f2e463baf3aaf57358a50f47e76fc073605"
     ] = _SOURCE_MANIFEST_SHA256
+    contract: M11ExperimentContract
     observed_cell_ids: tuple[StrictStr, ...]
     config: Gate1EvaluationConfig
     audit_receipt: Gate1AuditReceipt | None
@@ -174,50 +262,83 @@ class Gate1EvaluationResult(FrozenExperimentModel):
 
     @model_validator(mode="after")
     def require_closed_branch_and_identity(self) -> Self:
+        canonical_contract = M11ExperimentContract.model_validate(
+            self.contract.model_dump(mode="python", round_trip=True), strict=True
+        )
+        if (
+            canonical_contract != self.contract
+            or self.contract.contract_id != self.contract_id
+            or self.contract.content_sha256 != self.contract_content_sha256
+        ):
+            raise ValueError("Gate 1 result contract differs from the official root binding")
+        if self.config != _build_config():
+            raise ValueError("Gate 1 result config differs from the registered configuration")
         if self.repair_count not in (0, 1):
             raise ValueError("Gate 1 repair count must be 0 or 1")
-        if self.statistics is not None and tuple(
-            item.stream_count for item in self.statistics.groups
-        ) != (20, 20, 40):
-            raise ValueError("Gate 1 statistics stream census must be 20/20/40")
-        if self.verdict is not None and (
-            self.verdict.repair_count != self.repair_count
-            or self.verdict.contract.contract_id != self.contract_id
-            or self.verdict.contract.content_sha256 != self.contract_content_sha256
-        ):
-            raise ValueError("Gate 1 verdict binding differs from the evaluation result")
         if self.status == "invalid_test":
-            valid_shape = (
+            if not (
                 self.terminal
                 and not self.opens_gate_2
                 and self.audit_receipt is None
                 and self.statistics is None
                 and self.verdict is not None
                 and self.verdict.evidence_state is M11EvidenceState.INVALID_TEST
+                and self.verdict.repair_count == self.repair_count
+            ):
+                raise ValueError("Gate 1 invalid result branch is internally inconsistent")
+            expected_verdict = build_m11_verdict(
+                contract=self.contract,
+                evidence_state=M11EvidenceState.INVALID_TEST,
+                repair_count=self.repair_count,
+                invalid_reason=self.verdict.invalid_reason,
             )
-        elif self.status == "falsified_by_optimistic_ceiling":
-            valid_shape = (
-                self.terminal
-                and not self.opens_gate_2
-                and self.audit_receipt is not None
-                and self.statistics is not None
-                and self.statistics.falsifies_optimistic_ceiling
-                and self.verdict is not None
-                and self.verdict.evidence_state is M11EvidenceState.FALSIFIED_BY_OPTIMISTIC_CEILING
-                and self.audit_receipt.cell_ids == self.observed_cell_ids
-            )
+            if self.verdict != expected_verdict:
+                raise ValueError("Gate 1 invalid verdict differs from its exact evidence")
         else:
-            valid_shape = (
-                not self.terminal
-                and self.opens_gate_2
-                and self.audit_receipt is not None
-                and self.statistics is not None
-                and not self.statistics.falsifies_optimistic_ceiling
-                and self.verdict is None
-                and self.audit_receipt.cell_ids == self.observed_cell_ids
+            if self.audit_receipt is None or self.statistics is None:
+                raise ValueError("Gate 1 valid result requires complete persisted evidence")
+            canonical_receipt = Gate1AuditReceipt.model_validate(
+                self.audit_receipt.model_dump(mode="python", round_trip=True), strict=True
             )
-        if not valid_shape:
-            raise ValueError("Gate 1 evaluation result branch is internally inconsistent")
+            if canonical_receipt != self.audit_receipt:
+                raise ValueError("Gate 1 result evidence differs after strict revalidation")
+            expected_stream_ids = tuple(
+                stream_id
+                for corpus in self.contract.corpora
+                for stream_id in corpus.confirmation_stream_ids
+            )
+            if (
+                tuple(item.stream_id for item in self.audit_receipt.confirmation_cells)
+                != expected_stream_ids
+                or self.observed_cell_ids != self.audit_receipt.cell_ids
+            ):
+                raise ValueError("Gate 1 result evidence differs from contract confirmation order")
+            metrics = tuple(
+                _cell_metric_pair(item) for item in self.audit_receipt.confirmation_cells
+            )
+            recomputed = _bootstrap_gate1_statistics(metrics[:20], metrics[20:])
+            if self.statistics != recomputed:
+                raise ValueError("Gate 1 statistics differ from recomputed cell evidence")
+            falsifies = recomputed.falsifies_optimistic_ceiling
+            expected_status: Gate1EvaluationStatus = (
+                "falsified_by_optimistic_ceiling" if falsifies else "gate_1_survived"
+            )
+            expected_verdict = (
+                build_m11_verdict(
+                    contract=self.contract,
+                    evidence_state=M11EvidenceState.FALSIFIED_BY_OPTIMISTIC_CEILING,
+                    repair_count=self.repair_count,
+                )
+                if falsifies
+                else None
+            )
+            if (
+                self.status != expected_status
+                or self.terminal is not falsifies
+                or self.opens_gate_2 is falsifies
+                or self.verdict != expected_verdict
+            ):
+                raise ValueError("Gate 1 branch differs from recomputed cell evidence")
         digest = semantic_sha256(self, excluded_fields={"result_id", "content_sha256"})
         if self.result_id != f"yfm11g1r-{digest[:24]}" or self.content_sha256 != (
             f"sha256:{digest}"
@@ -252,17 +373,19 @@ def _build_config() -> Gate1EvaluationConfig:
 
 def build_gate1_audit_receipt(
     *,
-    cell_ids: tuple[str, ...],
-    selection_ids: tuple[str, ...],
-    tiny_audit_id: str,
+    confirmation_cells: tuple[Gate1StreamCell, ...],
+    confirmation_regimes: tuple[M11Regime, ...],
+    baseline_selections: tuple[Gate1BaselineSelectionEvidence, ...],
+    tiny_audit: Gate1TinyAudit,
 ) -> Gate1AuditReceipt:
     """Seal the successful prerequisite audits into one immutable receipt."""
 
     semantic: dict[str, object] = {
-        "schema_version": "yieldforge.m11-gate1-audit-receipt.v1",
-        "cell_ids": list(cell_ids),
-        "selection_ids": list(selection_ids),
-        "tiny_audit_id": tiny_audit_id,
+        "schema_version": "yieldforge.m11-gate1-audit-receipt.v2",
+        "confirmation_cells": [item.model_dump(mode="json") for item in confirmation_cells],
+        "confirmation_regimes": list(confirmation_regimes),
+        "baseline_selections": [item.model_dump(mode="json") for item in baseline_selections],
+        "tiny_audit": tiny_audit.model_dump(mode="json"),
         "roots_authenticated": True,
         "exact_confirmation_census": True,
         "regime_census": True,
@@ -276,9 +399,10 @@ def build_gate1_audit_receipt(
     return Gate1AuditReceipt(
         receipt_id=f"yfm11g1a-{digest[:24]}",
         content_sha256=f"sha256:{digest}",
-        cell_ids=cell_ids,
-        selection_ids=selection_ids,
-        tiny_audit_id=tiny_audit_id,
+        confirmation_cells=confirmation_cells,
+        confirmation_regimes=confirmation_regimes,
+        baseline_selections=baseline_selections,
+        tiny_audit=tiny_audit,
     )
 
 
@@ -293,9 +417,10 @@ def _result_semantic(
     repair_count: int,
     terminal: bool,
     opens_gate_2: bool,
+    contract: M11ExperimentContract,
 ) -> dict[str, object]:
     return {
-        "schema_version": "yieldforge.m11-gate1-evaluation-result.v1",
+        "schema_version": "yieldforge.m11-gate1-evaluation-result.v2",
         "status": status,
         "contract_id": _CONTRACT_ID,
         "contract_content_sha256": _CONTRACT_SHA256,
@@ -303,6 +428,7 @@ def _result_semantic(
         "population_content_sha256": _POPULATION_SHA256,
         "source_manifest_id": _SOURCE_MANIFEST_ID,
         "source_manifest_content_sha256": _SOURCE_MANIFEST_SHA256,
+        "contract": contract,
         "observed_cell_ids": observed_cell_ids,
         "config": config,
         "audit_receipt": audit_receipt,
@@ -318,7 +444,7 @@ def _result_semantic(
 
 def _result_digest(semantic: dict[str, object]) -> str:
     hashable = dict(semantic)
-    for field in ("config", "audit_receipt", "statistics", "verdict"):
+    for field in ("contract", "config", "audit_receipt", "statistics", "verdict"):
         value = hashable[field]
         hashable[field] = None if value is None else value.model_dump(mode="json")
     return semantic_sha256(hashable)
@@ -327,14 +453,34 @@ def _result_digest(semantic: dict[str, object]) -> str:
 def _build_gate1_valid_result(
     *,
     context: Gate1SourceContext,
-    cell_ids: tuple[str, ...],
-    audit_receipt: Gate1AuditReceipt,
-    statistics: Gate1BootstrapSummary,
+    cells: tuple[Gate1StreamCell, ...],
+    baseline_selections: tuple[Gate1BaselineSelectionEvidence, ...],
+    tiny_audit: Gate1TinyAudit,
     repair_count: Literal[0, 1],
 ) -> Gate1EvaluationResult:
-    """Build either valid Gate 1 terminal/survival branch from audited statistics."""
+    """Derive every valid-result field from complete persisted Gate 1 evidence."""
 
     _require_official_root_values(context)
+    canonical_cells = tuple(
+        Gate1StreamCell.model_validate(item.model_dump(mode="python", round_trip=True), strict=True)
+        for item in tuple(cells)
+    )
+    canonical_selections = tuple(
+        Gate1BaselineSelectionEvidence.model_validate(
+            item.model_dump(mode="python", round_trip=True), strict=True
+        )
+        for item in tuple(baseline_selections)
+    )
+    canonical_tiny = verify_gate1_tiny_audit(tiny_audit)
+    streams = _require_confirmation_cell_census(context, canonical_cells)
+    metrics = tuple(_cell_metric_pair(item) for item in canonical_cells)
+    statistics = _bootstrap_gate1_statistics(metrics[:20], metrics[20:])
+    audit_receipt = build_gate1_audit_receipt(
+        confirmation_cells=canonical_cells,
+        confirmation_regimes=tuple(item.regime for item in streams),
+        baseline_selections=canonical_selections,
+        tiny_audit=canonical_tiny,
+    )
     status: Gate1EvaluationStatus = (
         "falsified_by_optimistic_ceiling"
         if statistics.falsifies_optimistic_ceiling
@@ -352,7 +498,7 @@ def _build_gate1_valid_result(
     terminal = statistics.falsifies_optimistic_ceiling
     semantic = _result_semantic(
         status=status,
-        observed_cell_ids=cell_ids,
+        observed_cell_ids=audit_receipt.cell_ids,
         config=_build_config(),
         audit_receipt=audit_receipt,
         statistics=statistics,
@@ -360,6 +506,7 @@ def _build_gate1_valid_result(
         repair_count=repair_count,
         terminal=terminal,
         opens_gate_2=not terminal,
+        contract=context.bundle.contract,
     )
     digest = _result_digest(semantic)
     return Gate1EvaluationResult(
@@ -403,6 +550,7 @@ def _build_gate1_invalid_result(
         repair_count=repair_count,
         terminal=True,
         opens_gate_2=False,
+        contract=context.bundle.contract,
     )
     digest = _result_digest(semantic)
     return Gate1EvaluationResult(
@@ -527,21 +675,20 @@ def evaluate_gate1_confirmation(
 ) -> Gate1EvaluationResult:
     """Authenticate all Gate 1 evidence before computing the sole registered bootstrap."""
 
+    if type(repair_count) is not int or repair_count not in (0, 1):
+        raise Gate1EvaluationError("Gate 1 repair_count must be the strict integer 0 or 1")
     cell_tuple = tuple(cells)
     observed_ids = _observed_ids(cell_tuple)
-    canonical_repair_count: Literal[0, 1] = repair_count if repair_count in (0, 1) else 1
+    canonical_repair_count: Literal[0, 1] = repair_count
     try:
-        canonical_context = load_official_gate1_context(context.repository_root)
-        if context != canonical_context:
-            raise Gate1EvidenceError("caller context differs from official pinned sources")
+        session = _open_official_gate1_session(context.repository_root)
+        canonical_context = session.context
         _require_official_root_values(canonical_context)
     except (AttributeError, OSError, TypeError, ValueError, ValidationError):
-        try:
-            canonical_context = load_official_gate1_context(context.repository_root)
-        except (AttributeError, OSError, TypeError, ValueError, ValidationError):
-            raise Gate1EvidenceError(
-                "Gate 1 cannot emit a root-bound result without readable official sources"
-            ) from None
+        raise Gate1EvaluationError(
+            "Gate 1 cannot emit a root-bound result without readable official sources"
+        ) from None
+    if context != canonical_context:
         return _invalid(
             canonical_context,
             observed_ids,
@@ -566,10 +713,7 @@ def evaluate_gate1_confirmation(
             )
             for item in tuple(baseline_selections)
         )
-        canonical_selections = tuple(
-            select_gate1_baseline_policy(canonical_context, corpus_id)
-            for corpus_id in _CORPUS_ORDER
-        )
+        canonical_selections = session.baseline_selections
         if passed_selections != canonical_selections:
             raise Gate1EvidenceError("baseline selections differ from calibration-only evidence")
         if tiny_audit is None:
@@ -583,25 +727,18 @@ def evaluate_gate1_confirmation(
             repair_count=canonical_repair_count,
         )
 
-    selection_by_corpus = {item.corpus_id: item for item in canonical_selections}
-    metrics: list[Gate1CellMetricPair] = []
     canonical_cells: list[Gate1StreamCell] = []
     try:
         for supplied, stream in zip(cell_tuple, streams, strict=True):
             rebuilt_supplied = Gate1StreamCell.model_validate(
                 supplied.model_dump(mode="python", round_trip=True), strict=True
             )
-            expected = build_gate1_stream_cell(
-                canonical_context,
-                stream,
-                baseline_selection=selection_by_corpus[stream.corpus_id],
-            )
+            expected = session.build_stream_cell(stream.stream_id)
             if rebuilt_supplied != expected:
                 raise Gate1EvidenceError(
                     "Gate 1 cell differs from its reconstructed feasible/lower-bound evidence"
                 )
             canonical_cells.append(rebuilt_supplied)
-            metrics.append(_cell_metric_pair(rebuilt_supplied))
     except (AttributeError, TypeError, ValueError, ValidationError):
         return _invalid(
             canonical_context,
@@ -610,17 +747,11 @@ def evaluate_gate1_confirmation(
             repair_count=canonical_repair_count,
         )
 
-    receipt = build_gate1_audit_receipt(
-        cell_ids=tuple(item.cell_id for item in canonical_cells),
-        selection_ids=tuple(item.selection_id for item in canonical_selections),
-        tiny_audit_id=canonical_tiny_audit.audit_id,
-    )
-    statistics = bootstrap_gate1_statistics(tuple(metrics[:20]), tuple(metrics[20:]))
     return _build_gate1_valid_result(
         context=canonical_context,
-        cell_ids=receipt.cell_ids,
-        audit_receipt=receipt,
-        statistics=statistics,
+        cells=tuple(canonical_cells),
+        baseline_selections=canonical_selections,
+        tiny_audit=canonical_tiny_audit,
         repair_count=canonical_repair_count,
     )
 
@@ -628,6 +759,7 @@ def evaluate_gate1_confirmation(
 __all__ = [
     "Gate1AuditReceipt",
     "Gate1EvaluationConfig",
+    "Gate1EvaluationError",
     "Gate1EvaluationResult",
     "Gate1EvaluationStatus",
     "build_gate1_audit_receipt",

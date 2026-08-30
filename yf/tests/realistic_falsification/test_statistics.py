@@ -92,7 +92,7 @@ def test_q975_not_q95_controls_the_joint_upper_bound() -> None:
 def test_pcg64_seed_draws_complete_lectra_matrix_before_loco() -> None:
     statistics = _statistics()
 
-    lectra, loco = statistics.draw_gate1_bootstrap_indices(2, 2)
+    lectra, loco = statistics._draw_gate1_bootstrap_indices(2, 2)
 
     assert lectra[:5].tolist() == [[1, 1], [1, 0], [0, 0], [0, 0], [0, 1]]
     assert loco[:5].tolist() == [[0, 1], [0, 1], [0, 1], [0, 1], [1, 1]]
@@ -119,7 +119,7 @@ def test_s_and_u_are_resampled_as_one_paired_stream_vector() -> None:
     lectra = (_pair("0", "0"), _pair("4", "2"))
     loco = (_pair("1", "0"), _pair("3", "4"))
     arrays = statistics._bootstrap_gate1_arrays(lectra, loco)
-    lectra_indices, loco_indices = statistics.draw_gate1_bootstrap_indices(2, 2)
+    lectra_indices, loco_indices = statistics._draw_gate1_bootstrap_indices(2, 2)
     lectra_matrix = np.asarray([[0.0, 0.0], [4.0, 2.0]])
     loco_matrix = np.asarray([[1.0, 0.0], [3.0, 4.0]])
 
@@ -137,11 +137,11 @@ def test_s_and_u_are_resampled_as_one_paired_stream_vector() -> None:
 def test_constant_low_falsifies_but_exact_zero_boundary_survives() -> None:
     statistics = _statistics()
 
-    low = statistics.bootstrap_gate1_statistics(
+    low = statistics._bootstrap_gate1_statistics(
         (_pair("0", "0"),) * 20,
         (_pair("0", "0"),) * 20,
     )
-    boundary = statistics.bootstrap_gate1_statistics(
+    boundary = statistics._bootstrap_gate1_statistics(
         (_pair("1.5", "0.5"),) * 20,
         (_pair("1.5", "0.5"),) * 20,
     )
@@ -155,7 +155,7 @@ def test_constant_low_falsifies_but_exact_zero_boundary_survives() -> None:
 def test_crossed_corpus_failures_survive_through_equal_corpus_pool() -> None:
     statistics = _statistics()
 
-    result = statistics.bootstrap_gate1_statistics(
+    result = statistics._bootstrap_gate1_statistics(
         (_pair("3", "0"),) * 20,
         (_pair("0", "2"),) * 20,
     )
@@ -193,7 +193,7 @@ def test_wilson_interval_rejects_non_strict_or_invalid_counts(successes, total) 
 
 def test_bootstrap_summary_is_strict_frozen_and_content_addressed() -> None:
     statistics = _statistics()
-    result = statistics.bootstrap_gate1_statistics(
+    result = statistics._bootstrap_gate1_statistics(
         (_pair("1", "1"),) * 20,
         (_pair("1", "1"),) * 20,
     )
@@ -208,3 +208,67 @@ def test_bootstrap_summary_is_strict_frozen_and_content_addressed() -> None:
         )
     with pytest.raises(ValidationError):
         result.joint_upper_adverse_margin = 0.0
+
+
+@pytest.mark.parametrize(
+    ("lectra_size", "loco_size"),
+    [(1, 1), (19, 20), (20, 19), (21, 20), (20, 21)],
+)
+def test_registered_bootstrap_requires_exact_twenty_by_twenty_census_before_rng(
+    lectra_size: int,
+    loco_size: int,
+    monkeypatch,
+) -> None:
+    statistics = _statistics()
+    draw_count = 0
+
+    def forbidden_draw(*_args):
+        nonlocal draw_count
+        draw_count += 1
+        raise AssertionError("RNG must not run for an invalid census")
+
+    monkeypatch.setattr(statistics, "_draw_gate1_bootstrap_indices", forbidden_draw)
+
+    with pytest.raises(ValueError, match="20|census"):
+        statistics._bootstrap_gate1_statistics(
+            (_pair("0", "0"),) * lectra_size,
+            (_pair("0", "0"),) * loco_size,
+        )
+
+    assert draw_count == 0
+
+
+@pytest.mark.parametrize(("lectra_size", "loco_size"), [(21, 20), (23, 24)])
+def test_private_bootstrap_allocator_has_a_hard_twenty_stream_cap(
+    lectra_size: int,
+    loco_size: int,
+) -> None:
+    with pytest.raises(ValueError, match="20|cap|bounded"):
+        _statistics()._draw_gate1_bootstrap_indices(lectra_size, loco_size)
+
+
+@pytest.mark.parametrize(
+    ("savings", "unknown"),
+    [("-0.1", "0"), ("0", "-0.1"), ("-1e-10000", "0")],
+)
+def test_negative_metric_rejects_before_any_rng_draw(
+    savings: str,
+    unknown: str,
+    monkeypatch,
+) -> None:
+    statistics = _statistics()
+    draw_count = 0
+
+    def forbidden_draw(*_args):
+        nonlocal draw_count
+        draw_count += 1
+        raise AssertionError("RNG must not run for invalid metrics")
+
+    monkeypatch.setattr(statistics, "_draw_gate1_bootstrap_indices", forbidden_draw)
+    valid = (_pair("0", "0"),) * 20
+    invalid = (_pair(savings, unknown),) + valid[1:]
+
+    with pytest.raises(ValueError, match="nonnegative|metric"):
+        statistics._bootstrap_gate1_statistics(invalid, valid)
+
+    assert draw_count == 0

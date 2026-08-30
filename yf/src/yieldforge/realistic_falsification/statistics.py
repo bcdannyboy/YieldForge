@@ -20,6 +20,7 @@ GATE1_SAVINGS_THRESHOLD_PERCENT = 1.5
 GATE1_UNKNOWN_THRESHOLD_POINTS = 0.5
 GATE1_WILSON_Z = 1.959963984540054
 _DECIMAL_PRECISION = 50
+_MAX_INTERNAL_CORPUS_STREAMS = 20
 
 Gate1StatisticsGroup = Literal[
     "lectra-m3-m4",
@@ -194,16 +195,18 @@ def linear_quantile(values, probability: float) -> float:
     return float(np.quantile(array, float(probability), method=GATE1_QUANTILE_METHOD))
 
 
-def draw_gate1_bootstrap_indices(lectra_size: int, loco_size: int) -> tuple[np.ndarray, np.ndarray]:
+def _draw_gate1_bootstrap_indices(
+    lectra_size: int, loco_size: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Draw the complete Lectra matrix first, then LOCo, from PCG64(0)."""
 
     if (
         type(lectra_size) is not int
         or type(loco_size) is not int
-        or lectra_size <= 0
-        or loco_size <= 0
+        or not 0 < lectra_size <= _MAX_INTERNAL_CORPUS_STREAMS
+        or not 0 < loco_size <= _MAX_INTERNAL_CORPUS_STREAMS
     ):
-        raise ValueError("Gate 1 bootstrap corpus sizes must be positive strict integers")
+        raise ValueError("Gate 1 bootstrap corpus sizes require a bounded 1..20 strict census")
     generator = np.random.Generator(np.random.PCG64(GATE1_BOOTSTRAP_SEED))
     lectra = generator.integers(
         0,
@@ -219,8 +222,12 @@ def draw_gate1_bootstrap_indices(lectra_size: int, loco_size: int) -> tuple[np.n
 
 
 def _metric_matrix(values: tuple[Gate1CellMetricPair, ...]) -> np.ndarray:
-    if not values or any(type(item) is not Gate1CellMetricPair for item in values):
-        raise TypeError("Gate 1 bootstrap requires nonempty strict metric pairs")
+    if not 0 < len(values) <= _MAX_INTERNAL_CORPUS_STREAMS:
+        raise ValueError("Gate 1 bootstrap metric input exceeds the bounded 20-stream census")
+    if any(type(item) is not Gate1CellMetricPair for item in values):
+        raise TypeError("Gate 1 bootstrap requires strict metric pairs")
+    if any(item.savings_percent < 0 or item.unknown_contribution_points < 0 for item in values):
+        raise ValueError("Gate 1 bootstrap metrics must be nonnegative")
     matrix = np.asarray(
         [[float(item.savings_percent), float(item.unknown_contribution_points)] for item in values],
         dtype=np.float64,
@@ -238,7 +245,7 @@ def _bootstrap_gate1_arrays(
 
     lectra = _metric_matrix(tuple(lectra_metrics))
     loco = _metric_matrix(tuple(loco_metrics))
-    lectra_indices, loco_indices = draw_gate1_bootstrap_indices(len(lectra), len(loco))
+    lectra_indices, loco_indices = _draw_gate1_bootstrap_indices(len(lectra), len(loco))
     lectra_means = lectra[lectra_indices].mean(axis=1)
     loco_means = loco[loco_indices].mean(axis=1)
     pool_means = (lectra_means + loco_means) / 2.0
@@ -304,7 +311,7 @@ def optimistic_ceiling_falsified(joint_upper_adverse_margin: float) -> bool:
     return float(joint_upper_adverse_margin) < 0.0
 
 
-def bootstrap_gate1_statistics(
+def _bootstrap_gate1_statistics(
     lectra_metrics: tuple[Gate1CellMetricPair, ...],
     loco_metrics: tuple[Gate1CellMetricPair, ...],
 ) -> Gate1BootstrapSummary:
@@ -312,6 +319,8 @@ def bootstrap_gate1_statistics(
 
     lectra = tuple(lectra_metrics)
     loco = tuple(loco_metrics)
+    if len(lectra) != 20 or len(loco) != 20:
+        raise ValueError("Gate 1 registered bootstrap requires an exact 20/20 stream census")
     arrays = _bootstrap_gate1_arrays(lectra, loco)
     lectra_s = tuple(item.savings_percent for item in lectra)
     lectra_u = tuple(item.unknown_contribution_points for item in lectra)
@@ -400,9 +409,7 @@ __all__ = [
     "Gate1BootstrapSummary",
     "Gate1CellMetricPair",
     "Gate1GroupBootstrapSummary",
-    "bootstrap_gate1_statistics",
     "calculate_gate1_cell_metrics",
-    "draw_gate1_bootstrap_indices",
     "equal_corpus_mean",
     "linear_quantile",
     "optimistic_ceiling_falsified",

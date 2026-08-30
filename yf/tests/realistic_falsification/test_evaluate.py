@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from yieldforge.realistic_falsification.contracts import (
     M11EvidenceState,
     M11InvalidReasonCategory,
     M11VerdictAction,
+    build_m11_verdict,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,35 +31,177 @@ def _statistics():
     return importlib.import_module("yieldforge.realistic_falsification.statistics")
 
 
+def _bounds():
+    return importlib.import_module("yieldforge.realistic_falsification.bounds")
+
+
 @pytest.fixture(scope="module")
 def official_context():
     return load_official_gate1_context(REPO_ROOT)
+
+
+@pytest.fixture(scope="module")
+def official_selections(official_context):
+    bounds = _bounds()
+    return tuple(
+        bounds.select_gate1_baseline_policy(official_context, corpus_id)
+        for corpus_id in ("lectra-m3-m4", "loco-2dics")
+    )
+
+
+def _synthetic_confirmation_cells(
+    context,
+    selections,
+    *,
+    lower_ratio: Fraction,
+):
+    bounds = _bounds()
+    stream_by_id = {item.stream_id: item for item in context.bundle.population.streams}
+    selection_by_corpus = {item.corpus_id: item for item in selections}
+    expected_ids = tuple(
+        stream_id
+        for corpus in context.bundle.contract.corpora
+        for stream_id in corpus.confirmation_stream_ids
+    )
+    cells = []
+    for index, stream_id in enumerate(expected_ids):
+        stream = stream_by_id[stream_id]
+        selection = selection_by_corpus[stream.corpus_id]
+        event_id = f"gate1-result-fixture-event-{index}"
+        demand = bounds.build_gate1_demand_record(
+            event_position=0,
+            event_id=event_id,
+            geometry_reference_id=f"gate1-result-fixture-geometry-{index}",
+            geometry_sha256=f"{index + 1:064x}",
+            source_binding_sha256="sha256:" + "b" * 64,
+            source_kind="tiny",
+            source_instance=None,
+            material_group="fixture-material",
+            reference_area_key="fixture-material",
+            unit_area=lower_ratio,
+            quantity=1,
+            reference_area=Fraction(1),
+        )
+        lower = bounds.calculate_relaxed_lower_bound(
+            stream_id=stream_id,
+            demands=(demand,),
+        )
+        opening = bounds.build_gate1_feasible_opening(
+            event_position=0,
+            event_id=event_id,
+            payload_id=f"gate1-result-fixture-payload-{index}",
+            material_group="fixture-material",
+            reference_area_key="fixture-material",
+            source_kind="tiny",
+            candidate_options=((f"gate1-result-fixture-candidate-{index}", "sha256:" + "c" * 64),),
+            selected_candidate_id=f"gate1-result-fixture-candidate-{index}",
+            selection_rule="exhaustive_tiny_case",
+            verification_kind="exhaustive_tiny_case",
+            geometry_witness_sha256="sha256:" + "d" * 64,
+            known_positions_at_release=(0,),
+            stock_area=Fraction(1),
+            reference_area=Fraction(1),
+        )
+        policies = tuple(
+            bounds.build_gate1_feasible_policy_cost(
+                stream_id=stream_id,
+                policy_kind=kind,
+                openings=(opening,),
+                registered_policy_id=selection.selected_policy_id,
+                calibration_selection_id=selection.selection_id,
+                evidence_stage="confirmation_application",
+            )
+            for kind in ("baseline_as_of", "known_only")
+        )
+        cells.append(
+            bounds.build_gate1_stream_cell_from_evidence(
+                stream_id=stream_id,
+                corpus_id=stream.corpus_id,
+                lower_bound=lower,
+                baseline=policies[0],
+                known_only=policies[1],
+            )
+        )
+    return tuple(cells)
+
+
+@pytest.fixture(scope="module")
+def tiny_audit():
+    bounds = _bounds()
+    demand = bounds.build_gate1_demand_record(
+        event_position=0,
+        event_id="tiny-event-0",
+        geometry_reference_id="tiny-shape-0",
+        geometry_sha256="a" * 64,
+        source_binding_sha256="sha256:" + "b" * 64,
+        source_kind="tiny",
+        source_instance=None,
+        material_group="material-a",
+        reference_area_key="material-a",
+        unit_area=Fraction(6),
+        quantity=1,
+        reference_area=Fraction(10),
+    )
+    lower = bounds.calculate_relaxed_lower_bound(stream_id="tiny-stream", demands=(demand,))
+    opening = bounds.build_gate1_feasible_opening(
+        event_position=0,
+        event_id="tiny-event-0",
+        payload_id="tiny-payload-0",
+        material_group="material-a",
+        reference_area_key="material-a",
+        source_kind="tiny",
+        candidate_options=(("tiny-candidate-0", "sha256:" + "c" * 64),),
+        selected_candidate_id="tiny-candidate-0",
+        selection_rule="exhaustive_tiny_case",
+        verification_kind="exhaustive_tiny_case",
+        geometry_witness_sha256="sha256:" + "d" * 64,
+        known_positions_at_release=(0,),
+        stock_area=Fraction(11, 10),
+        reference_area=Fraction(1),
+    )
+    policies = tuple(
+        bounds.build_gate1_feasible_policy_cost(
+            stream_id="tiny-stream",
+            policy_kind=kind,
+            openings=(opening,),
+        )
+        for kind in ("baseline_as_of", "known_only")
+    )
+    cell = bounds.build_gate1_stream_cell_from_evidence(
+        stream_id="tiny-stream",
+        corpus_id="tiny",
+        lower_bound=lower,
+        baseline=policies[0],
+        known_only=policies[1],
+    )
+    return bounds.audit_tiny_gate1_bounds(
+        cell,
+        problem=bounds.build_preregistered_gate1_tiny_problem(),
+    )
+
+
+@pytest.fixture(scope="module")
+def falsified_cells(official_context, official_selections):
+    return _synthetic_confirmation_cells(
+        official_context,
+        official_selections,
+        lower_ratio=Fraction(1),
+    )
+
+
+@pytest.fixture(scope="module")
+def surviving_cells(official_context, official_selections):
+    return _synthetic_confirmation_cells(
+        official_context,
+        official_selections,
+        lower_ratio=Fraction(197, 200),
+    )
 
 
 def _metric(savings: str, unknown: str):
     return _statistics().Gate1CellMetricPair(
         savings_percent=Decimal(savings),
         unknown_contribution_points=Decimal(unknown),
-    )
-
-
-def _summary(savings: str, unknown: str):
-    return _statistics().bootstrap_gate1_statistics(
-        (_metric(savings, unknown),) * 20,
-        (_metric(savings, unknown),) * 20,
-    )
-
-
-def _cell_ids() -> tuple[str, ...]:
-    return tuple(f"yfm11g1-{index:024x}" for index in range(40))
-
-
-def _receipt():
-    evaluate = _evaluate()
-    return evaluate.build_gate1_audit_receipt(
-        cell_ids=_cell_ids(),
-        selection_ids=("yfm11bs-" + "a" * 24, "yfm11bs-" + "b" * 24),
-        tiny_audit_id="yfm11ta-" + "c" * 24,
     )
 
 
@@ -168,13 +312,18 @@ def test_cell_cost_extraction_requires_finite_canonical_six_place_bounds(
             evaluate._cell_metric_pair(cell)
 
 
-def test_falsified_branch_embeds_existing_abandon_verdict(official_context) -> None:
+def test_falsified_branch_embeds_existing_abandon_verdict(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+) -> None:
     evaluate = _evaluate()
     result = evaluate._build_gate1_valid_result(
         context=official_context,
-        cell_ids=_cell_ids(),
-        audit_receipt=_receipt(),
-        statistics=_summary("0", "0"),
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
         repair_count=0,
     )
 
@@ -185,15 +334,25 @@ def test_falsified_branch_embeds_existing_abandon_verdict(official_context) -> N
     assert result.verdict is not None
     assert result.verdict.evidence_state is M11EvidenceState.FALSIFIED_BY_OPTIMISTIC_CEILING
     assert result.verdict.action is M11VerdictAction.ABANDON
+    assert result.audit_receipt.confirmation_cells == falsified_cells
+    assert result.audit_receipt.baseline_selections == official_selections
+    assert result.audit_receipt.tiny_audit == tiny_audit
+    assert result.audit_receipt.cell_ids == tuple(item.cell_id for item in falsified_cells)
+    assert result.observed_cell_ids == result.audit_receipt.cell_ids
 
 
-def test_exact_zero_survival_is_intermediate_and_never_retention(official_context) -> None:
+def test_exact_zero_survival_is_intermediate_and_never_retention(
+    official_context,
+    official_selections,
+    tiny_audit,
+    surviving_cells,
+) -> None:
     evaluate = _evaluate()
     result = evaluate._build_gate1_valid_result(
         context=official_context,
-        cell_ids=_cell_ids(),
-        audit_receipt=_receipt(),
-        statistics=_summary("1.5", "0.5"),
+        cells=surviving_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
         repair_count=0,
     )
 
@@ -293,13 +452,96 @@ def test_tampered_context_returns_typed_invalid(official_context) -> None:
     assert result.verdict.invalid_reason.reason_code == "source_lineage_failure"
 
 
-def test_result_config_receipt_and_roots_reject_resigned_tampering(official_context) -> None:
+def test_invalid_repair_count_rejects_before_authentication_or_bootstrap(
+    official_context,
+    monkeypatch,
+) -> None:
+    evaluate = _evaluate()
+    calls = {"auth": 0, "bootstrap": 0}
+
+    def forbidden_auth(*_args, **_kwargs):
+        calls["auth"] += 1
+        raise AssertionError("authentication must not run for an invalid repair count")
+
+    def forbidden_bootstrap(*_args, **_kwargs):
+        calls["bootstrap"] += 1
+        raise AssertionError("bootstrap must not run for an invalid repair count")
+
+    monkeypatch.setattr(evaluate, "_open_official_gate1_session", forbidden_auth)
+    monkeypatch.setattr(evaluate, "_bootstrap_gate1_statistics", forbidden_bootstrap)
+
+    with pytest.raises(ValueError, match="repair_count|repair count|0 or 1"):
+        evaluate.evaluate_gate1_confirmation(
+            context=official_context,
+            cells=(),
+            baseline_selections=(),
+            tiny_audit=None,
+            repair_count=2,
+        )
+
+    assert calls == {"auth": 0, "bootstrap": 0}
+
+
+def test_evaluator_uses_one_session_and_routes_all_forty_cells_through_it(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+    monkeypatch,
+) -> None:
+    evaluate = _evaluate()
+    cells_by_stream = {item.stream_id: item for item in falsified_cells}
+    expected_ids = tuple(item.stream_id for item in falsified_cells)
+    calls = {"open": 0, "build": []}
+
+    class FakeSession:
+        context = official_context
+        baseline_selections = official_selections
+
+        def build_stream_cell(self, stream_id):
+            calls["build"].append(stream_id)
+            return cells_by_stream[stream_id]
+
+    def open_session(repository_root):
+        assert repository_root == official_context.repository_root
+        calls["open"] += 1
+        return FakeSession()
+
+    def forbidden_public_builder(*_args, **_kwargs):
+        raise AssertionError("evaluator must not re-enter the fully authenticating public builder")
+
+    monkeypatch.setattr(evaluate, "_open_official_gate1_session", open_session)
+    monkeypatch.setattr(
+        evaluate,
+        "build_gate1_stream_cell",
+        forbidden_public_builder,
+        raising=False,
+    )
+
+    result = evaluate.evaluate_gate1_confirmation(
+        context=official_context,
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+
+    assert calls == {"open": 1, "build": list(expected_ids)}
+    assert result.status == "falsified_by_optimistic_ceiling"
+
+
+def test_result_config_receipt_and_roots_reject_resigned_tampering(
+    official_context,
+    official_selections,
+    tiny_audit,
+    surviving_cells,
+) -> None:
     evaluate = _evaluate()
     result = evaluate._build_gate1_valid_result(
         context=official_context,
-        cell_ids=_cell_ids(),
-        audit_receipt=_receipt(),
-        statistics=_summary("1.5", "0.5"),
+        cells=surviving_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
         repair_count=0,
     )
 
@@ -316,22 +558,27 @@ def test_result_config_receipt_and_roots_reject_resigned_tampering(official_cont
         evaluate.Gate1EvaluationConfig.model_validate(config, strict=True)
 
     receipt = result.audit_receipt.model_dump(mode="python", round_trip=True)
-    receipt["cell_ids"] = (receipt["cell_ids"][0],) * 40
+    swapped_cells = list(receipt["confirmation_cells"])
+    swapped_cells[0], swapped_cells[1] = swapped_cells[1], swapped_cells[0]
+    receipt["confirmation_cells"] = tuple(swapped_cells)
     _rehash(receipt, id_field="receipt_id", prefix="yfm11g1a-")
-    with pytest.raises(ValidationError, match="cell|unique"):
+    with pytest.raises(ValidationError, match="cell|stream|corpus|regime|official"):
         evaluate.Gate1AuditReceipt.model_validate(receipt, strict=True)
 
 
 def test_result_rejects_resigned_verdict_and_statistics_cross_binding(
     official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
 ) -> None:
     evaluate = _evaluate()
     statistics = _statistics()
     result = evaluate._build_gate1_valid_result(
         context=official_context,
-        cell_ids=_cell_ids(),
-        audit_receipt=_receipt(),
-        statistics=_summary("0", "0"),
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
         repair_count=0,
     )
 
@@ -341,17 +588,159 @@ def test_result_rejects_resigned_verdict_and_statistics_cross_binding(
     payload = result.model_dump(mode="python", round_trip=True)
     payload["verdict"] = verdict_payload
     _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
-    with pytest.raises(ValidationError, match="repair|verdict|binding"):
+    with pytest.raises(ValidationError, match="repair|verdict|binding|branch"):
         evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
 
-    wrong_census = statistics.bootstrap_gate1_statistics(
-        (_metric("0", "0"),),
-        (_metric("0", "0"),),
+    with pytest.raises(ValueError, match="20|census"):
+        statistics._bootstrap_gate1_statistics(
+            (_metric("0", "0"),),
+            (_metric("0", "0"),),
+        )
+
+
+def test_result_rejects_fully_resigned_falsified_to_survived_branch_flip(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+) -> None:
+    evaluate = _evaluate()
+    result = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
     )
     payload = result.model_dump(mode="python", round_trip=True)
-    payload["statistics"] = wrong_census.model_dump(mode="python", round_trip=True)
+    summary = payload["statistics"]
+    summary["joint_upper_adverse_margin"] = 0.0
+    summary["falsifies_optimistic_ceiling"] = False
+    _rehash(summary, id_field="summary_id", prefix="yfm11g1s-")
+    payload.update(
+        status="gate_1_survived",
+        terminal=False,
+        opens_gate_2=True,
+        verdict=None,
+    )
     _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
-    with pytest.raises(ValidationError, match="census|stream_count|statistics"):
+
+    with pytest.raises(ValidationError, match="evidence|recompute|statistics|branch"):
+        evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
+
+
+def test_result_rejects_resigned_survived_to_falsified_branch_flip(
+    official_context,
+    official_selections,
+    tiny_audit,
+    surviving_cells,
+) -> None:
+    evaluate = _evaluate()
+    result = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=surviving_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+    payload = result.model_dump(mode="python", round_trip=True)
+    summary = payload["statistics"]
+    summary["joint_upper_adverse_margin"] = -0.1
+    summary["falsifies_optimistic_ceiling"] = True
+    _rehash(summary, id_field="summary_id", prefix="yfm11g1s-")
+    payload.update(
+        status="falsified_by_optimistic_ceiling",
+        terminal=True,
+        opens_gate_2=False,
+        verdict=build_m11_verdict(
+            contract=official_context.bundle.contract,
+            evidence_state=M11EvidenceState.FALSIFIED_BY_OPTIMISTIC_CEILING,
+            repair_count=0,
+        ).model_dump(mode="python", round_trip=True),
+    )
+    _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
+
+    with pytest.raises(ValidationError, match="evidence|recompute|statistics|branch"):
+        evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
+
+
+def test_result_rejects_resigned_same_branch_statistics_and_nested_evidence(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+) -> None:
+    evaluate = _evaluate()
+    result = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+
+    payload = result.model_dump(mode="python", round_trip=True)
+    payload["statistics"]["groups"][0]["savings_mean_ci_lower"] = -0.1
+    _rehash(payload["statistics"], id_field="summary_id", prefix="yfm11g1s-")
+    _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
+    with pytest.raises(ValidationError, match="evidence|recompute|statistics"):
+        evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
+
+    payload = result.model_dump(mode="python", round_trip=True)
+    forged_cell = payload["audit_receipt"]["confirmation_cells"][0]
+    forged_cell["ceiling_savings_percent"] = 99.0
+    _rehash(forged_cell, id_field="cell_id", prefix="yfm11g1-")
+    _rehash(payload["audit_receipt"], id_field="receipt_id", prefix="yfm11g1a-")
+    _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
+    with pytest.raises(ValidationError, match="cell|ceiling|reconcile|evidence"):
+        evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
+
+    payload = result.model_dump(mode="python", round_trip=True)
+    selections = list(payload["audit_receipt"]["baseline_selections"])
+    selections.reverse()
+    payload["audit_receipt"]["baseline_selections"] = tuple(selections)
+    _rehash(payload["audit_receipt"], id_field="receipt_id", prefix="yfm11g1a-")
+    _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
+    with pytest.raises(ValidationError, match="selection|corpus|order|binding"):
+        evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
+
+
+def test_result_rejects_resigned_cell_policy_different_from_frozen_selection(
+    official_context,
+    official_selections,
+    tiny_audit,
+    falsified_cells,
+) -> None:
+    evaluate = _evaluate()
+    result = evaluate._build_gate1_valid_result(
+        context=official_context,
+        cells=falsified_cells,
+        baseline_selections=official_selections,
+        tiny_audit=tiny_audit,
+        repair_count=0,
+    )
+    payload = result.model_dump(mode="python", round_trip=True)
+    receipt = payload["audit_receipt"]
+    selection = receipt["baseline_selections"][0]
+    replacement_policy_id = next(
+        policy_id
+        for policy_id in selection["eligible_policy_ids"]
+        if policy_id != selection["selected_policy_id"]
+    )
+    forged_cell = receipt["confirmation_cells"][0]
+    for evidence_name in ("baseline", "known_only"):
+        feasible = forged_cell[evidence_name]
+        feasible["registered_policy_id"] = replacement_policy_id
+        _rehash(feasible, id_field="witness_id", prefix="yfm11fp-")
+    _rehash(forged_cell, id_field="cell_id", prefix="yfm11g1-")
+    payload["observed_cell_ids"] = (
+        forged_cell["cell_id"],
+        *payload["observed_cell_ids"][1:],
+    )
+    _rehash(receipt, id_field="receipt_id", prefix="yfm11g1a-")
+    _rehash(payload, id_field="result_id", prefix="yfm11g1r-")
+
+    with pytest.raises(ValidationError, match="selection|policy|binding"):
         evaluate.Gate1EvaluationResult.model_validate(payload, strict=True)
 
 
@@ -360,5 +749,6 @@ def test_task5_public_api_is_exported_from_package() -> None:
     evaluate = _evaluate()
 
     assert package.Gate1EvaluationResult is evaluate.Gate1EvaluationResult
-    assert package.bootstrap_gate1_statistics is _statistics().bootstrap_gate1_statistics
+    assert not hasattr(package, "bootstrap_gate1_statistics")
+    assert not hasattr(package, "draw_gate1_bootstrap_indices")
     assert package.evaluate_gate1_confirmation is evaluate.evaluate_gate1_confirmation

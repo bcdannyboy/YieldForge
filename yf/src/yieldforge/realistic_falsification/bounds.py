@@ -2565,11 +2565,15 @@ def _build_calibration_score(
     )
 
 
-def select_gate1_baseline_policy(
+def _select_gate1_baseline_policy_authenticated(
     context: Gate1SourceContext,
     corpus_id: M11CorpusId,
+    *,
+    payloads: dict[str, M11Payload],
+    references: dict[str, dict[str, Fraction]],
+    proof_cache: dict[str, _PayloadProof],
 ) -> Gate1BaselineSelectionEvidence:
-    """Freeze the lowest-cost registered feasible policy using calibration streams only."""
+    """Derive one calibration selection from an already authenticated source context."""
 
     calibration = tuple(
         sorted(
@@ -2588,9 +2592,6 @@ def select_gate1_baseline_policy(
     eligible = tuple(
         item for item in GATE1_BASELINE_POLICY_REGISTRY if corpus_id in item.supported_corpora
     )
-    payloads = {item.payload_id: item for item in context.bundle.population.payloads}
-    references = _reference_registry(context)
-    proof_cache: dict[str, _PayloadProof] = {}
     scores: list[Gate1CalibrationPolicyScore] = []
     for policy in eligible:
         stream_costs: list[tuple[str, float]] = []
@@ -2660,17 +2661,33 @@ def select_gate1_baseline_policy(
     )
 
 
-def build_gate1_stream_cell(
+def select_gate1_baseline_policy(
+    context: Gate1SourceContext,
+    corpus_id: M11CorpusId,
+) -> Gate1BaselineSelectionEvidence:
+    """Freeze the lowest-cost registered feasible policy using calibration streams only."""
+
+    return _select_gate1_baseline_policy_authenticated(
+        context,
+        corpus_id,
+        payloads={item.payload_id: item for item in context.bundle.population.payloads},
+        references=_reference_registry(context),
+        proof_cache={},
+    )
+
+
+def _build_gate1_stream_cell_authenticated(
     context: Gate1SourceContext,
     stream: M11Stream,
     *,
-    baseline_selection: Gate1BaselineSelectionEvidence | None = None,
+    baseline_selection: Gate1BaselineSelectionEvidence,
+    canonical_selection: Gate1BaselineSelectionEvidence,
+    payloads: dict[str, M11Payload],
+    references: dict[str, dict[str, Fraction]],
+    proof_cache: dict[str, _PayloadProof],
 ) -> Gate1StreamCell:
-    """Build one complete official stream cell from exact demand and fallback geometry."""
+    """Build one cell from an authenticated context and internally derived selection."""
 
-    context = _authenticate_official_gate1_context(context)
-    if baseline_selection is None:
-        raise Gate1EvidenceError("official Gate 1 cells require calibration selection evidence")
     canonical_streams = tuple(
         item for item in context.bundle.population.streams if item.stream_id == stream.stream_id
     )
@@ -2704,7 +2721,6 @@ def build_gate1_stream_cell(
         != context.source_manifest.loco.catalog_content_sha256
     ):
         raise Gate1EvidenceError("Gate 1 context source identities changed after strict loading")
-    canonical_selection = select_gate1_baseline_policy(context, stream.corpus_id)
     if baseline_selection != canonical_selection:
         raise Gate1EvidenceError(
             "Gate 1 cell selection differs from the canonical calibration selection"
@@ -2712,9 +2728,6 @@ def build_gate1_stream_cell(
     policy = _policy_spec(canonical_selection.selected_policy_id)
     if stream.corpus_id not in policy.supported_corpora:
         raise Gate1EvidenceError("selected baseline policy does not support this source corpus")
-    payloads = {item.payload_id: item for item in context.bundle.population.payloads}
-    references = _reference_registry(context)
-    proof_cache: dict[str, _PayloadProof] = {}
     demands: list[Gate1DemandRecord] = []
     for event in stream.events:
         try:
@@ -2779,6 +2792,150 @@ def build_gate1_stream_cell(
         lower_bound=lower,
         baseline=baseline,
         known_only=known_only,
+    )
+
+
+def build_gate1_stream_cell(
+    context: Gate1SourceContext,
+    stream: M11Stream,
+    *,
+    baseline_selection: Gate1BaselineSelectionEvidence | None = None,
+) -> Gate1StreamCell:
+    """Build one complete official stream cell from exact demand and fallback geometry."""
+
+    context = _authenticate_official_gate1_context(context)
+    if baseline_selection is None:
+        raise Gate1EvidenceError("official Gate 1 cells require calibration selection evidence")
+    payloads = {item.payload_id: item for item in context.bundle.population.payloads}
+    references = _reference_registry(context)
+    proof_cache: dict[str, _PayloadProof] = {}
+    canonical_selection = _select_gate1_baseline_policy_authenticated(
+        context,
+        stream.corpus_id,
+        payloads=payloads,
+        references=references,
+        proof_cache=proof_cache,
+    )
+    return _build_gate1_stream_cell_authenticated(
+        context,
+        stream,
+        baseline_selection=baseline_selection,
+        canonical_selection=canonical_selection,
+        payloads=payloads,
+        references=references,
+        proof_cache=proof_cache,
+    )
+
+
+def _official_confirmation_stream_registry(
+    context: Gate1SourceContext,
+) -> tuple[M11Stream, ...]:
+    """Resolve the exact official primary-confirmation order after selection is frozen."""
+
+    expected_ids = tuple(
+        stream_id
+        for corpus in context.bundle.contract.corpora
+        for stream_id in corpus.confirmation_stream_ids
+    )
+    by_id = {item.stream_id: item for item in context.bundle.population.streams}
+    try:
+        streams = tuple(by_id[stream_id] for stream_id in expected_ids)
+    except KeyError as error:
+        raise Gate1EvidenceError(
+            "official confirmation registry references an absent stream"
+        ) from error
+    if len(streams) != 40 or any(
+        item.partition != "confirmation" or item.stream_kind != "primary" for item in streams
+    ):
+        raise Gate1EvidenceError("official confirmation registry differs from the frozen census")
+    return streams
+
+
+class _OfficialGate1Session:
+    """Opaque short-lived owner of one authenticated Gate 1 execution context."""
+
+    __slots__ = (
+        "__context",
+        "__selections",
+        "__selection_by_corpus",
+        "__streams_by_id",
+        "__payloads",
+        "__references",
+        "__proof_cache",
+    )
+
+    def __init__(
+        self,
+        *,
+        context: Gate1SourceContext,
+        selections: tuple[Gate1BaselineSelectionEvidence, Gate1BaselineSelectionEvidence],
+        streams: tuple[M11Stream, ...],
+        payloads: dict[str, M11Payload],
+        references: dict[str, dict[str, Fraction]],
+        proof_cache: dict[str, _PayloadProof],
+    ) -> None:
+        self.__context = context
+        self.__selections = selections
+        self.__selection_by_corpus = {item.corpus_id: item for item in selections}
+        self.__streams_by_id = {item.stream_id: item for item in streams}
+        self.__payloads = payloads
+        self.__references = references
+        self.__proof_cache = proof_cache
+
+    @property
+    def context(self) -> Gate1SourceContext:
+        return self.__context
+
+    @property
+    def baseline_selections(
+        self,
+    ) -> tuple[Gate1BaselineSelectionEvidence, Gate1BaselineSelectionEvidence]:
+        return self.__selections
+
+    def build_stream_cell(self, stream_id: str) -> Gate1StreamCell:
+        try:
+            stream = self.__streams_by_id[stream_id]
+        except (KeyError, TypeError) as error:
+            raise Gate1EvidenceError(
+                "official Gate 1 session accepts only primary confirmation stream IDs"
+            ) from error
+        selection = self.__selection_by_corpus[stream.corpus_id]
+        return _build_gate1_stream_cell_authenticated(
+            self.__context,
+            stream,
+            baseline_selection=selection,
+            canonical_selection=selection,
+            payloads=self.__payloads,
+            references=self.__references,
+            proof_cache=self.__proof_cache,
+        )
+
+
+def _open_official_gate1_session(repository_root: Path) -> _OfficialGate1Session:
+    """Open fresh authenticated state; freeze both selections before confirmation access."""
+
+    context = load_official_gate1_context(Path(repository_root).resolve())
+    payloads = {item.payload_id: item for item in context.bundle.population.payloads}
+    references = _reference_registry(context)
+    proof_cache: dict[str, _PayloadProof] = {}
+    selections = tuple(
+        _select_gate1_baseline_policy_authenticated(
+            context,
+            corpus_id,
+            payloads=payloads,
+            references=references,
+            proof_cache=proof_cache,
+        )
+        for corpus_id in ("lectra-m3-m4", "loco-2dics")
+    )
+    streams = _official_confirmation_stream_registry(context)
+    return _OfficialGate1Session(
+        context=context,
+        selections=(selections[0], selections[1]),
+        streams=streams,
+        payloads=payloads,
+        references=references,
+        proof_cache=proof_cache,
     )
 
 
