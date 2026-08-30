@@ -303,6 +303,18 @@ def test_downward_lower_bound_rounding_differs_from_realized_half_up_rounding() 
     assert bounds.round_half_up_cost(value) == 1.234568
 
 
+@pytest.mark.parametrize("rounding_function", ("round_down_cost", "round_half_up_cost"))
+@pytest.mark.parametrize("token,expected", (("1e22", 1e22), ("1e30", 1e30)))
+def test_admitted_large_exact_costs_round_without_decimal_context_leaks(
+    rounding_function: str,
+    token: str,
+    expected: float,
+) -> None:
+    bounds = _bounds()
+
+    assert getattr(bounds, rounding_function)(token) == expected
+
+
 @pytest.mark.parametrize(
     "token",
     (

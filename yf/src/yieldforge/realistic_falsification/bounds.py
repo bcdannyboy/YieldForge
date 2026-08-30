@@ -7,7 +7,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, DecimalException, localcontext
 from fractions import Fraction
 from itertools import product
 from pathlib import Path
@@ -303,27 +303,38 @@ def _parse_fraction_token(value: str, *, label: str, positive: bool = False) -> 
     return result
 
 
-def _decimal(value: Fraction) -> Decimal:
+def _quantized_decimal(value: Fraction, *, rounding: str, label: str) -> Decimal:
     if _fraction_complexity_exceeded(value):
         _raise_exact_complexity("exact decimal conversion")
-    digits = len(str(abs(value.numerator))) + len(str(value.denominator)) + 32
-    with localcontext() as context:
-        context.prec = max(80, digits)
-        return Decimal(value.numerator) / Decimal(value.denominator)
+    numerator_digits = len(str(abs(value.numerator)))
+    denominator_digits = len(str(value.denominator))
+    quantum_exponent = _COST_QUANTUM.as_tuple().exponent
+    quantum_places = -quantum_exponent if isinstance(quantum_exponent, int) else 0
+    precision = max(
+        80,
+        numerator_digits + denominator_digits + quantum_places + 16,
+    )
+    try:
+        with localcontext() as context:
+            context.prec = precision
+            exact_decimal = Decimal(value.numerator) / Decimal(value.denominator)
+            return exact_decimal.quantize(_COST_QUANTUM, rounding=rounding)
+    except DecimalException as error:
+        raise Gate1EvidenceError(f"{label} decimal rounding failed closed") from error
 
 
 def round_down_cost(value: FractionInput) -> float:
     """Round one nonnegative certified lower-bound cost down to six decimals."""
 
     exact = _fraction(value, label="lower-bound cost")
-    return float(_decimal(exact).quantize(_COST_QUANTUM, rounding=ROUND_DOWN))
+    return float(_quantized_decimal(exact, rounding=ROUND_DOWN, label="lower-bound cost"))
 
 
 def round_half_up_cost(value: FractionInput) -> float:
     """Round one nonnegative realized feasible cost half-up to six decimals."""
 
     exact = _fraction(value, label="realized cost")
-    return float(_decimal(exact).quantize(_COST_QUANTUM, rounding=ROUND_HALF_UP))
+    return float(_quantized_decimal(exact, rounding=ROUND_HALF_UP, label="realized cost"))
 
 
 def _identity(prefix: str, semantic: dict[str, object]) -> tuple[str, str]:
