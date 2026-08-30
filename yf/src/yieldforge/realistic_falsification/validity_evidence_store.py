@@ -13,7 +13,7 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 from gzip import GzipFile
 from io import BytesIO
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     Field,
@@ -44,8 +44,8 @@ from yieldforge.realistic_falsification.confirmation import (
 )
 
 _COMPRESSION = "gzip-level-6-mtime-0-flags-0"
-_MAX_COMPRESSED_BYTES = 256 * 1024 * 1024
-_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+_MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
+_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 _COST_PATTERN = r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _SIGNED_COST_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _METRIC_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{12}$"
@@ -74,8 +74,18 @@ class Gate3ValidityHardNullRow(FrozenExperimentModel):
     control_content_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
     corpus_id: Gate3CorpusId
     null_kind: Gate3HardNullKind
-    maximum_absolute_cost_difference: StrictStr = Field(pattern=_COST_PATTERN)
+    maximum_absolute_cost_difference: StrictStr = Field(
+        max_length=64,
+        pattern=_COST_PATTERN,
+    )
     passes: StrictBool
+
+    @model_validator(mode="after")
+    def require_frozen_tolerance_decision(self) -> Self:
+        expected = Decimal(self.maximum_absolute_cost_difference) <= Decimal("0.000001")
+        if self.passes is not expected:
+            raise ValueError("Gate 3 compact hard-null tolerance decision differs")
+        return self
 
 
 class Gate3ValidityTwinControlRow(FrozenExperimentModel):
@@ -83,15 +93,31 @@ class Gate3ValidityTwinControlRow(FrozenExperimentModel):
 
     control_id: StrictStr = Field(pattern=r"^yfm11g3twin-[0-9a-f]{24}$")
     control_content_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
-    source_stream_id: StrictStr = Field(min_length=1)
-    twin_stream_id: StrictStr = Field(min_length=1)
+    source_stream_id: StrictStr = Field(min_length=1, max_length=128)
+    twin_stream_id: StrictStr = Field(min_length=1, max_length=128)
     twin_cell_id: StrictStr = Field(pattern=r"^yfm11g3cell-[0-9a-f]{24}$")
     twin_cell_content_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
     corpus_id: Gate3CorpusId
-    baseline_cost: StrictStr = Field(pattern=_SIGNED_COST_PATTERN)
-    full_future_cost: StrictStr = Field(pattern=_SIGNED_COST_PATTERN)
-    known_only_cost: StrictStr = Field(pattern=_SIGNED_COST_PATTERN)
-    no_signal_savings_percent: StrictStr = Field(pattern=_METRIC_PATTERN)
+    baseline_cost: StrictStr = Field(max_length=64, pattern=_SIGNED_COST_PATTERN)
+    full_future_cost: StrictStr = Field(max_length=64, pattern=_SIGNED_COST_PATTERN)
+    known_only_cost: StrictStr = Field(max_length=64, pattern=_SIGNED_COST_PATTERN)
+    no_signal_savings_percent: StrictStr = Field(max_length=64, pattern=_METRIC_PATTERN)
+
+    @model_validator(mode="after")
+    def require_recomputed_metric(self) -> Self:
+        baseline = Decimal(self.baseline_cost)
+        if baseline <= 0:
+            raise ValueError("Gate 3 compact twin requires a positive baseline")
+        with localcontext() as context:
+            context.prec = 50
+            expected = Decimal(100) * (baseline - Decimal(self.full_future_cost)) / baseline
+        formatted = format(
+            expected.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP),
+            ".12f",
+        )
+        if self.no_signal_savings_percent != formatted:
+            raise ValueError("Gate 3 compact twin savings does not reconcile")
+        return self
 
 
 class Gate3ValidityExactAuditRow(FrozenExperimentModel):
@@ -102,8 +128,15 @@ class Gate3ValidityExactAuditRow(FrozenExperimentModel):
     corpus_id: Gate3CorpusId
     audit_ordinal: StrictInt = Field(ge=0, le=5)
     economic_arm: Literal["central", "adverse", "null"]
-    selected_action_id: StrictStr = Field(min_length=1)
+    selected_action_id: StrictStr = Field(min_length=1, max_length=512)
+    selected_is_exact_optimal: StrictBool
     passes: StrictBool
+
+    @model_validator(mode="after")
+    def require_exact_decision(self) -> Self:
+        if self.passes is not self.selected_is_exact_optimal:
+            raise ValueError("Gate 3 compact exact-audit decision differs")
+        return self
 
 
 class Gate3ValidityEvidenceReceipt(FrozenExperimentModel):
@@ -138,8 +171,12 @@ class Gate3ValidityEvidenceReceipt(FrozenExperimentModel):
         max_length=12,
     )
     no_signal_summaries: tuple[Gate3NoSignalSummary, Gate3NoSignalSummary]
-    failure_codes: tuple[StrictStr, ...]
-    diagnosis_codes: tuple[StrictStr, ...]
+    failure_codes: tuple[Annotated[StrictStr, Field(min_length=1, max_length=128)], ...] = Field(
+        max_length=20
+    )
+    diagnosis_codes: tuple[Annotated[StrictStr, Field(min_length=1, max_length=128)], ...] = Field(
+        max_length=2
+    )
     status: Literal["valid", "diagnosis_required", "invalid"]
     exact_control_census: Literal[True] = True
     raw_controls_revalidated: Literal[True] = True
@@ -213,6 +250,25 @@ class Gate3ValidityEvidenceReceipt(FrozenExperimentModel):
         )
         if any(len(set(values)) != len(values) for values in uniqueness_groups):
             raise ValueError("Gate 3 compact validity identities must be unique")
+        for twin in self.twin_controls:
+            twin_semantic = {
+                "schema_version": "yieldforge.m11-gate3-twin-control.v1",
+                "roots": self.roots.model_dump(mode="json"),
+                "source_stream_id": twin.source_stream_id,
+                "twin_stream_id": twin.twin_stream_id,
+                "corpus_id": twin.corpus_id,
+                "twin_cell_id": twin.twin_cell_id,
+                "twin_cell_content_sha256": twin.twin_cell_content_sha256,
+                "baseline_cost": twin.baseline_cost,
+                "full_future_cost": twin.full_future_cost,
+                "known_only_cost": twin.known_only_cost,
+                "no_signal_savings_percent": twin.no_signal_savings_percent,
+            }
+            twin_digest = semantic_sha256(twin_semantic)
+            if twin.control_id != f"yfm11g3twin-{twin_digest[:24]}" or (
+                twin.control_content_sha256 != f"sha256:{twin_digest}"
+            ):
+                raise ValueError("Gate 3 compact twin identity differs")
         expected_summaries = []
         for corpus_id, rows, summary in zip(
             _CORPUS_ORDER,
@@ -311,6 +367,50 @@ def deterministic_gzip(data: bytes) -> bytes:
     ) as archive:
         archive.write(data)
     return output.getvalue()
+
+
+def _iter_canonical_json_bytes(value: Gate3ValidityReceipt):
+    """Yield the canonical JSON encoding without retaining a second raw copy."""
+
+    payload = value.model_dump(mode="json")
+    encoder = json.JSONEncoder(
+        allow_nan=False,
+        indent=2,
+        sort_keys=True,
+    )
+    for chunk in encoder.iterencode(payload):
+        yield chunk.encode("utf-8")
+    yield b"\n"
+
+
+def _stream_canonical_gzip(
+    validity: Gate3ValidityReceipt,
+) -> tuple[bytes, int]:
+    """Compress canonical chunks while enforcing the raw bound incrementally."""
+
+    output = BytesIO()
+    uncompressed_byte_count = 0
+    with GzipFile(
+        filename="",
+        mode="wb",
+        compresslevel=6,
+        fileobj=output,
+        mtime=0,
+    ) as archive:
+        for chunk in _iter_canonical_json_bytes(validity):
+            uncompressed_byte_count += len(chunk)
+            if uncompressed_byte_count > _MAX_UNCOMPRESSED_BYTES:
+                raise Gate3ValidityEvidenceError(
+                    "Gate 3 validity sidecar exceeds the uncompressed byte bound"
+                )
+            archive.write(chunk)
+    compressed = output.getvalue()
+    _validate_gzip_header(compressed)
+    if len(compressed) > _MAX_COMPRESSED_BYTES:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity sidecar exceeds the compressed byte bound"
+        )
+    return compressed, uncompressed_byte_count
 
 
 def _strict_validity_receipt(receipt: Gate3ValidityReceipt) -> Gate3ValidityReceipt:
@@ -420,6 +520,7 @@ def _compact_audits(receipt: Gate3ValidityReceipt) -> tuple[Gate3ValidityExactAu
             audit_ordinal=item.registration.audit_ordinal,
             economic_arm=item.economic_arm,
             selected_action_id=item.selected_action_id,
+            selected_is_exact_optimal=item.selected_is_exact_optimal,
             passes=item.passes,
         )
         for item in receipt.exact_audits
@@ -448,8 +549,6 @@ def canonical_gate3_validity_receipt_bytes(receipt: Gate3ValidityReceipt) -> byt
 
 @dataclass(frozen=True, slots=True)
 class _PreparedValidityEvidence:
-    validity_receipt: Gate3ValidityReceipt
-    canonical_bytes: bytes
     compressed_bytes: bytes
     evidence_receipt: Gate3ValidityEvidenceReceipt
 
@@ -458,7 +557,7 @@ def _build_evidence_receipt(
     validity: Gate3ValidityReceipt,
     freezes: tuple[Gate3BaselineCalibrationFreeze, Gate3BaselineCalibrationFreeze],
     *,
-    canonical_bytes: bytes,
+    uncompressed_byte_count: int,
     compressed_bytes: bytes,
 ) -> Gate3ValidityEvidenceReceipt:
     validity_hash = validity.content_sha256.removeprefix("sha256:")
@@ -488,7 +587,7 @@ def _build_evidence_receipt(
         "sidecar_name": (f"m11-gate3-validity-receipt-{validity_hash}-{compressed_hash}.json.gz"),
         "compressed_raw_sha256": f"sha256:{compressed_hash}",
         "compressed_byte_count": len(compressed_bytes),
-        "uncompressed_byte_count": len(canonical_bytes),
+        "uncompressed_byte_count": uncompressed_byte_count,
         "compression": _COMPRESSION,
     }
     digest = semantic_sha256(semantic)
@@ -512,7 +611,7 @@ def _build_evidence_receipt(
         sidecar_name=semantic["sidecar_name"],
         compressed_raw_sha256=semantic["compressed_raw_sha256"],
         compressed_byte_count=len(compressed_bytes),
-        uncompressed_byte_count=len(canonical_bytes),
+        uncompressed_byte_count=uncompressed_byte_count,
     )
 
 
@@ -527,26 +626,14 @@ def _prepare_validity_evidence(
     strict = _strict_validity_receipt(validity_receipt)
     freezes = _strict_baseline_freezes(baseline_freezes, expected_roots=strict.roots)
     _validate_receipt_freeze_bindings(strict, freezes)
-    canonical = canonical_pretty_json_bytes(strict)
-    if len(canonical) > _MAX_UNCOMPRESSED_BYTES:
-        raise Gate3ValidityEvidenceError(
-            "Gate 3 validity sidecar exceeds the uncompressed byte bound"
-        )
-    compressed = deterministic_gzip(canonical)
-    _validate_gzip_header(compressed)
-    if len(compressed) > _MAX_COMPRESSED_BYTES:
-        raise Gate3ValidityEvidenceError(
-            "Gate 3 validity sidecar exceeds the compressed byte bound"
-        )
+    compressed, uncompressed_byte_count = _stream_canonical_gzip(strict)
     evidence_receipt = _build_evidence_receipt(
         strict,
         freezes,
-        canonical_bytes=canonical,
+        uncompressed_byte_count=uncompressed_byte_count,
         compressed_bytes=compressed,
     )
     return _PreparedValidityEvidence(
-        validity_receipt=strict,
-        canonical_bytes=canonical,
         compressed_bytes=compressed,
         evidence_receipt=evidence_receipt,
     )
@@ -681,24 +768,28 @@ def _validate_gzip_header(data: bytes) -> None:
         )
 
 
-def _bounded_gzip_decompress(data: bytes) -> bytes:
+def _bounded_gzip_decompress(data: bytes) -> bytearray:
     try:
         with GzipFile(fileobj=BytesIO(data), mode="rb") as archive:
-            chunks: list[bytes] = []
-            remaining = _MAX_UNCOMPRESSED_BYTES + 1
-            while remaining:
+            raw = bytearray()
+            while True:
+                remaining = _MAX_UNCOMPRESSED_BYTES + 1 - len(raw)
+                if remaining <= 0:
+                    raise Gate3ValidityEvidenceError(
+                        "Gate 3 validity sidecar exceeds the uncompressed byte bound"
+                    )
                 chunk = archive.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
-                chunks.append(chunk)
-                remaining -= len(chunk)
+                raw.extend(chunk)
+                if len(raw) > _MAX_UNCOMPRESSED_BYTES:
+                    raise Gate3ValidityEvidenceError(
+                        "Gate 3 validity sidecar exceeds the uncompressed byte bound"
+                    )
+    except Gate3ValidityEvidenceError:
+        raise
     except (EOFError, OSError, zlib.error) as error:
         raise Gate3ValidityEvidenceError("Gate 3 validity sidecar is not valid gzip") from error
-    raw = b"".join(chunks)
-    if len(raw) > _MAX_UNCOMPRESSED_BYTES:
-        raise Gate3ValidityEvidenceError(
-            "Gate 3 validity sidecar exceeds the uncompressed byte bound"
-        )
     return raw
 
 
@@ -715,7 +806,7 @@ def _reject_nonfinite_json(value: str):
     raise Gate3ValidityEvidenceError(f"Gate 3 validity JSON contains non-finite value {value}")
 
 
-def _parse_strict_validity_json(raw: bytes) -> Gate3ValidityReceipt:
+def _parse_strict_validity_json(raw: bytes | bytearray) -> Gate3ValidityReceipt:
     try:
         json.loads(
             raw,
@@ -735,6 +826,20 @@ def _parse_strict_validity_json(raw: bytes) -> Gate3ValidityReceipt:
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity sidecar failed strict semantic validation"
         ) from error
+
+
+def _has_canonical_encoding(
+    validity: Gate3ValidityReceipt,
+    raw: bytes | bytearray,
+) -> bool:
+    view = memoryview(raw)
+    offset = 0
+    for chunk in _iter_canonical_json_bytes(validity):
+        stop = offset + len(chunk)
+        if stop > len(view) or view[offset:stop] != chunk:
+            return False
+        offset = stop
+    return offset == len(view)
 
 
 def _validate_sidecar_bytes(
@@ -762,14 +867,13 @@ def _validate_sidecar_bytes(
     if len(raw) != evidence_receipt.uncompressed_byte_count:
         raise Gate3ValidityEvidenceError("Gate 3 validity uncompressed byte count differs")
     validity = _parse_strict_validity_json(raw)
-    canonical = canonical_pretty_json_bytes(validity)
-    if raw != canonical:
+    if not _has_canonical_encoding(validity, raw):
         raise Gate3ValidityEvidenceError("Gate 3 validity receipt encoding is not canonical")
     _validate_receipt_freeze_bindings(validity, baseline_freezes)
     rederived = _build_evidence_receipt(
         validity,
         baseline_freezes,
-        canonical_bytes=canonical,
+        uncompressed_byte_count=len(raw),
         compressed_bytes=data,
     )
     if rederived != evidence_receipt:

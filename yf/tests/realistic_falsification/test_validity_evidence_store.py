@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import gzip
 import hashlib
 import importlib
 import json
 import os
+import weakref
 from pathlib import Path
 
 import pytest
@@ -164,6 +166,124 @@ def test_validity_evidence_receipt_rejects_duplicate_compact_id(validity_case) -
         )
 
 
+def test_resigned_hard_null_cannot_contradict_frozen_tolerance(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+    first = receipt.hard_nulls[0]
+    contradicted = first.model_copy(update={"passes": False})
+    failure_code = f"hard_null:{first.registration_id}"
+
+    with pytest.raises(ValidationError, match="hard-null tolerance"):
+        _resign_evidence_receipt(
+            receipt,
+            hard_nulls=(contradicted, *receipt.hard_nulls[1:]),
+            failure_codes=(failure_code,),
+            status="invalid",
+        )
+
+
+def test_resigned_twin_requires_positive_baseline_and_exact_metric(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+    first = receipt.twin_controls[0]
+
+    for update, match in (
+        ({"baseline_cost": "0.000000"}, "positive baseline"),
+        ({"full_future_cost": "99.000000"}, "savings does not reconcile"),
+    ):
+        contradicted = first.model_copy(update=update)
+        with pytest.raises(ValidationError, match=match):
+            _resign_evidence_receipt(
+                receipt,
+                twin_controls=(contradicted, *receipt.twin_controls[1:]),
+            )
+
+
+def test_resigned_twin_row_identity_is_rederived_from_roots(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+    first = receipt.twin_controls[0]
+    contradicted = first.model_copy(update={"known_only_cost": "999.000000"})
+
+    with pytest.raises(ValidationError, match="twin identity"):
+        _resign_evidence_receipt(
+            receipt,
+            twin_controls=(contradicted, *receipt.twin_controls[1:]),
+        )
+
+
+def test_exact_audit_compact_pass_is_bound_to_exact_optimality(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+
+    assert "selected_is_exact_optimal" in store.Gate3ValidityExactAuditRow.model_fields
+    first = receipt.exact_audits[0]
+    contradicted = first.model_copy(update={"passes": not first.selected_is_exact_optimal})
+    failure_code = f"exact_audit:{first.registration_id}"
+    with pytest.raises(ValidationError, match="exact-audit decision"):
+        _resign_evidence_receipt(
+            receipt,
+            exact_audits=(contradicted, *receipt.exact_audits[1:]),
+            failure_codes=(failure_code,),
+            status="invalid",
+        )
+
+
+def test_resigned_status_and_summary_are_rederived_from_compact_rows(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+
+    with pytest.raises(ValidationError, match="validity decision"):
+        _resign_evidence_receipt(receipt, status="invalid")
+
+    first_summary = receipt.no_signal_summaries[0]
+    summary_semantic = first_summary.model_dump(
+        mode="python",
+        round_trip=True,
+        exclude={"summary_id", "content_sha256"},
+    )
+    summary_semantic.update(
+        mean_no_signal_savings_percent="0.300000000000",
+        classification="diagnosis_required",
+    )
+    summary_digest = semantic_sha256(summary_semantic)
+    contradicted_summary = type(first_summary)(
+        summary_id=f"yfm11g3ns-{summary_digest[:24]}",
+        content_sha256=f"sha256:{summary_digest}",
+        **summary_semantic,
+    )
+    with pytest.raises(ValidationError, match="no-signal summary"):
+        _resign_evidence_receipt(
+            receipt,
+            no_signal_summaries=(
+                contradicted_summary,
+                receipt.no_signal_summaries[1],
+            ),
+            diagnosis_codes=("no_signal:lectra-m3-m4",),
+            status="diagnosis_required",
+        )
+
+
 def test_compact_receipt_preserves_invalid_and_diagnosis_decisions(validity_case) -> None:  # type: ignore[no-untyped-def]
     store = _store()
     freezes, valid = validity_case
@@ -307,34 +427,114 @@ def test_publish_is_immutable_idempotent_and_loads_exact_full_receipt(
     assert _load_validity(first_path, freezes, validity, first_evidence) == validity
 
 
-def test_publication_prepares_full_receipt_exactly_once(
+def test_publication_streams_full_receipt_exactly_once(
     tmp_path: Path,
     validity_case,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     store = _store()
     freezes, validity = validity_case
-    serialize = store.canonical_pretty_json_bytes
-    compress = store.deterministic_gzip
-    calls = {"serialize": 0, "compress": 0}
+    iterate = store._iter_canonical_json_bytes
+    calls = 0
 
-    def counted_serialize(value):  # type: ignore[no-untyped-def]
-        calls["serialize"] += 1
-        return serialize(value)
+    def counted_chunks(value):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        yield from iterate(value)
 
-    def counted_compress(data):  # type: ignore[no-untyped-def]
-        calls["compress"] += 1
-        return compress(data)
-
-    monkeypatch.setattr(store, "canonical_pretty_json_bytes", counted_serialize)
-    monkeypatch.setattr(store, "deterministic_gzip", counted_compress)
+    monkeypatch.setattr(store, "_iter_canonical_json_bytes", counted_chunks)
     store.publish_gate3_validity_evidence(
         tmp_path,
         validity,
         baseline_freezes=freezes,
     )
 
-    assert calls == {"serialize": 1, "compress": 1}
+    assert calls == 1
+
+
+def test_preparation_retains_only_transport_and_compact_receipt(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+
+    prepared = store._prepare_validity_evidence(
+        validity,
+        baseline_freezes=freezes,
+    )
+
+    assert set(prepared.__dataclass_fields__) == {
+        "compressed_bytes",
+        "evidence_receipt",
+    }
+    assert not hasattr(prepared, "validity_receipt")
+    assert not hasattr(prepared, "canonical_bytes")
+
+
+def test_preparation_releases_detached_full_receipt_graph(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    strict_validate = store._strict_validity_receipt
+    detached_refs = []
+
+    def capture_detached(value):  # type: ignore[no-untyped-def]
+        detached = strict_validate(value)
+        detached_refs.append(weakref.ref(detached))
+        return detached
+
+    monkeypatch.setattr(store, "_strict_validity_receipt", capture_detached)
+    prepared = store._prepare_validity_evidence(
+        validity,
+        baseline_freezes=freezes,
+    )
+    gc.collect()
+
+    assert prepared.compressed_bytes
+    assert detached_refs[0]() is None
+
+
+def test_preparation_streams_canonical_encoding_and_stops_at_bound(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    consumed = []
+
+    def bounded_chunks(_value):  # type: ignore[no-untyped-def]
+        consumed.append("oversize")
+        yield b"x" * 11
+        consumed.append("forbidden-tail")
+        raise AssertionError("serializer consumed beyond the first oversize chunk")
+
+    monkeypatch.setattr(store, "_MAX_UNCOMPRESSED_BYTES", 10)
+    monkeypatch.setattr(store, "_iter_canonical_json_bytes", bounded_chunks)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="uncompressed byte bound"):
+        store.build_gate3_validity_evidence_receipt(
+            validity,
+            baseline_freezes=freezes,
+        )
+    assert consumed == ["oversize"]
+
+
+def test_preparation_does_not_materialize_canonical_raw_bytes(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+
+    def reject_materialization(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepared evidence must stream canonical bytes")
+
+    monkeypatch.setattr(store, "canonical_pretty_json_bytes", reject_materialization)
+    monkeypatch.setattr(store, "deterministic_gzip", reject_materialization)
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+    assert receipt.uncompressed_byte_count > 0
 
 
 def test_publish_refuses_to_replace_foreign_bytes(
@@ -405,10 +605,12 @@ def test_loader_rederives_compact_rows_from_full_receipt(
 ) -> None:  # type: ignore[no-untyped-def]
     store = _store()
     freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
-    mutated_row = evidence.twin_controls[0].model_copy(update={"known_only_cost": "999.000000"})
+    mutated_row = evidence.hard_nulls[0].model_copy(
+        update={"control_content_sha256": "sha256:" + "f" * 64}
+    )
     resigned = _resign_evidence_receipt(
         evidence,
-        twin_controls=(mutated_row, *evidence.twin_controls[1:]),
+        hard_nulls=(mutated_row, *evidence.hard_nulls[1:]),
     )
 
     with pytest.raises(store.Gate3ValidityEvidenceError, match="compact receipt"):
@@ -462,6 +664,28 @@ def test_loader_accepts_distinct_bound_gzip_transport_without_recompression(
     assert alternate_path != published
     assert gzip.decompress(alternate_bytes) == gzip.decompress(published.read_bytes())
     assert _load_validity(alternate_path, freezes, validity, alternate_receipt) == validity
+
+
+def test_loader_stream_compares_canonical_encoding_without_materializing_copy(
+    tmp_path: Path,
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+
+    def reject_materialization(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("loader must compare canonical chunks in place")
+
+    monkeypatch.setattr(store, "canonical_pretty_json_bytes", reject_materialization)
+    assert _load_validity(published, freezes, validity, evidence) == validity
+
+
+def test_validity_store_freezes_materially_bounded_peak_contract() -> None:
+    store = _store()
+
+    assert store._MAX_UNCOMPRESSED_BYTES == 128 * 1024 * 1024
+    assert store._MAX_COMPRESSED_BYTES == 32 * 1024 * 1024
 
 
 @pytest.mark.parametrize("header_mutation", ("mtime", "fname"))
