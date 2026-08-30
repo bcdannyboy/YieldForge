@@ -89,6 +89,10 @@ from yieldforge.oracle.gate3_execution import (
     load_portable_fact_gate3,
     publish_gate3_decision,
 )
+from yieldforge.realistic_falsification.geometry_runner import (
+    M11Gate2RunnerError,
+    run_and_publish_official_gate2,
+)
 from yieldforge.realistic_falsification.runner import (
     M11Gate1RunnerError,
     generate_and_publish_m11_pack,
@@ -818,6 +822,38 @@ def _run_m11_gate1(args: argparse.Namespace) -> int:
     return 2 if artifact.disposition == "INVALID_NONZERO" else 0
 
 
+def _run_m11_gate2(args: argparse.Namespace) -> int:
+    """Execute and authenticate the frozen forty-stream M11 Gate 2."""
+
+    try:
+        artifact, path = run_and_publish_official_gate2(
+            repository_root=args.repository_root,
+            gate1_artifact_path=args.gate1_artifact,
+            output_directory=args.output,
+        )
+    except M11Gate2RunnerError as error:
+        print(f"M11 Gate 2 failed: {error}")
+        return 2
+    verdict = artifact.gate2_result.verdict
+    verdict_action = verdict.action if verdict is not None else "none"
+    print(
+        "Published M11 Gate 2 result: "
+        f"run={artifact.run_id} "
+        f"status={artifact.status} "
+        f"disposition={artifact.disposition} "
+        f"verdict_action={verdict_action} "
+        f"stage={artifact.evaluation_stage} "
+        f"streams={artifact.stream_count} "
+        f"edges={artifact.edge_count} "
+        f"unresolved={artifact.unresolved_optimistically_counted} "
+        f"blocking={artifact.blocking_error_count} "
+        "productization_authorized=false "
+        f"output={path}",
+        flush=True,
+    )
+    return 2 if artifact.status == "invalid_test" else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1179,6 +1215,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_m11.add_argument("--repository-root", type=Path, required=True)
     run_m11.add_argument("--output", type=Path, required=True)
     run_m11.set_defaults(handler=_run_m11_gate1)
+
+    run_m11_gate2 = benchmark_commands.add_parser(
+        "m11-gate2-run",
+        help="execute and publish the frozen forty-stream M11 Gate 2",
+    )
+    run_m11_gate2.add_argument("--repository-root", type=Path, required=True)
+    run_m11_gate2.add_argument("--gate1-artifact", type=Path, required=True)
+    run_m11_gate2.add_argument("--output", type=Path, required=True)
+    run_m11_gate2.set_defaults(handler=_run_m11_gate2)
     return parser
 
 

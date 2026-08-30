@@ -260,6 +260,235 @@ def test_m11_run_exposes_only_root_and_output() -> None:
     }
 
 
+def test_m11_gate2_run_exposes_only_registered_evidence_paths() -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "m11-gate2-run",
+            "--repository-root",
+            "/official/repository",
+            "--gate1-artifact",
+            "/official/results/gate1.json",
+            "--output",
+            "/official/results",
+        ]
+    )
+
+    assert args.handler.__name__ == "_run_m11_gate2"
+    assert set(vars(args)) == {
+        "command",
+        "benchmark_command",
+        "repository_root",
+        "gate1_artifact",
+        "output",
+        "handler",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--seed", "1"),
+        ("--threshold", "0"),
+        ("--stream", "stream-00"),
+        ("--skip-auth", "true"),
+        ("--geometry-limit", "1"),
+    ),
+)
+def test_m11_gate2_run_rejects_contract_or_authentication_overrides(
+    option: str,
+    value: str,
+) -> None:
+    from yieldforge.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "benchmark",
+                "m11-gate2-run",
+                "--repository-root",
+                "/official/repository",
+                "--gate1-artifact",
+                "/official/results/gate1.json",
+                "--output",
+                "/official/results",
+                option,
+                value,
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "disposition", "verdict_action", "evaluation_stage"),
+    (
+        (
+            "insufficient_headroom",
+            "ABANDON",
+            "ABANDON",
+            "stage_a_favorable_superset",
+        ),
+        ("gate_2_survived", "OPEN_GATE_3", None, "stage_b_exact_attempted"),
+    ),
+)
+def test_m11_gate2_handler_returns_zero_for_both_valid_decision_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+    status: str,
+    disposition: str,
+    verdict_action: str | None,
+    evaluation_stage: str,
+) -> None:
+    from yieldforge import cli
+
+    result_path = tmp_path / "results" / "m11-gate2-result.json"
+    artifact = SimpleNamespace(
+        run_id="yfm11g2run-" + "1" * 24,
+        status=status,
+        disposition=disposition,
+        productization_authorized=False,
+        evaluation_stage=evaluation_stage,
+        stream_count=40,
+        edge_count=120,
+        unresolved_optimistically_counted=7,
+        blocking_error_count=0,
+        gate2_result=SimpleNamespace(
+            verdict=(
+                SimpleNamespace(action=verdict_action)
+                if verdict_action is not None
+                else None
+            )
+        ),
+    )
+    calls: list[dict[str, Path]] = []
+    monkeypatch.setattr(
+        cli,
+        "run_and_publish_official_gate2",
+        lambda **kwargs: calls.append(kwargs) or (artifact, result_path),
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m11-gate2-run",
+                "--repository-root",
+                str(tmp_path),
+                "--gate1-artifact",
+                str(tmp_path / "gate1.json"),
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "repository_root": tmp_path,
+            "gate1_artifact_path": tmp_path / "gate1.json",
+            "output_directory": tmp_path / "results",
+        }
+    ]
+    output = capsys.readouterr().out
+    assert f"status={status}" in output
+    assert f"disposition={disposition}" in output
+    assert f"verdict_action={verdict_action or 'none'}" in output
+    assert f"stage={evaluation_stage}" in output
+    assert "streams=40" in output
+    assert "edges=120" in output
+    assert "unresolved=7" in output
+    assert "blocking=0" in output
+    assert "productization_authorized=false" in output
+    assert f"output={result_path}" in output
+
+
+def test_m11_gate2_handler_returns_nonzero_on_authentication_or_publication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from yieldforge import cli
+
+    monkeypatch.setattr(
+        cli,
+        "run_and_publish_official_gate2",
+        lambda **kwargs: (_ for _ in ()).throw(
+            cli.M11Gate2RunnerError("Gate 1 did not open Gate 2")
+        ),
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m11-gate2-run",
+                "--repository-root",
+                str(tmp_path),
+                "--gate1-artifact",
+                str(tmp_path / "gate1.json"),
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 2
+    )
+    assert "M11 Gate 2 failed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("verdict_action", ("ONE_REPAIR_AND_RERUN", "ABANDON"))
+def test_m11_gate2_handler_publishes_invalid_evidence_but_returns_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+    verdict_action: str,
+) -> None:
+    from yieldforge import cli
+
+    result_path = tmp_path / "results" / "m11-gate2-invalid.json"
+    artifact = SimpleNamespace(
+        run_id="yfm11g2run-" + "1" * 24,
+        status="invalid_test",
+        disposition=verdict_action,
+        productization_authorized=False,
+        evaluation_stage="stage_a_favorable_superset",
+        stream_count=40,
+        edge_count=120,
+        unresolved_optimistically_counted=7,
+        blocking_error_count=1,
+        gate2_result=SimpleNamespace(
+            verdict=SimpleNamespace(action=verdict_action),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_and_publish_official_gate2",
+        lambda **kwargs: (artifact, result_path),
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m11-gate2-run",
+                "--repository-root",
+                str(tmp_path),
+                "--gate1-artifact",
+                str(tmp_path / "gate1.json"),
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert "status=invalid_test" in output
+    assert f"disposition={verdict_action}" in output
+    assert f"verdict_action={verdict_action}" in output
+    assert f"output={result_path}" in output
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     (
