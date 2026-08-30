@@ -1,10 +1,10 @@
 {
   "calibration_streams_per_corpus": 8,
   "claim_ceiling": "modeled_semi_synthetic_hypothesis_disposition_only_may_abandon_or_authorize_a_bounded_real_history_operator_pilot_never_authorizes_productization_factory_representativeness_realized_roi_buyer_demand_adoption_integration_reliability_or_commercial_proof",
-  "config_id": "yfm11g3c-53fe5ef0b04068679b203809",
+  "config_id": "yfm11g3c-7ddc185d488357c13504f20c",
   "confirmation_inputs_used": false,
   "confirmation_streams_per_corpus": 20,
-  "content_sha256": "sha256:53fe5ef0b04068679b203809760667f113109771e545365a745b774b3d887e85",
+  "content_sha256": "sha256:7ddc185d488357c13504f20c8a101edd285046ddec9d02d6d20529f06d9efa4c",
   "controls": {
     "accounting_rule": "complete_six_decimal_half_up_ledger_reconciliation",
     "candidate_parity_rule": "same_verified_candidate_hashes_projection_seeds_config_compute_eligibility_and_actions",
@@ -13,6 +13,29 @@
       "primary",
       "conservative",
       "permissive"
+    ],
+    "exact_audit_arm_registry": [
+      {
+        "audit_arm": "central",
+        "candidate_rule": "retain_all_registered_candidates",
+        "economic_profile": "central",
+        "event_slice_rule": "unmodified_registered_three_event_slice",
+        "material_rule": "preserve_registered_material_keys"
+      },
+      {
+        "audit_arm": "adverse",
+        "candidate_rule": "retain_all_registered_candidates",
+        "economic_profile": "adverse",
+        "event_slice_rule": "unmodified_registered_three_event_slice",
+        "material_rule": "preserve_registered_material_keys"
+      },
+      {
+        "audit_arm": "null",
+        "candidate_rule": "retain_all_registered_candidates",
+        "economic_profile": "central",
+        "event_slice_rule": "unmodified_registered_three_event_slice",
+        "material_rule": "unique_material_key_per_event_information_null"
+      }
     ],
     "exact_short_case_rule": "two_ply_root_matches_exact_optimum_for_every_registered_case",
     "expanded_role": "support_diagnostic_only_never_primary_or_rescue",

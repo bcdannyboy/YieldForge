@@ -175,6 +175,38 @@ def test_gate3_candidate_eligibility_terminal_and_adverse_controls_are_complete(
     assert controls.exact_short_case_rule == (
         "two_ply_root_matches_exact_optimum_for_every_registered_case"
     )
+    assert tuple(
+        (
+            item.audit_arm,
+            item.economic_profile,
+            item.event_slice_rule,
+            item.material_rule,
+            item.candidate_rule,
+        )
+        for item in controls.exact_audit_arm_registry
+    ) == (
+        (
+            "central",
+            "central",
+            "unmodified_registered_three_event_slice",
+            "preserve_registered_material_keys",
+            "retain_all_registered_candidates",
+        ),
+        (
+            "adverse",
+            "adverse",
+            "unmodified_registered_three_event_slice",
+            "preserve_registered_material_keys",
+            "retain_all_registered_candidates",
+        ),
+        (
+            "null",
+            "central",
+            "unmodified_registered_three_event_slice",
+            "unique_material_key_per_event_information_null",
+            "retain_all_registered_candidates",
+        ),
+    )
     assert config.thresholds.model_dump(mode="python") == {
         "savings_red_below_percent": 1.5,
         "savings_green_minimum_percent": 2.5,
@@ -251,6 +283,11 @@ def test_gate3_config_identity_and_nested_models_fail_closed(
     payload = config.model_dump(mode="python", round_trip=True)
     payload["config_id"] = "yfm11g3c-" + "0" * 24
     with pytest.raises(ValidationError, match="identity"):
+        gate3.M11Gate3ConfirmationConfig.model_validate(payload, strict=True)
+
+    payload = config.model_dump(mode="python", round_trip=True)
+    payload["controls"]["exact_audit_arm_registry"][2]["economic_profile"] = "adverse"
+    with pytest.raises(ValidationError):
         gate3.M11Gate3ConfirmationConfig.model_validate(payload, strict=True)
 
 

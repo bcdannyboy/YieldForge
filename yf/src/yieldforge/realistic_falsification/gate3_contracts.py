@@ -353,6 +353,55 @@ class M11Gate3ForecastConfig(FrozenExperimentModel):
         return self
 
 
+M11Gate3ExactAuditArm = Literal["central", "adverse", "null"]
+
+
+class M11Gate3ExactAuditArmRule(FrozenExperimentModel):
+    """Outcome-blind execution semantics for one registered exact-audit arm."""
+
+    audit_arm: M11Gate3ExactAuditArm
+    economic_profile: Literal["central", "adverse"]
+    event_slice_rule: Literal["unmodified_registered_three_event_slice"] = (
+        "unmodified_registered_three_event_slice"
+    )
+    material_rule: Literal[
+        "preserve_registered_material_keys",
+        "unique_material_key_per_event_information_null",
+    ]
+    candidate_rule: Literal["retain_all_registered_candidates"] = "retain_all_registered_candidates"
+
+    @model_validator(mode="after")
+    def require_exact_arm_mapping(self) -> Self:
+        expected = {
+            "central": ("central", "preserve_registered_material_keys"),
+            "adverse": ("adverse", "preserve_registered_material_keys"),
+            "null": ("central", "unique_material_key_per_event_information_null"),
+        }[self.audit_arm]
+        if (self.economic_profile, self.material_rule) != expected:
+            raise ValueError("Gate 3 exact-audit arm semantics differ from the frozen mapping")
+        return self
+
+
+def _exact_audit_arm_registry() -> tuple[M11Gate3ExactAuditArmRule, ...]:
+    return (
+        M11Gate3ExactAuditArmRule(
+            audit_arm="central",
+            economic_profile="central",
+            material_rule="preserve_registered_material_keys",
+        ),
+        M11Gate3ExactAuditArmRule(
+            audit_arm="adverse",
+            economic_profile="adverse",
+            material_rule="preserve_registered_material_keys",
+        ),
+        M11Gate3ExactAuditArmRule(
+            audit_arm="null",
+            economic_profile="central",
+            material_rule="unique_material_key_per_event_information_null",
+        ),
+    )
+
+
 class M11Gate3ControlConfig(FrozenExperimentModel):
     """Candidate, terminal, eligibility, adverse, and validity-control semantics."""
 
@@ -405,6 +454,7 @@ class M11Gate3ControlConfig(FrozenExperimentModel):
     exact_short_case_rule: Literal[
         "two_ply_root_matches_exact_optimum_for_every_registered_case"
     ] = "two_ply_root_matches_exact_optimum_for_every_registered_case"
+    exact_audit_arm_registry: tuple[M11Gate3ExactAuditArmRule, ...] = _exact_audit_arm_registry()
     accounting_rule: Literal["complete_six_decimal_half_up_ledger_reconciliation"] = (
         "complete_six_decimal_half_up_ledger_reconciliation"
     )
@@ -419,6 +469,8 @@ class M11Gate3ControlConfig(FrozenExperimentModel):
     def require_expanded_registry(self) -> Self:
         if self.lectra_expanded_seed_order != tuple(range(16)):
             raise ValueError("Gate 3 Lectra expanded seeds differ from 0 through 15")
+        if self.exact_audit_arm_registry != _exact_audit_arm_registry():
+            raise ValueError("Gate 3 exact-audit arm registry differs from the frozen mapping")
         return self
 
 
@@ -822,6 +874,7 @@ __all__ = [
     "M11Gate3ConfirmationConfig",
     "M11Gate3ControlConfig",
     "M11Gate3ExecutionConfig",
+    "M11Gate3ExactAuditArmRule",
     "M11Gate3ForecastConfig",
     "M11Gate3ForecastVariant",
     "M11Gate3PolicyConfig",
