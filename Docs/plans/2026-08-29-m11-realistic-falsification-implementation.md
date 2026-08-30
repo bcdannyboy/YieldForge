@@ -72,8 +72,8 @@
 
 1. Write failing analytical tests for zero demand, one item, fractional material, material mismatch, known-only masking, chronology relaxation, zero friction, terminal credit, and monotonicity under every relaxation.
 2. Implement a lower bound on achievable full-future net cost by relaxing geometry, stock indivisibility, chronology, storage, handling, and perfect identification only in favorable directions. Keep material identities separate. Document the proof direction in code and artifact fields.
-3. Compute `B_opt` and `K_opt` only from verified feasible frozen policies. `K_opt` uses the same algorithm, action set, and compute contract with unknown events masked; it is not another lower bound. The certified upper bounds are `B_opt - L_full` and `K_opt - L_full`.
-4. Cross-check tiny cases against exhaustive enumeration and assert `L_full <= exact_full_optimum <= B_opt`, `exact_known_optimum <= K_opt`, and `K_opt - L_full >= exact_known_optimum - exact_full_optimum`. A violation is `invalid_test`, never economic evidence.
+3. Compute `B_feasible` and `K_feasible` only from verified feasible frozen policies. `K_feasible` uses the same algorithm, action set, and compute contract with unknown events masked; it is not another lower bound. The certified upper bounds are `B_feasible - L_full` and `K_feasible - L_full`.
+4. Cross-check tiny cases against exhaustive enumeration and assert `L_full <= exact_full_optimum <= B_feasible`, `exact_known_optimum <= K_feasible`, and `K_feasible - L_full >= exact_known_optimum - exact_full_optimum`. A violation is `invalid_test`, never economic evidence.
 5. Run focused tests and commit.
 
 ## Task 5: Implement deterministic inference and Gate 1 decision

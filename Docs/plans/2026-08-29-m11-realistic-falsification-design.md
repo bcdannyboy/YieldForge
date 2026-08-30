@@ -111,11 +111,11 @@ on achievable cost; a heuristic oracle is not a certified ceiling.
 
 Define:
 
-- `CeilingSavings_i = 100 * (B_opt_i - L_i) / B_opt_i`
-- `CeilingUnknown_i = 100 * (K_opt_i - L_i) / B_opt_i`
+- `CeilingSavings_i = 100 * (B_feasible_i - L_i) / B_feasible_i`
+- `CeilingUnknown_i = 100 * (K_feasible_i - L_i) / B_feasible_i`
 
-Here `B_opt_i` is a verified feasible cost from the strongest frozen as-of-time optimistic-arm
-baseline and `K_opt_i` is a verified feasible cost from the identical frozen known-only algorithm
+Here `B_feasible_i` is a verified feasible cost from the strongest frozen as-of-time optimistic-arm
+baseline and `K_feasible_i` is a verified feasible cost from the identical frozen known-only algorithm
 with unknown events masked. Neither may be a lower bound or another relaxation. Subtracting the
 full-information lower bound `L_i` from those feasible costs is what makes both quantities certified
 upper bounds; subtracting a known-only lower bound would not be valid.
