@@ -136,7 +136,7 @@ def test_adapter_runtime_config_hash_is_deterministic_and_domain_separated(
     assert first.startswith("sha256:")
     assert len(first) == 71
     assert first != gate3_config.content_sha256
-    assert first == "sha256:dc71929bc462040f310c6e4570c75175ca0213645f53b1265015b907a08079d7"
+    assert first == "sha256:9006a711a465e3b57b97f703cea5ea90b0b06fa8922a5330b95ef0979fe1e0a1"
 
 
 def test_gate3_inputs_are_fully_authenticated_once_into_an_immutable_bundle(
