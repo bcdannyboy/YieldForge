@@ -2,26 +2,34 @@
 
 ## Roadmap status
 
-[[M10 - Experiment and verdict]] is complete. There is no active product-development milestone in
-the current YieldForge roadmap.
+[[M10 - Experiment and verdict]] is complete, and the additive [[M11 - Economic resolution]] has
+now measured the economic question M10 left uncomputed. There is no active product-development
+milestone in the current YieldForge roadmap.
 
 ## Current decision
 
-Do not productize YieldForge and stop additional virtual-oracle investment. The final minimum
-investment verdict is `yfm10-931b3a95fe84cd96cff799f2`; its formal numeric economic band remains
-`not_computed`.
+Do not productize YieldForge, do not authorize a bounded pilot, and stop investment in the current
+modeled product and algorithms. M11 central manifest
+`yfm11econcentral-71171ff1cb601f546f55b78e` resolves the current modeled economic value as
+`INSUFFICIENT_CURRENT_MODELED_VALUE`: known-only savings were exactly zero in both tested segments,
+while full-future savings were zero on LOCo and small, sparse, and unreliable on Lectra.
 
-## Optional next investment
+M10 result `yfm10-931b3a95fe84cd96cff799f2` remains the historical minimum investment verdict;
+its formal economic band was correctly `not_computed` at the time. The earlier
+[[M11 - Realistic falsification verdict]] remains the audit record of the invalid first M11 test.
 
-Acquire real manufacturer history only if there is appetite for a separate evidence stage and all
-four exact reopen conditions exist:
+## Reopen boundary
 
-1. permissioned real manufacturer chronology and remnant history;
-2. observed material identities and economically meaningful costs;
-3. an independent second geometry corpus; and
-4. a buyer- or operator-owned bounded decision and cost.
+Do not continue the same algorithm or test simply to seek a positive result. Consider a new frozen
+evidence stage only if at least one genuinely new basis exists:
 
-Those conditions authorize a new frozen contract, not productization.
+1. a materially new algorithmic capability that changes the tested decisions;
+2. a materially different segment with an independently credible value mechanism; or
+3. real factory chronology, material identities, costs, remnant history, and operator access strong
+   enough to justify a new real-world test on their own.
+
+Any of those conditions authorizes, at most, a new prospective contract. It does not overturn the
+current result or authorize productization.
 
 ## Superseded M8 objective — audit history
 
@@ -189,6 +197,15 @@ Phase C. The full two-probe rerun and six-cell calibration remain unauthorized. 
   parents and closes the current roadmap: acquire real manufacturer history if reopening evidence
   work, do not productize, and stop additional virtual-oracle investment. Its formal economic band
   is `not_computed`.
+- The additive M11 economic-resolution run repaired the non-economic accounting/evidence defects,
+  completed 96/96 calibration attempts and all frozen validity controls, then executed 40/40 paired
+  B/F/K central cells with zero failures. LOCo full-future and known-only savings were both exactly
+  zero. Lectra full-future mean savings were `0.536368330506%` with 95% CI
+  `[0.000000000000%, 1.098250947619%]`, zero median, and only 3/20 positive streams; Lectra
+  known-only savings were exactly zero. Both segments are `current_segment_red`; central manifest
+  `yfm11econcentral-71171ff1cb601f546f55b78e` resolves the current modeled product as
+  `INSUFFICIENT_CURRENT_MODELED_VALUE`, with pilot and productization unauthorized. See
+  [[M11 - Economic resolution]].
 
 ## Experiment status
 
@@ -216,8 +233,10 @@ This proves exact remnant reuse is possible in the modeled M4 one-part geometry.
 calibrated and frozen baseline reproduced all 36 evaluation streams and selected 38 remnant
 retrievals. M5 proves deterministic mechanism replay, and M6 proves controlled temporal
 construction, partition integrity, regeneration, and lossless lowering. A roadmap investment
-verdict now exists, but no formal numeric M0 band, observed factory chronology, paired oracle-savings
-estimate, general reuse-frequency estimate, physical validation, adoption evidence, or commercial
-proof exists.
+verdict and a valid semi-synthetic paired economic estimate now exist. No observed factory
+chronology, real cost ledger, general factory reuse-frequency estimate, physical validation,
+adoption evidence, buyer evidence, or commercial proof exists. Those missing forms of evidence do
+not weaken the stop decision for the tested system; they prevent broader claims about every possible
+future system.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

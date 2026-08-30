@@ -55,3 +55,26 @@ A new evidence stage may be considered only when all four conditions exist:
 
 Meeting those conditions would authorize a separately frozen evidence contract, not productization.
 Until then, the current roadmap authorizes no additional virtual-oracle investment.
+
+## Post-M10 economic resolution — additive audit note
+
+M10 remains unchanged as the historical minimum roadmap verdict. Its
+`formal_economic_band=not_computed` field accurately describes the evidence available when
+`yfm10-931b3a95fe84cd96cff799f2` was published; it is not retroactively rewritten.
+
+A later, separately bound repair-lineage test has now answered the narrower economic question. M11
+central manifest `yfm11econcentral-71171ff1cb601f546f55b78e` completed 40/40 paired B/F/K cells
+with zero failures and returned:
+
+- LOCo: full-future and known-only mean savings both `0.000000000000%`;
+- Lectra: full-future mean `0.536368330506%`, 95% CI
+  `[0.000000000000%, 1.098250947619%]`, median `0.000000000000%`, 3/20 positive streams;
+- Lectra known-only: mean, interval, median, and positive fraction all zero; and
+- global disposition `INSUFFICIENT_CURRENT_MODELED_VALUE`, with
+  `economic_value_resolved=true`, bounded pilot unauthorized, and productization unauthorized.
+
+The earlier [[M11 - Realistic falsification verdict]] remains unchanged as the audit record of the
+invalid first M11 attempt and its contract-forced decision. The new [[M11 - Economic resolution]]
+is additive evidence produced after fixing the non-economic execution and evidence defects. It
+falsifies the current modeled product and algorithms, not the possibility that a materially new
+algorithm, segment, or real factory setting could justify a separate future hypothesis.
