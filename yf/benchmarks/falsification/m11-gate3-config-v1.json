@@ -1,0 +1,317 @@
+{
+  "calibration_streams_per_corpus": 8,
+  "claim_ceiling": "modeled_semi_synthetic_hypothesis_disposition_only_may_abandon_or_authorize_a_bounded_real_history_operator_pilot_never_authorizes_productization_factory_representativeness_realized_roi_buyer_demand_adoption_integration_reliability_or_commercial_proof",
+  "config_id": "yfm11g3c-53fe5ef0b04068679b203809",
+  "confirmation_inputs_used": false,
+  "confirmation_streams_per_corpus": 20,
+  "content_sha256": "sha256:53fe5ef0b04068679b203809760667f113109771e545365a745b774b3d887e85",
+  "controls": {
+    "accounting_rule": "complete_six_decimal_half_up_ledger_reconciliation",
+    "candidate_parity_rule": "same_verified_candidate_hashes_projection_seeds_config_compute_eligibility_and_actions",
+    "conservative_role": "required_non_red_retain_sensitivity",
+    "eligibility_order": [
+      "primary",
+      "conservative",
+      "permissive"
+    ],
+    "exact_short_case_rule": "two_ply_root_matches_exact_optimum_for_every_registered_case",
+    "expanded_role": "support_diagnostic_only_never_primary_or_rescue",
+    "fixed_adverse_required": true,
+    "hard_null_rule": "B_and_F_equal_within_accounting_tolerance",
+    "incomplete_stream_rule": "invalid_no_numeric_imputation",
+    "lectra_expanded": "validated_m2_seeds_0_through_15_same_solver_config_and_10_seconds",
+    "lectra_expanded_seconds_per_seed": 10,
+    "lectra_expanded_seed_order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "lectra_ordinary": "committed_valid_m2_seeds_0_through_3_constrained_by_pack_registration",
+    "loco_expanded": "all_eight_frozen_shelf_width_candidates",
+    "loco_ordinary": "frozen_selected_minimum_area_generated_fallback",
+    "minimum_ordinary_availability_percent": 60.0,
+    "no_signal_rule": "mean_above_0_5_invalidates_and_0_3_through_0_5_requires_diagnosis",
+    "permissive_role": "diagnostic_only_last",
+    "primary_terminal_objective": "scrap_only",
+    "required_non_red_sensitivity_savings_percent": 1.5,
+    "required_non_red_sensitivity_unknown_points": 0.5,
+    "shuffled_twin_rule": "mandatory_no_signal_unique_material_control",
+    "zero_support_denominator_rule": "fail_support_gate_not_validity",
+    "zero_terminal_sensitivity": "add_back_terminal_credit_only"
+  },
+  "corpus_order": [
+    "lectra-m3-m4",
+    "loco-2dics"
+  ],
+  "events_per_stream": 24,
+  "execution": {
+    "central_necessary_rules": [
+      "mean_savings_at_least_2_5",
+      "unknown_at_least_1_5",
+      "bootstrap_lower_mean_savings_strictly_above_zero",
+      "median_savings_strictly_above_zero",
+      "positive_stream_fraction_strictly_above_50"
+    ],
+    "central_order": [
+      "loco-2dics",
+      "lectra-m3-m4",
+      "equal-corpus-pool"
+    ],
+    "downstream_order": [
+      "fixed_adverse",
+      "zero_terminal_credit",
+      "conservative_eligibility",
+      "expanded_catalog_diagnostic",
+      "permissive_eligibility_diagnostic",
+      "support_metrics",
+      "deployable_capture"
+    ],
+    "downstream_requires_all_central_pass": true,
+    "terminal_skip_marker": "skipped_terminal_prerequisite",
+    "terminal_skip_scope": "all_later_corpora_sensitivities_support_and_deployable",
+    "valid_central_failure_action": "ABANDON",
+    "valid_central_failure_state": "insufficient_headroom",
+    "validity_controls_precede_central": true
+  },
+  "forecast": {
+    "confirmation_inputs_used": false,
+    "cycle_rule": "repeat_last_P_released_pairs_fallback_to_last_seen_when_history_shorter_than_P",
+    "forecast_disabled_rule": "same_executor_and_selected_config_with_forecast_horizon_zero",
+    "forecast_enabled_policy": "selected_config_same_m9_two_ply_executor",
+    "hidden_field_access": "forbidden",
+    "known_firm_prefix_rule": "prepend_complete_firm_known_prefix",
+    "modal_tie_break": "count_then_most_recent_occurrence_then_ids",
+    "registry": [
+      {
+        "generator": "last_seen",
+        "history_release_slots": 1,
+        "maximum_unknown_release_slots": 3,
+        "registry_id": "last_seen@3"
+      },
+      {
+        "generator": "last_seen",
+        "history_release_slots": 1,
+        "maximum_unknown_release_slots": 6,
+        "registry_id": "last_seen@6"
+      },
+      {
+        "generator": "modal_trailing_12",
+        "history_release_slots": 12,
+        "maximum_unknown_release_slots": 3,
+        "registry_id": "modal_trailing_12@3"
+      },
+      {
+        "generator": "modal_trailing_12",
+        "history_release_slots": 12,
+        "maximum_unknown_release_slots": 6,
+        "registry_id": "modal_trailing_12@6"
+      },
+      {
+        "generator": "cycle_last_4",
+        "history_release_slots": 4,
+        "maximum_unknown_release_slots": 4,
+        "registry_id": "cycle_last_4@4"
+      },
+      {
+        "generator": "cycle_last_12",
+        "history_release_slots": 12,
+        "maximum_unknown_release_slots": 12,
+        "registry_id": "cycle_last_12@12"
+      }
+    ],
+    "selection_rule": "lowest_central_calibration_aggregate_then_config_id",
+    "selection_unit": "per_corpus_eight_calibration_streams",
+    "suffix_rule": "maximum_unknown_release_slots",
+    "synthetic_event_payload_rule": "copy_only_a_previously_released_payload_and_material_pair",
+    "synthetic_timestamp_rule": "use_frozen_calendar_release_slots"
+  },
+  "policy": {
+    "action_catalog_requirement": "complete_no_truncation",
+    "additional_baseline_policy_id": "known_only_m9_two_ply_scrap",
+    "baseline_economic_arm": "central",
+    "baseline_selection_rule": "lowest_mean_net_cost_then_invalid_median_sheet_openings_policy_id",
+    "baseline_selection_unit": "per_corpus_eight_calibration_streams",
+    "confirmation_inputs_used": false,
+    "full_and_known_algorithm": "m9_complete_two_ply_reoptimization",
+    "full_and_known_objective": "scrap_only",
+    "full_and_known_objective_definition": "m7_final_net_cost_including_terminal_scrap_credit",
+    "full_visibility": "complete_remaining_released_and_unreleased_suffix",
+    "known_visibility": "firm_known_prefix_only_with_physical_unknown_mask",
+    "registered_m7_policies": [
+      {
+        "information_set": "released_work_and_current_inventory_only",
+        "lookahead_availability": "not_applicable",
+        "name": "myopic_geometry",
+        "schema_version": "yieldforge.m7-policy.v1",
+        "seed": 0,
+        "version": "1.0.0"
+      },
+      {
+        "information_set": "released_work_and_current_inventory_only",
+        "lookahead_availability": "not_applicable",
+        "name": "remnant_first",
+        "schema_version": "yieldforge.m7-policy.v1",
+        "seed": 0,
+        "version": "1.0.0"
+      },
+      {
+        "information_set": "released_work_and_current_inventory_only",
+        "lookahead_availability": "not_applicable",
+        "name": "net_cost",
+        "schema_version": "yieldforge.m7-policy.v1",
+        "seed": 0,
+        "version": "1.0.0"
+      },
+      {
+        "information_set": "released_work_and_current_inventory_only",
+        "lookahead_availability": "not_applicable",
+        "name": "age_regularity",
+        "schema_version": "yieldforge.m7-policy.v1",
+        "seed": 0,
+        "version": "1.0.0"
+      },
+      {
+        "information_set": "released_work_inventory_and_firm_known_orders_only",
+        "lookahead_availability": "zero_no_pre_release_known_at_field",
+        "name": "known_order_lookahead",
+        "schema_version": "yieldforge.m7-policy.v1",
+        "seed": 0,
+        "version": "1.0.0"
+      }
+    ],
+    "search_depth": 2,
+    "shared_parity": "same_candidates_actions_algorithm_compute_and_tie_rule",
+    "tie_break": "bounded_cost_then_baseline_then_action_id"
+  },
+  "productization_authorized": false,
+  "projection": {
+    "compatibility_dto_publication": "forbidden",
+    "compatibility_dto_semantics": "source_faithful_engine_projection_not_native_m6_or_m2_provenance",
+    "horizon_rule": "max_due_at_across_stream_shared_by_every_material_shard",
+    "known_event_predicate": "known_at_less_than_or_equal_to_current_release_at",
+    "known_only_mask": "physically_omit_unknown_instances_problems_and_candidates",
+    "ledger_rounding": "six_decimal_half_up",
+    "loco_archive_placeholders": "deterministic_engine_only_never_published_as_m2_evidence",
+    "material_sharding_rule": "one_independent_m7_replay_shard_per_exact_material_key",
+    "purchase_rate_formula": "virgin_cost_per_reference_area / reference_area",
+    "reference_area_rule": "exact_corpus_material_reference_area_registry",
+    "registered_candidate_rule": "all_and_only_pack_registered_candidates_never_gate1_selection_only",
+    "retrieval_rate_formula": "retrieval_handling_per_remnant_use",
+    "return_rate_formula": "return_handling_per_eligible_remnant",
+    "scrap_terminal_rate_formula": "scrap_and_terminal_credit_per_reference_area / reference_area",
+    "shard_event_order": "local_contiguous_order_preserving_global_chronology",
+    "shard_merge_rule": "merge_decisions_by_original_global_event_position",
+    "shard_order": "sorted_exact_material_key",
+    "storage_rate_formula": "storage_per_reference_area_30_days / (reference_area * 30 * 24)"
+  },
+  "roots": [
+    {
+      "binding_id": "yfm11g3b-c53fe9e9abdd0a384a363a4b",
+      "content_sha256": "sha256:c53fe9e9abdd0a384a363a4b642289f7b60ea38b8827c24b6fac3e888bc5fd6c",
+      "parent_schema_version": "yieldforge.m11-realistic-falsification-contract.v1",
+      "raw_file_sha256": "sha256:0cddf4e144a1eae26159403a8f456fe55fd3bb76bcc28b676c8edc71ae35ccf4",
+      "repository_path": "benchmarks/falsification/m11-contract-v1.json",
+      "role": "m11_contract",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1",
+      "semantic_content_sha256": "sha256:e956019aeef85350f2ffa9d351ab15539d1b23137d7566118f73c5f29882143b",
+      "semantic_id": "yfm11c-e956019aeef85350f2ffa9d3"
+    },
+    {
+      "binding_id": "yfm11g3b-9f6f947166df7bf52f321fc9",
+      "content_sha256": "sha256:9f6f947166df7bf52f321fc9cfe4eb124abb207b21d7ae3ee78966ed0e2996b6",
+      "parent_schema_version": "yieldforge.m11-population.v1",
+      "raw_file_sha256": "sha256:c16f38ec48aabfd97a90ff9ff3b2bdd52a280c042bd8786bff6a2224236d163b",
+      "repository_path": "benchmarks/falsification/m11-population-v1.json",
+      "role": "m11_population",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1",
+      "semantic_content_sha256": "sha256:a26084179d2e8f776630f8ac272d5651069500a5df996869d20df9893ca0bc56",
+      "semantic_id": "yfm11pop-a26084179d2e8f776630f8ac"
+    },
+    {
+      "binding_id": "yfm11g3b-65ad22930ab7ca4afb002443",
+      "content_sha256": "sha256:65ad22930ab7ca4afb00244369e6d5319305046e0db0bb2f4201da5255f50be0",
+      "parent_schema_version": "yieldforge.m11-source-manifest.v1",
+      "raw_file_sha256": "sha256:36d2cf2bf9b0bf64fa5adfe114f8c5d1a9a2ce0abc757e78c23cdb68239ac673",
+      "repository_path": "benchmarks/falsification/source-manifest-v1.json",
+      "role": "m11_source_manifest",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1",
+      "semantic_content_sha256": "sha256:54426d56dcccc07b667da56fd1106f2e463baf3aaf57358a50f47e76fc073605",
+      "semantic_id": "yfm11sm-54426d56dcccc07b667da56f"
+    },
+    {
+      "binding_id": "yfm11g3b-00510686af9bfb1d79857097",
+      "content_sha256": "sha256:00510686af9bfb1d79857097215f266fd2fc8d59a434bdc7e46c2045f2d6f155",
+      "parent_schema_version": "yieldforge.m0-contract.v1",
+      "raw_file_sha256": "sha256:8ad20ca2ffaa4873588a4829d0d4fccfc85269429c6e2363b59d29be150d1c99",
+      "repository_path": "experiments/m0-contract-v1.json",
+      "role": "m0_contract",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1",
+      "semantic_content_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+      "semantic_id": "yfm0-29b7efe8ac2a0a9995c4f907"
+    },
+    {
+      "binding_id": "yfm11g3b-8c390c8379c7abb29fc26cb1",
+      "content_sha256": "sha256:8c390c8379c7abb29fc26cb1366ca0c0dcde38282ca9a04fe47348d47708751d",
+      "parent_schema_version": "yieldforge.m7-frozen-baseline.v1",
+      "raw_file_sha256": "sha256:d26be33a66c0d6d4eef7400806523c8835bdf9c3381437e33677b9586d4c3277",
+      "repository_path": "experiments/results/m7-frozen-baseline-v1.0.1.json",
+      "role": "m7_frozen_baseline",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1",
+      "semantic_content_sha256": "sha256:5c13c3fe531828d8cd986c3980104afebb2d959a2885ed4c3b61de29961bf7a8",
+      "semantic_id": "yfm7freeze-5c13c3fe531828d8cd986c39"
+    },
+    {
+      "binding_id": "yfm11g3b-aeecea560e546bc0987ca3dd",
+      "content_sha256": "sha256:aeecea560e546bc0987ca3dd61c58573a504f8e1b679648e5221e1ca605d1d31",
+      "parent_schema_version": "yieldforge.m9-two-ply-repair-validation.v1",
+      "raw_file_sha256": "sha256:16444e2e0f1a6fa5fb57398b290a7b0b66fda271997a48202a403c499060b858",
+      "repository_path": "experiments/results/m9-two-ply-repair-validation-yfm9r-db0829451b1b0393f2d22559.json",
+      "role": "m9_two_ply_repair",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1",
+      "semantic_content_sha256": "sha256:db0829451b1b0393f2d2255990ade1ce783b27a8527f73f3c7bf07e6716438ba",
+      "semantic_id": "yfm9r-db0829451b1b0393f2d22559"
+    }
+  ],
+  "schema_version": "yieldforge.m11-gate3-confirmation-config.v1",
+  "status": "frozen_before_confirmation",
+  "thresholds": {
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 0,
+    "confidence_level": 0.95,
+    "fixed_adverse_minimum_savings_percent": 1.5,
+    "fixed_adverse_minimum_unknown_percentage_points": 0.5,
+    "hard_null_accounting_tolerance": 1e-06,
+    "maximum_mean_immediate_sacrifice_percent": 0.5,
+    "maximum_top_10_concentration_percent": 25.0,
+    "minimum_deployable_capture_percent": 50.0,
+    "minimum_deployable_savings_percent": 1.5,
+    "minimum_deployable_unknown_percentage_points": 0.5,
+    "minimum_lower_mean_bound_percent_exclusive": 0.0,
+    "minimum_median_savings_percent_exclusive": 0.0,
+    "minimum_opportunity_frequency_percent": 20.0,
+    "minimum_ordinary_availability_percent": 60.0,
+    "minimum_positive_stream_fraction_percent_exclusive": 50.0,
+    "minimum_remnant_realization_percent": 60.0,
+    "no_signal_diagnosis_minimum_percent": 0.3,
+    "no_signal_invalid_above_percent": 0.5,
+    "runtime_ceiling_hours": 72,
+    "savings_green_minimum_percent": 2.5,
+    "savings_red_below_percent": 1.5,
+    "unknown_green_minimum_percentage_points": 1.5,
+    "unknown_red_below_percentage_points": 0.5,
+    "verification_reserve_hours": 12
+  }
+}
