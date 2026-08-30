@@ -89,6 +89,12 @@ from yieldforge.oracle.gate3_execution import (
     load_portable_fact_gate3,
     publish_gate3_decision,
 )
+from yieldforge.realistic_falsification.runner import (
+    M11Gate1RunnerError,
+    generate_and_publish_m11_pack,
+    run_and_publish_official_gate1,
+    validate_official_m11_pack,
+)
 from yieldforge.spyrrow_adapter import SpyrrowAdapter
 from yieldforge.temporal_benchmark.catalog import load_registered_catalog
 from yieldforge.temporal_benchmark.contracts import TemporalRegime, build_registered_contract
@@ -746,6 +752,72 @@ def _profile_m8_portable_hard_arm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _generate_m11_falsification_pack(args: argparse.Namespace) -> int:
+    """Regenerate and immutably publish the registered M11 pack."""
+
+    try:
+        publication = generate_and_publish_m11_pack(args.repository_root)
+    except M11Gate1RunnerError as error:
+        print(f"M11 generation failed: {error}")
+        return 2
+    bundle = publication.bundle
+    print(
+        "Published deterministic M11 pack: "
+        f"contract={bundle.contract.contract_id} "
+        f"population={bundle.population.population_id} "
+        f"contract_path={publication.contract_path} "
+        f"population_path={publication.population_path}",
+        flush=True,
+    )
+    return 0
+
+
+def _validate_m11_falsification_pack(args: argparse.Namespace) -> int:
+    """Regenerate and exact-compare the complete registered M11 pack."""
+
+    try:
+        bundle = validate_official_m11_pack(args.repository_root)
+    except M11Gate1RunnerError as error:
+        print(f"M11 validation failed: {error}")
+        return 2
+    print(
+        "Validated deterministic M11 pack: "
+        f"contract={bundle.contract.contract_id} "
+        f"population={bundle.population.population_id} "
+        f"streams={len(bundle.population.streams)}",
+        flush=True,
+    )
+    return 0
+
+
+def _run_m11_gate1(args: argparse.Namespace) -> int:
+    """Execute and authenticate the frozen forty-stream M11 Gate 1."""
+
+    try:
+        artifact, path = run_and_publish_official_gate1(
+            repository_root=args.repository_root,
+            output_directory=args.output,
+        )
+    except M11Gate1RunnerError as error:
+        print(f"M11 Gate 1 failed: {error}")
+        return 2
+    statistics = artifact.gate1_result.statistics
+    q975 = statistics.joint_upper_adverse_margin if statistics is not None else "n/a"
+    print(
+        "Published M11 Gate 1 result: "
+        f"run={artifact.run_id} "
+        f"cells={artifact.successful_cell_count}/40 "
+        f"failures={artifact.failed_cell_count} "
+        f"joint_margin_q975={q975} "
+        f"status={artifact.status} "
+        f"disposition={artifact.disposition} "
+        "productization_authorized=false "
+        f"output={path}",
+        flush=True,
+    )
+    return 2 if artifact.disposition == "INVALID_NONZERO" else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yieldforge")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1085,6 +1157,28 @@ def build_parser() -> argparse.ArgumentParser:
     portable_profile_m8.add_argument("--jagua-binary", type=Path, required=True)
     portable_profile_m8.add_argument("--output", type=Path, required=True)
     portable_profile_m8.set_defaults(handler=_profile_m8_portable_hard_arm)
+
+    generate_m11 = benchmark_commands.add_parser(
+        "m11-generate",
+        help="regenerate and immutably publish the frozen M11 test pack",
+    )
+    generate_m11.add_argument("--repository-root", type=Path, required=True)
+    generate_m11.set_defaults(handler=_generate_m11_falsification_pack)
+
+    validate_m11 = benchmark_commands.add_parser(
+        "m11-validate",
+        help="regenerate and exact-compare the frozen M11 test pack",
+    )
+    validate_m11.add_argument("--repository-root", type=Path, required=True)
+    validate_m11.set_defaults(handler=_validate_m11_falsification_pack)
+
+    run_m11 = benchmark_commands.add_parser(
+        "m11-run",
+        help="execute and publish the frozen forty-stream M11 Gate 1",
+    )
+    run_m11.add_argument("--repository-root", type=Path, required=True)
+    run_m11.add_argument("--output", type=Path, required=True)
+    run_m11.set_defaults(handler=_run_m11_gate1)
     return parser
 
 

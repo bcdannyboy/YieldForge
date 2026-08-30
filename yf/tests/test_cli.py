@@ -206,6 +206,255 @@ def test_m8_sparse_proof_command_is_registered() -> None:
     assert "worker_count" not in vars(args)
 
 
+@pytest.mark.parametrize(
+    ("command", "expected_handler", "expected_fields"),
+    (
+        (
+            "m11-generate",
+            "_generate_m11_falsification_pack",
+            {"command", "benchmark_command", "repository_root", "handler"},
+        ),
+        (
+            "m11-validate",
+            "_validate_m11_falsification_pack",
+            {"command", "benchmark_command", "repository_root", "handler"},
+        ),
+    ),
+)
+def test_m11_pack_commands_expose_only_the_repository_root(
+    command: str,
+    expected_handler: str,
+    expected_fields: set[str],
+) -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["benchmark", command, "--repository-root", "/official/repository"]
+    )
+
+    assert args.handler.__name__ == expected_handler
+    assert set(vars(args)) == expected_fields
+
+
+def test_m11_run_exposes_only_root_and_output() -> None:
+    from yieldforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "benchmark",
+            "m11-run",
+            "--repository-root",
+            "/official/repository",
+            "--output",
+            "/official/results",
+        ]
+    )
+
+    assert args.handler.__name__ == "_run_m11_gate1"
+    assert set(vars(args)) == {
+        "command",
+        "benchmark_command",
+        "repository_root",
+        "output",
+        "handler",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--seed", "1"),
+        ("--threshold", "0"),
+        ("--stream", "stream-00"),
+        ("--repair-count", "1"),
+        ("--skip-auth", "true"),
+    ),
+)
+def test_m11_run_rejects_registered_contract_overrides(option: str, value: str) -> None:
+    from yieldforge.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "benchmark",
+                "m11-run",
+                "--repository-root",
+                "/official/repository",
+                "--output",
+                "/official/results",
+                option,
+                value,
+            ]
+        )
+
+
+def test_m11_generate_handler_publishes_only_the_registered_pack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from yieldforge import cli
+
+    bundle = SimpleNamespace(
+        contract=SimpleNamespace(contract_id="contract-id"),
+        population=SimpleNamespace(population_id="population-id"),
+    )
+    publication = SimpleNamespace(
+        bundle=bundle,
+        contract_path=tmp_path / "contract.json",
+        population_path=tmp_path / "population.json",
+    )
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        cli,
+        "generate_and_publish_m11_pack",
+        lambda root: calls.append(root) or publication,
+    )
+
+    assert cli.main(["benchmark", "m11-generate", "--repository-root", str(tmp_path)]) == 0
+    assert calls == [tmp_path]
+    output = capsys.readouterr().out
+    assert "contract=contract-id" in output
+    assert "population=population-id" in output
+
+
+def test_m11_validate_handler_returns_nonzero_on_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from yieldforge import cli
+
+    monkeypatch.setattr(
+        cli,
+        "validate_official_m11_pack",
+        lambda root: (_ for _ in ()).throw(cli.M11Gate1RunnerError("root mismatch")),
+    )
+
+    assert cli.main(["benchmark", "m11-validate", "--repository-root", str(tmp_path)]) == 2
+    assert "M11 validation failed: root mismatch" in capsys.readouterr().out
+
+
+def test_m11_run_handler_returns_zero_for_valid_abandon_and_prints_exact_margin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from yieldforge import cli
+
+    result_path = tmp_path / "results" / "m11-gate1-result.json"
+    artifact = SimpleNamespace(
+        run_id="run-id",
+        successful_cell_count=40,
+        failed_cell_count=0,
+        status="falsified_by_optimistic_ceiling",
+        disposition="ABANDON",
+        gate1_result=SimpleNamespace(statistics=SimpleNamespace(joint_upper_adverse_margin=-0.25)),
+    )
+    calls: list[dict[str, Path]] = []
+    monkeypatch.setattr(
+        cli,
+        "run_and_publish_official_gate1",
+        lambda **kwargs: calls.append(kwargs) or (artifact, result_path),
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m11-run",
+                "--repository-root",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "repository_root": tmp_path,
+            "output_directory": tmp_path / "results",
+        }
+    ]
+    output = capsys.readouterr().out
+    assert "joint_margin_q975=-0.25" in output
+    assert "status=falsified_by_optimistic_ceiling" in output
+    assert "disposition=ABANDON" in output
+
+
+def test_m11_run_handler_returns_nonzero_on_invalid_or_publication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from yieldforge import cli
+
+    monkeypatch.setattr(
+        cli,
+        "run_and_publish_official_gate1",
+        lambda **kwargs: (_ for _ in ()).throw(
+            cli.M11Gate1RunnerError("read-back authentication failed")
+        ),
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m11-run",
+                "--repository-root",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 2
+    )
+    assert "M11 Gate 1 failed" in capsys.readouterr().out
+
+
+def test_m11_run_handler_publishes_invalid_artifact_but_returns_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from yieldforge import cli
+
+    result_path = tmp_path / "results" / "m11-gate1-invalid.json"
+    artifact = SimpleNamespace(
+        run_id="invalid-run-id",
+        successful_cell_count=39,
+        failed_cell_count=1,
+        status="invalid_test",
+        disposition="INVALID_NONZERO",
+        gate1_result=SimpleNamespace(statistics=None),
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_and_publish_official_gate1",
+        lambda **kwargs: (artifact, result_path),
+    )
+
+    assert (
+        cli.main(
+            [
+                "benchmark",
+                "m11-run",
+                "--repository-root",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert "status=invalid_test" in output
+    assert "disposition=INVALID_NONZERO" in output
+    assert f"output={result_path}" in output
+
+
 def test_m8_sparse_proof_does_not_expose_the_internal_worker_override() -> None:
     from yieldforge.cli import build_parser
 
