@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Literal, Self
 
 from pydantic import (
@@ -28,6 +29,15 @@ M11Provenance = Literal[
 M11SourceLineageKind = Literal["lectra", "loco_2dics"]
 
 M11_PARENT_ROLE_ORDER = ("m0_contract", "m10_verdict")
+M11_PARENT_ROLE_SPECS = MappingProxyType(
+    {
+        "m0_contract": ("yieldforge.m0-contract.v1", "yfm0-"),
+        "m10_verdict": (
+            "yieldforge.m10-minimum-investment-verdict.v1",
+            "yfm10-",
+        ),
+    }
+)
 M11_SOURCE_LINEAGE_ORDER: tuple[M11SourceLineageKind, ...] = (
     "lectra",
     "loco_2dics",
@@ -63,6 +73,31 @@ class M11VerdictAction(StrEnum):
     ONE_REPAIR_AND_RERUN = "ONE_REPAIR_AND_RERUN"
     ABANDON = "ABANDON"
     CONTINUE_TO_REAL_PILOT = "CONTINUE_TO_REAL_PILOT"
+
+
+class M11InvalidReasonCategory(StrEnum):
+    """Closed validity-failure categories with frozen repair semantics."""
+
+    PREREGISTERED_INTEGRITY_OR_SOFTWARE_DEFECT = "preregistered_integrity_or_software_defect"
+    OTHER_VALIDITY_FAILURE = "other_validity_failure"
+    RUNTIME_OVERRUN = "runtime_overrun"
+
+
+class M11InvalidReason(FrozenExperimentModel):
+    """One explicit invalid-test reason and its mechanically checked repair eligibility."""
+
+    category: M11InvalidReasonCategory
+    reason_code: StrictStr = Field(min_length=1)
+    repair_eligible: StrictBool
+
+    @model_validator(mode="after")
+    def require_category_derived_eligibility(self) -> Self:
+        expected = (
+            self.category is M11InvalidReasonCategory.PREREGISTERED_INTEGRITY_OR_SOFTWARE_DEFECT
+        )
+        if self.repair_eligible is not expected:
+            raise ValueError("M11 invalid-reason repair eligibility does not match its category")
+        return self
 
 
 class M11ParentBinding(FrozenExperimentModel):
@@ -284,6 +319,24 @@ class M11ExperimentContract(FrozenExperimentModel):
             raise ValueError("M11 parent roles differ from the frozen required order")
         if len({parent.binding_id for parent in self.parents}) != len(self.parents):
             raise ValueError("M11 parent bindings must be unique")
+        for root_field in (
+            "repository_path",
+            "parent_semantic_id",
+            "parent_content_sha256",
+            "raw_file_sha256",
+        ):
+            roots = {getattr(parent, root_field) for parent in self.parents}
+            if len(roots) != len(self.parents):
+                raise ValueError("M11 requires independent parent root artifacts")
+        for parent in self.parents:
+            expected_schema, semantic_prefix = M11_PARENT_ROLE_SPECS[parent.role]
+            semantic_suffix = parent.parent_semantic_id.removeprefix(semantic_prefix)
+            if (
+                parent.parent_schema_version != expected_schema
+                or len(semantic_suffix) != 24
+                or any(character not in "0123456789abcdef" for character in semantic_suffix)
+            ):
+                raise ValueError("M11 parents must use their role-specific schema and semantic ID")
         if len(self.corpora) != 2:
             raise ValueError("M11 requires exactly two distinct source lineages and corpora")
         corpus_ids = {corpus.source.corpus_id for corpus in self.corpora}
@@ -298,9 +351,22 @@ class M11ExperimentContract(FrozenExperimentModel):
             origins = {getattr(corpus.source, origin_field) for corpus in self.corpora}
             if len(origins) != 2:
                 raise ValueError("M11 sources must attest independent root origins")
+        registered_ids = tuple(
+            registered_id
+            for corpus in self.corpora
+            for registered_id in (
+                corpus.calibration_stream_ids
+                + corpus.confirmation_stream_ids
+                + corpus.shuffled_twin_stream_ids
+                + corpus.hard_null_fixture_ids
+                + corpus.exact_audit_episode_ids
+            )
+        )
+        if len(set(registered_ids)) != len(registered_ids):
+            raise ValueError("M11 stream and control IDs must be globally unique and disjoint")
         fields = tuple(item.field_name for item in self.field_provenance)
-        if len(fields) == 0 or len(set(fields)) != len(fields):
-            raise ValueError("M11 field provenance entries must be nonempty and unique")
+        if len(fields) == 0 or len(set(fields)) != len(fields) or fields != tuple(sorted(fields)):
+            raise ValueError("M11 field provenance entries must be nonempty, unique, and sorted")
 
         digest = semantic_sha256(
             self,
@@ -323,6 +389,7 @@ class M11VerdictResult(FrozenExperimentModel):
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     contract: M11ExperimentContract
     evidence_state: M11EvidenceState
+    invalid_reason: M11InvalidReason | None = None
     repair_count: StrictInt
     action: M11VerdictAction
     claim_ceiling: Literal[
@@ -338,7 +405,16 @@ class M11VerdictResult(FrozenExperimentModel):
             raise ValueError("M11 repair count must be 0 or 1")
         if self.productization_authorized:
             raise ValueError("M11 modeled evidence cannot authorize productization")
-        expected_action = _action_for(self.evidence_state, self.repair_count)
+        if self.evidence_state is M11EvidenceState.INVALID_TEST:
+            if self.invalid_reason is None:
+                raise ValueError("M11 invalid_test requires an explicit invalid reason")
+        elif self.invalid_reason is not None:
+            raise ValueError("M11 non-invalid evidence cannot carry an invalid reason")
+        expected_action = _action_for(
+            self.evidence_state,
+            self.repair_count,
+            self.invalid_reason,
+        )
         if self.action is not expected_action:
             raise ValueError("M11 verdict action does not match the frozen decision rule")
         digest = semantic_sha256(
@@ -431,11 +507,16 @@ def build_m11_contract(
         for corpus in corpora
     )
     canonical_provenance = tuple(
-        M11FieldProvenance.model_validate(
-            item.model_dump(mode="python", round_trip=True, warnings=False),
-            strict=True,
+        sorted(
+            (
+                M11FieldProvenance.model_validate(
+                    item.model_dump(mode="python", round_trip=True, warnings=False),
+                    strict=True,
+                )
+                for item in field_provenance
+            ),
+            key=lambda item: item.field_name,
         )
-        for item in field_provenance
     )
     semantic = {
         "schema_version": "yieldforge.m11-realistic-falsification-contract.v1",
@@ -468,10 +549,16 @@ def build_m11_contract(
 def _action_for(
     evidence_state: M11EvidenceState,
     repair_count: int,
+    invalid_reason: M11InvalidReason | None,
 ) -> M11VerdictAction:
     if evidence_state is M11EvidenceState.RETAIN_FOR_PILOT:
         return M11VerdictAction.CONTINUE_TO_REAL_PILOT
-    if evidence_state is M11EvidenceState.INVALID_TEST and repair_count == 0:
+    if (
+        evidence_state is M11EvidenceState.INVALID_TEST
+        and repair_count == 0
+        and invalid_reason is not None
+        and invalid_reason.repair_eligible
+    ):
         return M11VerdictAction.ONE_REPAIR_AND_RERUN
     return M11VerdictAction.ABANDON
 
@@ -481,6 +568,7 @@ def build_m11_verdict(
     contract: M11ExperimentContract,
     evidence_state: M11EvidenceState,
     repair_count: Literal[0, 1],
+    invalid_reason: M11InvalidReason | None = None,
 ) -> M11VerdictResult:
     """Apply the frozen M11 decision rule without accepting a caller-selected action."""
 
@@ -488,18 +576,32 @@ def build_m11_verdict(
         contract.model_dump(mode="python", round_trip=True, warnings=False),
         strict=True,
     )
+    canonical_invalid_reason = (
+        None
+        if invalid_reason is None
+        else M11InvalidReason.model_validate(
+            invalid_reason.model_dump(mode="python", round_trip=True, warnings=False),
+            strict=True,
+        )
+    )
     semantic = {
         "schema_version": "yieldforge.m11-realistic-falsification-verdict.v1",
         "contract": canonical_contract,
         "evidence_state": evidence_state,
+        "invalid_reason": canonical_invalid_reason,
         "repair_count": repair_count,
-        "action": _action_for(evidence_state, repair_count),
+        "action": _action_for(evidence_state, repair_count, canonical_invalid_reason),
         "claim_ceiling": M11_CLAIM_CEILING,
         "productization_authorized": False,
     }
     hashable_semantic = {
         **semantic,
         "contract": canonical_contract.model_dump(mode="json"),
+        "invalid_reason": (
+            None
+            if canonical_invalid_reason is None
+            else canonical_invalid_reason.model_dump(mode="json")
+        ),
     }
     digest = semantic_sha256(hashable_semantic)
     return M11VerdictResult(
@@ -516,8 +618,11 @@ __all__ = [
     "M11EvidenceState",
     "M11ExperimentContract",
     "M11FieldProvenance",
+    "M11InvalidReason",
+    "M11InvalidReasonCategory",
     "M11MetricDefinitions",
     "M11_PARENT_ROLE_ORDER",
+    "M11_PARENT_ROLE_SPECS",
     "M11ParentBinding",
     "M11Provenance",
     "M11SourceBinding",
