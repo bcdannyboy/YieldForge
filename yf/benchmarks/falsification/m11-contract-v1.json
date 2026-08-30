@@ -1,7 +1,7 @@
 {
   "claim_ceiling": "modeled_semi_synthetic_hypothesis_disposition_only_may_abandon_or_authorize_a_bounded_real_history_operator_pilot_never_authorizes_productization_factory_representativeness_realized_roi_buyer_demand_adoption_integration_reliability_or_commercial_proof",
-  "content_sha256": "sha256:59d8b2d8677957ae24dff3e4b475fd279b907cef0918fbc833def4470e686952",
-  "contract_id": "yfm11c-59d8b2d8677957ae24dff3e4",
+  "content_sha256": "sha256:6e730b90caebc0055fc901c6a4114802a9c0c06cb10e0df8891aac537050ecec",
+  "contract_id": "yfm11c-6e730b90caebc0055fc901c6",
   "corpora": [
     {
       "calibration_stream_ids": [
@@ -170,10 +170,6 @@
   ],
   "field_provenance": [
     {
-      "field_name": "candidate_references",
-      "provenance": "externally_anchored"
-    },
-    {
       "field_name": "chronology",
       "provenance": "generated"
     },
@@ -207,6 +203,14 @@
     },
     {
       "field_name": "known_at",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "lectra_candidate_references",
+      "provenance": "externally_anchored"
+    },
+    {
+      "field_name": "loco_candidate_references",
       "provenance": "generated"
     },
     {

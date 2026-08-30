@@ -10,9 +10,9 @@
     "twin_event_count": 960,
     "twin_stream_count": 40
   },
-  "content_sha256": "sha256:46ef8c2ab124db4b189189750afd4a6c25726e4011bdfee41697e4e3acf2de7b",
-  "contract_content_sha256": "sha256:59d8b2d8677957ae24dff3e4b475fd279b907cef0918fbc833def4470e686952",
-  "contract_id": "yfm11c-59d8b2d8677957ae24dff3e4",
+  "content_sha256": "sha256:abe50d754b1150466c82e6cb5414f0140663fff6afbbbb82dd5361b7c324ec1c",
+  "contract_content_sha256": "sha256:6e730b90caebc0055fc901c6a4114802a9c0c06cb10e0df8891aac537050ecec",
+  "contract_id": "yfm11c-6e730b90caebc0055fc901c6",
   "economic_profiles": [
     {
       "arm": "optimistic",
@@ -286,10 +286,6 @@
   ],
   "field_provenance": [
     {
-      "field_name": "candidate_references",
-      "provenance": "externally_anchored"
-    },
-    {
       "field_name": "chronology",
       "provenance": "generated"
     },
@@ -323,6 +319,14 @@
     },
     {
       "field_name": "known_at",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "lectra_candidate_references",
+      "provenance": "externally_anchored"
+    },
+    {
+      "field_name": "loco_candidate_references",
       "provenance": "generated"
     },
     {
@@ -152584,7 +152588,7 @@
       "source_kind": "loco_2dics"
     }
   ],
-  "population_id": "yfm11pop-46ef8c2ab124db4b18918975",
+  "population_id": "yfm11pop-abe50d754b1150466c82e6cb",
   "prohibited_selection_fields": [
     "candidate_width",
     "candidate_density",

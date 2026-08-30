@@ -630,6 +630,8 @@ class M11Population(FrozenExperimentModel):
             raise ValueError("M11 selection inputs differ from the outcome-blind registry")
         if self.prohibited_selection_fields != M11_PROHIBITED_SELECTION_FIELDS:
             raise ValueError("M11 prohibited selection fields differ from the frozen registry")
+        if self.field_provenance != _field_provenance():
+            raise ValueError("M11 field provenance differs from the frozen exhaustive registry")
         if tuple(item.arm for item in self.economic_profiles) != (
             "optimistic",
             "central",
@@ -1496,9 +1498,25 @@ def _loco_reference_areas(catalog: LOCoCatalog) -> tuple[tuple[str, float], ...]
     return tuple(result)
 
 
+def _reference_area_registry(catalog: LOCoCatalog) -> tuple[M11ReferenceAreas, ...]:
+    return (
+        M11ReferenceAreas(
+            corpus_id="lectra-m3-m4",
+            policy="fixed_lectra_median",
+            by_material=tuple(
+                (f"lectra-material-{index}", LECTRA_REFERENCE_AREA) for index in range(1, 6)
+            ),
+        ),
+        M11ReferenceAreas(
+            corpus_id="loco-2dics",
+            policy="per_instance_median_verified_fallback",
+            by_material=_loco_reference_areas(catalog),
+        ),
+    )
+
+
 def _field_provenance() -> tuple[M11FieldProvenance, ...]:
     values = {
-        "candidate_references": "externally_anchored",
         "chronology": "generated",
         "customer_identity": "generated",
         "due_time": "generated",
@@ -1508,6 +1526,8 @@ def _field_provenance() -> tuple[M11FieldProvenance, ...]:
         "geometry_reference": "source_observed",
         "job_identity": "generated",
         "known_at": "generated",
+        "lectra_candidate_references": "externally_anchored",
+        "loco_candidate_references": "generated",
         "material_identity": "assumed",
         "priority": "generated",
         "quantity": "derived",
@@ -1770,18 +1790,7 @@ def generate_m11_pack(repository_root: Path) -> M11PackBundle:
         "source_partitions": [item.model_dump(mode="json") for item in partitions],
         "economic_profiles": [item.model_dump(mode="json") for item in _economic_profiles()],
         "reference_areas": [
-            M11ReferenceAreas(
-                corpus_id="lectra-m3-m4",
-                policy="fixed_lectra_median",
-                by_material=tuple(
-                    (f"lectra-material-{index}", LECTRA_REFERENCE_AREA) for index in range(1, 6)
-                ),
-            ).model_dump(mode="json"),
-            M11ReferenceAreas(
-                corpus_id="loco-2dics",
-                policy="per_instance_median_verified_fallback",
-                by_material=_loco_reference_areas(loco),
-            ).model_dump(mode="json"),
+            item.model_dump(mode="json") for item in _reference_area_registry(loco)
         ],
         "field_provenance": [item.model_dump(mode="json") for item in provenance],
         "payloads": [
@@ -1822,9 +1831,30 @@ def _validate_pack_cross_binding(bundle: M11PackBundle) -> M11PackBundle:
         or population.contract_content_sha256 != contract.content_sha256
     ):
         raise PackEvidenceError("M11 population does not bind its Task 1 contract")
+    if contract.field_provenance != population.field_provenance:
+        raise PackEvidenceError("M11 contract and population provenance registries differ")
     streams = {item.stream_id: item for item in population.streams}
     nulls = {item.null_id for item in population.hard_nulls}
     audits = {item.audit_id for item in population.exact_audits}
+    for control in population.hard_nulls:
+        source = streams[control.source_stream_id]
+        if (
+            source.stream_kind != "primary"
+            or source.partition != "confirmation"
+            or control.event_ids != tuple(item.event_id for item in source.events[:3])
+        ):
+            raise PackEvidenceError("M11 hard-null does not bind its prescribed source window")
+    for control in population.exact_audits:
+        source = streams[control.source_stream_id]
+        expected_event_ids = tuple(
+            source.events[position].event_id for position in control.event_positions
+        )
+        if (
+            source.stream_kind != "primary"
+            or source.partition != "confirmation"
+            or control.event_ids != expected_event_ids
+        ):
+            raise PackEvidenceError("M11 exact audit does not bind its frozen stream positions")
     for corpus in contract.corpora:
         corpus_id = corpus.source.corpus_id
         expected_calibration = tuple(
@@ -1926,6 +1956,128 @@ def _load_pack_model(path: Path, model):
     return value
 
 
+def _bounded_file_sha256(path: Path, *, maximum_bytes: int) -> str:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise PackEvidenceError(f"cannot inspect pinned M11 source: {path}") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > maximum_bytes
+    ):
+        raise PackEvidenceError(f"pinned M11 source is not a bounded regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise PackEvidenceError(f"cannot open pinned M11 source: {path}") from error
+    digest = hashlib.sha256()
+    read_count = 0
+    try:
+        while chunk := os.read(descriptor, 1024 * 1024):
+            read_count += len(chunk)
+            if read_count > maximum_bytes:
+                raise PackEvidenceError(f"pinned M11 source exceeds its bound: {path}")
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
+def _validate_population_against_pinned_sources(
+    *,
+    root: Path,
+    population: M11Population,
+    source_manifest: M11SourceManifest,
+) -> None:
+    """Recompute every Task 3 source leaf from the exact Task 2 parents."""
+
+    lectra_catalog_path = root / Path(source_manifest.lectra.lectra_catalog_repository_path)
+    lectra_catalog, lectra_raw = _read_json(lectra_catalog_path, maximum_bytes=16 * 1024 * 1024)
+    if hashlib.sha256(lectra_raw).hexdigest() != source_manifest.lectra.lectra_catalog_raw_sha256:
+        raise PackEvidenceError("M11 Lectra catalog differs from the pinned Task 2 source")
+    m3_path = root / Path(source_manifest.lectra.m3_input_repository_path)
+    if (
+        _bounded_file_sha256(m3_path, maximum_bytes=128 * 1024 * 1024)
+        != source_manifest.lectra.m3_input_raw_sha256
+    ):
+        raise PackEvidenceError("M11 M3 input differs from the pinned Task 2 source")
+    try:
+        m3 = load_m3_input_pack(m3_path)
+        loco = load_loco_catalog(root / _LOCO_CATALOG_PATH)
+    except (ValidationError, ValueError) as error:
+        raise PackEvidenceError("M11 pinned source leaves failed strict loading") from error
+    if (
+        loco.catalog_id != population.source_catalog_id
+        or loco.catalog_id != source_manifest.loco.catalog_id
+    ):
+        raise PackEvidenceError("M11 LOCo catalog differs from the pinned Task 2 source")
+
+    lectra_partitions = derive_lectra_holdout_partitions(m3.expected_task_ids, lectra_catalog)
+    loco_partitions = _derive_loco_holdout_partitions(loco)
+    expected_partitions = lectra_partitions + loco_partitions
+    if population.source_partitions != expected_partitions:
+        raise PackEvidenceError(
+            "M11 source partitions do not match freshly derived Task 2 families"
+        )
+
+    expected_lectra = _lectra_payloads(m3, lectra_partitions)
+    actual_lectra = {
+        item.source_case_id: item for item in population.payloads if item.source_kind == "lectra"
+    }
+    if set(actual_lectra) != set(expected_lectra) or any(
+        actual_lectra[case_id] != expected for case_id, expected in expected_lectra.items()
+    ):
+        raise PackEvidenceError("M11 Lectra tasks or ordered candidate references differ from M3")
+
+    loco_items = {item.item_id: item for item in loco.items}
+    loco_family_by_item = {
+        case_id: family.family_id
+        for partition in loco_partitions
+        for family in partition.families
+        for case_id in family.source_case_ids
+    }
+    for payload in (item for item in population.payloads if item.source_kind == "loco_2dics"):
+        try:
+            items = tuple(
+                loco_items[reference.reference_id] for reference in payload.geometry_references
+            )
+            family_ids = {loco_family_by_item[item.item_id] for item in items}
+        except KeyError as error:
+            raise PackEvidenceError(
+                "M11 LOCo payload references an unregistered source row"
+            ) from error
+        if len(family_ids) != 1:
+            raise PackEvidenceError("M11 LOCo payload crosses freshly derived holdout families")
+        expected_payload = _loco_payload(items, next(iter(family_ids)))
+        if payload != expected_payload:
+            raise PackEvidenceError(
+                "M11 LOCo source references or eight-width fallback differ from pinned geometry"
+            )
+
+    payloads = {item.payload_id: item for item in population.payloads}
+    allowed_families = {
+        (item.corpus_id, item.partition): set(item.family_ids)
+        for item in population.source_partitions
+    }
+    expected_source_kind = {"lectra-m3-m4": "lectra", "loco-2dics": "loco_2dics"}
+    for stream in population.streams:
+        admitted = allowed_families[(stream.corpus_id, stream.partition)]
+        for event in stream.events:
+            payload = payloads[event.payload_id]
+            if (
+                payload.source_kind != expected_source_kind[stream.corpus_id]
+                or payload.family_id not in admitted
+            ):
+                raise PackEvidenceError(
+                    "M11 stream payload is outside its corpus holdout partition"
+                )
+
+    if population.reference_areas != _reference_area_registry(loco):
+        raise PackEvidenceError("M11 reference areas differ from pinned deterministic derivation")
+
+
 def load_m11_pack_bundle(
     *, repository_root: Path, contract_path: Path, population_path: Path, source_manifest_path: Path
 ) -> M11PackBundle:
@@ -1947,6 +2099,11 @@ def load_m11_pack_bundle(
         source_manifest
     ):
         raise PackEvidenceError("M11 contract does not bind the supplied Task 2 source manifest")
+    _validate_population_against_pinned_sources(
+        root=root,
+        population=bundle.population,
+        source_manifest=source_manifest,
+    )
     parents = _parent_bindings(root)
     if bundle.contract.parents != parents:
         raise PackEvidenceError("M11 contract does not bind the supplied Task 1 parent files")

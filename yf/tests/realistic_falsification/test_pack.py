@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -63,6 +64,119 @@ def _rehash(payload: dict[str, object], *, id_field: str, prefix: str) -> None:
     digest = semantic_sha256(semantic)
     payload[id_field] = f"{prefix}{digest[:24]}"
     payload["content_sha256"] = f"sha256:{digest}"
+
+
+def _write_recertified_mutation(
+    tmp_path: Path,
+    generated,
+    mutate: Callable[[dict[str, object], dict[str, object]], None],
+) -> tuple[Path, Path]:
+    """Rehash an adversarial semantic mutation through every dependent Task 3 ID."""
+
+    contract = copy.deepcopy(generated.contract.model_dump(mode="json"))
+    population = copy.deepcopy(generated.population.model_dump(mode="json"))
+    mutate(contract, population)
+
+    for partition in population["source_partitions"]:
+        _rehash(partition, id_field="partition_id", prefix="yfm11sp-")
+
+    payload_id_map: dict[str, str] = {}
+    for payload in population["payloads"]:
+        old_payload_id = payload["payload_id"]
+        fallback = payload["fallback_stock"]
+        if fallback is not None:
+            _rehash(fallback, id_field="stock_id", prefix="yfm11fb-")
+            payload["candidate_references"][0]["candidate_id"] = fallback["stock_id"]
+            payload["candidate_references"][0]["content_sha256"] = fallback["content_sha256"]
+        _rehash(payload, id_field="payload_id", prefix="yfm11pl-")
+        payload_id_map[old_payload_id] = payload["payload_id"]
+    population["payloads"].sort(key=lambda item: item["payload_id"])
+    payloads = {item["payload_id"]: item for item in population["payloads"]}
+
+    event_id_map: dict[str, str] = {}
+    stream_id_map: dict[str, str] = {}
+    primary_streams = [item for item in population["streams"] if item["stream_kind"] == "primary"]
+    twin_streams = [
+        item for item in population["streams"] if item["stream_kind"] == "shuffled_twin"
+    ]
+    for stream in primary_streams:
+        old_stream_id = stream["stream_id"]
+        for event in stream["events"]:
+            old_event_id = event["event_id"]
+            event["payload_id"] = payload_id_map[event["payload_id"]]
+            event["family_id"] = payloads[event["payload_id"]]["family_id"]
+            _rehash(event, id_field="event_id", prefix="yfm11e-")
+            event_id_map[old_event_id] = event["event_id"]
+        _rehash(stream, id_field="stream_id", prefix="yfm11st-")
+        stream_id_map[old_stream_id] = stream["stream_id"]
+    for stream in twin_streams:
+        old_stream_id = stream["stream_id"]
+        stream["source_stream_id"] = stream_id_map[stream["source_stream_id"]]
+        for event in stream["events"]:
+            old_event_id = event["event_id"]
+            event["payload_id"] = payload_id_map[event["payload_id"]]
+            event["family_id"] = payloads[event["payload_id"]]["family_id"]
+            event["payload_source_event_id"] = event_id_map[event["payload_source_event_id"]]
+            _rehash(event, id_field="event_id", prefix="yfm11e-")
+            event_id_map[old_event_id] = event["event_id"]
+        _rehash(stream, id_field="stream_id", prefix="yfm11st-")
+        stream_id_map[old_stream_id] = stream["stream_id"]
+
+    null_id_map: dict[str, str] = {}
+    for control in population["hard_nulls"]:
+        old_id = control["null_id"]
+        control["source_stream_id"] = stream_id_map[control["source_stream_id"]]
+        control["event_ids"] = [event_id_map.get(value, value) for value in control["event_ids"]]
+        _rehash(control, id_field="null_id", prefix="yfm11null-")
+        null_id_map[old_id] = control["null_id"]
+    audit_id_map: dict[str, str] = {}
+    for control in population["exact_audits"]:
+        old_id = control["audit_id"]
+        control["source_stream_id"] = stream_id_map[control["source_stream_id"]]
+        control["event_ids"] = [event_id_map.get(value, value) for value in control["event_ids"]]
+        _rehash(control, id_field="audit_id", prefix="yfm11audit-")
+        audit_id_map[old_id] = control["audit_id"]
+
+    for corpus in contract["corpora"]:
+        source = corpus["source"]
+        _rehash(source, id_field="source_id", prefix="yfm11s-")
+        for field in (
+            "calibration_stream_ids",
+            "confirmation_stream_ids",
+            "shuffled_twin_stream_ids",
+        ):
+            corpus[field] = [stream_id_map[value] for value in corpus[field]]
+        corpus["hard_null_fixture_ids"] = [
+            null_id_map[value] for value in corpus["hard_null_fixture_ids"]
+        ]
+        corpus["exact_audit_episode_ids"] = [
+            audit_id_map[value] for value in corpus["exact_audit_episode_ids"]
+        ]
+    _rehash(contract, id_field="contract_id", prefix="yfm11c-")
+    population["contract_id"] = contract["contract_id"]
+    population["contract_content_sha256"] = contract["content_sha256"]
+    _rehash(population, id_field="population_id", prefix="yfm11pop-")
+
+    contract_model = M11ExperimentContract.model_validate_json(
+        json.dumps(contract, allow_nan=False), strict=True
+    )
+    population_model = M11Population.model_validate_json(
+        json.dumps(population, allow_nan=False), strict=True
+    )
+    contract_path = tmp_path / "contract.json"
+    population_path = tmp_path / "population.json"
+    contract_path.write_bytes(canonical_pretty_json_bytes(contract_model))
+    population_path.write_bytes(canonical_pretty_json_bytes(population_model))
+    return contract_path, population_path
+
+
+def _load_mutated_bundle(contract_path: Path, population_path: Path):
+    return load_m11_pack_bundle(
+        repository_root=REPO_ROOT,
+        contract_path=contract_path,
+        population_path=population_path,
+        source_manifest_path=SOURCE_MANIFEST_PATH,
+    )
 
 
 def test_generation_is_byte_identical_and_committed_artifacts_strict_read_back(generated) -> None:
@@ -432,6 +546,152 @@ def test_rehashed_contract_source_forgery_cannot_cross_bind_task2(
             population_path=population_path,
             source_manifest_path=SOURCE_MANIFEST_PATH,
         )
+
+
+@pytest.mark.parametrize("forgery", ["lectra_candidate", "loco_source_case"])
+def test_full_loader_rejects_source_leaf_not_registered_by_task2(
+    tmp_path: Path, generated, forgery: str
+) -> None:
+    def mutate(_contract, population) -> None:
+        if forgery == "lectra_candidate":
+            payload = next(
+                item for item in population["payloads"] if item["source_kind"] == "lectra"
+            )
+            payload["candidate_references"][0]["candidate_id"] = "cand_nonexistent"
+        else:
+            payload = next(
+                item for item in population["payloads"] if item["source_kind"] == "loco_2dics"
+            )
+            old_id = payload["geometry_references"][0]["reference_id"]
+            new_id = "yflci-" + "0" * 24
+            payload["geometry_references"][0]["reference_id"] = new_id
+            for placement in payload["fallback_stock"]["placements"]:
+                if placement["geometry_reference_id"] == old_id:
+                    placement["geometry_reference_id"] = new_id
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError):
+        _load_mutated_bundle(*paths)
+
+
+def test_full_loader_rederives_exact_loco_component_membership(tmp_path: Path, generated) -> None:
+    large_component = next(
+        family
+        for partition in generated.population.source_partitions
+        for family in partition.families
+        if "shirts" in family.source_instances
+    )
+    assert set(large_component.source_instances) == {
+        "fu",
+        "jackobs1",
+        "jackobs2",
+        "shapes0",
+        "shapes1",
+        "shapes2",
+        "shirts",
+    }
+
+    def mutate(_contract, population) -> None:
+        family = next(
+            family
+            for partition in population["source_partitions"]
+            for family in partition["families"]
+            if "shirts" in family["source_instances"]
+        )
+        family["source_instances"].remove("shirts")
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError):
+        _load_mutated_bundle(*paths)
+
+
+def test_full_loader_rejects_confirmation_family_in_calibration_stream(
+    tmp_path: Path, generated
+) -> None:
+    confirmation_family = next(
+        partition.family_ids[0]
+        for partition in generated.population.source_partitions
+        if partition.corpus_id == "lectra-m3-m4" and partition.partition == "confirmation"
+    )
+    calibration_payload_id = next(
+        event.payload_id
+        for stream in generated.population.streams
+        if stream.corpus_id == "lectra-m3-m4"
+        and stream.partition == "calibration"
+        and stream.stream_kind == "primary"
+        for event in stream.events
+    )
+
+    def mutate(_contract, population) -> None:
+        payload = next(
+            item for item in population["payloads"] if item["payload_id"] == calibration_payload_id
+        )
+        payload["family_id"] = confirmation_family
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError):
+        _load_mutated_bundle(*paths)
+
+
+@pytest.mark.parametrize("corpus_id", ["lectra-m3-m4", "loco-2dics"])
+def test_full_loader_recomputes_frozen_reference_areas(
+    tmp_path: Path, generated, corpus_id: str
+) -> None:
+    def mutate(_contract, population) -> None:
+        reference = next(
+            item for item in population["reference_areas"] if item["corpus_id"] == corpus_id
+        )
+        reference["by_material"][0][1] += 1.0
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError):
+        _load_mutated_bundle(*paths)
+
+
+def test_full_loader_recomputes_all_eight_loco_fallback_candidates(
+    tmp_path: Path, generated
+) -> None:
+    def mutate(_contract, population) -> None:
+        payload = next(
+            item for item in population["payloads"] if item["source_kind"] == "loco_2dics"
+        )
+        fallback = payload["fallback_stock"]
+        candidates = [
+            (width * height, index)
+            for index, (width, height) in enumerate(
+                zip(fallback["candidate_widths"], fallback["candidate_heights"], strict=True)
+            )
+            if index != fallback["selected_width_index"]
+        ]
+        _area, index = max(candidates)
+        fallback["candidate_heights"][index] *= 2.0
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError):
+        _load_mutated_bundle(*paths)
+
+
+@pytest.mark.parametrize("control_kind", ["hard_null", "exact_audit"])
+def test_full_loader_binds_control_event_ids_to_frozen_source_windows(
+    tmp_path: Path, generated, control_kind: str
+) -> None:
+    def mutate(_contract, population) -> None:
+        collection = "hard_nulls" if control_kind == "hard_null" else "exact_audits"
+        population[collection][0]["event_ids"][0] = "yfm11e-" + "0" * 24
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError):
+        _load_mutated_bundle(*paths)
+
+
+def test_provenance_distinguishes_lectra_and_generated_loco_candidates(generated) -> None:
+    provenance = {
+        item.field_name: item.provenance for item in generated.population.field_provenance
+    }
+    assert provenance["lectra_candidate_references"] == "externally_anchored"
+    assert provenance["loco_candidate_references"] == "generated"
+    assert provenance["fallback_layout"] == "generated"
+    assert "candidate_references" not in provenance
 
 
 def test_noncanonical_or_crossed_artifacts_fail_closed(tmp_path: Path, generated) -> None:
