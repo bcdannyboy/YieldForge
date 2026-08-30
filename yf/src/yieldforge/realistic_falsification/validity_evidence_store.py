@@ -51,7 +51,7 @@ from yieldforge.realistic_falsification.confirmation import (
 _COMPRESSION = "gzip-level-6-mtime-0-flags-0"
 _MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
-_MAX_STRICT_RECEIPT_BYTES = 32 * 1024 * 1024
+_MAX_STRICT_RECEIPT_BYTES = _MAX_UNCOMPRESSED_BYTES
 _MAX_JSON_NESTING_DEPTH = 128
 _COST_PATTERN = r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _SIGNED_COST_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{6}$"
@@ -561,11 +561,12 @@ def _count_canonical_json_value(
         return
     if type(value) is float:
         try:
-            counter.add(len(json.dumps(value, allow_nan=False)))
+            encoded_size = len(json.dumps(value, allow_nan=False))
         except (TypeError, ValueError) as error:
             raise Gate3ValidityEvidenceError(
                 "Gate 3 validity receipt contains a non-canonical JSON scalar"
             ) from error
+        counter.add(encoded_size)
         return
     raise Gate3ValidityEvidenceError(
         f"Gate 3 validity receipt contains unsupported JSON type {type(value).__name__}"

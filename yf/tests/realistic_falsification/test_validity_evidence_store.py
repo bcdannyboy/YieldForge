@@ -1018,6 +1018,14 @@ def test_strict_preflight_exact_size_accepts_complete_control_census(
     ) == len(canonical)
 
 
+def test_float_at_size_boundary_preserves_strict_receipt_bound_error() -> None:
+    store = _store()
+    counter = store._CanonicalSizeCounter(0)
+
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="strict receipt byte bound"):
+        store._count_canonical_json_value(counter, 1.25, depth=0)
+
+
 def test_recovery_enforces_strict_receipt_cap_before_json_parse(
     tmp_path: Path,
     validity_case,
@@ -1214,7 +1222,7 @@ def test_validity_store_freezes_materially_bounded_peak_contract() -> None:
 
     assert store._MAX_UNCOMPRESSED_BYTES == 128 * 1024 * 1024
     assert store._MAX_COMPRESSED_BYTES == 32 * 1024 * 1024
-    assert store._MAX_STRICT_RECEIPT_BYTES == 32 * 1024 * 1024
+    assert store._MAX_STRICT_RECEIPT_BYTES == store._MAX_UNCOMPRESSED_BYTES
 
 
 @pytest.mark.parametrize("header_mutation", ("mtime", "fname"))
