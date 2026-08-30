@@ -10,7 +10,10 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import stat
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Self
@@ -64,6 +67,10 @@ _MAX_FAILURE_DETAIL_CHARS = 1000
 _CALIBRATION_ARRAY_MARKER = b'"calibration_attempts": ['
 _MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_REPAIRED_SOURCE_BYTES = 4 * 1024 * 1024
+_MAX_GIT_METADATA_BYTES = 4096
+_MAX_GIT_STDERR_BYTES = 16 * 1024
+_GIT_TIMEOUT_SECONDS = 10.0
 
 
 class EconomicResolutionEvidenceError(ValueError):
@@ -185,6 +192,262 @@ def build_economic_resolution_protocol() -> EconomicResolutionProtocol:
         content_sha256=f"sha256:{digest}",
         **semantic,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundedGitResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+def _run_git_bounded(
+    cwd: Path,
+    arguments: tuple[str, ...],
+    *,
+    max_stdout_bytes: int,
+    timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
+) -> _BoundedGitResult:
+    """Run one read-only Git query without a shell or unbounded pipe reads."""
+
+    if (
+        type(arguments) is not tuple
+        or not arguments
+        or any(type(item) is not str or not item or "\x00" in item for item in arguments)
+        or type(max_stdout_bytes) is not int
+        or not 0 <= max_stdout_bytes <= _MAX_REPAIRED_SOURCE_BYTES
+        or isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0 < timeout_seconds <= 30
+    ):
+        raise EconomicResolutionEvidenceError("Git lineage query bounds are malformed")
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    stdout = bytearray()
+    stderr = bytearray()
+    try:
+        environment = os.environ.copy()
+        for variable in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ):
+            environment.pop(variable, None)
+        environment.update(
+            {
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_PAGER": "cat",
+                "LC_ALL": "C",
+            }
+        )
+        process = subprocess.Popen(
+            ("git", "--no-pager", "-C", os.fspath(cwd), *arguments),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            env=environment,
+            shell=False,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise EconomicResolutionEvidenceError("Git lineage query pipes are unavailable")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, (stdout, max_stdout_bytes))
+        selector.register(process.stderr, selectors.EVENT_READ, (stderr, _MAX_GIT_STDERR_BYTES))
+        deadline = time.monotonic() + float(timeout_seconds)
+        while selector.get_map():
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise EconomicResolutionEvidenceError("Git lineage query timed out")
+            events = selector.select(remaining_seconds)
+            if not events:
+                raise EconomicResolutionEvidenceError("Git lineage query timed out")
+            for key, _ in events:
+                buffer, limit = key.data
+                chunk = os.read(key.fd, min(64 * 1024, limit - len(buffer) + 1))
+                if chunk:
+                    buffer.extend(chunk)
+                    if len(buffer) > limit:
+                        raise EconomicResolutionEvidenceError(
+                            "Git lineage query exceeded its output bound"
+                        )
+                else:
+                    selector.unregister(key.fileobj)
+        wait_seconds = max(0.001, deadline - time.monotonic())
+        returncode = process.wait(timeout=wait_seconds)
+        return _BoundedGitResult(returncode, bytes(stdout), bytes(stderr))
+    except EconomicResolutionEvidenceError:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise EconomicResolutionEvidenceError("Git lineage query failed safely") from error
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except subprocess.SubprocessError:
+                pass
+        if selector is not None:
+            selector.close()
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+
+def _one_git_output_line(result: _BoundedGitResult, *, label: str) -> bytes:
+    if result.returncode != 0:
+        raise EconomicResolutionEvidenceError(f"{label} Git query failed")
+    if b"\x00" in result.stdout:
+        raise EconomicResolutionEvidenceError(f"{label} Git output is malformed")
+    lines = result.stdout.splitlines()
+    if len(lines) != 1 or not lines[0]:
+        raise EconomicResolutionEvidenceError(f"{label} Git output is malformed")
+    return lines[0]
+
+
+def verify_economic_resolution_runtime_lineage(
+    repository_root: Path,
+    protocol: EconomicResolutionProtocol,
+) -> None:
+    """Require HEAD and the working source to retain the frozen repair lineage."""
+
+    try:
+        strict_protocol = EconomicResolutionProtocol.model_validate(
+            protocol.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "economic-resolution runtime protocol failed strict validation"
+        ) from error
+    if strict_protocol != build_economic_resolution_protocol():
+        raise EconomicResolutionEvidenceError(
+            "economic-resolution runtime protocol differs from frozen lineage"
+        )
+    start = Path(repository_root)
+    try:
+        start_metadata = start.lstat()
+        if stat.S_ISLNK(start_metadata.st_mode) or not stat.S_ISDIR(start_metadata.st_mode):
+            raise EconomicResolutionEvidenceError(
+                "repository root must be a regular non-symlink directory"
+            )
+        start = start.resolve(strict=True)
+    except EconomicResolutionEvidenceError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise EconomicResolutionEvidenceError("repository root could not be resolved") from error
+
+    top_level_result = _run_git_bounded(
+        start,
+        ("rev-parse", "--show-toplevel"),
+        max_stdout_bytes=_MAX_GIT_METADATA_BYTES,
+    )
+    top_level_raw = _one_git_output_line(top_level_result, label="repository top-level")
+    try:
+        top_level_candidate = Path(os.fsdecode(top_level_raw))
+        top_level_metadata = top_level_candidate.lstat()
+        if (
+            not top_level_candidate.is_absolute()
+            or stat.S_ISLNK(top_level_metadata.st_mode)
+            or not stat.S_ISDIR(top_level_metadata.st_mode)
+        ):
+            raise EconomicResolutionEvidenceError(
+                "repository top-level must be an absolute non-symlink directory"
+            )
+        top_level = top_level_candidate.resolve(strict=True)
+        if not start.is_relative_to(top_level):
+            raise EconomicResolutionEvidenceError(
+                "discovered repository top-level does not contain the requested root"
+            )
+    except EconomicResolutionEvidenceError:
+        raise
+    except (OSError, RuntimeError, UnicodeError) as error:
+        raise EconomicResolutionEvidenceError(
+            "repository top-level Git output could not be resolved"
+        ) from error
+
+    commit_sha = strict_protocol.repair_commit_sha
+    commit_result = _run_git_bounded(
+        top_level,
+        ("cat-file", "-e", f"{commit_sha}^{{commit}}"),
+        max_stdout_bytes=0,
+    )
+    if commit_result.returncode != 0 or commit_result.stdout:
+        raise EconomicResolutionEvidenceError("repair commit does not exist as a commit")
+    ancestor_result = _run_git_bounded(
+        top_level,
+        ("merge-base", "--is-ancestor", commit_sha, "HEAD"),
+        max_stdout_bytes=0,
+    )
+    if ancestor_result.returncode != 0 or ancestor_result.stdout:
+        raise EconomicResolutionEvidenceError("repair commit is not an ancestor of HEAD")
+
+    blob_expression = f"{commit_sha}:{strict_protocol.repaired_source_path}"
+    try:
+        blob_id = _one_git_output_line(
+            _run_git_bounded(
+                top_level,
+                ("rev-parse", "--verify", blob_expression),
+                max_stdout_bytes=_MAX_GIT_METADATA_BYTES,
+            ),
+            label="repair commit blob",
+        ).decode("ascii", errors="strict")
+    except UnicodeDecodeError as error:
+        raise EconomicResolutionEvidenceError("repair commit blob identity is malformed") from error
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob_id) is None:
+        raise EconomicResolutionEvidenceError("repair commit blob identity is malformed")
+    blob_type = _one_git_output_line(
+        _run_git_bounded(
+            top_level,
+            ("cat-file", "-t", blob_id),
+            max_stdout_bytes=_MAX_GIT_METADATA_BYTES,
+        ),
+        label="repair commit blob type",
+    )
+    if blob_type != b"blob":
+        raise EconomicResolutionEvidenceError("repair commit source object is not a blob")
+    size_raw = _one_git_output_line(
+        _run_git_bounded(
+            top_level,
+            ("cat-file", "-s", blob_id),
+            max_stdout_bytes=_MAX_GIT_METADATA_BYTES,
+        ),
+        label="repair commit blob size",
+    )
+    try:
+        if re.fullmatch(rb"[0-9]+", size_raw) is None:
+            raise ValueError
+        blob_size = int(size_raw)
+    except (OverflowError, ValueError) as error:
+        raise EconomicResolutionEvidenceError("repair commit blob size is malformed") from error
+    if not 0 <= blob_size <= _MAX_REPAIRED_SOURCE_BYTES:
+        raise EconomicResolutionEvidenceError("repair commit blob exceeds the source byte bound")
+    blob_result = _run_git_bounded(
+        top_level,
+        ("cat-file", "blob", blob_id),
+        max_stdout_bytes=blob_size,
+    )
+    if blob_result.returncode != 0 or len(blob_result.stdout) != blob_size:
+        raise EconomicResolutionEvidenceError("repair commit blob could not be read exactly")
+    if f"sha256:{hashlib.sha256(blob_result.stdout).hexdigest()}" != (
+        strict_protocol.repaired_source_raw_sha256
+    ):
+        raise EconomicResolutionEvidenceError("repair commit blob raw SHA-256 differs")
+
+    current_source = top_level / strict_protocol.repaired_source_path
+    current_raw = _read_bounded_regular_file(
+        current_source,
+        max_bytes=_MAX_REPAIRED_SOURCE_BYTES,
+        label="runtime repaired source",
+    )
+    if f"sha256:{hashlib.sha256(current_raw).hexdigest()}" != (
+        strict_protocol.repaired_source_raw_sha256
+    ):
+        raise EconomicResolutionEvidenceError("current source raw SHA-256 differs from repair")
 
 
 class Gate3LegacyCalibrationAttemptReference(FrozenExperimentModel):
@@ -1272,6 +1535,120 @@ publish_gate3_calibration_checkpoint = publish_gate3_calibration_attempt_checkpo
 load_gate3_calibration_checkpoint = load_gate3_calibration_attempt_checkpoint
 
 
+def _discover_single_prefixed_regular_file(
+    output_directory: Path,
+    *,
+    prefix: str,
+    filename_pattern: re.Pattern[str],
+    max_bytes: int,
+    label: str,
+) -> tuple[Path, re.Match[str]] | None:
+    directory = Path(output_directory)
+    try:
+        metadata = directory.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise EconomicResolutionEvidenceError(
+            f"{label} directory could not be inspected"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise EconomicResolutionEvidenceError(f"{label} directory must be a non-symlink directory")
+    candidate: tuple[Path, re.Match[str]] | None = None
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.startswith(prefix):
+                    continue
+                match = filename_pattern.fullmatch(entry.name)
+                if match is None:
+                    raise EconomicResolutionEvidenceError(f"{label} has a malformed prefixed entry")
+                entry_metadata = entry.stat(follow_symlinks=False)
+                if (
+                    stat.S_ISLNK(entry_metadata.st_mode)
+                    or not stat.S_ISREG(entry_metadata.st_mode)
+                    or entry_metadata.st_size > max_bytes
+                ):
+                    raise EconomicResolutionEvidenceError(
+                        f"{label} candidate must be a bounded regular non-symlink file"
+                    )
+                if candidate is not None:
+                    raise EconomicResolutionEvidenceError(
+                        f"{label} has competing prefixed candidates"
+                    )
+                candidate = Path(entry.path), match
+    except EconomicResolutionEvidenceError:
+        raise
+    except OSError as error:
+        raise EconomicResolutionEvidenceError(f"{label} directory scan failed safely") from error
+    return candidate
+
+
+def discover_gate3_calibration_attempt_checkpoint(
+    output_directory: Path,
+    *,
+    protocol: EconomicResolutionProtocol,
+    legacy_reference: Gate3LegacyCalibrationAttemptReference,
+) -> tuple[Path, Gate3CalibrationAttemptCheckpoint] | None:
+    """Discover one exact resumable checkpoint, failing closed on ambiguity."""
+
+    try:
+        strict_protocol = EconomicResolutionProtocol.model_validate(
+            protocol.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+        strict_reference = Gate3LegacyCalibrationAttemptReference.model_validate(
+            legacy_reference.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "checkpoint discovery inputs failed strict validation"
+        ) from error
+    if (
+        strict_protocol != build_economic_resolution_protocol()
+        or strict_reference.roots.content_sha256 != strict_protocol.legacy_root_content_sha256
+    ):
+        raise EconomicResolutionEvidenceError("checkpoint discovery lineage binding differs")
+    prefix = f"m11-economic-calibration-checkpoint-{strict_reference.execution_position:03d}-"
+    discovered = _discover_single_prefixed_regular_file(
+        output_directory,
+        prefix=prefix,
+        filename_pattern=re.compile(rf"{re.escape(prefix)}([0-9a-f]{{64}})\.json"),
+        max_bytes=_MAX_CHECKPOINT_BYTES,
+        label="calibration checkpoint discovery",
+    )
+    if discovered is None:
+        return None
+    path, filename_match = discovered
+    content_digest = filename_match.group(1)
+    checkpoint = load_gate3_calibration_attempt_checkpoint(
+        path,
+        expected_protocol=strict_protocol,
+        expected_roots=strict_reference.roots,
+        expected_execution_position=strict_reference.execution_position,
+        expected_corpus_id=strict_reference.corpus_id,
+        expected_stream_id=strict_reference.stream_id,
+        expected_policy_id=strict_reference.policy_id,
+        expected_checkpoint_id=f"yfm11econcal-{content_digest[:24]}",
+        expected_content_sha256=f"sha256:{content_digest}",
+    )
+    if strict_reference.status == "success":
+        if (
+            checkpoint.outcome_kind != "legacy_success_reference"
+            or checkpoint.legacy_reference != strict_reference
+        ):
+            raise EconomicResolutionEvidenceError("discovered checkpoint legacy reference differs")
+    elif (
+        checkpoint.outcome_kind not in {"repaired_runtime_success", "repaired_runtime_failure"}
+        or checkpoint.replaced_legacy_failure_reference != strict_reference
+    ):
+        raise EconomicResolutionEvidenceError(
+            "discovered checkpoint replaced legacy failure reference differs"
+        )
+    return path, checkpoint
+
+
 def _checkpoint_cost_and_openings(
     checkpoint: Gate3CalibrationAttemptCheckpoint,
 ) -> tuple[Gate3CostLedger, int] | None:
@@ -1615,3 +1992,61 @@ def load_gate3_calibration_manifest(
     ):
         raise EconomicResolutionEvidenceError("calibration manifest differs from expected binding")
     return manifest
+
+
+def discover_gate3_calibration_manifest(
+    output_directory: Path,
+    *,
+    protocol: EconomicResolutionProtocol,
+    legacy_scan: Gate3LegacyCalibrationScan,
+    checkpoints: tuple[Gate3CalibrationAttemptCheckpoint, ...],
+) -> tuple[Path, Gate3CalibrationManifest] | None:
+    """Discover the sole manifest and require exact rederivation from checkpoints."""
+
+    try:
+        strict_protocol = EconomicResolutionProtocol.model_validate(
+            protocol.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+        strict_scan = Gate3LegacyCalibrationScan.model_validate(
+            legacy_scan.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "manifest discovery inputs failed strict validation"
+        ) from error
+    expected_manifest = build_gate3_calibration_manifest(
+        checkpoints,
+        legacy_scan=strict_scan,
+    )
+    if (
+        strict_protocol != build_economic_resolution_protocol()
+        or expected_manifest.protocol != strict_protocol
+        or strict_scan.protocol != strict_protocol
+    ):
+        raise EconomicResolutionEvidenceError("manifest discovery lineage binding differs")
+    prefix = "m11-economic-calibration-manifest-"
+    discovered = _discover_single_prefixed_regular_file(
+        output_directory,
+        prefix=prefix,
+        filename_pattern=re.compile(rf"{re.escape(prefix)}([0-9a-f]{{64}})\.json"),
+        max_bytes=_MAX_MANIFEST_BYTES,
+        label="calibration manifest discovery",
+    )
+    if discovered is None:
+        return None
+    path, filename_match = discovered
+    content_digest = filename_match.group(1)
+    manifest = load_gate3_calibration_manifest(
+        path,
+        expected_protocol=strict_protocol,
+        expected_roots=expected_manifest.roots,
+        expected_manifest_id=f"yfm11econcalman-{content_digest[:24]}",
+        expected_content_sha256=f"sha256:{content_digest}",
+    )
+    if manifest != expected_manifest:
+        raise EconomicResolutionEvidenceError(
+            "discovered calibration manifest differs from rederived state"
+        )
+    return path, manifest

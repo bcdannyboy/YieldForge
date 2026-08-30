@@ -1405,3 +1405,397 @@ def test_manifest_rejects_scan_whose_legacy_failure_reference_differs() -> None:
             _valid_checkpoints(resolution),
             legacy_scan=changed_scan,
         )
+
+
+def _install_lineage_git_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    resolution,  # type: ignore[no-untyped-def]
+    *,
+    repository_root: Path,
+    source_raw: bytes,
+    commit_exists: bool = True,
+    commit_is_ancestor: bool = True,
+    commit_blob_raw: bytes | None = None,
+) -> None:
+    blob_raw = source_raw if commit_blob_raw is None else commit_blob_raw
+    blob_id = "a" * 40
+
+    def fake_git(
+        cwd: Path,
+        arguments: tuple[str, ...],
+        *,
+        max_stdout_bytes: int,
+        timeout_seconds: float = 10.0,
+    ) -> SimpleNamespace:
+        del max_stdout_bytes, timeout_seconds
+        assert cwd == repository_root
+        if arguments == ("rev-parse", "--show-toplevel"):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{repository_root}\n".encode(),
+                stderr=b"",
+            )
+        if arguments == (
+            "cat-file",
+            "-e",
+            f"{resolution.REPAIR_COMMIT_SHA}^{{commit}}",
+        ):
+            return SimpleNamespace(
+                returncode=0 if commit_exists else 1,
+                stdout=b"",
+                stderr=b"missing" if not commit_exists else b"",
+            )
+        if arguments == (
+            "merge-base",
+            "--is-ancestor",
+            resolution.REPAIR_COMMIT_SHA,
+            "HEAD",
+        ):
+            return SimpleNamespace(
+                returncode=0 if commit_is_ancestor else 1,
+                stdout=b"",
+                stderr=b"",
+            )
+        if arguments == (
+            "rev-parse",
+            "--verify",
+            (f"{resolution.REPAIR_COMMIT_SHA}:yf/src/yieldforge/baseline/geometry.py"),
+        ):
+            return SimpleNamespace(returncode=0, stdout=f"{blob_id}\n".encode(), stderr=b"")
+        if arguments == ("cat-file", "-t", blob_id):
+            return SimpleNamespace(returncode=0, stdout=b"blob\n", stderr=b"")
+        if arguments == ("cat-file", "-s", blob_id):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=f"{len(blob_raw)}\n".encode(),
+                stderr=b"",
+            )
+        if arguments == ("cat-file", "blob", blob_id):
+            return SimpleNamespace(returncode=0, stdout=blob_raw, stderr=b"")
+        raise AssertionError(f"unexpected git invocation: {arguments!r}")
+
+    monkeypatch.setattr(resolution, "_run_git_bounded", fake_git)
+
+
+def _prepare_lineage_repository(
+    tmp_path: Path,
+    resolution,  # type: ignore[no-untyped-def]
+) -> tuple[Path, bytes]:
+    repository_root = tmp_path / "repo"
+    source_path = repository_root / "yf/src/yieldforge/baseline/geometry.py"
+    source_path.parent.mkdir(parents=True)
+    actual_repository_root = Path(resolution.__file__).resolve().parents[4]
+    source_raw = (actual_repository_root / "yf/src/yieldforge/baseline/geometry.py").read_bytes()
+    assert f"sha256:{hashlib.sha256(source_raw).hexdigest()}" == (
+        resolution.REPAIRED_SOURCE_RAW_SHA256
+    )
+    source_path.write_bytes(source_raw)
+    return repository_root, source_raw
+
+
+def test_runtime_lineage_verifies_commit_ancestry_blob_and_current_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    repository_root, source_raw = _prepare_lineage_repository(tmp_path, resolution)
+    _install_lineage_git_stub(
+        monkeypatch,
+        resolution,
+        repository_root=repository_root,
+        source_raw=source_raw,
+    )
+
+    assert (
+        resolution.verify_economic_resolution_runtime_lineage(
+            repository_root,
+            resolution.build_economic_resolution_protocol(),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("commit_exists", "commit_is_ancestor", "expected"),
+    (
+        (False, True, "repair commit"),
+        (True, False, "ancestor"),
+    ),
+)
+def test_runtime_lineage_rejects_missing_or_nonancestor_repair_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    commit_exists: bool,
+    commit_is_ancestor: bool,
+    expected: str,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    repository_root, source_raw = _prepare_lineage_repository(tmp_path, resolution)
+    _install_lineage_git_stub(
+        monkeypatch,
+        resolution,
+        repository_root=repository_root,
+        source_raw=source_raw,
+        commit_exists=commit_exists,
+        commit_is_ancestor=commit_is_ancestor,
+    )
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match=expected):
+        resolution.verify_economic_resolution_runtime_lineage(
+            repository_root,
+            resolution.build_economic_resolution_protocol(),
+        )
+
+
+def test_runtime_lineage_rejects_changed_commit_blob_current_source_and_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    repository_root, source_raw = _prepare_lineage_repository(tmp_path, resolution)
+    protocol = resolution.build_economic_resolution_protocol()
+    _install_lineage_git_stub(
+        monkeypatch,
+        resolution,
+        repository_root=repository_root,
+        source_raw=source_raw,
+        commit_blob_raw=source_raw + b"changed",
+    )
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="commit blob"):
+        resolution.verify_economic_resolution_runtime_lineage(repository_root, protocol)
+
+    _install_lineage_git_stub(
+        monkeypatch,
+        resolution,
+        repository_root=repository_root,
+        source_raw=source_raw,
+    )
+    source_path = repository_root / protocol.repaired_source_path
+    source_path.write_bytes(source_raw + b"changed")
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="current source"):
+        resolution.verify_economic_resolution_runtime_lineage(repository_root, protocol)
+
+    source_path.unlink()
+    target = repository_root / "geometry-target.py"
+    target.write_bytes(source_raw)
+    source_path.symlink_to(target)
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="non-symlink"):
+        resolution.verify_economic_resolution_runtime_lineage(repository_root, protocol)
+
+
+@pytest.mark.parametrize(
+    "outcome_kind",
+    ("legacy_success_reference", "repaired_runtime_success", "repaired_runtime_failure"),
+)
+def test_checkpoint_discovery_returns_none_or_exact_bound_checkpoint(
+    tmp_path: Path,
+    outcome_kind: str,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    valid = _valid_checkpoints(resolution)
+    checkpoint = valid[0] if outcome_kind == "legacy_success_reference" else valid[54]
+    reference = checkpoint.legacy_reference or checkpoint.replaced_legacy_failure_reference
+    assert reference is not None
+    if outcome_kind == "repaired_runtime_failure":
+        checkpoint = resolution.build_gate3_calibration_attempt_checkpoint(
+            protocol=checkpoint.protocol,
+            roots=checkpoint.roots,
+            execution_position=checkpoint.execution_position,
+            corpus_id=checkpoint.corpus_id,
+            stream_id=checkpoint.stream_id,
+            policy_id=checkpoint.policy_id,
+            replaced_legacy_failure_reference=reference,
+            failure_type="builtins.RuntimeError",
+            failure_detail="bounded repaired runtime failure",
+        )
+    assert (
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            tmp_path,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+        is None
+    )
+
+    published = resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, checkpoint)
+    assert resolution.discover_gate3_calibration_attempt_checkpoint(
+        tmp_path,
+        protocol=checkpoint.protocol,
+        legacy_reference=reference,
+    ) == (published, checkpoint)
+
+
+@pytest.mark.parametrize(
+    "bad_kind",
+    ("malformed", "bad_content", "symlink", "competing"),
+)
+def test_checkpoint_discovery_rejects_prefixed_malformed_or_competing_entries(
+    tmp_path: Path,
+    bad_kind: str,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    reference = checkpoint.legacy_reference
+    assert reference is not None
+    prefix = f"m11-economic-calibration-checkpoint-{reference.execution_position:03d}-"
+    if bad_kind == "malformed":
+        (tmp_path / f"{prefix}not-a-hash.json").write_text("{}")
+    elif bad_kind == "bad_content":
+        (tmp_path / f"{prefix}{'a' * 64}.json").write_text("{}")
+    elif bad_kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}")
+        (tmp_path / f"{prefix}{'a' * 64}.json").symlink_to(target)
+    else:
+        resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, checkpoint)
+        (tmp_path / f"{prefix}{'b' * 64}.json").write_text("{}")
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            tmp_path,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+
+
+def test_checkpoint_discovery_rejects_outcome_that_does_not_match_legacy_reference(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    reference = checkpoint.legacy_reference
+    assert reference is not None and reference.final_costs is not None
+    changed_reference = _resign_reference(reference, full_sheet_opening_count=2)
+    changed_checkpoint = resolution.build_gate3_calibration_attempt_checkpoint(
+        protocol=checkpoint.protocol,
+        roots=checkpoint.roots,
+        execution_position=checkpoint.execution_position,
+        corpus_id=checkpoint.corpus_id,
+        stream_id=checkpoint.stream_id,
+        policy_id=checkpoint.policy_id,
+        legacy_reference=changed_reference,
+    )
+    resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, changed_checkpoint)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="legacy reference"):
+        resolution.discover_gate3_calibration_attempt_checkpoint(
+            tmp_path,
+            protocol=checkpoint.protocol,
+            legacy_reference=reference,
+        )
+
+
+def test_manifest_discovery_returns_none_or_exact_rederived_manifest(tmp_path: Path) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoints = _valid_checkpoints(resolution)
+    legacy_scan = resolution.build_official_legacy_calibration_scan(
+        _official_references(resolution)
+    )
+    protocol = resolution.build_economic_resolution_protocol()
+    assert (
+        resolution.discover_gate3_calibration_manifest(
+            tmp_path,
+            protocol=protocol,
+            legacy_scan=legacy_scan,
+            checkpoints=checkpoints,
+        )
+        is None
+    )
+
+    manifest = resolution.build_gate3_calibration_manifest(
+        checkpoints,
+        legacy_scan=legacy_scan,
+    )
+    published = resolution.publish_gate3_calibration_manifest(tmp_path, manifest)
+    assert resolution.discover_gate3_calibration_manifest(
+        tmp_path,
+        protocol=protocol,
+        legacy_scan=legacy_scan,
+        checkpoints=checkpoints,
+    ) == (published, manifest)
+
+
+@pytest.mark.parametrize(
+    "bad_kind",
+    ("malformed", "bad_content", "symlink", "competing"),
+)
+def test_manifest_discovery_rejects_prefixed_malformed_or_competing_entries(
+    tmp_path: Path,
+    bad_kind: str,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoints = _valid_checkpoints(resolution)
+    legacy_scan = resolution.build_official_legacy_calibration_scan(
+        _official_references(resolution)
+    )
+    protocol = resolution.build_economic_resolution_protocol()
+    prefix = "m11-economic-calibration-manifest-"
+    if bad_kind == "malformed":
+        (tmp_path / f"{prefix}not-a-hash.json").write_text("{}")
+    elif bad_kind == "bad_content":
+        (tmp_path / f"{prefix}{'a' * 64}.json").write_text("{}")
+    elif bad_kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}")
+        (tmp_path / f"{prefix}{'a' * 64}.json").symlink_to(target)
+    else:
+        manifest = resolution.build_gate3_calibration_manifest(
+            checkpoints,
+            legacy_scan=legacy_scan,
+        )
+        resolution.publish_gate3_calibration_manifest(tmp_path, manifest)
+        (tmp_path / f"{prefix}{'b' * 64}.json").write_text("{}")
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError):
+        resolution.discover_gate3_calibration_manifest(
+            tmp_path,
+            protocol=protocol,
+            legacy_scan=legacy_scan,
+            checkpoints=checkpoints,
+        )
+
+
+def test_manifest_discovery_rejects_manifest_not_equal_to_rederived_state(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoints = _valid_checkpoints(resolution)
+    legacy_scan = resolution.build_official_legacy_calibration_scan(
+        _official_references(resolution)
+    )
+    reference = legacy_scan.attempt_references[54]
+    mismatched_checkpoint = resolution.build_gate3_calibration_attempt_checkpoint(
+        protocol=checkpoints[54].protocol,
+        roots=checkpoints[54].roots,
+        execution_position=checkpoints[54].execution_position,
+        corpus_id=checkpoints[54].corpus_id,
+        stream_id=checkpoints[54].stream_id,
+        policy_id=checkpoints[54].policy_id,
+        replaced_legacy_failure_reference=reference,
+        failure_type="builtins.RuntimeError",
+        failure_detail="bounded repaired runtime failure",
+    )
+    mismatched = (*checkpoints[:54], mismatched_checkpoint, *checkpoints[55:])
+    manifest = resolution.build_gate3_calibration_manifest(
+        mismatched,
+        legacy_scan=legacy_scan,
+    )
+    resolution.publish_gate3_calibration_manifest(tmp_path, manifest)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="rederived"):
+        resolution.discover_gate3_calibration_manifest(
+            tmp_path,
+            protocol=resolution.build_economic_resolution_protocol(),
+            legacy_scan=legacy_scan,
+            checkpoints=checkpoints,
+        )
