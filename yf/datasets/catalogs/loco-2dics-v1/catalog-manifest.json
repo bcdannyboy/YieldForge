@@ -1,0 +1,27 @@
+{
+  "catalog_artifact_name": "loco-catalog.json",
+  "catalog_artifact_sha256": "528e2579f3f91125c56e86734a39998c847140e9f93f25ba26559c5fd5de6391",
+  "catalog_artifact_size_bytes": 866804,
+  "catalog_content_sha256": "sha256:1251ba73249dcfdd4070a4f68acd3ab3bd65688f0667d4e75e57ef599fa6753d",
+  "catalog_id": "yflc-1251ba73249dcfdd4070a4f6",
+  "census": {
+    "demand_file_count": 15,
+    "item_file_count": 15,
+    "item_record_count": 511,
+    "member_count": 52,
+    "nfp_file_count": 18,
+    "total_source_demand": 25658,
+    "unique_quarter_turn_family_count": 157,
+    "unique_scale_invariant_family_count": 140,
+    "unique_translation_normalized_shape_count": 160
+  },
+  "content_sha256": "sha256:2232a3e62d723660a33c83c3f2a38b3350129a06d8321f645d44c1fccebdc98f",
+  "dataset_id": "loco-2dics-v1",
+  "manifest_id": "yflcm-2232a3e62d723660a33c83c3",
+  "nfp_policy": "intentionally_excluded_not_parsed_or_committed",
+  "parser_identity": "yieldforge.loco-2dics-safe-importer.v1",
+  "schema_version": "yieldforge.loco-2dics-catalog-manifest.v1",
+  "upstream_sha256": "86980c3d4a33fb329bd9a4cdc9464a6de9e8450baf70b1b4365944ab471a5133",
+  "upstream_size_bytes": 1654751,
+  "upstream_url": "https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip"
+}
