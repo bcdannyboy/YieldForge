@@ -1074,6 +1074,33 @@ def test_json_nesting_depth_accepts_exact_limit_and_rejects_next_level() -> None
         store._validate_json_nesting_depth(too_deep)
 
 
+def test_model_graph_depth_allows_scalar_but_not_container_at_exact_limit(
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    scalar_at_limit: object = "leaf"
+    container_at_limit: object = []
+    for _ in range(store._MAX_JSON_NESTING_DEPTH - 1):
+        scalar_at_limit = [scalar_at_limit]
+        container_at_limit = [container_at_limit]
+    allowed = validity.model_copy(update={"roots": scalar_at_limit})
+    rejected = validity.model_copy(update={"roots": container_at_limit})
+
+    assert (
+        store._bounded_existing_canonical_size(
+            allowed,
+            maximum_bytes=store._MAX_STRICT_RECEIPT_BYTES,
+        )
+        > 0
+    )
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="nesting depth"):
+        store.build_gate3_validity_evidence_receipt(
+            rejected,
+            baseline_freezes=freezes,
+        )
+
+
 def test_load_and_recover_reject_deep_json_as_public_store_error(
     tmp_path: Path,
     validity_case,

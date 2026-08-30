@@ -479,7 +479,9 @@ def _count_canonical_json_value(
     *,
     depth: int,
 ) -> None:
-    if depth > _MAX_JSON_NESTING_DEPTH:
+    if depth > _MAX_JSON_NESTING_DEPTH or (
+        depth == _MAX_JSON_NESTING_DEPTH and isinstance(value, (BaseModel, dict, list, tuple))
+    ):
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity receipt exceeds the JSON nesting depth bound"
         )
@@ -588,7 +590,9 @@ def _bounded_existing_canonical_size(
 def _iter_pretty_json_bytes(value: object, *, depth: int) -> Iterator[bytes]:
     """Traverse the existing receipt graph using the canonical JSON layout."""
 
-    if depth > _MAX_JSON_NESTING_DEPTH:
+    if depth > _MAX_JSON_NESTING_DEPTH or (
+        depth == _MAX_JSON_NESTING_DEPTH and isinstance(value, (BaseModel, dict, list, tuple))
+    ):
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity receipt exceeds the JSON nesting depth bound"
         )
