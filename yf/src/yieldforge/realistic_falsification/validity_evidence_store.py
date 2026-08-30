@@ -8,21 +8,27 @@ import os
 import re
 import stat
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from enum import Enum
 from gzip import GzipFile
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from pydantic import (
+    BaseModel,
     Field,
     StrictBool,
     StrictInt,
     StrictStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
+from pydantic_core import to_json
 
 from yieldforge.experiments.contracts import (
     FrozenExperimentModel,
@@ -54,10 +60,46 @@ _CORPUS_ORDER: tuple[Gate3CorpusId, Gate3CorpusId] = (
     "lectra-m3-m4",
     "loco-2dics",
 )
+_SUMMARY_STRING_BOUNDS = {
+    "summary_id": 64,
+    "content_sha256": 80,
+    "corpus_id": 32,
+    "mean_no_signal_savings_percent": 64,
+    "classification": 32,
+}
 
 
 class Gate3ValidityEvidenceError(ValueError):
     """Gate 3 validity evidence failed a bounded fail-closed check."""
+
+
+def _summary_value(summary: object, field_name: str) -> object:
+    if isinstance(summary, BaseModel):
+        return getattr(summary, field_name, None)
+    if isinstance(summary, dict):
+        return summary.get(field_name)
+    return None
+
+
+def _validate_no_signal_summary_string_bounds(summaries: object) -> None:
+    """Reject oversized imported summary strings before nested validation/hashing."""
+
+    if not isinstance(summaries, (list, tuple)):
+        return
+    for summary in summaries:
+        for field_name, maximum in _SUMMARY_STRING_BOUNDS.items():
+            value = _summary_value(summary, field_name)
+            if isinstance(value, str) and len(value) > maximum:
+                raise ValueError(f"Gate 3 no-signal summary {field_name} exceeds its string bound")
+        for field_name, maximum in (
+            ("control_ids", 128),
+            ("control_content_sha256s", 80),
+        ):
+            values = _summary_value(summary, field_name)
+            if isinstance(values, (list, tuple)) and any(
+                isinstance(value, str) and len(value) > maximum for value in values
+            ):
+                raise ValueError(f"Gate 3 no-signal summary {field_name} exceeds its string bound")
 
 
 class Gate3ValidityBaselineFreezeBinding(FrozenExperimentModel):
@@ -112,7 +154,7 @@ class Gate3ValidityTwinControlRow(FrozenExperimentModel):
             context.prec = 50
             expected = Decimal(100) * (baseline - Decimal(self.full_future_cost)) / baseline
         formatted = format(
-            expected.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP),
+            expected.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_EVEN),
             ".12f",
         )
         if self.no_signal_savings_percent != formatted:
@@ -191,6 +233,12 @@ class Gate3ValidityEvidenceReceipt(FrozenExperimentModel):
     compressed_byte_count: StrictInt = Field(gt=0, le=_MAX_COMPRESSED_BYTES)
     uncompressed_byte_count: StrictInt = Field(gt=0, le=_MAX_UNCOMPRESSED_BYTES)
     compression: Literal["gzip-level-6-mtime-0-flags-0"] = _COMPRESSION
+
+    @field_validator("no_signal_summaries", mode="before")
+    @classmethod
+    def require_bounded_imported_summary_strings(cls, value: object) -> object:
+        _validate_no_signal_summary_string_bounds(value)
+        return value
 
     @model_validator(mode="after")
     def require_exact_census_decision_and_identity(self) -> Self:
@@ -283,7 +331,7 @@ class Gate3ValidityEvidenceReceipt(FrozenExperimentModel):
                     Decimal(0),
                 ) / Decimal(20)
             formatted = format(
-                mean.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP),
+                mean.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_EVEN),
                 ".12f",
             )
             classification = (
@@ -369,18 +417,94 @@ def deterministic_gzip(data: bytes) -> bytes:
     return output.getvalue()
 
 
-def _iter_canonical_json_bytes(value: Gate3ValidityReceipt):
-    """Yield the canonical JSON encoding without retaining a second raw copy."""
+def _iter_pretty_json_bytes(value: object, *, depth: int) -> Iterator[bytes]:
+    """Traverse the existing receipt graph using the canonical JSON layout."""
 
-    payload = value.model_dump(mode="json")
-    encoder = json.JSONEncoder(
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
+    if isinstance(value, BaseModel):
+        fields = type(value).model_fields
+        items = tuple((name, getattr(value, name)) for name in sorted(fields))
+        yield from _iter_pretty_json_object(items, depth=depth)
+        return
+    if isinstance(value, dict):
+        if any(type(key) is not str for key in value):
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity canonical JSON requires string object keys"
+            )
+        yield from _iter_pretty_json_object(
+            tuple((key, value[key]) for key in sorted(value)),
+            depth=depth,
+        )
+        return
+    if isinstance(value, (list, tuple)):
+        if not value:
+            yield b"[]"
+            return
+        yield b"[\n"
+        for index, item in enumerate(value):
+            yield b" " * (2 * (depth + 1))
+            yield from _iter_pretty_json_bytes(item, depth=depth + 1)
+            yield b",\n" if index + 1 < len(value) else b"\n"
+        yield b" " * (2 * depth)
+        yield b"]"
+        return
+    if isinstance(value, Enum):
+        yield from _iter_pretty_json_bytes(value.value, depth=depth)
+        return
+    if type(value) in (date, datetime, time, timedelta):
+        yield to_json(value)
+        return
+    if value is None or type(value) in (str, int, float, bool):
+        try:
+            yield json.dumps(value, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity receipt contains a non-canonical JSON scalar"
+            ) from error
+        return
+    raise Gate3ValidityEvidenceError(
+        f"Gate 3 validity receipt contains unsupported JSON type {type(value).__name__}"
     )
-    for chunk in encoder.iterencode(payload):
-        yield chunk.encode("utf-8")
+
+
+def _iter_pretty_json_object(
+    items: tuple[tuple[str, object], ...],
+    *,
+    depth: int,
+) -> Iterator[bytes]:
+    if not items:
+        yield b"{}"
+        return
+    yield b"{\n"
+    for index, (key, value) in enumerate(items):
+        yield b" " * (2 * (depth + 1))
+        yield json.dumps(key).encode("utf-8")
+        yield b": "
+        yield from _iter_pretty_json_bytes(value, depth=depth + 1)
+        yield b",\n" if index + 1 < len(items) else b"\n"
+    yield b" " * (2 * depth)
+    yield b"}"
+
+
+def _iter_canonical_json_bytes(value: Gate3ValidityReceipt) -> Iterator[bytes]:
+    """Yield canonical JSON while retaining no second receipt-sized graph."""
+
+    yield from _iter_pretty_json_bytes(value, depth=0)
     yield b"\n"
+
+
+class _BoundedCompressedSink(BytesIO):
+    """Abort gzip writes before the compressed transport can exceed its cap."""
+
+    def __init__(self, maximum_bytes: int) -> None:
+        super().__init__()
+        self._maximum_bytes = maximum_bytes
+
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > self._maximum_bytes:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity sidecar exceeds the compressed byte bound"
+            )
+        return super().write(data)
 
 
 def _stream_canonical_gzip(
@@ -388,7 +512,7 @@ def _stream_canonical_gzip(
 ) -> tuple[bytes, int]:
     """Compress canonical chunks while enforcing the raw bound incrementally."""
 
-    output = BytesIO()
+    output = _BoundedCompressedSink(_MAX_COMPRESSED_BYTES)
     uncompressed_byte_count = 0
     with GzipFile(
         filename="",
@@ -406,10 +530,6 @@ def _stream_canonical_gzip(
             archive.write(chunk)
     compressed = output.getvalue()
     _validate_gzip_header(compressed)
-    if len(compressed) > _MAX_COMPRESSED_BYTES:
-        raise Gate3ValidityEvidenceError(
-            "Gate 3 validity sidecar exceeds the compressed byte bound"
-        )
     return compressed, uncompressed_byte_count
 
 
@@ -553,7 +673,7 @@ class _PreparedValidityEvidence:
     evidence_receipt: Gate3ValidityEvidenceReceipt
 
 
-def _build_evidence_receipt(
+def _build_evidence_receipt_unchecked(
     validity: Gate3ValidityReceipt,
     freezes: tuple[Gate3BaselineCalibrationFreeze, Gate3BaselineCalibrationFreeze],
     *,
@@ -613,6 +733,28 @@ def _build_evidence_receipt(
         compressed_byte_count=len(compressed_bytes),
         uncompressed_byte_count=uncompressed_byte_count,
     )
+
+
+def _build_evidence_receipt(
+    validity: Gate3ValidityReceipt,
+    freezes: tuple[Gate3BaselineCalibrationFreeze, Gate3BaselineCalibrationFreeze],
+    *,
+    uncompressed_byte_count: int,
+    compressed_bytes: bytes,
+) -> Gate3ValidityEvidenceReceipt:
+    try:
+        return _build_evidence_receipt_unchecked(
+            validity,
+            freezes,
+            uncompressed_byte_count=uncompressed_byte_count,
+            compressed_bytes=compressed_bytes,
+        )
+    except Gate3ValidityEvidenceError:
+        raise
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 compact validity receipt failed validation"
+        ) from error
 
 
 def _prepare_validity_evidence(
@@ -898,6 +1040,16 @@ def _strict_compact_tuple(values, model, expected_length: int, label: str):  # t
         ) from error
 
 
+def _strict_expected_roots(expected_roots: Gate3RootBinding) -> Gate3RootBinding:
+    try:
+        return Gate3RootBinding.model_validate(
+            expected_roots.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate3ValidityEvidenceError("Gate 3 validity expected roots are malformed") from error
+
+
 def _strict_expected_values(
     *,
     expected_roots: Gate3RootBinding,
@@ -925,13 +1077,7 @@ def _strict_expected_values(
     expected_raw_controls_revalidated: bool,
     expected_source_lineage: Literal["repaired_runtime"],
 ):  # type: ignore[no-untyped-def]
-    try:
-        strict_roots = Gate3RootBinding.model_validate(
-            expected_roots.model_dump(mode="python", round_trip=True),
-            strict=True,
-        )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
-        raise Gate3ValidityEvidenceError("Gate 3 validity expected roots are malformed") from error
+    strict_roots = _strict_expected_roots(expected_roots)
     freezes = _strict_baseline_freezes(
         expected_baseline_freezes,
         expected_roots=strict_roots,
@@ -954,6 +1100,12 @@ def _strict_expected_values(
         12,
         "exact-audit rows",
     )
+    try:
+        _validate_no_signal_summary_string_bounds(expected_no_signal_summaries)
+    except ValueError as error:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity expected no-signal summaries are malformed"
+        ) from error
     summaries = _strict_compact_tuple(
         expected_no_signal_summaries,
         Gate3NoSignalSummary,
@@ -966,9 +1118,15 @@ def _strict_expected_values(
         or type(expected_validity_receipt_content_sha256) is not str
         or re.fullmatch(_SHA256_PATTERN, expected_validity_receipt_content_sha256) is None
         or type(expected_failure_codes) is not tuple
-        or any(type(item) is not str for item in expected_failure_codes)
+        or len(expected_failure_codes) > 20
+        or any(
+            type(item) is not str or not 1 <= len(item) <= 128 for item in expected_failure_codes
+        )
         or type(expected_diagnosis_codes) is not tuple
-        or any(type(item) is not str for item in expected_diagnosis_codes)
+        or len(expected_diagnosis_codes) > 2
+        or any(
+            type(item) is not str or not 1 <= len(item) <= 128 for item in expected_diagnosis_codes
+        )
         or type(expected_status) is not str
         or expected_status not in ("valid", "diagnosis_required", "invalid")
         or expected_exact_control_census is not True
@@ -1018,6 +1176,43 @@ def publish_gate3_validity_evidence(
     except M8ArtifactPublicationError as error:
         raise Gate3ValidityEvidenceError("Gate 3 validity immutable publication failed") from error
     return published, prepared.evidence_receipt
+
+
+def recover_gate3_validity_evidence_receipt(
+    path: Path,
+    *,
+    expected_roots: Gate3RootBinding,
+    expected_baseline_freezes: tuple[
+        Gate3BaselineCalibrationFreeze,
+        Gate3BaselineCalibrationFreeze,
+    ],
+) -> Gate3ValidityEvidenceReceipt:
+    """Authenticate one orphan sidecar and reconstruct its compact receipt."""
+
+    strict_roots = _strict_expected_roots(expected_roots)
+    strict_freezes = _strict_baseline_freezes(
+        expected_baseline_freezes,
+        expected_roots=strict_roots,
+    )
+    candidate = Path(path)
+    data = _read_bounded_regular_file(candidate)
+    _validate_gzip_header(data)
+    raw = _bounded_gzip_decompress(data)
+    validity = _parse_strict_validity_json(raw)
+    if not _has_canonical_encoding(validity, raw):
+        raise Gate3ValidityEvidenceError("Gate 3 validity receipt encoding is not canonical")
+    if validity.roots != strict_roots:
+        raise Gate3ValidityEvidenceError("Gate 3 validity sidecar roots differ")
+    _validate_receipt_freeze_bindings(validity, strict_freezes)
+    recovered = _build_evidence_receipt(
+        validity,
+        strict_freezes,
+        uncompressed_byte_count=len(raw),
+        compressed_bytes=data,
+    )
+    if candidate.name != recovered.sidecar_name:
+        raise Gate3ValidityEvidenceError("Gate 3 validity sidecar filename differs")
+    return recovered
 
 
 def load_gate3_validity_evidence(

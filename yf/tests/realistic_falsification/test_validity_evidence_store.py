@@ -7,10 +7,11 @@ import importlib
 import json
 import os
 import weakref
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from tests.realistic_falsification.test_confirmation import (
     _baseline_freeze,
@@ -284,6 +285,113 @@ def test_resigned_status_and_summary_are_rederived_from_compact_rows(validity_ca
         )
 
 
+def _resign_full_twin(control, **updates):  # type: ignore[no-untyped-def]
+    semantic = control.model_dump(
+        mode="python",
+        round_trip=True,
+        exclude={"control_id", "content_sha256"},
+    )
+    semantic.update(updates)
+    digest = semantic_sha256(semantic)
+    return type(control)(
+        control_id=f"yfm11g3twin-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        **semantic,
+    )
+
+
+def _resign_full_summary(summary, **updates):  # type: ignore[no-untyped-def]
+    semantic = summary.model_dump(
+        mode="python",
+        round_trip=True,
+        exclude={"summary_id", "content_sha256"},
+    )
+    semantic.update(updates)
+    digest = semantic_sha256(semantic)
+    return type(summary)(
+        summary_id=f"yfm11g3ns-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        **semantic,
+    )
+
+
+def test_half_even_row_and_summary_boundaries_accept_authoritative_full_receipt(
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, valid = validity_case
+    lectra = list(valid.twin_controls[:20])
+    lectra[0] = _resign_full_twin(
+        lectra[0],
+        baseline_cost="200000000.000000",
+        full_future_cost="199999999.999999",
+        known_only_cost="200000000.000000",
+        no_signal_savings_percent="0.000000000000",
+    )
+    for index in range(1, 11):
+        lectra[index] = _resign_full_twin(
+            lectra[index],
+            baseline_cost="100000000.000000",
+            full_future_cost="99999999.999999",
+            known_only_cost="100000000.000000",
+            no_signal_savings_percent="0.000000000001",
+        )
+    full = evaluate_gate3_validity_controls(
+        roots=valid.roots,
+        hard_nulls=valid.hard_nulls,
+        twin_controls=tuple(lectra) + valid.twin_controls[20:],
+        exact_audits=valid.exact_audits,
+    )
+
+    compact = store.build_gate3_validity_evidence_receipt(
+        full,
+        baseline_freezes=freezes,
+    )
+
+    assert full.twin_controls[0].no_signal_savings_percent == "0.000000000000"
+    assert full.no_signal_summaries[0].mean_no_signal_savings_percent == ("0.000000000000")
+    assert compact.twin_controls[0].no_signal_savings_percent == "0.000000000000"
+    assert compact.no_signal_summaries[0] == full.no_signal_summaries[0]
+
+
+def test_compact_receipt_bounds_imported_summary_strings(validity_case) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    receipt = store.build_gate3_validity_evidence_receipt(
+        validity,
+        baseline_freezes=freezes,
+    )
+    first_summary = receipt.no_signal_summaries[0]
+    oversized = _resign_full_summary(
+        first_summary,
+        control_ids=("x" * 129, *first_summary.control_ids[1:]),
+    )
+
+    with pytest.raises(ValidationError, match="string bound"):
+        _resign_evidence_receipt(
+            receipt,
+            no_signal_summaries=(oversized, receipt.no_signal_summaries[1]),
+        )
+
+
+def test_builder_normalizes_compact_validation_error(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+
+    def invalid_compact_rows(_receipt):  # type: ignore[no-untyped-def]
+        return (store.Gate3ValidityTwinControlRow(control_id="invalid"),)
+
+    monkeypatch.setattr(store, "_compact_twins", invalid_compact_rows)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="compact validity receipt"):
+        store.build_gate3_validity_evidence_receipt(
+            validity,
+            baseline_freezes=freezes,
+        )
+
+
 def test_compact_receipt_preserves_invalid_and_diagnosis_decisions(validity_case) -> None:  # type: ignore[no-untyped-def]
     store = _store()
     freezes, valid = validity_case
@@ -427,6 +535,107 @@ def test_publish_is_immutable_idempotent_and_loads_exact_full_receipt(
     assert _load_validity(first_path, freezes, validity, first_evidence) == validity
 
 
+def test_recover_orphan_sidecar_reconstructs_exact_compact_receipt_and_releases_full_graph(
+    tmp_path: Path,
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+    parse = store._parse_strict_validity_json
+    parsed_refs = []
+
+    def capture_parsed(raw):  # type: ignore[no-untyped-def]
+        parsed = parse(raw)
+        parsed_refs.append(weakref.ref(parsed))
+        return parsed
+
+    monkeypatch.setattr(store, "_parse_strict_validity_json", capture_parsed)
+    recovered = store.recover_gate3_validity_evidence_receipt(
+        published,
+        expected_roots=validity.roots,
+        expected_baseline_freezes=freezes,
+    )
+    gc.collect()
+
+    assert recovered == evidence
+    assert parsed_refs[0]() is None
+
+
+def test_recover_uses_actual_historical_transport_without_recompression(
+    tmp_path: Path,
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+    alternate = bytearray(published.read_bytes())
+    alternate[9] = 3 if alternate[9] != 3 else 255
+    alternate_bytes = bytes(alternate)
+    alternate_receipt = _resign_transport(evidence, alternate_bytes)
+    alternate_path = tmp_path / alternate_receipt.sidecar_name
+    alternate_path.write_bytes(alternate_bytes)
+
+    def reject_recompression(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("recovery must bind actual historical gzip bytes")
+
+    monkeypatch.setattr(store, "_stream_canonical_gzip", reject_recompression)
+    monkeypatch.setattr(store, "deterministic_gzip", reject_recompression)
+    recovered = store.recover_gate3_validity_evidence_receipt(
+        alternate_path,
+        expected_roots=validity.roots,
+        expected_baseline_freezes=freezes,
+    )
+
+    assert recovered == alternate_receipt
+    assert recovered.compressed_raw_sha256 == (
+        f"sha256:{hashlib.sha256(alternate_bytes).hexdigest()}"
+    )
+
+
+def test_recover_rejects_wrong_filename_tamper_and_freeze_substitution(
+    tmp_path: Path,
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+    wrong_name = tmp_path / "wrong-name.json.gz"
+    wrong_name.write_bytes(published.read_bytes())
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="filename"):
+        store.recover_gate3_validity_evidence_receipt(
+            wrong_name,
+            expected_roots=validity.roots,
+            expected_baseline_freezes=freezes,
+        )
+
+    tampered = bytearray(published.read_bytes())
+    tampered[-1] ^= 1
+    tampered_directory = tmp_path / "tampered-recovery"
+    tampered_directory.mkdir()
+    tampered_path = tampered_directory / evidence.sidecar_name
+    tampered_path.write_bytes(tampered)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="not valid gzip"):
+        store.recover_gate3_validity_evidence_receipt(
+            tampered_path,
+            expected_roots=validity.roots,
+            expected_baseline_freezes=freezes,
+        )
+
+    substituted_freezes = (
+        _baseline_freeze(
+            corpus_id="lectra-m3-m4",
+            selected_policy_id="remnant_first",
+        ),
+        freezes[1],
+    )
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="supplied baseline freezes"):
+        store.recover_gate3_validity_evidence_receipt(
+            published,
+            expected_roots=validity.roots,
+            expected_baseline_freezes=substituted_freezes,
+        )
+
+
 def test_publication_streams_full_receipt_exactly_once(
     tmp_path: Path,
     validity_case,
@@ -518,6 +727,69 @@ def test_preparation_streams_canonical_encoding_and_stops_at_bound(
     assert consumed == ["oversize"]
 
 
+def test_canonical_iterator_traverses_models_without_model_dump_graph(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    _, validity = validity_case
+    expected = store.canonical_gate3_validity_receipt_bytes(validity)
+
+    def reject_model_dump(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("canonical iterator must traverse the existing graph")
+
+    monkeypatch.setattr(BaseModel, "model_dump", reject_model_dump)
+    assert b"".join(store._iter_canonical_json_bytes(validity)) == expected
+
+
+def test_canonical_iterator_matches_pydantic_json_temporal_scalars() -> None:
+    store = _store()
+
+    class TemporalPayload(BaseModel):
+        occurred_at: datetime
+        calendar_date: date
+        clock_time: time
+
+    payload = TemporalPayload(
+        occurred_at=datetime(2026, 8, 30, 12, 34, 56, 789012, tzinfo=UTC),
+        calendar_date=date(2026, 8, 30),
+        clock_time=time(12, 34, 56, 789012, tzinfo=UTC),
+    )
+    expected = (
+        json.dumps(
+            payload.model_dump(mode="json"),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+    assert b"".join(store._iter_canonical_json_bytes(payload)) == expected
+
+
+def test_compressed_sink_stops_before_consuming_incompressible_tail(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    _, validity = validity_case
+    consumed = 0
+    total_chunks = 256
+
+    def incompressible_chunks(_value):  # type: ignore[no-untyped-def]
+        nonlocal consumed
+        for index in range(total_chunks):
+            consumed += 1
+            yield hashlib.shake_256(str(index).encode()).digest(4096)
+
+    monkeypatch.setattr(store, "_MAX_COMPRESSED_BYTES", 1024)
+    monkeypatch.setattr(store, "_iter_canonical_json_bytes", incompressible_chunks)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="compressed byte bound"):
+        store._stream_canonical_gzip(validity)
+    assert consumed < total_chunks
+
+
 def test_preparation_does_not_materialize_canonical_raw_bytes(
     validity_case,
     monkeypatch: pytest.MonkeyPatch,
@@ -597,6 +869,74 @@ def test_loader_rejects_receipt_tamper_and_expected_mismatch_before_io(
             expected_source_lineage="repaired_runtime",
         )
     assert reads == []
+
+
+def test_expected_code_bounds_fail_as_public_store_error_before_io(
+    tmp_path: Path,
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+
+    def reject_read(_path):  # type: ignore[no-untyped-def]
+        raise AssertionError("malformed expected values must fail before I/O")
+
+    monkeypatch.setattr(store, "_read_bounded_regular_file", reject_read)
+    common = {
+        "evidence_receipt": evidence,
+        "expected_roots": validity.roots,
+        "expected_baseline_freezes": freezes,
+        "expected_validity_receipt_id": validity.receipt_id,
+        "expected_validity_receipt_content_sha256": validity.content_sha256,
+        "expected_hard_nulls": evidence.hard_nulls,
+        "expected_twin_controls": evidence.twin_controls,
+        "expected_exact_audits": evidence.exact_audits,
+        "expected_no_signal_summaries": evidence.no_signal_summaries,
+        "expected_status": validity.status,
+        "expected_exact_control_census": True,
+        "expected_raw_controls_revalidated": True,
+        "expected_source_lineage": "repaired_runtime",
+    }
+    for failures, diagnoses in (
+        (tuple("x" for _ in range(21)), ()),
+        ((), ("x", "y", "z")),
+        (("x" * 129,), ()),
+        (("",), ()),
+        ((), ("x" * 129,)),
+    ):
+        with pytest.raises(
+            store.Gate3ValidityEvidenceError,
+            match="expected compact values",
+        ):
+            store.load_gate3_validity_evidence(
+                published,
+                **common,
+                expected_failure_codes=failures,
+                expected_diagnosis_codes=diagnoses,
+            )
+
+    oversized_summary = _resign_full_summary(
+        evidence.no_signal_summaries[0],
+        control_ids=("x" * 129, *evidence.no_signal_summaries[0].control_ids[1:]),
+    )
+    with pytest.raises(
+        store.Gate3ValidityEvidenceError,
+        match="expected no-signal summaries",
+    ):
+        summary_common = {
+            **common,
+            "expected_no_signal_summaries": (
+                oversized_summary,
+                evidence.no_signal_summaries[1],
+            ),
+        }
+        store.load_gate3_validity_evidence(
+            published,
+            **summary_common,
+            expected_failure_codes=(),
+            expected_diagnosis_codes=(),
+        )
 
 
 def test_loader_rederives_compact_rows_from_full_receipt(
