@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import math
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
+from time import perf_counter
 
 import pytest
 from pydantic import ValidationError
@@ -112,6 +114,21 @@ def test_task4_public_api_is_exported_from_the_package() -> None:
     assert package.Gate1LowerBound is _bounds().Gate1LowerBound
     assert package.build_gate1_stream_cell is _bounds().build_gate1_stream_cell
     assert package.build_gate1_tiny_problem is _bounds().build_gate1_tiny_problem
+    assert (
+        package.build_preregistered_gate1_tiny_problem
+        is _bounds().build_preregistered_gate1_tiny_problem
+    )
+    assert (
+        package.GATE1_PREREGISTERED_TINY_PROBLEM_ID == _bounds().GATE1_PREREGISTERED_TINY_PROBLEM_ID
+    )
+    assert (
+        package.GATE1_PREREGISTERED_TINY_PROBLEM_CONTENT_SHA256
+        == _bounds().GATE1_PREREGISTERED_TINY_PROBLEM_CONTENT_SHA256
+    )
+    assert (
+        package.GATE1_PREREGISTERED_TINY_PROBLEM_ROOT_SHA256
+        == _bounds().GATE1_PREREGISTERED_TINY_PROBLEM_ROOT_SHA256
+    )
     assert package.select_gate1_baseline_policy is _bounds().select_gate1_baseline_policy
     assert package.audit_tiny_gate1_bounds is _bounds().audit_tiny_gate1_bounds
     assert package.verify_gate1_tiny_audit is _bounds().verify_gate1_tiny_audit
@@ -248,7 +265,7 @@ def test_every_favorable_relaxation_is_explicit_and_bound_is_monotone() -> None:
     )
     known = _policy(kind="known_only", openings=(_opening(stock_area=Fraction(11, 10)),))
     cell = _cell(lower_bound=lower, baseline=baseline, known_only=known)
-    problem = bounds.build_gate1_tiny_problem()
+    problem = bounds.build_preregistered_gate1_tiny_problem()
 
     assert lower.relaxation_assumptions == expected_relaxations
     assert lower.lower_bound_cost == 60.0
@@ -256,7 +273,6 @@ def test_every_favorable_relaxation_is_explicit_and_bound_is_monotone() -> None:
     audit = bounds.audit_tiny_gate1_bounds(
         cell,
         problem=problem,
-        expected_problem_root_sha256=problem.problem_root_sha256,
     )
     assert audit.all_inequalities_hold is True
     assert audit.relaxed_lower_bound_exact == "60"
@@ -285,6 +301,56 @@ def test_downward_lower_bound_rounding_differs_from_realized_half_up_rounding() 
 
     assert bounds.round_down_cost(value) == 1.234567
     assert bounds.round_half_up_cost(value) == 1.234568
+
+
+@pytest.mark.parametrize(
+    "token",
+    (
+        "1e1000",
+        "1e1000000",
+        "9" * 1000 + "/1",
+        "1/" + "9" * 1000,
+    ),
+)
+def test_exact_number_tokens_fail_closed_before_unbounded_expansion(token: str) -> None:
+    bounds = _bounds()
+    started = perf_counter()
+
+    with pytest.raises(bounds.Gate1EvidenceError, match="complexity limit"):
+        bounds.round_down_cost(token)
+
+    assert perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        10**1000,
+        Fraction(1, 10**1000),
+        Decimal("1e1000"),
+    ),
+)
+def test_preparsed_exact_numbers_are_bounded_before_decimal_conversion(value) -> None:
+    bounds = _bounds()
+    started = perf_counter()
+
+    with pytest.raises(bounds.Gate1EvidenceError, match="complexity limit"):
+        bounds.round_half_up_cost(value)
+
+    assert perf_counter() - started < 0.5
+
+
+def test_persisted_rational_validator_rejects_an_exponent_bomb_quickly() -> None:
+    bounds = _bounds()
+    lower = bounds.calculate_relaxed_lower_bound(stream_id="zero-stream", demands=())
+    payload = lower.model_dump(mode="python", round_trip=True)
+    payload["raw_cost_exact"] = "1e1000000"
+    started = perf_counter()
+
+    with pytest.raises(ValidationError, match="complexity limit"):
+        bounds.Gate1LowerBound.model_validate(payload, strict=True)
+
+    assert perf_counter() - started < 0.5
 
 
 def test_feasible_cost_is_constructive_half_up_evidence_not_a_lower_bound() -> None:
@@ -357,13 +423,12 @@ def test_tiny_exact_audit_rejects_wrong_cell_costs_without_caller_optima() -> No
     baseline = _policy(kind="baseline_as_of", openings=(_opening(),))
     known = _policy(kind="known_only", openings=(_opening(),))
     cell = _cell(lower_bound=lower, baseline=baseline, known_only=known)
-    problem = bounds.build_gate1_tiny_problem()
+    problem = bounds.build_preregistered_gate1_tiny_problem()
 
     with pytest.raises(bounds.Gate1BoundAuditError, match="enumerated feasible baseline"):
         bounds.audit_tiny_gate1_bounds(
             cell,
             problem=problem,
-            expected_problem_root_sha256=problem.problem_root_sha256,
         )
 
 
@@ -379,14 +444,14 @@ def test_tiny_audit_rejects_wrong_root_caller_optima_and_resigned_tampering() ->
         baseline=_policy(kind="baseline_as_of", openings=openings),
         known_only=_policy(kind="known_only", openings=openings),
     )
-    problem = bounds.build_gate1_tiny_problem()
+    problem = bounds.build_preregistered_gate1_tiny_problem()
     audit = bounds.audit_tiny_gate1_bounds(
         cell,
         problem=problem,
-        expected_problem_root_sha256=problem.problem_root_sha256,
     )
 
-    with pytest.raises(bounds.Gate1EvidenceError, match="problem root"):
+    assert bounds.verify_gate1_tiny_audit(audit) == audit
+    with pytest.raises(TypeError):
         bounds.audit_tiny_gate1_bounds(
             cell,
             problem=problem,
@@ -396,7 +461,6 @@ def test_tiny_audit_rejects_wrong_root_caller_optima_and_resigned_tampering() ->
         bounds.audit_tiny_gate1_bounds(
             cell,
             problem=problem,
-            expected_problem_root_sha256=problem.problem_root_sha256,
             exact_full_optimum=Fraction(1),
         )
 
@@ -410,6 +474,57 @@ def test_tiny_audit_rejects_wrong_root_caller_optima_and_resigned_tampering() ->
     payload["content_sha256"] = content
     with pytest.raises(ValidationError, match="enumerat|optimum|reconcile"):
         bounds.Gate1TinyAudit.model_validate(payload, strict=True)
+
+
+def test_tiny_audit_rejects_a_renamed_and_fully_resigned_action() -> None:
+    bounds = _bounds()
+    canonical = bounds.build_gate1_tiny_problem()
+    payload = canonical.model_dump(mode="python", round_trip=True)
+    actions = [dict(action) for action in payload["actions"]]
+    actions[0]["action_id"] = "attacker-baseline"
+    actions.sort(key=lambda action: action["action_id"])
+    payload["actions"] = tuple(actions)
+    payload["action_census_sha256"] = "sha256:" + bounds.semantic_sha256(
+        {
+            "root_state_id": payload["root_state_id"],
+            "action_ids": [action["action_id"] for action in actions],
+        }
+    )
+    root_semantic = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"problem_id", "content_sha256", "problem_root_sha256"}
+    }
+    payload["problem_root_sha256"] = "sha256:" + bounds.semantic_sha256(root_semantic)
+    identity_semantic = {
+        key: value for key, value in payload.items() if key not in {"problem_id", "content_sha256"}
+    }
+    payload["problem_id"], payload["content_sha256"] = bounds._identity(
+        "yfm11tp-", identity_semantic
+    )
+    forged_problem = bounds.Gate1TinyProblem.model_validate(payload, strict=True)
+
+    lower = bounds.calculate_relaxed_lower_bound(
+        stream_id="tiny-stream",
+        demands=(_demand(unit_area=Fraction(6), reference_area=Fraction(10)),),
+    )
+    openings = (_opening(stock_area=Fraction(11, 10)),)
+    cell = _cell(
+        lower_bound=lower,
+        baseline=_policy(kind="baseline_as_of", openings=openings),
+        known_only=_policy(kind="known_only", openings=openings),
+    )
+
+    with pytest.raises(bounds.Gate1EvidenceError, match="preregistered tiny problem"):
+        try:
+            bounds.audit_tiny_gate1_bounds(cell, problem=forged_problem)
+        except TypeError:
+            # Demonstrates the former caller-controlled-root vulnerability during RED.
+            bounds.audit_tiny_gate1_bounds(
+                cell,
+                problem=forged_problem,
+                expected_problem_root_sha256=forged_problem.problem_root_sha256,
+            )
 
 
 @pytest.fixture(scope="module")
@@ -618,6 +733,54 @@ def test_confirmation_rejects_a_resigned_forged_calibration_policy_winner(
             confirmation,
             baseline_selection=forged_selection,
         )
+
+
+def test_public_cell_builder_rejects_identity_preserving_post_load_context_mutation(
+    official_context,
+    official_baseline_selections,
+) -> None:
+    bounds = _bounds()
+    selection = official_baseline_selections["lectra-m3-m4"]
+    stream = next(
+        item
+        for item in official_context.bundle.population.streams
+        if item.corpus_id == "lectra-m3-m4"
+        and item.partition == "confirmation"
+        and item.stream_kind == "primary"
+    )
+    canonical_cell = bounds.build_gate1_stream_cell(
+        official_context,
+        stream,
+        baseline_selection=selection,
+    )
+    replacement_position = next(
+        position
+        for position, opening in enumerate(canonical_cell.baseline.openings[1:], start=1)
+        if opening.stock_area_exact != canonical_cell.baseline.openings[0].stock_area_exact
+    )
+    forged_event = stream.events[0].model_copy(
+        update={"payload_id": stream.events[replacement_position].payload_id}
+    )
+    forged_stream = stream.model_copy(update={"events": (forged_event,) + stream.events[1:]})
+    forged_population = official_context.bundle.population.model_copy(
+        update={
+            "streams": tuple(
+                forged_stream if item.stream_id == stream.stream_id else item
+                for item in official_context.bundle.population.streams
+            )
+        }
+    )
+    forged_context = official_context._replace(
+        bundle=official_context.bundle._replace(population=forged_population)
+    )
+
+    with pytest.raises(bounds.Gate1EvidenceError, match="authenticated official context"):
+        forged_cell = bounds.build_gate1_stream_cell(
+            forged_context,
+            forged_stream,
+            baseline_selection=selection,
+        )
+        assert forged_cell.baseline_feasible_cost != canonical_cell.baseline_feasible_cost
 
 
 @pytest.mark.parametrize("corpus_id", ("lectra-m3-m4", "loco-2dics"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
@@ -12,7 +13,15 @@ from itertools import product
 from pathlib import Path
 from typing import Literal, NamedTuple, Self
 
-from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
+from pydantic import (
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+    model_validator,
+)
 from shapely import box, union_all
 from shapely.affinity import translate
 
@@ -82,6 +91,13 @@ GATE1_LOWER_BOUND_PROOF_DIRECTION = (
 GATE1_FEASIBLE_ALGORITHM = "one_event_one_verified_registered_fresh_opening"
 GATE1_ACTION_SET_CONTRACT = "all_and_only_pack_registered_per_event_fresh_opening_candidates"
 GATE1_COMPUTE_CONTRACT = "validate_every_registered_candidate_then_apply_frozen_policy_rule"
+GATE1_PREREGISTERED_TINY_PROBLEM_ID = "yfm11tp-6fb07a058bbb0b41d99c0c0d"
+GATE1_PREREGISTERED_TINY_PROBLEM_CONTENT_SHA256 = (
+    "sha256:6fb07a058bbb0b41d99c0c0dbb02d1681065cdff46c9e24a1dd8d7c325ebf8b4"
+)
+GATE1_PREREGISTERED_TINY_PROBLEM_ROOT_SHA256 = (
+    "sha256:611a84f122cbde54c63e7c161313f7c13a6ef0d29e82c9201b0b7f17fd564232"
+)
 
 Gate1BaselinePolicyId = Literal[
     "fresh-candidate-position-0",
@@ -96,6 +112,14 @@ Gate1OpeningSelectionRule = Literal[
 ]
 
 FractionInput = Fraction | Decimal | int | float | str
+
+_EXACT_NUMBER_TOKEN = re.compile(
+    r"^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|\d+/[1-9]\d*)$"
+)
+_MAX_EXACT_TOKEN_CHARS = 160
+_MAX_EXACT_COMPONENT_DIGITS = 72
+_MAX_EXACT_EXPONENT_ABS = 72
+_MAX_EXACT_INTEGER_BITS = 256
 
 
 class Gate1EvidenceError(ValueError):
@@ -165,9 +189,86 @@ GATE1_BASELINE_POLICY_REGISTRY = (
 )
 
 
-def _fraction(value: FractionInput, *, label: str, positive: bool = False) -> Fraction:
+def _exact_token_complexity_exceeded(token: str) -> bool:
+    if len(token) > _MAX_EXACT_TOKEN_CHARS:
+        return True
+    unsigned = token.lstrip("+-")
+    if "/" in unsigned:
+        numerator, denominator = unsigned.split("/", 1)
+        return (
+            len(numerator) > _MAX_EXACT_COMPONENT_DIGITS
+            or len(denominator) > _MAX_EXACT_COMPONENT_DIGITS
+        )
+    mantissa = unsigned
+    exponent = ""
+    for marker in ("e", "E"):
+        if marker in mantissa:
+            mantissa, exponent = mantissa.split(marker, 1)
+            break
+    if sum(character.isdigit() for character in mantissa) > _MAX_EXACT_COMPONENT_DIGITS:
+        return True
+    if exponent:
+        exponent_digits = exponent.lstrip("+-")
+        if len(exponent_digits) > 3:
+            return True
+        if exponent_digits.isdigit() and int(exponent_digits) > _MAX_EXACT_EXPONENT_ABS:
+            return True
+    return False
+
+
+def _fraction_complexity_exceeded(value: Fraction) -> bool:
+    numerator = abs(value.numerator)
+    denominator = value.denominator
+    if (
+        numerator.bit_length() > _MAX_EXACT_INTEGER_BITS
+        or denominator.bit_length() > _MAX_EXACT_INTEGER_BITS
+    ):
+        return True
+    return (
+        len(str(numerator)) > _MAX_EXACT_COMPONENT_DIGITS
+        or len(str(denominator)) > _MAX_EXACT_COMPONENT_DIGITS
+    )
+
+
+def _raise_exact_complexity(label: str) -> None:
+    raise Gate1EvidenceError(f"{label} exceeds the exact-number complexity limit")
+
+
+def _fraction(
+    value: FractionInput,
+    *,
+    label: str,
+    positive: bool = False,
+    signed: bool = False,
+) -> Fraction:
     if isinstance(value, bool):
         raise Gate1EvidenceError(f"{label} cannot be boolean")
+    if isinstance(value, Fraction) and _fraction_complexity_exceeded(value):
+        _raise_exact_complexity(label)
+    if isinstance(value, int) and abs(value).bit_length() > _MAX_EXACT_INTEGER_BITS:
+        _raise_exact_complexity(label)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise Gate1EvidenceError(f"{label} is not a finite exact number")
+        decimal_tuple = value.as_tuple()
+        if (
+            len(decimal_tuple.digits) > _MAX_EXACT_COMPONENT_DIGITS
+            or not isinstance(decimal_tuple.exponent, int)
+            or abs(decimal_tuple.exponent) > _MAX_EXACT_EXPONENT_ABS
+        ):
+            _raise_exact_complexity(label)
+    token: str | None = None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise Gate1EvidenceError(f"{label} is not a finite exact number")
+        token = str(value)
+    elif isinstance(value, str):
+        token = value
+    if token is not None:
+        if _exact_token_complexity_exceeded(token):
+            _raise_exact_complexity(label)
+        if not _EXACT_NUMBER_TOKEN.fullmatch(token):
+            raise Gate1EvidenceError(f"{label} is not a finite exact number")
     try:
         if isinstance(value, Fraction):
             result = value
@@ -176,16 +277,16 @@ def _fraction(value: FractionInput, *, label: str, positive: bool = False) -> Fr
         elif isinstance(value, int):
             result = Fraction(value)
         elif isinstance(value, float):
-            if not math.isfinite(value):
-                raise ValueError
-            result = Fraction(str(value))
+            result = Fraction(token)
         elif isinstance(value, str):
-            result = Fraction(value)
+            result = Fraction(token)
         else:
             raise TypeError
     except (TypeError, ValueError, ZeroDivisionError) as error:
         raise Gate1EvidenceError(f"{label} is not a finite exact number") from error
-    if result < 0 or (positive and result <= 0):
+    if _fraction_complexity_exceeded(result):
+        _raise_exact_complexity(label)
+    if (not signed and result < 0) or (positive and result <= 0):
         qualifier = "positive" if positive else "nonnegative"
         raise Gate1EvidenceError(f"{label} must be {qualifier}")
     return result
@@ -203,6 +304,8 @@ def _parse_fraction_token(value: str, *, label: str, positive: bool = False) -> 
 
 
 def _decimal(value: Fraction) -> Decimal:
+    if _fraction_complexity_exceeded(value):
+        _raise_exact_complexity("exact decimal conversion")
     digits = len(str(abs(value.numerator))) + len(str(value.denominator)) + 32
     with localcontext() as context:
         context.prec = max(80, digits)
@@ -487,7 +590,11 @@ class Gate1LowerBound(FrozenExperimentModel):
             ),
             start=Fraction(0),
         )
-        if self.raw_cost_exact != str(raw) or self.lower_bound_cost != round_down_cost(raw):
+        persisted_raw = _parse_fraction_token(
+            self.raw_cost_exact,
+            label="Gate 1 lower-bound raw cost",
+        )
+        if persisted_raw != raw or self.lower_bound_cost != round_down_cost(raw):
             raise ValueError("Gate 1 lower-bound cost does not reconcile")
         digest = semantic_sha256(self, excluded_fields={"bound_id", "content_sha256"})
         if self.bound_id != f"yfm11lb-{digest[:24]}" or self.content_sha256 != (f"sha256:{digest}"):
@@ -833,10 +940,19 @@ class Gate1FeasiblePolicyCost(FrozenExperimentModel):
             ),
             start=Fraction(0),
         )
-        realized = sum((Fraction(str(item.purchase_cost)) for item in self.openings), Fraction(0))
-        if self.raw_purchase_cost_exact != str(raw) or self.feasible_cost != round_half_up_cost(
-            realized
-        ):
+        realized = sum(
+            (
+                _fraction(item.purchase_cost, label="opening rounded purchase cost")
+                for item in self.openings
+            ),
+            Fraction(0),
+        )
+        persisted_raw = _parse_fraction_token(
+            self.raw_purchase_cost_exact,
+            label="feasible policy raw purchase cost",
+            positive=True,
+        )
+        if persisted_raw != raw or self.feasible_cost != round_half_up_cost(realized):
             raise ValueError("feasible policy purchase ledger does not reconcile")
         digest = semantic_sha256(self, excluded_fields={"witness_id", "content_sha256"})
         if self.witness_id != f"yfm11fp-{digest[:24]}" or self.content_sha256 != (
@@ -874,7 +990,10 @@ def build_gate1_feasible_policy_cost(
         ),
         start=Fraction(0),
     )
-    realized = sum((Fraction(str(item.purchase_cost)) for item in openings), start=Fraction(0))
+    realized = sum(
+        (_fraction(item.purchase_cost, label="opening rounded purchase cost") for item in openings),
+        start=Fraction(0),
+    )
     semantic: dict[str, object] = {
         "schema_version": "yieldforge.m11-gate1-feasible-policy.v1",
         "stream_id": stream_id,
@@ -938,10 +1057,18 @@ class Gate1CalibrationPolicyScore(FrozenExperimentModel):
         if len(stream_ids) != len(set(stream_ids)):
             raise ValueError("calibration policy score repeats a stream")
         exact = sum(
-            (Fraction(str(cost)) for _stream_id, cost in self.calibration_stream_costs),
+            (
+                _fraction(cost, label="calibration stream feasible cost", positive=True)
+                for _stream_id, cost in self.calibration_stream_costs
+            ),
             start=Fraction(0),
         )
-        if self.total_cost_exact != str(exact) or self.total_cost != round_half_up_cost(exact):
+        persisted_total = _parse_fraction_token(
+            self.total_cost_exact,
+            label="calibration policy total cost",
+            positive=True,
+        )
+        if persisted_total != exact or self.total_cost != round_half_up_cost(exact):
             raise ValueError("calibration policy total does not reconcile")
         digest = semantic_sha256(self, excluded_fields={"score_id", "content_sha256"})
         if self.score_id != f"yfm11bsc-{digest[:24]}" or self.content_sha256 != (
@@ -1045,8 +1172,9 @@ def verify_weaker_feasible_comparator_ceiling(
 
 
 def _ceiling_percent(feasible: float, lower: float) -> float:
-    exact_feasible = Fraction(str(feasible))
-    raw = (exact_feasible - Fraction(str(lower))) * Fraction(100) / exact_feasible
+    exact_feasible = _fraction(feasible, label="feasible ceiling comparator", positive=True)
+    exact_lower = _fraction(lower, label="lower-bound ceiling comparator")
+    raw = (exact_feasible - exact_lower) * Fraction(100) / exact_feasible
     return round_half_up_cost(raw)
 
 
@@ -1305,7 +1433,7 @@ class Gate1TinyProblem(FrozenExperimentModel):
         return self
 
 
-def build_gate1_tiny_problem() -> Gate1TinyProblem:
+def build_preregistered_gate1_tiny_problem() -> Gate1TinyProblem:
     """Build the preregistered two-scenario, four-action exact proof kernel."""
 
     scenarios = (
@@ -1350,7 +1478,7 @@ def build_gate1_tiny_problem() -> Gate1TinyProblem:
     root = "sha256:" + semantic_sha256(root_semantic)
     semantic = {"problem_root_sha256": root, **root_semantic}
     identifier, content = _identity("yfm11tp-", semantic)
-    return Gate1TinyProblem(
+    problem = Gate1TinyProblem(
         problem_id=identifier,
         content_sha256=content,
         problem_root_sha256=root,
@@ -1358,6 +1486,43 @@ def build_gate1_tiny_problem() -> Gate1TinyProblem:
         actions=actions,
         action_census_sha256=action_census,
     )
+    identity = (
+        problem.problem_id,
+        problem.content_sha256,
+        problem.problem_root_sha256,
+    )
+    expected = (
+        GATE1_PREREGISTERED_TINY_PROBLEM_ID,
+        GATE1_PREREGISTERED_TINY_PROBLEM_CONTENT_SHA256,
+        GATE1_PREREGISTERED_TINY_PROBLEM_ROOT_SHA256,
+    )
+    if identity != expected:
+        raise Gate1EvidenceError("Gate 1 preregistered tiny problem constants differ")
+    return problem
+
+
+def build_gate1_tiny_problem() -> Gate1TinyProblem:
+    """Compatibility alias for the pinned preregistered Gate 1 proof kernel."""
+
+    return build_preregistered_gate1_tiny_problem()
+
+
+def _require_preregistered_gate1_tiny_problem(
+    problem: Gate1TinyProblem,
+) -> Gate1TinyProblem:
+    """Revalidate and exact-compare a tiny problem to the code-pinned kernel."""
+
+    try:
+        rebuilt = Gate1TinyProblem.model_validate(
+            problem.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate1EvidenceError("Gate 1 preregistered tiny problem is invalid") from error
+    canonical = build_preregistered_gate1_tiny_problem()
+    if rebuilt != canonical:
+        raise Gate1EvidenceError("Gate 1 evidence differs from the preregistered tiny problem")
+    return canonical
 
 
 class Gate1TinyRelaxationCheck(FrozenExperimentModel):
@@ -1550,9 +1715,17 @@ def _enumerate_gate1_tiny_problem(problem: Gate1TinyProblem) -> _TinyEnumeration
 
 
 def _require_tiny_cell_matches(cell: Gate1StreamCell, result: _TinyEnumeration) -> None:
-    lower = Fraction(str(cell.lower_bound.lower_bound_cost))
-    baseline = Fraction(str(cell.baseline_feasible_cost))
-    known = Fraction(str(cell.known_only_feasible_cost))
+    lower = _fraction(cell.lower_bound.lower_bound_cost, label="tiny cell lower bound")
+    baseline = _fraction(
+        cell.baseline_feasible_cost,
+        label="tiny cell baseline feasible cost",
+        positive=True,
+    )
+    known = _fraction(
+        cell.known_only_feasible_cost,
+        label="tiny cell known-only feasible cost",
+        positive=True,
+    )
     if lower != result.relaxed_lower_bound:
         raise Gate1BoundAuditError("Gate 1 cell lower bound differs from enumerated relaxation")
     if baseline != result.baseline_feasible:
@@ -1616,8 +1789,44 @@ class Gate1TinyAudit(FrozenExperimentModel):
 
     @model_validator(mode="after")
     def require_recomputed_certificate_and_identity(self) -> Self:
-        result = _enumerate_gate1_tiny_problem(self.problem)
+        canonical_problem = _require_preregistered_gate1_tiny_problem(self.problem)
+        result = _enumerate_gate1_tiny_problem(canonical_problem)
         _require_tiny_cell_matches(self.cell, result)
+        persisted_exact_values = (
+            _parse_fraction_token(
+                self.relaxed_lower_bound_exact,
+                label="tiny relaxed lower bound",
+            ),
+            _parse_fraction_token(
+                self.exact_full_optimum,
+                label="tiny exact full optimum",
+                positive=True,
+            ),
+            _parse_fraction_token(
+                self.exact_known_optimum,
+                label="tiny exact known optimum",
+                positive=True,
+            ),
+            _parse_fraction_token(
+                self.baseline_feasible_exact,
+                label="tiny baseline feasible cost",
+                positive=True,
+            ),
+            _parse_fraction_token(
+                self.known_feasible_exact,
+                label="tiny known-only feasible cost",
+                positive=True,
+            ),
+        )
+        recomputed_exact_values = (
+            result.relaxed_lower_bound,
+            result.exact_full_optimum,
+            result.exact_known_optimum,
+            result.baseline_feasible,
+            result.known_feasible,
+        )
+        if persisted_exact_values != recomputed_exact_values:
+            raise ValueError("Gate 1 tiny exact values differ from exhaustive enumeration")
         expected = (
             self.problem.problem_root_sha256,
             self.problem.root_state_id,
@@ -1672,12 +1881,10 @@ def audit_tiny_gate1_bounds(
     cell: Gate1StreamCell,
     *,
     problem: Gate1TinyProblem,
-    expected_problem_root_sha256: str,
 ) -> Gate1TinyAudit:
     """Enumerate the finite proof kernel and bind its checked certificate to one tiny cell."""
 
-    if problem.problem_root_sha256 != expected_problem_root_sha256:
-        raise Gate1EvidenceError("Gate 1 tiny problem root differs from the preregistered root")
+    problem = _require_preregistered_gate1_tiny_problem(problem)
     result = _enumerate_gate1_tiny_problem(problem)
     _require_tiny_cell_matches(cell, result)
     semantic: dict[str, object] = {
@@ -1745,17 +1952,18 @@ def audit_tiny_gate1_bounds(
 
 def verify_gate1_tiny_audit(
     audit: Gate1TinyAudit,
-    *,
-    expected_problem_root_sha256: str,
 ) -> Gate1TinyAudit:
     """Revalidate a persisted exhaustive certificate against its preregistered root."""
 
-    if audit.problem_root_sha256 != expected_problem_root_sha256:
-        raise Gate1EvidenceError("Gate 1 tiny audit problem root differs")
-    return Gate1TinyAudit.model_validate(
-        audit.model_dump(mode="python", round_trip=True),
-        strict=True,
-    )
+    try:
+        rebuilt = Gate1TinyAudit.model_validate(
+            audit.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+        raise Gate1EvidenceError("Gate 1 preregistered tiny audit is invalid") from error
+    _require_preregistered_gate1_tiny_problem(rebuilt.problem)
+    return rebuilt
 
 
 class Gate1SourceContext(NamedTuple):
@@ -1765,12 +1973,13 @@ class Gate1SourceContext(NamedTuple):
     source_manifest: M11SourceManifest
     m3_input: M3ResidualInputPack
     loco_catalog: LOCoCatalog
+    repository_root: Path
 
 
 def load_official_gate1_context(repository_root: Path) -> Gate1SourceContext:
     """Strict-load the official e561fec-compatible pack and all Gate 1 source leaves."""
 
-    root = Path(repository_root)
+    root = Path(repository_root).resolve()
     contract_path = root / "benchmarks/falsification/m11-contract-v1.json"
     population_path = root / "benchmarks/falsification/m11-population-v1.json"
     source_manifest_path = root / "benchmarks/falsification/source-manifest-v1.json"
@@ -1790,7 +1999,53 @@ def load_official_gate1_context(repository_root: Path) -> Gate1SourceContext:
         or loco_catalog.content_sha256 != source_manifest.loco.catalog_content_sha256
     ):
         raise Gate1EvidenceError("Gate 1 source context does not match the official attestation")
-    return Gate1SourceContext(bundle, source_manifest, m3_input, loco_catalog)
+    return Gate1SourceContext(bundle, source_manifest, m3_input, loco_catalog, root)
+
+
+def _authenticate_official_gate1_context(context: Gate1SourceContext) -> Gate1SourceContext:
+    """Revalidate primitive evidence, reload pinned artifacts, and exact-compare the context."""
+
+    try:
+        rebuilt = Gate1SourceContext(
+            M11PackBundle(
+                type(context.bundle.contract).model_validate(
+                    context.bundle.contract.model_dump(mode="python", round_trip=True),
+                    strict=True,
+                ),
+                type(context.bundle.population).model_validate(
+                    context.bundle.population.model_dump(mode="python", round_trip=True),
+                    strict=True,
+                ),
+            ),
+            type(context.source_manifest).model_validate(
+                context.source_manifest.model_dump(mode="python", round_trip=True),
+                strict=True,
+            ),
+            type(context.m3_input).model_validate(
+                context.m3_input.model_dump(mode="python", round_trip=True),
+                strict=True,
+            ),
+            type(context.loco_catalog).model_validate(
+                context.loco_catalog.model_dump(mode="python", round_trip=True),
+                strict=True,
+            ),
+            Path(context.repository_root).resolve(),
+        )
+    except (AttributeError, TypeError, ValueError, ValidationError) as error:
+        raise Gate1EvidenceError(
+            "Gate 1 requires an authenticated official context with valid nested identities"
+        ) from error
+    try:
+        canonical = load_official_gate1_context(rebuilt.repository_root)
+    except (OSError, ValueError, ValidationError) as error:
+        raise Gate1EvidenceError(
+            "Gate 1 requires an authenticated official context with intact pinned artifacts"
+        ) from error
+    if rebuilt != canonical:
+        raise Gate1EvidenceError(
+            "Gate 1 requires an authenticated official context exact-matching pinned artifacts"
+        )
+    return canonical
 
 
 def _polygon_area(points: tuple[tuple[Fraction, Fraction], ...]) -> Fraction:
@@ -1813,9 +2068,7 @@ def _polygon_area(points: tuple[tuple[Fraction, Fraction], ...]) -> Fraction:
 
 
 def _point_fraction(value: float) -> Fraction:
-    if not math.isfinite(value):
-        raise Gate1EvidenceError("source coordinate must be finite")
-    return Fraction(str(value))
+    return _fraction(value, label="source coordinate", signed=True)
 
 
 def _float_matches_within_one_ulp(left: float, right: float) -> bool:
@@ -1952,8 +2205,13 @@ def _validate_lectra_payload(
         outside = sum(item.difference(candidate_stock).area for item in placed.values())
         if outside > area_tolerance:
             raise Gate1EvidenceError("Lectra candidate exceeds its verified used-layout boundary")
-        used_width = Fraction(str(candidate.width))
-        used_area = used_width * Fraction(str(pair.problem.strip_height))
+        used_width = _fraction(candidate.width, label="Lectra candidate used width", positive=True)
+        strip_height = _fraction(
+            pair.problem.strip_height,
+            label="Lectra strip height",
+            positive=True,
+        )
+        used_area = used_width * strip_height
         options.append((candidate.candidate_id, reference.content_sha256))
         candidate_areas.append((used_area, candidate.candidate_id, position, used_width))
         geometry_evidence.append(
@@ -1964,16 +2222,30 @@ def _validate_lectra_payload(
                 "archive_batch_sha256": selected.archive_batch_sha256,
                 "used_layout_width_exact": str(used_width),
                 "used_layout_area_exact": str(used_area),
-                "purchased_stock_width_exact": str(Fraction(str(pair.problem.sheet_length))),
-                "purchased_stock_height_exact": str(Fraction(str(pair.problem.strip_height))),
+                "purchased_stock_width_exact": str(
+                    _fraction(
+                        pair.problem.sheet_length,
+                        label="Lectra sheet length",
+                        positive=True,
+                    )
+                ),
+                "purchased_stock_height_exact": str(strip_height),
                 "part_count": len(placed),
             }
         )
     _selected_used_area, selected_candidate_id, _position, selected_used_width = min(
         candidate_areas
     )
-    purchased_width = Fraction(str(pair.problem.sheet_length))
-    purchased_height = Fraction(str(pair.problem.strip_height))
+    purchased_width = _fraction(
+        pair.problem.sheet_length,
+        label="Lectra sheet length",
+        positive=True,
+    )
+    purchased_height = _fraction(
+        pair.problem.strip_height,
+        label="Lectra strip height",
+        positive=True,
+    )
     selected_area = purchased_width * purchased_height
 
     components: list[_DemandComponent] = []
@@ -2050,7 +2322,13 @@ def _validate_loco_payload(
             item = items[reference.reference_id]
         except KeyError as error:
             raise Gate1EvidenceError("LOCo payload references an absent source item") from error
-        exact_points = tuple((Fraction(x), Fraction(y)) for x, y in item.exact_normalized_vertices)
+        exact_points = tuple(
+            (
+                _fraction(x, label="LOCo exact x coordinate", signed=True),
+                _fraction(y, label="LOCo exact y coordinate", signed=True),
+            )
+            for x, y in item.exact_normalized_vertices
+        )
         exact_area = _polygon_area(exact_points)
         min_x = min(point[0] for point in exact_points)
         max_x = max(point[0] for point in exact_points)
@@ -2104,7 +2382,9 @@ def _validate_loco_payload(
     overlap = sum(item.area for item in placed) - union.area
     if overlap > max(1e-9, stock.area * 1e-12):
         raise Gate1EvidenceError("LOCo fallback polygons overlap")
-    exact_stock_area = Fraction(str(fallback.width)) * Fraction(str(fallback.height))
+    fallback_width = _fraction(fallback.width, label="LOCo fallback width", positive=True)
+    fallback_height = _fraction(fallback.height, label="LOCo fallback height", positive=True)
+    exact_stock_area = fallback_width * fallback_height
     if not _float_matches_within_one_ulp(fallback.area, float(exact_stock_area)):
         raise Gate1EvidenceError("LOCo fallback purchase area does not reconcile")
     option = payload.candidate_references[0]
@@ -2123,12 +2403,12 @@ def _validate_loco_payload(
         source_kind="loco_2dics",
         demand_components=tuple(components),
         candidate_options=((option.candidate_id, option.content_sha256),),
-        candidate_used_layout_widths=(Fraction(str(fallback.width)),),
+        candidate_used_layout_widths=(fallback_width,),
         candidate_geometry_witness_sha256s=(f"sha256:{witness_digest}",),
         selected_candidate_id=option.candidate_id,
-        selected_used_layout_width=Fraction(str(fallback.width)),
-        purchased_stock_width=Fraction(str(fallback.width)),
-        purchased_stock_height=Fraction(str(fallback.height)),
+        selected_used_layout_width=fallback_width,
+        purchased_stock_width=fallback_width,
+        purchased_stock_height=fallback_height,
         selected_stock_area=exact_stock_area,
         reference_area_key=reference_area_key,
         reference_area=reference_area,
@@ -2244,7 +2524,13 @@ def _build_calibration_score(
     stream_costs: tuple[tuple[str, float], ...],
 ) -> Gate1CalibrationPolicyScore:
     canonical = tuple(sorted(stream_costs))
-    exact = sum((Fraction(str(cost)) for _stream_id, cost in canonical), start=Fraction(0))
+    exact = sum(
+        (
+            _fraction(cost, label="calibration stream feasible cost", positive=True)
+            for _stream_id, cost in canonical
+        ),
+        start=Fraction(0),
+    )
     semantic: dict[str, object] = {
         "schema_version": "yieldforge.m11-gate1-calibration-policy-score.v1",
         "corpus_id": corpus_id,
@@ -2371,6 +2657,7 @@ def build_gate1_stream_cell(
 ) -> Gate1StreamCell:
     """Build one complete official stream cell from exact demand and fallback geometry."""
 
+    context = _authenticate_official_gate1_context(context)
     if baseline_selection is None:
         raise Gate1EvidenceError("official Gate 1 cells require calibration selection evidence")
     canonical_streams = tuple(
@@ -2492,6 +2779,9 @@ __all__ = [
     "GATE1_FEASIBLE_ALGORITHM",
     "GATE1_LOWER_BOUND_PROOF_DIRECTION",
     "GATE1_NON_LATTICE_ASSUMPTIONS",
+    "GATE1_PREREGISTERED_TINY_PROBLEM_CONTENT_SHA256",
+    "GATE1_PREREGISTERED_TINY_PROBLEM_ID",
+    "GATE1_PREREGISTERED_TINY_PROBLEM_ROOT_SHA256",
     "GATE1_RELAXATION_ASSUMPTIONS",
     "Gate1BoundAuditError",
     "Gate1BaselinePolicySpec",
@@ -2517,6 +2807,7 @@ __all__ = [
     "build_gate1_stream_cell",
     "build_gate1_stream_cell_from_evidence",
     "build_gate1_tiny_problem",
+    "build_preregistered_gate1_tiny_problem",
     "calculate_relaxed_lower_bound",
     "load_official_gate1_context",
     "round_down_cost",
