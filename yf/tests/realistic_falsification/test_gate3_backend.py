@@ -5,9 +5,14 @@ from itertools import product
 
 import pytest
 
+import yieldforge.oracle.search_validation as search_validation
+import yieldforge.realistic_falsification.gate3_backend as gate3_backend
 from tests.oracle.fixtures import two_problem_runtime
+from yieldforge.baseline.contracts import LayoutFitSearchConfig
 from yieldforge.baseline.policies import M7PolicyName, policy_identity
 from yieldforge.baseline.replay import (
+    M7ReplayRuntime,
+    build_m7_replay_input,
     enumerate_m7_action_catalog,
     initial_m7_cursor,
     m7_semantic_runtime_sha256,
@@ -69,6 +74,7 @@ def _roots():
 def _projection(
     *,
     visible_local: tuple[tuple[int, ...], ...] = ((0,), (0, 1), (0, 1, 2)),
+    maximum_candidates: int = 256,
 ) -> M11MaterialRuntimeProjection:
     roots = _roots()
     rates = FeasibilityRateManifest(
@@ -85,6 +91,33 @@ def _projection(
         rates=rates,
         event_count=3,
     )
+    if maximum_candidates != runtime.replay_input.search_config.maximum_candidates:
+        source = runtime.replay_input
+        replay_input = build_m7_replay_input(
+            m0_contract_id=source.m0_contract_id,
+            m0_contract_sha256=source.m0_contract_sha256,
+            problem_index_id=source.problem_index_id,
+            problem_index_sha256=source.problem_index_sha256,
+            m6_contract_id=source.m6_contract_id,
+            m6_contract_sha256=source.m6_contract_sha256,
+            m6_population_id=source.m6_population_id,
+            m6_population_sha256=source.m6_population_sha256,
+            policy=source.policy,
+            rates=source.rates,
+            fit_config=source.fit_config,
+            search_config=LayoutFitSearchConfig(maximum_candidates=maximum_candidates),
+            problems=source.problems,
+            candidate_sets=source.candidate_sets,
+            instances=source.instances,
+            horizon_end=source.horizon_end,
+            collision_backend=source.collision_backend,
+            jagua_container_guard=source.jagua_container_guard,
+        )
+        runtime = M7ReplayRuntime(
+            replay_input=replay_input,
+            runtime_candidates=runtime.runtime_candidates,
+            rules=runtime.rules,
+        )
     source_positions = (0, 5, 23)
     source_event_map = tuple(
         M11SourceEventMap(
@@ -267,6 +300,134 @@ def test_runtime_and_catalog_hashes_are_canonical_and_state_sensitive() -> None:
         )
         != first_catalog_hash
     )
+
+
+def test_gate3_hashes_bind_registered_bounded_catalog_claim_and_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = two_problem_runtime(first_width=4.0, second_width=4.0)
+    cursor = initial_m7_cursor(runtime.replay_input)
+    catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
+    truncated = replace(
+        catalog,
+        generated=replace(
+            catalog.generated,
+            fit_search_budget_truncated_count=1,
+        ),
+    )
+    payloads: list[object] = []
+
+    def capture(payload: object) -> str:
+        payloads.append(payload)
+        return "sha256:" + "0" * 64
+
+    monkeypatch.setattr(gate3_backend, "_sha256", capture)
+
+    gate3_compute_budget_sha256(runtime)
+    gate3_action_catalog_sha256(runtime=runtime, cursor=cursor, catalog=truncated)
+
+    compute, action_catalog = payloads
+    assert compute["catalog_requirement"] == (
+        "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    )
+    assert compute["geometry_placement_search_maximum_candidates"] == 256
+    assert compute["geometric_exhaustiveness_claim"] == "not_claimed"
+    assert action_catalog["action_catalog_requirement"] == compute["catalog_requirement"]
+    assert action_catalog["geometry_placement_search_maximum_candidates"] == 256
+    assert action_catalog["geometric_exhaustiveness_claim"] == "not_claimed"
+    assert action_catalog["fit_search_budget_truncated_count"] == 1
+
+
+def _force_geometry_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = enumerate_m7_action_catalog
+
+    def truncated(*args, **kwargs):  # type: ignore[no-untyped-def]
+        catalog = original(*args, **kwargs)
+        if catalog.generated.fit_search_query_count == 0:
+            return catalog
+        return replace(
+            catalog,
+            generated=replace(
+                catalog.generated,
+                fit_search_budget_truncated_count=max(
+                    1,
+                    catalog.generated.fit_search_budget_truncated_count,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(gate3_backend, "enumerate_m7_action_catalog", truncated)
+    monkeypatch.setattr(search_validation, "enumerate_m7_action_catalog", truncated)
+
+
+def test_gate3_bounded_execution_persists_truncation_without_dropping_discovered_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_geometry_truncation(monkeypatch)
+    projection = _projection()
+
+    direct = execute_gate3_material_shard(
+        projection=projection,
+        roots=_roots(),
+        arm="B",
+        policy_id="age_regularity",
+    )
+    full = execute_gate3_material_shard(
+        projection=projection,
+        roots=_roots(),
+        arm="F",
+        policy_id="age_regularity",
+    )
+
+    requirement = "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    assert any(item.truncated_catalog_count > 0 for item in direct.shard_trace.decisions)
+    assert any(item.truncated_catalog_count > 0 for item in full.shard_trace.decisions)
+    assert all(
+        item.action_catalog_requirement == requirement
+        and item.action_catalog_complete
+        and item.truncated_transition_count == 0
+        for item in direct.shard_trace.decisions + full.shard_trace.decisions
+    )
+    cursor = initial_m7_cursor(projection.runtime.replay_input)
+    for decision, step in zip(full.shard_trace.decisions, full.steps, strict=True):
+        discovered = enumerate_m7_action_catalog(
+            projection.runtime,
+            cursor=cursor,
+            complete=True,
+        )
+        assert decision.action_ids == tuple(item.action_id for item in discovered.actions)
+        assert tuple(item.action_id for item in decision.m9_root_scores) == decision.action_ids
+        cursor = step.cursor
+
+
+def test_gate3_rejects_runtime_search_maximum_other_than_registered_256() -> None:
+    with pytest.raises(ValueError, match="maximum.*256"):
+        execute_gate3_material_shard(
+            projection=_projection(maximum_candidates=255),
+            roots=_roots(),
+            arm="B",
+            policy_id="age_regularity",
+        )
+
+
+def test_gate3_rejects_m9_result_with_mismatched_catalog_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = gate3_backend.score_two_ply_reoptimization
+
+    def mismatched(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = original(*args, **kwargs)
+        return replace(result, action_catalog_requirement="complete_no_truncation")
+
+    monkeypatch.setattr(gate3_backend, "score_two_ply_reoptimization", mismatched)
+
+    with pytest.raises(ValueError, match="bounded action catalog requirement"):
+        execute_gate3_material_shard(
+            projection=_projection(),
+            roots=_roots(),
+            arm="F",
+            policy_id="age_regularity",
+        )
 
 
 def test_backend_and_confirmation_share_one_inventory_hash_for_empty_and_nonempty() -> None:

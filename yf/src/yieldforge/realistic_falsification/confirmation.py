@@ -43,6 +43,14 @@ GATE3_BASELINE_POLICY_IDS: tuple[Gate3BaselinePolicyId, ...] = (
     "known_order_lookahead",
     "known_only_m9_two_ply_scrap",
 )
+Gate3ActionCatalogRequirement = Literal[
+    "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+]
+GATE3_ACTION_CATALOG_REQUIREMENT: Gate3ActionCatalogRequirement = (
+    "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+)
+GATE3_GEOMETRY_PLACEMENT_SEARCH_MAXIMUM_CANDIDATES: Literal[256] = 256
+GATE3_GEOMETRIC_EXHAUSTIVENESS_CLAIM: Literal["not_claimed"] = "not_claimed"
 
 _COST_PATTERN = r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _SIGNED_COST_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{6}$"
@@ -254,8 +262,9 @@ class Gate3DecisionTrace(FrozenExperimentModel):
     )
     m9_depth: Literal[2] | None = None
     m9_complete: StrictBool = False
+    action_catalog_requirement: Gate3ActionCatalogRequirement
     action_catalog_complete: Literal[True] = True
-    truncated_catalog_count: Literal[0] = 0
+    truncated_catalog_count: StrictInt = Field(ge=0)
     truncated_transition_count: Literal[0] = 0
 
     @model_validator(mode="after")
@@ -384,6 +393,8 @@ def build_gate3_decision_trace(
     m9_continuation_event_count: int,
     m9_start_event_position: int | None,
     m9_stop_event_position: int | None,
+    action_catalog_requirement: Gate3ActionCatalogRequirement = (GATE3_ACTION_CATALOG_REQUIREMENT),
+    truncated_catalog_count: int = 0,
 ) -> Gate3DecisionTrace:
     tie_rule: Gate3TieRule = (
         "bounded_cost_then_baseline_then_action_id"
@@ -454,8 +465,9 @@ def build_gate3_decision_trace(
         ),
         "m9_depth": 2 if algorithm == "m9_two_ply" else None,
         "m9_complete": algorithm == "m9_two_ply",
+        "action_catalog_requirement": action_catalog_requirement,
         "action_catalog_complete": True,
-        "truncated_catalog_count": 0,
+        "truncated_catalog_count": truncated_catalog_count,
         "truncated_transition_count": 0,
     }
     digest = semantic_sha256(semantic)
@@ -1810,7 +1822,7 @@ class Gate3ExactSearchTelemetry(FrozenExperimentModel):
     explored_transition_count: StrictInt = Field(gt=0)
     terminal_leaf_count: StrictInt = Field(gt=0)
     peak_branching_factor: StrictInt = Field(gt=0)
-    truncated_catalog_count: Literal[0] = 0
+    truncated_catalog_count: StrictInt = Field(ge=0)
 
 
 class Gate3ExactMaterialAudit(FrozenExperimentModel):
@@ -1828,6 +1840,7 @@ class Gate3ExactMaterialAudit(FrozenExperimentModel):
     exact_optimal_final_cost: StrictStr = Field(pattern=_SIGNED_COST_PATTERN)
     exact_root_scores: tuple[Gate3ExactRootScore, ...] = Field(min_length=1)
     exact_optimal_action_ids: tuple[StrictStr, ...] = Field(min_length=1)
+    action_catalog_requirement: Gate3ActionCatalogRequirement
     exact_complete: Literal[True] = True
     telemetry: Gate3ExactSearchTelemetry
     selected_action_id: StrictStr = Field(min_length=1)
@@ -1851,6 +1864,7 @@ class Gate3ExactMaterialAudit(FrozenExperimentModel):
             or decision.m9_start_event_position != 0
             or decision.search_runtime_sha256 != attestation.m7_runtime_semantic_sha256
             or self.selected_action_id != decision.selected_action_id
+            or self.action_catalog_requirement != decision.action_catalog_requirement
         ):
             raise ValueError("Gate 3 exact material differs from its projection/two-ply trace")
         if self.exact_root_scores != tuple(
@@ -1920,9 +1934,13 @@ def build_gate3_exact_material_audit(
     optimum = min(costs.values())
     optimal_ids = tuple(sorted(key for key, value in costs.items() if value == optimum))
     if (
-        not exact_result.complete
-        or exact_result.telemetry.truncated_catalog_count != 0
-        or _exact_search_cost(exact_result.optimal_final_net_cost) != _format_signed_cost(optimum)
+        exact_result.action_catalog_requirement != GATE3_ACTION_CATALOG_REQUIREMENT
+        or not exact_result.action_catalog_complete
+        or not exact_result.complete
+    ):
+        raise ValueError("Gate 3 exact search lacks the bounded action catalog contract")
+    if (
+        _exact_search_cost(exact_result.optimal_final_net_cost) != _format_signed_cost(optimum)
         or tuple(sorted(exact_result.optimal_first_action_ids)) != optimal_ids
     ):
         raise ValueError("Gate 3 exact search is incomplete or internally inconsistent")
@@ -1932,7 +1950,7 @@ def build_gate3_exact_material_audit(
         explored_transition_count=exact_result.telemetry.explored_transition_count,
         terminal_leaf_count=exact_result.telemetry.terminal_leaf_count,
         peak_branching_factor=exact_result.telemetry.peak_branching_factor,
-        truncated_catalog_count=0,
+        truncated_catalog_count=exact_result.telemetry.truncated_catalog_count,
     )
     semantic = {
         "schema_version": "yieldforge.m11-gate3-exact-material.v1",
@@ -1943,6 +1961,7 @@ def build_gate3_exact_material_audit(
         "exact_optimal_final_cost": _format_signed_cost(optimum),
         "exact_root_scores": [item.model_dump(mode="json") for item in scores],
         "exact_optimal_action_ids": optimal_ids,
+        "action_catalog_requirement": exact_result.action_catalog_requirement,
         "exact_complete": True,
         "telemetry": telemetry.model_dump(mode="json"),
         "selected_action_id": selected,
@@ -1960,6 +1979,7 @@ def build_gate3_exact_material_audit(
         exact_optimal_final_cost=_format_signed_cost(optimum),
         exact_root_scores=scores,
         exact_optimal_action_ids=optimal_ids,
+        action_catalog_requirement=exact_result.action_catalog_requirement,
         exact_complete=True,
         telemetry=telemetry,
         selected_action_id=selected,
@@ -4389,7 +4409,11 @@ def run_gate3_early_confirmation(
 
 
 __all__ = [
+    "GATE3_ACTION_CATALOG_REQUIREMENT",
     "GATE3_BASELINE_POLICY_IDS",
+    "GATE3_GEOMETRIC_EXHAUSTIVENESS_CLAIM",
+    "GATE3_GEOMETRY_PLACEMENT_SEARCH_MAXIMUM_CANDIDATES",
+    "Gate3ActionCatalogRequirement",
     "Gate3AppliedActionContext",
     "Gate3Algorithm",
     "Gate3Arm",

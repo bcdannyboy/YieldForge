@@ -548,6 +548,12 @@ def build_adapter_gate3_backend(
         raise AdapterGate3BackendError(
             "Gate 3 adapter context differs from the authenticated parent roots"
         )
+    runtime_maximum = context.geometry_context.search_config.maximum_candidates
+    configured_maximum = config.policy.geometry_placement_search_maximum_candidates
+    if runtime_maximum != configured_maximum:
+        raise AdapterGate3BackendError(
+            "Gate 3 runtime geometry search maximum differs from the Gate 3 config"
+        )
     calibration, confirmation, streams = _stream_registries(context)
     return AdapterGate3Backend(
         repository_root=root,

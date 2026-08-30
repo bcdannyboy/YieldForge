@@ -180,8 +180,13 @@ def _patch_execution(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untype
     )
     monkeypatch.setattr(gate3_controls, "initial_m7_cursor", lambda value: "cursor")
 
-    def exact_search(request, *, include_terminal_credit=True):  # type: ignore[no-untyped-def]
-        calls["exact"].append((request, include_terminal_credit))
+    def exact_search(  # type: ignore[no-untyped-def]
+        request,
+        *,
+        include_terminal_credit=True,
+        action_catalog_requirement,
+    ):
+        calls["exact"].append((request, include_terminal_credit, action_catalog_requirement))
         return f"exact-result:{id(request.runtime)}"
 
     monkeypatch.setattr(gate3_controls, "solve_exact_search", exact_search)
@@ -232,7 +237,10 @@ def test_execute_uses_each_canonical_registration_once_and_reuses_each_projectio
         )
     assert all(arm == "F" for _label, arm, _policy in calls["execute"][-12:])
     assert len(calls["exact"]) == 12
-    assert all(include_terminal_credit for _request, include_terminal_credit in calls["exact"])
+    assert all(include_terminal_credit for _request, include_terminal_credit, _ in calls["exact"])
+    assert {requirement for _request, _include_terminal_credit, requirement in calls["exact"]} == {
+        "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    }
     evaluated = calls["evaluate"][0]
     assert len(evaluated["hard_nulls"]) == 6
     assert len(evaluated["twin_controls"]) == 40
@@ -335,3 +343,22 @@ def test_projection_evidence_records_the_exact_known_only_runtime_per_decision(
         "receipt:decision-1",
         "receipt:decision-2",
     )
+
+
+def test_exact_control_propagates_structural_search_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, roots, freezes = _inputs()
+    _patch_execution(monkeypatch)
+
+    def fail_structurally(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("structurally incomplete bounded action graph")
+
+    monkeypatch.setattr(gate3_controls, "solve_exact_search", fail_structurally)
+
+    with pytest.raises(RuntimeError, match="structurally incomplete"):
+        gate3_controls.execute_gate3_validity_controls(
+            context=context,
+            roots=roots,
+            baseline_freezes=freezes,
+        )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 
 import pytest
@@ -1276,7 +1276,12 @@ def _exact_registration(*, corpus_id: str, ordinal: int):
     )
 
 
-def _exact_material_audit(*, evidence, selected_optimal: bool):
+def _exact_search_result(
+    *,
+    evidence,
+    selected_optimal: bool,
+    truncated_catalog_count: int = 0,
+):
     from yieldforge.baseline.contracts import M7ActionKind
     from yieldforge.oracle.search_validation import (
         M9ExactRootScore,
@@ -1309,14 +1314,32 @@ def _exact_material_audit(*, evidence, selected_optimal: bool):
             item.action_id for item in scores if item.final_net_cost == optimum
         ),
         root_scores=scores,
+        action_catalog_requirement=(
+            "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+        ),
+        action_catalog_complete=True,
         complete=True,
         telemetry=M9ExactSearchTelemetry(
             catalog_count=1,
             explored_transition_count=len(scores),
             terminal_leaf_count=len(scores),
             peak_branching_factor=len(scores),
-            truncated_catalog_count=0,
+            truncated_catalog_count=truncated_catalog_count,
         ),
+    )
+    return result
+
+
+def _exact_material_audit(
+    *,
+    evidence,
+    selected_optimal: bool,
+    truncated_catalog_count: int = 0,
+):
+    result = _exact_search_result(
+        evidence=evidence,
+        selected_optimal=selected_optimal,
+        truncated_catalog_count=truncated_catalog_count,
     )
     return _confirmation().build_gate3_exact_material_audit(
         evidence=evidence,
@@ -1396,6 +1419,59 @@ def test_exact_audit_requires_two_ply_selected_root_to_be_exact_optimal() -> Non
     assert null.economic_profile == "central"
     assert null.payload_transform == "unmodified"
     assert null.material_rule == "unique_material_key_per_event_information_null"
+
+
+def test_exact_material_accepts_bounded_geometry_truncation_and_rejects_semantic_drift() -> None:
+    registration = _exact_registration(corpus_id="lectra-m3-m4", ordinal=0)
+    evidence = _bound_projection_shard(
+        registration=registration,
+        event_index=0,
+        arm="F",
+        policy_id="age_regularity",
+        cost="1.000000",
+        include_extra_action=True,
+    )
+    result = _exact_search_result(
+        evidence=evidence,
+        selected_optimal=True,
+        truncated_catalog_count=3,
+    )
+
+    audit = _confirmation().build_gate3_exact_material_audit(
+        evidence=evidence,
+        exact_result=result,
+    )
+
+    assert audit.action_catalog_requirement == (
+        "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+    )
+    assert audit.telemetry.truncated_catalog_count == 3
+    for mutation in (
+        {"action_catalog_requirement": "complete_no_truncation"},
+        {"action_catalog_complete": False},
+        {"complete": False},
+    ):
+        with pytest.raises(ValueError, match="bounded action catalog"):
+            _confirmation().build_gate3_exact_material_audit(
+                evidence=evidence,
+                exact_result=replace(result, **mutation),
+            )
+
+
+def test_decision_trace_binds_bounded_catalog_requirement_and_nonnegative_truncation() -> None:
+    decision = _decision(position=0, arm="F")
+    requirement = "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+
+    assert decision.action_catalog_requirement == requirement
+    assert decision.truncated_catalog_count == 0
+    payload = decision.model_dump(mode="python", round_trip=True)
+    payload["action_catalog_requirement"] = "complete_no_truncation"
+    with pytest.raises(ValidationError):
+        _confirmation().Gate3DecisionTrace.model_validate(payload, strict=True)
+    payload = decision.model_dump(mode="python", round_trip=True)
+    payload["truncated_catalog_count"] = -1
+    with pytest.raises(ValidationError):
+        _confirmation().Gate3DecisionTrace.model_validate(payload, strict=True)
 
 
 def test_validity_control_contract_requires_registered_projection_and_search_evidence() -> None:

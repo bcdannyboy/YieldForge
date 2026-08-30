@@ -16,6 +16,7 @@ from yieldforge.realistic_falsification.adapter import (
     project_stream,
 )
 from yieldforge.realistic_falsification.confirmation import (
+    GATE3_ACTION_CATALOG_REQUIREMENT,
     Gate3Arm,
     Gate3BaselineCalibrationFreeze,
     Gate3BaselinePolicyId,
@@ -365,6 +366,7 @@ def _exact_audit(
         exact_result = solve_exact_search(
             cast(M9ExactSearchRequest, request),
             include_terminal_credit=True,
+            action_catalog_requirement=GATE3_ACTION_CATALOG_REQUIREMENT,
         )
         material_audits.append(
             build_gate3_exact_material_audit(

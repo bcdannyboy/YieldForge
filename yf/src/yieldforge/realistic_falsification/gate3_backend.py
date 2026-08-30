@@ -38,6 +38,9 @@ from yieldforge.realistic_falsification.adapter import (
     M11MaterialRuntimeProjection,
 )
 from yieldforge.realistic_falsification.confirmation import (
+    GATE3_ACTION_CATALOG_REQUIREMENT,
+    GATE3_GEOMETRIC_EXHAUSTIVENESS_CLAIM,
+    GATE3_GEOMETRY_PLACEMENT_SEARCH_MAXIMUM_CANDIDATES,
     Gate3Arm,
     Gate3ArmTrace,
     Gate3BaselinePolicyId,
@@ -142,9 +145,18 @@ def gate3_inventory_sha256(inventory: tuple[InventoryItem, ...]) -> str:
     return _confirmation_inventory_sha256(ordered)
 
 
+def _require_registered_bounded_geometry(runtime: M7ReplayRuntime) -> None:
+    observed = runtime.replay_input.search_config.maximum_candidates
+    if observed != GATE3_GEOMETRY_PLACEMENT_SEARCH_MAXIMUM_CANDIDATES:
+        raise Gate3BackendEvidenceError(
+            "Gate 3 geometry placement search maximum must equal registered 256"
+        )
+
+
 def gate3_search_config_sha256(runtime: M7ReplayRuntime) -> str:
     """Bind the exact fit/search/collision configuration used by a decision."""
 
+    _require_registered_bounded_geometry(runtime)
     replay = runtime.replay_input
     return _sha256(
         {
@@ -159,10 +171,15 @@ def gate3_search_config_sha256(runtime: M7ReplayRuntime) -> str:
 def gate3_compute_budget_sha256(runtime: M7ReplayRuntime) -> str:
     """Bind the common complete-catalog fixed-depth-two compute contract."""
 
+    _require_registered_bounded_geometry(runtime)
     replay = runtime.replay_input
     return _sha256(
         {
-            "catalog_requirement": "complete_no_truncation",
+            "catalog_requirement": GATE3_ACTION_CATALOG_REQUIREMENT,
+            "geometry_placement_search_maximum_candidates": (
+                GATE3_GEOMETRY_PLACEMENT_SEARCH_MAXIMUM_CANDIDATES
+            ),
+            "geometric_exhaustiveness_claim": GATE3_GEOMETRIC_EXHAUSTIVENESS_CLAIM,
             "depth": 2,
             "objective": "scrap_only",
             "tie_rule": "bounded_cost_then_baseline_then_action_id",
@@ -182,12 +199,13 @@ def gate3_action_catalog_sha256(
 ) -> str:
     """Hash one complete current-state catalog and all policy-visible terms."""
 
+    _require_registered_bounded_geometry(runtime)
     if catalog.event_position != cursor.next_event_position:
         raise ValueError("Gate 3 action catalog position differs from its cursor")
     if len(catalog.actions) != catalog.standard_action_count + catalog.remnant_action_count:
         raise ValueError("Gate 3 action catalog count does not reconcile")
-    if catalog.generated.fit_search_budget_truncated_count:
-        raise ValueError("Gate 3 requires a complete untruncated action catalog")
+    if catalog.generated.fit_search_budget_truncated_count < 0:
+        raise ValueError("Gate 3 action catalog truncation telemetry cannot be negative")
     action_ids = tuple(item.action_id for item in catalog.actions)
     context_ids = tuple(item.action_id for item in catalog.contexts)
     if len(set(action_ids)) != len(action_ids) or context_ids != action_ids:
@@ -200,6 +218,11 @@ def gate3_action_catalog_sha256(
     )
     return _sha256(
         {
+            "action_catalog_requirement": GATE3_ACTION_CATALOG_REQUIREMENT,
+            "geometry_placement_search_maximum_candidates": (
+                GATE3_GEOMETRY_PLACEMENT_SEARCH_MAXIMUM_CANDIDATES
+            ),
+            "geometric_exhaustiveness_claim": GATE3_GEOMETRIC_EXHAUSTIVENESS_CLAIM,
             "event_position": catalog.event_position,
             "inventory_before_sha256": gate3_inventory_sha256(cursor.inventory),
             "candidate_set_id": candidate_set.candidate_set_id,
@@ -286,6 +309,7 @@ def _require_projection_authority(
             "Gate 3 projection differs from its authenticated adapter attestation"
         ) from error
     replay = projection.runtime.replay_input
+    _require_registered_bounded_geometry(projection.runtime)
     source_map = projection.source_event_map
     parity = projection.candidate_action_parity
     if (
@@ -590,6 +614,12 @@ def _decision_trace(
         ),
         m9_start_event_position=(m9.start_event_position if m9 is not None else None),
         m9_stop_event_position=(m9.stop_event_position if m9 is not None else None),
+        action_catalog_requirement=GATE3_ACTION_CATALOG_REQUIREMENT,
+        truncated_catalog_count=(
+            m9.telemetry.truncated_catalog_count
+            if m9 is not None
+            else catalog.generated.fit_search_budget_truncated_count
+        ),
     )
 
 
@@ -665,8 +695,6 @@ def _run_direct_m7(
     steps: list[M7StepResult] = []
     while cursor.next_event_position < len(runtime.replay_input.instances):
         catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
-        if catalog.generated.fit_search_budget_truncated_count:
-            raise Gate3BackendEvidenceError("Gate 3 direct replay encountered a truncated catalog")
         selection = select_m7_fallback(catalog, policy=runtime.replay_input.policy)
         descriptor = next(item for item in catalog.actions if item.action_id == selection.action_id)
         step = apply_m7_action_descriptor(
@@ -732,10 +760,6 @@ def _run_receding_m9(
             )
         )
         catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
-        if catalog.generated.fit_search_budget_truncated_count:
-            raise Gate3BackendEvidenceError(
-                "Gate 3 two-ply replay encountered a truncated root catalog"
-            )
         result = score_two_ply_reoptimization(
             _Gate3SearchRequest(
                 runtime=runtime,
@@ -743,16 +767,18 @@ def _run_receding_m9(
                 visibility=FullRealizedVisibility(stream=runtime.replay_input.instances),
             ),
             objective_label="scrap_only",
+            action_catalog_requirement=GATE3_ACTION_CATALOG_REQUIREMENT,
         )
         action_ids = tuple(item.action_id for item in catalog.actions)
         if (
-            not result.complete
+            result.action_catalog_requirement != GATE3_ACTION_CATALOG_REQUIREMENT
+            or not result.complete
             or not result.action_catalog_complete
-            or result.telemetry.truncated_catalog_count
+            or result.telemetry.truncated_catalog_count < 0
             or tuple(item.action_id for item in result.root_scores) != action_ids
         ):
             raise Gate3BackendEvidenceError(
-                "Gate 3 two-ply result differs from its complete root catalog"
+                "Gate 3 two-ply result differs from its bounded action catalog requirement"
             )
         descriptor = next(
             item for item in catalog.actions if item.action_id == result.selected_action_id

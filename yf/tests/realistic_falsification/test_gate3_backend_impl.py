@@ -420,6 +420,7 @@ def test_factory_consumes_authenticated_parents_and_reconstructs_context_once(
     config = SimpleNamespace(
         status="frozen_before_confirmation",
         confirmation_inputs_used=False,
+        policy=SimpleNamespace(geometry_placement_search_maximum_candidates=256),
     )
     gate1 = SimpleNamespace(
         status="gate_1_survived",
@@ -439,11 +440,15 @@ def test_factory_consumes_authenticated_parents_and_reconstructs_context_once(
         gate1_result_content_sha256="sha256:gate1-result",
         gate2_result=gate2_result,
     )
+    geometry_context = SimpleNamespace(
+        search_config=SimpleNamespace(maximum_candidates=256),
+    )
     context = SimpleNamespace(
         repository_root=tmp_path.resolve(),
         gate1_result=gate1_result,
         gate2_result=gate2_result,
         gate3_config=config,
+        geometry_context=geometry_context,
         population=SimpleNamespace(
             population_id=roots.population_id,
             content_sha256=roots.population_content_sha256,
@@ -455,7 +460,6 @@ def test_factory_consumes_authenticated_parents_and_reconstructs_context_once(
     monkeypatch.setattr(impl, "M11Gate3ConfirmationConfig", validator)
     monkeypatch.setattr(impl, "_strict_roots", lambda value: value)
     monkeypatch.setattr(impl, "_expected_roots", lambda **kwargs: roots)
-    geometry_context = object()
     geometry_calls = []
     context_calls = []
 
@@ -498,6 +502,17 @@ def test_factory_consumes_authenticated_parents_and_reconstructs_context_once(
             "gate2_result": gate2_result,
         }
     ]
+
+    geometry_context.search_config.maximum_candidates = 255
+    with pytest.raises(AdapterGate3BackendError, match="maximum.*Gate 3 config"):
+        build_adapter_gate3_backend(
+            repository_root=tmp_path,
+            gate1_artifact=gate1,
+            gate2_artifact=gate2,
+            gate3_config=config,
+            roots=roots,
+        )
+    geometry_context.search_config.maximum_candidates = 256
 
     monkeypatch.setattr(impl, "_expected_roots", lambda **kwargs: object())
     with pytest.raises(AdapterGate3BackendError, match="roots differ"):
