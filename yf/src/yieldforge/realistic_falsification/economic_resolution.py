@@ -17,14 +17,27 @@ from typing import Literal, Self
 
 from pydantic import Field, StrictInt, StrictStr, ValidationError, model_validator
 
-from yieldforge.experiments.contracts import FrozenExperimentModel, semantic_sha256
+from yieldforge.experiments.contracts import (
+    FrozenExperimentModel,
+    canonical_pretty_json_bytes,
+    semantic_sha256,
+)
+from yieldforge.oracle.artifact_publisher import (
+    M8ArtifactPublicationError,
+    publish_immutable_artifact,
+)
 from yieldforge.realistic_falsification.confirmation import (
     GATE3_BASELINE_POLICY_IDS,
+    Gate3BaselineCalibrationFreeze,
     Gate3BaselinePolicyId,
     Gate3CalibrationAttempt,
     Gate3CorpusId,
     Gate3CostLedger,
     Gate3RootBinding,
+    select_gate3_baseline_policy,
+)
+from yieldforge.realistic_falsification.economic_evidence_store import (
+    Gate3CalibrationObservationReceipt,
 )
 
 REPAIR_COMMIT_SHA = "3e7bcb1c587d950134639f6836341ef3d8f7d99e"
@@ -42,12 +55,15 @@ LEGACY_GATE3_RUN_CONTENT_SHA256 = (
 LEGACY_GATE3_ROOT_CONTENT_SHA256 = (
     "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2"
 )
-ACCOUNTING_ARITHMETIC_SEMANTIC = (
-    "placed_plus_process_loss_plus_retained_plus_scrap_left_to_right"
-)
+ACCOUNTING_ARITHMETIC_SEMANTIC = "placed_plus_process_loss_plus_retained_plus_scrap_left_to_right"
 _MAX_ATTEMPT_OBJECT_BYTES = 64 * 1024 * 1024
 _DEFAULT_SCAN_CHUNK_BYTES = 1024 * 1024
+_MAX_SCAN_CHUNK_BYTES = 64 * 1024 * 1024
+_MAX_FAILURE_TYPE_CHARS = 240
+_MAX_FAILURE_DETAIL_CHARS = 1000
 _CALIBRATION_ARRAY_MARKER = b'"calibration_attempts": ['
+_MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
+_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 
 
 class EconomicResolutionEvidenceError(ValueError):
@@ -79,23 +95,24 @@ class EconomicResolutionProtocol(FrozenExperimentModel):
         "placed_plus_process_loss_plus_retained_plus_scrap_left_to_right"
     ] = ACCOUNTING_ARITHMETIC_SEMANTIC
     bootstrap_bit_generator: Literal["PCG64"] = "PCG64"
+    bootstrap_generator: Literal["numpy.Generator(PCG64(0))"] = "numpy.Generator(PCG64(0))"
     bootstrap_seed: Literal[0] = 0
     bootstrap_resamples: Literal[10000] = 10_000
-    central_full_future_mean_min_percent: Literal["2.500000000000"] = (
-        "2.500000000000"
-    )
-    central_unknown_future_contribution_min_percentage_points: Literal[
+    bootstrap_resampling_unit: Literal["paired_stream"] = "paired_stream"
+    bootstrap_quantile_method: Literal["linear_type_7"] = "linear_type_7"
+    bootstrap_confidence_level: Literal[0.95] = 0.95
+    bootstrap_lower_quantile: Literal[0.025] = 0.025
+    bootstrap_upper_quantile: Literal[0.975] = 0.975
+    max_attempt_object_bytes: Literal[67108864] = _MAX_ATTEMPT_OBJECT_BYTES
+    central_full_future_mean_min_percent: Literal["2.500000000000"] = "2.500000000000"
+    central_unknown_future_contribution_min_percentage_points: Literal["1.500000000000"] = (
         "1.500000000000"
-    ] = "1.500000000000"
-    causal_known_only_mean_min_percent: Literal["1.500000000000"] = (
-        "1.500000000000"
     )
+    causal_known_only_mean_min_percent: Literal["1.500000000000"] = "1.500000000000"
     lower_confidence_bound_rule: Literal["strictly_greater_than_zero"] = (
         "strictly_greater_than_zero"
     )
-    median_savings_rule: Literal["strictly_greater_than_zero"] = (
-        "strictly_greater_than_zero"
-    )
+    median_savings_rule: Literal["strictly_greater_than_zero"] = "strictly_greater_than_zero"
     positive_stream_fraction_rule: Literal["strictly_greater_than_one_half"] = (
         "strictly_greater_than_one_half"
     )
@@ -146,12 +163,17 @@ def build_economic_resolution_protocol() -> EconomicResolutionProtocol:
         "legacy_root_content_sha256": LEGACY_GATE3_ROOT_CONTENT_SHA256,
         "accounting_arithmetic_semantic": ACCOUNTING_ARITHMETIC_SEMANTIC,
         "bootstrap_bit_generator": "PCG64",
+        "bootstrap_generator": "numpy.Generator(PCG64(0))",
         "bootstrap_seed": 0,
         "bootstrap_resamples": 10_000,
+        "bootstrap_resampling_unit": "paired_stream",
+        "bootstrap_quantile_method": "linear_type_7",
+        "bootstrap_confidence_level": 0.95,
+        "bootstrap_lower_quantile": 0.025,
+        "bootstrap_upper_quantile": 0.975,
+        "max_attempt_object_bytes": _MAX_ATTEMPT_OBJECT_BYTES,
         "central_full_future_mean_min_percent": "2.500000000000",
-        "central_unknown_future_contribution_min_percentage_points": (
-            "1.500000000000"
-        ),
+        "central_unknown_future_contribution_min_percentage_points": ("1.500000000000"),
         "causal_known_only_mean_min_percent": "1.500000000000",
         "lower_confidence_bound_rule": "strictly_greater_than_zero",
         "median_savings_rule": "strictly_greater_than_zero",
@@ -168,9 +190,9 @@ def build_economic_resolution_protocol() -> EconomicResolutionProtocol:
 class Gate3LegacyCalibrationAttemptReference(FrozenExperimentModel):
     """Compact authenticated reference to one legacy calibration attempt."""
 
-    schema_version: Literal[
+    schema_version: Literal["yieldforge.m11-economic-legacy-calibration-reference.v1"] = (
         "yieldforge.m11-economic-legacy-calibration-reference.v1"
-    ] = "yieldforge.m11-economic-legacy-calibration-reference.v1"
+    )
     reference_id: StrictStr = Field(pattern=r"^yfm11econlegacy-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     roots: Gate3RootBinding
@@ -195,8 +217,16 @@ class Gate3LegacyCalibrationAttemptReference(FrozenExperimentModel):
     full_sheet_opening_count: StrictInt | None = Field(default=None, ge=0)
     exact_event_census: Literal[True] | None = None
     source_lineage: Literal["legacy_success_output_equivalent"] | None = None
-    failure_type: StrictStr | None = None
-    failure_detail: StrictStr | None = None
+    failure_type: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_FAILURE_TYPE_CHARS,
+    )
+    failure_detail: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_FAILURE_DETAIL_CHARS,
+    )
 
     @model_validator(mode="after")
     def require_exact_outcome_and_identity(self) -> Self:
@@ -263,13 +293,9 @@ def _build_legacy_calibration_reference(
         "observation_id": observation.observation_id if observation else None,
         "observation_content_sha256": observation.content_sha256 if observation else None,
         "final_costs": observation.final_costs.model_dump(mode="json") if observation else None,
-        "full_sheet_opening_count": (
-            observation.full_sheet_opening_count if observation else None
-        ),
+        "full_sheet_opening_count": (observation.full_sheet_opening_count if observation else None),
         "exact_event_census": observation.exact_event_census if observation else None,
-        "source_lineage": (
-            "legacy_success_output_equivalent" if observation else None
-        ),
+        "source_lineage": ("legacy_success_output_equivalent" if observation else None),
         "failure_type": attempt.failure_type,
         "failure_detail": attempt.failure_detail,
     }
@@ -290,9 +316,7 @@ def _build_legacy_calibration_reference(
         observation_id=observation.observation_id if observation else None,
         observation_content_sha256=observation.content_sha256 if observation else None,
         final_costs=observation.final_costs if observation else None,
-        full_sheet_opening_count=(
-            observation.full_sheet_opening_count if observation else None
-        ),
+        full_sheet_opening_count=(observation.full_sheet_opening_count if observation else None),
         exact_event_census=observation.exact_event_census if observation else None,
         source_lineage=("legacy_success_output_equivalent" if observation else None),
         failure_type=attempt.failure_type,
@@ -341,7 +365,10 @@ def _require_expected_scan_inputs(
         or expected_failure_count < 0
         or type(chunk_size) is not int
         or chunk_size <= 0
+        or chunk_size > _MAX_SCAN_CHUNK_BYTES
     ):
+        if type(chunk_size) is not int or not 0 < chunk_size <= _MAX_SCAN_CHUNK_BYTES:
+            raise EconomicResolutionEvidenceError("legacy scan chunk size is malformed")
         raise EconomicResolutionEvidenceError("legacy scan expected binding is malformed")
 
 
@@ -365,10 +392,7 @@ def _authenticated_file_pass(
         before_fingerprint = _fingerprint(before)
         if before.st_size != expected_byte_count:
             raise EconomicResolutionEvidenceError("legacy calibration artifact size differs")
-        if (
-            expected_fingerprint is not None
-            and before_fingerprint != expected_fingerprint
-        ):
+        if expected_fingerprint is not None and before_fingerprint != expected_fingerprint:
             raise EconomicResolutionEvidenceError(
                 "legacy calibration artifact changed between authenticated passes"
             )
@@ -380,10 +404,7 @@ def _authenticated_file_pass(
             | getattr(os, "O_NONBLOCK", 0),
         )
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or _fingerprint(opened) != before_fingerprint
-        ):
+        if not stat.S_ISREG(opened.st_mode) or _fingerprint(opened) != before_fingerprint:
             raise EconomicResolutionEvidenceError(
                 "legacy calibration artifact identity changed during open"
             )
@@ -404,7 +425,7 @@ def _authenticated_file_pass(
         during = os.fstat(descriptor)
     except EconomicResolutionEvidenceError:
         raise
-    except OSError as error:
+    except (OSError, OverflowError) as error:
         raise EconomicResolutionEvidenceError(
             "legacy calibration artifact could not be read safely"
         ) from error
@@ -461,17 +482,31 @@ def _strict_attempt_reference(
         raise EconomicResolutionEvidenceError(
             "legacy calibration attempt failed strict validation"
         ) from error
-    return _build_legacy_calibration_reference(
-        attempt,
-        attempt_byte_offset=byte_offset,
-        attempt_byte_count=len(raw),
-    )
+    if attempt.status == "failure" and (
+        attempt.failure_type is None
+        or attempt.failure_detail is None
+        or len(attempt.failure_type) > _MAX_FAILURE_TYPE_CHARS
+        or len(attempt.failure_detail) > _MAX_FAILURE_DETAIL_CHARS
+    ):
+        raise EconomicResolutionEvidenceError(
+            "legacy calibration failure text exceeds compact retention bound"
+        )
+    try:
+        return _build_legacy_calibration_reference(
+            attempt,
+            attempt_byte_offset=byte_offset,
+            attempt_byte_count=len(raw),
+        )
+    except (ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "legacy calibration attempt could not be compacted safely"
+        ) from error
 
 
 class _CalibrationAttemptArrayFramer:
     """Frame one top-level attempt object while retaining at most one object."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_attempt_object_bytes: int) -> None:
         self.references: list[Gate3LegacyCalibrationAttemptReference] = []
         self.marker_count = 0
         self._marker_progress = 0
@@ -483,6 +518,7 @@ class _CalibrationAttemptArrayFramer:
         self._object_depth = 0
         self._in_string = False
         self._escape = False
+        self._max_attempt_object_bytes = max_attempt_object_bytes
 
     def feed(self, chunk: bytes, chunk_offset: int) -> None:
         for local_offset, value in enumerate(chunk):
@@ -523,7 +559,7 @@ class _CalibrationAttemptArrayFramer:
                     "legacy calibration array separator is malformed"
                 )
             self._object.append(value)
-            if len(self._object) > _MAX_ATTEMPT_OBJECT_BYTES:
+            if len(self._object) > self._max_attempt_object_bytes:
                 raise EconomicResolutionEvidenceError(
                     "legacy calibration attempt exceeds object byte bound"
                 )
@@ -572,9 +608,7 @@ class _CalibrationAttemptArrayFramer:
                 "legacy artifact must contain exactly one calibration_attempts marker"
             )
         if not self._array_ended or self._state == "object":
-            raise EconomicResolutionEvidenceError(
-                "legacy calibration attempt array is incomplete"
-            )
+            raise EconomicResolutionEvidenceError("legacy calibration attempt array is incomplete")
         return tuple(self.references)
 
 
@@ -588,6 +622,7 @@ def _scan_legacy_calibration_attempts(
     expected_success_count: int,
     expected_failure_count: int,
     chunk_size: int = _DEFAULT_SCAN_CHUNK_BYTES,
+    max_attempt_object_bytes: int | None = None,
 ) -> tuple[Gate3LegacyCalibrationAttemptReference, ...]:
     """Authenticate twice, then retain only compact references from one array."""
 
@@ -603,13 +638,26 @@ def _scan_legacy_calibration_attempts(
         type(expected_attempt_order) is not tuple or not expected_attempt_order
     ):
         raise EconomicResolutionEvidenceError("legacy expected attempt order is malformed")
+    object_byte_bound = (
+        _MAX_ATTEMPT_OBJECT_BYTES if max_attempt_object_bytes is None else max_attempt_object_bytes
+    )
+    if (
+        type(object_byte_bound) is not int
+        or object_byte_bound <= 0
+        or object_byte_bound > _MAX_ATTEMPT_OBJECT_BYTES
+    ):
+        raise EconomicResolutionEvidenceError(
+            "legacy calibration attempt object byte bound is malformed"
+        )
     first_fingerprint = _authenticated_file_pass(
         path,
         expected_byte_count=expected_byte_count,
         expected_raw_sha256=expected_raw_sha256,
         chunk_size=chunk_size,
     )
-    framer = _CalibrationAttemptArrayFramer()
+    framer = _CalibrationAttemptArrayFramer(
+        max_attempt_object_bytes=object_byte_bound,
+    )
     _authenticated_file_pass(
         path,
         expected_byte_count=expected_byte_count,
@@ -628,16 +676,12 @@ def _scan_legacy_calibration_attempts(
         raise EconomicResolutionEvidenceError(
             "legacy calibration execution positions differ from expected order"
         )
-    actual_order = tuple(
-        (item.corpus_id, item.stream_id, item.policy_id) for item in references
-    )
+    actual_order = tuple((item.corpus_id, item.stream_id, item.policy_id) for item in references)
     if expected_attempt_order is not None and actual_order != expected_attempt_order:
         raise EconomicResolutionEvidenceError(
             "legacy calibration corpus stream policy order differs"
         )
-    if any(
-        item.roots.content_sha256 != expected_root_content_sha256 for item in references
-    ):
+    if any(item.roots.content_sha256 != expected_root_content_sha256 for item in references):
         raise EconomicResolutionEvidenceError("legacy calibration root binding differs")
     success_count = sum(item.status == "success" for item in references)
     failure_count = sum(item.status == "failure" for item in references)
@@ -659,19 +703,18 @@ class Gate3LegacyCalibrationScan(FrozenExperimentModel):
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     protocol: EconomicResolutionProtocol
     roots: Gate3RootBinding
-    legacy_artifact_name: Literal[
+    legacy_artifact_name: Literal["m11-gate3-early-yfm11g3run-3dd87efab6f64ada4c5bd09c.json"] = (
         "m11-gate3-early-yfm11g3run-3dd87efab6f64ada4c5bd09c.json"
-    ] = "m11-gate3-early-yfm11g3run-3dd87efab6f64ada4c5bd09c.json"
+    )
     legacy_artifact_byte_count: Literal[2270455752] = LEGACY_GATE3_ARTIFACT_BYTE_COUNT
     legacy_artifact_raw_sha256: Literal[
         "sha256:e5757919ddd9251bf374d1664be25faf175963e78478b223ea0d7e22f7439199"
     ] = LEGACY_GATE3_ARTIFACT_RAW_SHA256
-    legacy_run_id: Literal["yfm11g3run-3dd87efab6f64ada4c5bd09c"] = (
-        LEGACY_GATE3_RUN_ID
-    )
+    legacy_run_id: Literal["yfm11g3run-3dd87efab6f64ada4c5bd09c"] = LEGACY_GATE3_RUN_ID
     legacy_run_content_sha256: Literal[
         "sha256:3dd87efab6f64ada4c5bd09c0580a1696017b3115ccdce3ce041b4221c89a89f"
     ] = LEGACY_GATE3_RUN_CONTENT_SHA256
+    max_attempt_object_bytes: Literal[67108864] = _MAX_ATTEMPT_OBJECT_BYTES
     calibration_stream_census: tuple[
         tuple[Gate3CorpusId, tuple[StrictStr, ...]],
         tuple[Gate3CorpusId, tuple[StrictStr, ...]],
@@ -688,6 +731,8 @@ class Gate3LegacyCalibrationScan(FrozenExperimentModel):
     def require_official_census_and_identity(self) -> Self:
         if self.protocol != build_economic_resolution_protocol():
             raise ValueError("official legacy scan protocol binding differs")
+        if self.max_attempt_object_bytes != self.protocol.max_attempt_object_bytes:
+            raise ValueError("official legacy scan object byte bound differs")
         if self.roots.content_sha256 != LEGACY_GATE3_ROOT_CONTENT_SHA256:
             raise ValueError("official legacy scan root binding differs")
         references = self.attempt_references
@@ -701,9 +746,8 @@ class Gate3LegacyCalibrationScan(FrozenExperimentModel):
             ("lectra-m3-m4", lectra_streams),
             ("loco-2dics", loco_streams),
         )
-        if (
-            self.calibration_stream_census != expected_census
-            or any(len(streams) != 8 or len(set(streams)) != 8 for _, streams in expected_census)
+        if self.calibration_stream_census != expected_census or any(
+            len(streams) != 8 or len(set(streams)) != 8 for _, streams in expected_census
         ):
             raise ValueError("official legacy scan repeated stream census differs")
         expected_order = tuple(
@@ -730,7 +774,7 @@ class Gate3LegacyCalibrationScan(FrozenExperimentModel):
         if any(
             start < 0
             or end > self.legacy_artifact_byte_count
-            or (index and start <= byte_ranges[index - 1][1])
+            or (index and start < byte_ranges[index - 1][1])
             for index, (start, end) in enumerate(byte_ranges)
         ):
             raise ValueError("official legacy scan byte ranges overlap or escape artifact")
@@ -759,13 +803,12 @@ def build_official_legacy_calibration_scan(
         "schema_version": "yieldforge.m11-economic-legacy-calibration-scan.v1",
         "protocol": protocol.model_dump(mode="json"),
         "roots": roots.model_dump(mode="json"),
-        "legacy_artifact_name": (
-            "m11-gate3-early-yfm11g3run-3dd87efab6f64ada4c5bd09c.json"
-        ),
+        "legacy_artifact_name": ("m11-gate3-early-yfm11g3run-3dd87efab6f64ada4c5bd09c.json"),
         "legacy_artifact_byte_count": LEGACY_GATE3_ARTIFACT_BYTE_COUNT,
         "legacy_artifact_raw_sha256": LEGACY_GATE3_ARTIFACT_RAW_SHA256,
         "legacy_run_id": LEGACY_GATE3_RUN_ID,
         "legacy_run_content_sha256": LEGACY_GATE3_RUN_CONTENT_SHA256,
+        "max_attempt_object_bytes": _MAX_ATTEMPT_OBJECT_BYTES,
         "calibration_stream_census": census,
         "attempt_references": [item.model_dump(mode="json") for item in references],
         "success_count": 60,
@@ -799,10 +842,776 @@ def scan_official_legacy_gate3_calibration_artifact(
         expected_attempt_order=None,
         expected_success_count=60,
         expected_failure_count=36,
+        max_attempt_object_bytes=_MAX_ATTEMPT_OBJECT_BYTES,
     )
     return build_official_legacy_calibration_scan(references)
 
 
-scan_legacy_gate3_calibration_artifact = (
-    scan_official_legacy_gate3_calibration_artifact
-)
+scan_legacy_gate3_calibration_artifact = scan_official_legacy_gate3_calibration_artifact
+
+
+class Gate3CalibrationAttemptCheckpoint(FrozenExperimentModel):
+    """One immutable compact calibration outcome under the repair protocol."""
+
+    schema_version: Literal["yieldforge.m11-economic-calibration-checkpoint.v1"] = (
+        "yieldforge.m11-economic-calibration-checkpoint.v1"
+    )
+    checkpoint_id: StrictStr = Field(pattern=r"^yfm11econcal-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    protocol: EconomicResolutionProtocol
+    roots: Gate3RootBinding
+    execution_position: StrictInt = Field(ge=0, le=95)
+    corpus_id: Gate3CorpusId
+    stream_id: StrictStr = Field(min_length=1)
+    policy_id: Gate3BaselinePolicyId
+    outcome_kind: Literal[
+        "legacy_success_reference",
+        "repaired_runtime_success",
+        "repaired_runtime_failure",
+    ]
+    legacy_reference: Gate3LegacyCalibrationAttemptReference | None = None
+    replaced_legacy_failure_reference: Gate3LegacyCalibrationAttemptReference | None = None
+    repaired_receipt: Gate3CalibrationObservationReceipt | None = None
+    failure_type: StrictStr | None = Field(default=None, max_length=240)
+    failure_detail: StrictStr | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def require_one_bound_outcome_and_identity(self) -> Self:
+        if self.protocol != build_economic_resolution_protocol():
+            raise ValueError("calibration checkpoint protocol binding differs")
+        if self.roots.content_sha256 != self.protocol.legacy_root_content_sha256:
+            raise ValueError("calibration checkpoint root binding differs")
+        binding = (
+            self.roots,
+            self.execution_position,
+            self.corpus_id,
+            self.stream_id,
+            self.policy_id,
+        )
+        if self.outcome_kind == "legacy_success_reference":
+            reference = self.legacy_reference
+            if (
+                reference is None
+                or self.replaced_legacy_failure_reference is not None
+                or self.repaired_receipt is not None
+                or self.failure_type is not None
+                or self.failure_detail is not None
+                or reference.status != "success"
+                or reference.source_lineage != "legacy_success_output_equivalent"
+                or (
+                    reference.roots,
+                    reference.execution_position,
+                    reference.corpus_id,
+                    reference.stream_id,
+                    reference.policy_id,
+                )
+                != binding
+            ):
+                raise ValueError(
+                    "legacy calibration checkpoint binding differs or outcome is not unique"
+                )
+        elif self.outcome_kind == "repaired_runtime_success":
+            receipt = self.repaired_receipt
+            replaced = self.replaced_legacy_failure_reference
+            if (
+                receipt is None
+                or self.legacy_reference is not None
+                or replaced is None
+                or replaced.status != "failure"
+                or self.failure_type is not None
+                or self.failure_detail is not None
+                or receipt.source_lineage != "repaired_runtime"
+                or (
+                    receipt.roots,
+                    self.execution_position,
+                    receipt.corpus_id,
+                    receipt.stream_id,
+                    receipt.policy_id,
+                )
+                != binding
+                or (
+                    replaced.roots,
+                    replaced.execution_position,
+                    replaced.corpus_id,
+                    replaced.stream_id,
+                    replaced.policy_id,
+                )
+                != binding
+            ):
+                raise ValueError("repaired_runtime calibration checkpoint binding differs")
+        elif (
+            self.legacy_reference is not None
+            or self.repaired_receipt is not None
+            or self.replaced_legacy_failure_reference is None
+            or self.replaced_legacy_failure_reference.status != "failure"
+            or (
+                self.replaced_legacy_failure_reference.roots,
+                self.replaced_legacy_failure_reference.execution_position,
+                self.replaced_legacy_failure_reference.corpus_id,
+                self.replaced_legacy_failure_reference.stream_id,
+                self.replaced_legacy_failure_reference.policy_id,
+            )
+            != binding
+            or not self.failure_type
+            or not self.failure_detail
+        ):
+            raise ValueError("repaired failure checkpoint lacks exactly one preserved failure")
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"checkpoint_id", "content_sha256"},
+        )
+        if self.checkpoint_id != f"yfm11econcal-{digest[:24]}" or (
+            self.content_sha256 != f"sha256:{digest}"
+        ):
+            raise ValueError("calibration checkpoint identity differs from content")
+        return self
+
+
+def build_gate3_calibration_attempt_checkpoint(
+    *,
+    protocol: EconomicResolutionProtocol,
+    roots: Gate3RootBinding,
+    execution_position: int,
+    corpus_id: Gate3CorpusId,
+    stream_id: str,
+    policy_id: Gate3BaselinePolicyId,
+    legacy_reference: Gate3LegacyCalibrationAttemptReference | None = None,
+    replaced_legacy_failure_reference: (Gate3LegacyCalibrationAttemptReference | None) = None,
+    repaired_receipt: Gate3CalibrationObservationReceipt | None = None,
+    failure_type: str | None = None,
+    failure_detail: str | None = None,
+) -> Gate3CalibrationAttemptCheckpoint:
+    """Build exactly one legacy success, repaired success, or repaired failure."""
+
+    outcomes = (
+        legacy_reference is not None,
+        repaired_receipt is not None,
+        failure_type is not None or failure_detail is not None,
+    )
+    if sum(outcomes) != 1 or outcomes[2] and (not failure_type or not failure_detail):
+        raise EconomicResolutionEvidenceError(
+            "calibration checkpoint requires exactly one complete outcome"
+        )
+    expected_binding = (
+        roots,
+        execution_position,
+        corpus_id,
+        stream_id,
+        policy_id,
+    )
+    if legacy_reference is not None:
+        if replaced_legacy_failure_reference is not None:
+            raise EconomicResolutionEvidenceError(
+                "legacy success checkpoint cannot replace a legacy failure"
+            )
+        outcome_kind = "legacy_success_reference"
+    elif repaired_receipt is not None:
+        if repaired_receipt.source_lineage != "repaired_runtime":
+            raise EconomicResolutionEvidenceError(
+                "repaired receipt must use source_lineage=repaired_runtime"
+            )
+        if (
+            replaced_legacy_failure_reference is None
+            or replaced_legacy_failure_reference.status != "failure"
+            or (
+                replaced_legacy_failure_reference.roots,
+                replaced_legacy_failure_reference.execution_position,
+                replaced_legacy_failure_reference.corpus_id,
+                replaced_legacy_failure_reference.stream_id,
+                replaced_legacy_failure_reference.policy_id,
+            )
+            != expected_binding
+        ):
+            raise EconomicResolutionEvidenceError(
+                "repaired checkpoint replaced legacy failure binding differs"
+            )
+        outcome_kind = "repaired_runtime_success"
+    else:
+        if (
+            replaced_legacy_failure_reference is None
+            or replaced_legacy_failure_reference.status != "failure"
+            or (
+                replaced_legacy_failure_reference.roots,
+                replaced_legacy_failure_reference.execution_position,
+                replaced_legacy_failure_reference.corpus_id,
+                replaced_legacy_failure_reference.stream_id,
+                replaced_legacy_failure_reference.policy_id,
+            )
+            != expected_binding
+        ):
+            raise EconomicResolutionEvidenceError(
+                "repaired checkpoint replaced legacy failure binding differs"
+            )
+        outcome_kind = "repaired_runtime_failure"
+    semantic = {
+        "schema_version": "yieldforge.m11-economic-calibration-checkpoint.v1",
+        "protocol": protocol.model_dump(mode="json"),
+        "roots": roots.model_dump(mode="json"),
+        "execution_position": execution_position,
+        "corpus_id": corpus_id,
+        "stream_id": stream_id,
+        "policy_id": policy_id,
+        "outcome_kind": outcome_kind,
+        "legacy_reference": (
+            legacy_reference.model_dump(mode="json") if legacy_reference else None
+        ),
+        "replaced_legacy_failure_reference": (
+            replaced_legacy_failure_reference.model_dump(mode="json")
+            if replaced_legacy_failure_reference
+            else None
+        ),
+        "repaired_receipt": (
+            repaired_receipt.model_dump(mode="json") if repaired_receipt else None
+        ),
+        "failure_type": failure_type,
+        "failure_detail": failure_detail,
+    }
+    digest = semantic_sha256(semantic)
+    try:
+        return Gate3CalibrationAttemptCheckpoint(
+            checkpoint_id=f"yfm11econcal-{digest[:24]}",
+            content_sha256=f"sha256:{digest}",
+            protocol=protocol,
+            roots=roots,
+            execution_position=execution_position,
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            policy_id=policy_id,
+            outcome_kind=outcome_kind,  # type: ignore[arg-type]
+            legacy_reference=legacy_reference,
+            replaced_legacy_failure_reference=replaced_legacy_failure_reference,
+            repaired_receipt=repaired_receipt,
+            failure_type=failure_type,
+            failure_detail=failure_detail,
+        )
+    except (ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(str(error)) from error
+
+
+def _checkpoint_filename(checkpoint: Gate3CalibrationAttemptCheckpoint) -> str:
+    digest = checkpoint.content_sha256.removeprefix("sha256:")
+    return f"m11-economic-calibration-checkpoint-{checkpoint.execution_position:03d}-{digest}.json"
+
+
+def _read_bounded_regular_file(path: Path, *, max_bytes: int, label: str) -> bytes:
+    candidate = Path(path)
+    descriptor: int | None = None
+    try:
+        before = candidate.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size > max_bytes
+        ):
+            raise EconomicResolutionEvidenceError(
+                f"{label} must be a bounded regular non-symlink file"
+            )
+        before_fingerprint = _fingerprint(before)
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _fingerprint(opened) != before_fingerprint:
+            raise EconomicResolutionEvidenceError(f"{label} identity changed during open")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        during = os.fstat(descriptor)
+    except EconomicResolutionEvidenceError:
+        raise
+    except OSError as error:
+        raise EconomicResolutionEvidenceError(f"{label} could not be read safely") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        after = candidate.lstat()
+    except OSError as error:
+        raise EconomicResolutionEvidenceError(f"{label} could not be re-inspected") from error
+    if (
+        len(raw) > max_bytes
+        or len(raw) != before.st_size
+        or _fingerprint(during) != before_fingerprint
+        or _fingerprint(after) != before_fingerprint
+    ):
+        raise EconomicResolutionEvidenceError(f"{label} changed during read")
+    return raw
+
+
+def _parse_canonical_checkpoint(raw: bytes) -> Gate3CalibrationAttemptCheckpoint:
+    if type(raw) is not bytes or len(raw) > _MAX_CHECKPOINT_BYTES:
+        raise EconomicResolutionEvidenceError("calibration checkpoint exceeds byte bound")
+    try:
+        json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+        checkpoint = Gate3CalibrationAttemptCheckpoint.model_validate_json(raw, strict=True)
+    except EconomicResolutionEvidenceError:
+        raise
+    except (json.JSONDecodeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration checkpoint failed strict validation"
+        ) from error
+    if canonical_pretty_json_bytes(checkpoint) != raw:
+        raise EconomicResolutionEvidenceError("calibration checkpoint encoding is not canonical")
+    return checkpoint
+
+
+def publish_gate3_calibration_attempt_checkpoint(
+    output_directory: Path,
+    checkpoint: Gate3CalibrationAttemptCheckpoint,
+) -> Path:
+    """Publish one compact checkpoint immutably under its full semantic hash."""
+
+    try:
+        strict = Gate3CalibrationAttemptCheckpoint.model_validate(
+            checkpoint.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration checkpoint failed strict validation"
+        ) from error
+    raw = canonical_pretty_json_bytes(strict)
+    if len(raw) > _MAX_CHECKPOINT_BYTES:
+        raise EconomicResolutionEvidenceError("calibration checkpoint exceeds byte bound")
+    destination = Path(output_directory) / _checkpoint_filename(strict)
+    try:
+        return publish_immutable_artifact(
+            destination,
+            raw,
+            validate=lambda data: canonical_pretty_json_bytes(_parse_canonical_checkpoint(data)),
+            label="M11 economic calibration checkpoint",
+        )
+    except M8ArtifactPublicationError as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration checkpoint immutable publication failed"
+        ) from error
+
+
+def load_gate3_calibration_attempt_checkpoint(
+    path: Path,
+    *,
+    expected_protocol: EconomicResolutionProtocol,
+    expected_roots: Gate3RootBinding,
+    expected_execution_position: int,
+    expected_corpus_id: Gate3CorpusId,
+    expected_stream_id: str,
+    expected_policy_id: Gate3BaselinePolicyId,
+    expected_checkpoint_id: str,
+    expected_content_sha256: str,
+) -> Gate3CalibrationAttemptCheckpoint:
+    """Load a small canonical checkpoint only under every caller binding."""
+
+    expected = (
+        expected_protocol,
+        expected_roots,
+        expected_execution_position,
+        expected_corpus_id,
+        expected_stream_id,
+        expected_policy_id,
+        expected_checkpoint_id,
+        expected_content_sha256,
+    )
+    if (
+        type(expected_execution_position) is not int
+        or not 0 <= expected_execution_position <= 95
+        or type(expected_stream_id) is not str
+        or not expected_stream_id
+        or type(expected_checkpoint_id) is not str
+        or re.fullmatch(r"yfm11econcal-[0-9a-f]{24}", expected_checkpoint_id) is None
+        or type(expected_content_sha256) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_content_sha256) is None
+    ):
+        raise EconomicResolutionEvidenceError("checkpoint expected binding is malformed")
+    candidate = Path(path)
+    expected_name = (
+        "m11-economic-calibration-checkpoint-"
+        f"{expected_execution_position:03d}-"
+        f"{expected_content_sha256.removeprefix('sha256:')}.json"
+    )
+    if candidate.name != expected_name:
+        raise EconomicResolutionEvidenceError("checkpoint path differs from expected binding")
+    raw = _read_bounded_regular_file(
+        candidate,
+        max_bytes=_MAX_CHECKPOINT_BYTES,
+        label="calibration checkpoint",
+    )
+    checkpoint = _parse_canonical_checkpoint(raw)
+    actual = (
+        checkpoint.protocol,
+        checkpoint.roots,
+        checkpoint.execution_position,
+        checkpoint.corpus_id,
+        checkpoint.stream_id,
+        checkpoint.policy_id,
+        checkpoint.checkpoint_id,
+        checkpoint.content_sha256,
+    )
+    if actual != expected:
+        raise EconomicResolutionEvidenceError(
+            "calibration checkpoint differs from expected binding"
+        )
+    return checkpoint
+
+
+build_gate3_calibration_checkpoint = build_gate3_calibration_attempt_checkpoint
+publish_gate3_calibration_checkpoint = publish_gate3_calibration_attempt_checkpoint
+load_gate3_calibration_checkpoint = load_gate3_calibration_attempt_checkpoint
+
+
+def _checkpoint_cost_and_openings(
+    checkpoint: Gate3CalibrationAttemptCheckpoint,
+) -> tuple[Gate3CostLedger, int] | None:
+    if checkpoint.outcome_kind == "legacy_success_reference":
+        reference = checkpoint.legacy_reference
+        if reference is None or reference.final_costs is None:
+            return None
+        return reference.final_costs, reference.full_sheet_opening_count  # type: ignore[return-value]
+    if checkpoint.outcome_kind == "repaired_runtime_success":
+        receipt = checkpoint.repaired_receipt
+        if receipt is None:
+            return None
+        return receipt.final_costs, receipt.full_sheet_opening_count
+    return None
+
+
+def _rederive_checkpoint_freezes(
+    *,
+    roots: Gate3RootBinding,
+    checkpoints: tuple[Gate3CalibrationAttemptCheckpoint, ...],
+    stream_census: tuple[tuple[Gate3CorpusId, tuple[str, ...]], ...],
+) -> tuple[Gate3BaselineCalibrationFreeze, Gate3BaselineCalibrationFreeze]:
+    freezes: list[Gate3BaselineCalibrationFreeze] = []
+    for corpus_id, stream_ids in stream_census:
+        per_corpus = tuple(item for item in checkpoints if item.corpus_id == corpus_id)
+        costs: dict[str, tuple[str, ...]] = {}
+        openings: dict[str, tuple[int, ...]] = {}
+        for policy_id in GATE3_BASELINE_POLICY_IDS:
+            outcomes = tuple(
+                _checkpoint_cost_and_openings(item)
+                for item in per_corpus
+                if item.policy_id == policy_id
+            )
+            if len(outcomes) != 8 or any(item is None for item in outcomes):
+                raise ValueError("complete calibration freeze requires eight successes per policy")
+            successful = tuple(item for item in outcomes if item is not None)
+            costs[policy_id] = tuple(item[0].net_cost for item in successful)
+            openings[policy_id] = tuple(item[1] for item in successful)
+        freezes.append(
+            select_gate3_baseline_policy(
+                roots=roots,
+                corpus_id=corpus_id,
+                calibration_stream_ids=stream_ids,
+                policy_stream_costs=costs,
+                policy_stream_sheet_openings=openings,
+                policy_invalid_stream_counts={
+                    policy_id: 0 for policy_id in GATE3_BASELINE_POLICY_IDS
+                },
+            )
+        )
+    if len(freezes) != 2:
+        raise ValueError("complete calibration requires both corpus freezes")
+    return freezes[0], freezes[1]
+
+
+class Gate3CalibrationManifest(FrozenExperimentModel):
+    """Complete compact 96-attempt calibration state and optional freezes."""
+
+    schema_version: Literal["yieldforge.m11-economic-calibration-manifest.v1"] = (
+        "yieldforge.m11-economic-calibration-manifest.v1"
+    )
+    manifest_id: StrictStr = Field(pattern=r"^yfm11econcalman-[0-9a-f]{24}$")
+    content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    protocol: EconomicResolutionProtocol
+    roots: Gate3RootBinding
+    legacy_scan_id: StrictStr = Field(pattern=r"^yfm11econscan-[0-9a-f]{24}$")
+    legacy_scan_content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    legacy_scan: Gate3LegacyCalibrationScan
+    calibration_stream_census: tuple[
+        tuple[Gate3CorpusId, tuple[StrictStr, ...]],
+        tuple[Gate3CorpusId, tuple[StrictStr, ...]],
+    ]
+    checkpoints: tuple[Gate3CalibrationAttemptCheckpoint, ...] = Field(
+        min_length=96,
+        max_length=96,
+    )
+    success_count: StrictInt = Field(ge=0, le=96)
+    failure_count: StrictInt = Field(ge=0, le=96)
+    status: Literal["complete_valid", "complete_invalid"]
+    baseline_freezes: tuple[Gate3BaselineCalibrationFreeze, ...] = Field(max_length=2)
+    complete: Literal[True] = True
+
+    @model_validator(mode="after")
+    def require_complete_rederivation_and_identity(self) -> Self:
+        if self.protocol != build_economic_resolution_protocol():
+            raise ValueError("calibration manifest protocol binding differs")
+        if self.roots.content_sha256 != self.protocol.legacy_root_content_sha256:
+            raise ValueError("calibration manifest root binding differs")
+        if (
+            self.legacy_scan_id != self.legacy_scan.scan_id
+            or self.legacy_scan_content_sha256 != self.legacy_scan.content_sha256
+            or self.legacy_scan.protocol != self.protocol
+            or self.legacy_scan.roots != self.roots
+        ):
+            raise ValueError("calibration manifest legacy scan binding differs")
+        checkpoints = self.checkpoints
+        if tuple(item.execution_position for item in checkpoints) != tuple(range(96)):
+            raise ValueError("calibration manifest checkpoint order differs")
+        if any(item.protocol != self.protocol or item.roots != self.roots for item in checkpoints):
+            raise ValueError("calibration manifest checkpoint binding differs")
+        for checkpoint, reference in zip(
+            checkpoints,
+            self.legacy_scan.attempt_references,
+            strict=True,
+        ):
+            if checkpoint.outcome_kind == "legacy_success_reference":
+                if reference.status != "success" or checkpoint.legacy_reference != reference:
+                    raise ValueError(
+                        "calibration manifest legacy success reference differs from scan"
+                    )
+            elif (
+                reference.status != "failure"
+                or checkpoint.replaced_legacy_failure_reference != reference
+            ):
+                raise ValueError(
+                    "calibration manifest replaced legacy reference differs from legacy scan"
+                )
+        lectra_streams = tuple(item.stream_id for item in checkpoints[:8])
+        loco_streams = tuple(item.stream_id for item in checkpoints[48:56])
+        expected_census = (
+            ("lectra-m3-m4", lectra_streams),
+            ("loco-2dics", loco_streams),
+        )
+        if self.calibration_stream_census != expected_census or any(
+            len(streams) != 8 or len(set(streams)) != 8 for _, streams in expected_census
+        ):
+            raise ValueError("calibration manifest repeated stream census differs")
+        expected_order = tuple(
+            (corpus_id, stream_id, policy_id)
+            for corpus_id, streams in expected_census
+            for policy_id in GATE3_BASELINE_POLICY_IDS
+            for stream_id in streams
+        )
+        actual_order = tuple(
+            (item.corpus_id, item.stream_id, item.policy_id) for item in checkpoints
+        )
+        if actual_order != expected_order:
+            raise ValueError("calibration manifest corpus policy stream order differs")
+        success_count = sum(item.outcome_kind != "repaired_runtime_failure" for item in checkpoints)
+        failure_count = 96 - success_count
+        if (self.success_count, self.failure_count) != (success_count, failure_count):
+            raise ValueError("calibration manifest success/failure counts differ")
+        if failure_count:
+            if self.status != "complete_invalid" or self.baseline_freezes:
+                raise ValueError("invalid calibration manifest cannot publish freezes")
+        else:
+            expected_freezes = _rederive_checkpoint_freezes(
+                roots=self.roots,
+                checkpoints=checkpoints,
+                stream_census=expected_census,
+            )
+            if self.status != "complete_valid" or self.baseline_freezes != expected_freezes:
+                raise ValueError("valid calibration manifest freezes differ from ledgers")
+        digest = semantic_sha256(
+            self,
+            excluded_fields={"manifest_id", "content_sha256"},
+        )
+        if self.manifest_id != f"yfm11econcalman-{digest[:24]}" or (
+            self.content_sha256 != f"sha256:{digest}"
+        ):
+            raise ValueError("calibration manifest identity differs from content")
+        return self
+
+
+def build_gate3_calibration_manifest(
+    checkpoints: tuple[Gate3CalibrationAttemptCheckpoint, ...],
+    *,
+    legacy_scan: Gate3LegacyCalibrationScan,
+) -> Gate3CalibrationManifest:
+    """Build a terminal compact calibration manifest without imputation."""
+
+    if type(checkpoints) is not tuple or len(checkpoints) != 96:
+        raise EconomicResolutionEvidenceError(
+            "calibration manifest requires exactly 96 checkpoints"
+        )
+    if tuple(item.execution_position for item in checkpoints) != tuple(range(96)):
+        raise EconomicResolutionEvidenceError("calibration manifest checkpoint order differs")
+    protocol = checkpoints[0].protocol
+    roots = checkpoints[0].roots
+    try:
+        strict_legacy_scan = Gate3LegacyCalibrationScan.model_validate(
+            legacy_scan.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration manifest legacy scan failed strict validation"
+        ) from error
+    if strict_legacy_scan.protocol != protocol or strict_legacy_scan.roots != roots:
+        raise EconomicResolutionEvidenceError("calibration manifest legacy scan binding differs")
+    census: tuple[tuple[Gate3CorpusId, tuple[str, ...]], ...] = (
+        ("lectra-m3-m4", tuple(item.stream_id for item in checkpoints[:8])),
+        ("loco-2dics", tuple(item.stream_id for item in checkpoints[48:56])),
+    )
+    success_count = sum(item.outcome_kind != "repaired_runtime_failure" for item in checkpoints)
+    failure_count = 96 - success_count
+    status = "complete_invalid" if failure_count else "complete_valid"
+    try:
+        freezes = (
+            ()
+            if failure_count
+            else _rederive_checkpoint_freezes(
+                roots=roots,
+                checkpoints=checkpoints,
+                stream_census=census,
+            )
+        )
+        semantic = {
+            "schema_version": "yieldforge.m11-economic-calibration-manifest.v1",
+            "protocol": protocol.model_dump(mode="json"),
+            "roots": roots.model_dump(mode="json"),
+            "legacy_scan_id": strict_legacy_scan.scan_id,
+            "legacy_scan_content_sha256": strict_legacy_scan.content_sha256,
+            "legacy_scan": strict_legacy_scan.model_dump(mode="json"),
+            "calibration_stream_census": census,
+            "checkpoints": [item.model_dump(mode="json") for item in checkpoints],
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "status": status,
+            "baseline_freezes": [item.model_dump(mode="json") for item in freezes],
+            "complete": True,
+        }
+        digest = semantic_sha256(semantic)
+        return Gate3CalibrationManifest(
+            manifest_id=f"yfm11econcalman-{digest[:24]}",
+            content_sha256=f"sha256:{digest}",
+            protocol=protocol,
+            roots=roots,
+            legacy_scan_id=strict_legacy_scan.scan_id,
+            legacy_scan_content_sha256=strict_legacy_scan.content_sha256,
+            legacy_scan=strict_legacy_scan,
+            calibration_stream_census=census,  # type: ignore[arg-type]
+            checkpoints=checkpoints,
+            success_count=success_count,
+            failure_count=failure_count,
+            status=status,  # type: ignore[arg-type]
+            baseline_freezes=freezes,
+        )
+    except (ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(str(error)) from error
+
+
+def _manifest_filename(manifest: Gate3CalibrationManifest) -> str:
+    return (
+        f"m11-economic-calibration-manifest-{manifest.content_sha256.removeprefix('sha256:')}.json"
+    )
+
+
+def _parse_canonical_manifest(raw: bytes) -> Gate3CalibrationManifest:
+    if type(raw) is not bytes or len(raw) > _MAX_MANIFEST_BYTES:
+        raise EconomicResolutionEvidenceError("calibration manifest exceeds byte bound")
+    try:
+        json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+        manifest = Gate3CalibrationManifest.model_validate_json(raw, strict=True)
+    except EconomicResolutionEvidenceError:
+        raise
+    except (json.JSONDecodeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration manifest failed strict validation"
+        ) from error
+    if canonical_pretty_json_bytes(manifest) != raw:
+        raise EconomicResolutionEvidenceError("calibration manifest encoding is not canonical")
+    return manifest
+
+
+def publish_gate3_calibration_manifest(
+    output_directory: Path,
+    manifest: Gate3CalibrationManifest,
+) -> Path:
+    """Publish the complete compact calibration manifest immutably."""
+
+    try:
+        strict = Gate3CalibrationManifest.model_validate(
+            manifest.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration manifest failed strict validation"
+        ) from error
+    raw = canonical_pretty_json_bytes(strict)
+    if len(raw) > _MAX_MANIFEST_BYTES:
+        raise EconomicResolutionEvidenceError("calibration manifest exceeds byte bound")
+    destination = Path(output_directory) / _manifest_filename(strict)
+    try:
+        return publish_immutable_artifact(
+            destination,
+            raw,
+            validate=lambda data: canonical_pretty_json_bytes(_parse_canonical_manifest(data)),
+            label="M11 economic calibration manifest",
+        )
+    except M8ArtifactPublicationError as error:
+        raise EconomicResolutionEvidenceError(
+            "calibration manifest immutable publication failed"
+        ) from error
+
+
+def load_gate3_calibration_manifest(
+    path: Path,
+    *,
+    expected_protocol: EconomicResolutionProtocol,
+    expected_roots: Gate3RootBinding,
+    expected_manifest_id: str,
+    expected_content_sha256: str,
+) -> Gate3CalibrationManifest:
+    """Load a complete manifest only under exact immutable bindings."""
+
+    if (
+        type(expected_manifest_id) is not str
+        or re.fullmatch(r"yfm11econcalman-[0-9a-f]{24}", expected_manifest_id) is None
+        or type(expected_content_sha256) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_content_sha256) is None
+    ):
+        raise EconomicResolutionEvidenceError("manifest expected binding is malformed")
+    candidate = Path(path)
+    expected_name = (
+        f"m11-economic-calibration-manifest-{expected_content_sha256.removeprefix('sha256:')}.json"
+    )
+    if candidate.name != expected_name:
+        raise EconomicResolutionEvidenceError("manifest path differs from expected binding")
+    raw = _read_bounded_regular_file(
+        candidate,
+        max_bytes=_MAX_MANIFEST_BYTES,
+        label="calibration manifest",
+    )
+    manifest = _parse_canonical_manifest(raw)
+    if (
+        manifest.protocol,
+        manifest.roots,
+        manifest.manifest_id,
+        manifest.content_sha256,
+    ) != (
+        expected_protocol,
+        expected_roots,
+        expected_manifest_id,
+        expected_content_sha256,
+    ):
+        raise EconomicResolutionEvidenceError("calibration manifest differs from expected binding")
+    return manifest

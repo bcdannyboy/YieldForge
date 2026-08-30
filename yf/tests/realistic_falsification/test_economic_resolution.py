@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ from yieldforge.realistic_falsification.confirmation import (
     Gate3CalibrationAttempt,
     build_gate3_cost_ledger,
     build_gate3_root_binding,
+    select_gate3_baseline_policy,
 )
 
 STREAM_A = "yfm11st-" + "a" * 24
@@ -45,9 +47,7 @@ def _calibration_attempt(
         "status": status,
         "observation": observation.model_dump(mode="json") if observation else None,
         "failure_type": None if observation else "builtins.ValueError",
-        "failure_detail": (
-            None if observation else 'escaped quote: " and braces: {not an object}'
-        ),
+        "failure_detail": (None if observation else 'escaped quote: " and braces: {not an object}'),
     }
     digest = semantic_sha256(semantic)
     return Gate3CalibrationAttempt(
@@ -61,9 +61,7 @@ def _calibration_attempt(
         status=status,  # type: ignore[arg-type]
         observation=observation,
         failure_type=None if observation else "builtins.ValueError",
-        failure_detail=(
-            None if observation else 'escaped quote: " and braces: {not an object}'
-        ),
+        failure_detail=(None if observation else 'escaped quote: " and braces: {not an object}'),
     )
 
 
@@ -73,9 +71,7 @@ def _legacy_artifact_bytes(attempts: tuple[Gate3CalibrationAttempt, ...]) -> byt
             {
                 "content_sha256": "sha256:" + "9" * 64,
                 "result": {
-                    "calibration_attempts": [
-                        item.model_dump(mode="json") for item in attempts
-                    ]
+                    "calibration_attempts": [item.model_dump(mode="json") for item in attempts]
                 },
                 "run_id": "synthetic",
             },
@@ -90,6 +86,24 @@ def _legacy_artifact_bytes(attempts: tuple[Gate3CalibrationAttempt, ...]) -> byt
 def _write_legacy(path: Path, raw: bytes) -> tuple[int, str]:
     path.write_bytes(raw)
     return len(raw), f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+def _resign_attempt(attempt, **updates):  # type: ignore[no-untyped-def]
+    draft = attempt.model_copy(update=updates)
+    semantic = draft.model_dump(
+        mode="json",
+        exclude={"attempt_id", "content_sha256"},
+    )
+    digest = semantic_sha256(semantic)
+    return type(attempt).model_validate(
+        draft.model_copy(
+            update={
+                "attempt_id": f"yfm11g3calatt-{digest[:24]}",
+                "content_sha256": f"sha256:{digest}",
+            }
+        ).model_dump(mode="python", round_trip=True),
+        strict=True,
+    )
 
 
 def _official_roots():
@@ -166,9 +180,7 @@ def _reference(resolution, *, position: int, status: str):  # type: ignore[no-un
         "final_costs": ledger.model_dump(mode="json") if status == "success" else None,
         "full_sheet_opening_count": 1 if status == "success" else None,
         "exact_event_census": True if status == "success" else None,
-        "source_lineage": (
-            "legacy_success_output_equivalent" if status == "success" else None
-        ),
+        "source_lineage": ("legacy_success_output_equivalent" if status == "success" else None),
         "failure_type": None if status == "success" else "builtins.ValueError",
         "failure_detail": None if status == "success" else "preserved failure",
     }
@@ -185,14 +197,113 @@ def _official_references(resolution):  # type: ignore[no-untyped-def]
         _reference(
             resolution,
             position=position,
-            status=(
-                "success"
-                if position < 48 or (position - 48) % 8 < 2
-                else "failure"
-            ),
+            status=("success" if position < 48 or (position - 48) % 8 < 2 else "failure"),
         )
         for position in range(96)
     )
+
+
+def _resign_reference(reference, **updates):  # type: ignore[no-untyped-def]
+    draft = reference.model_copy(update=updates)
+    semantic = draft.model_dump(
+        mode="json",
+        exclude={"reference_id", "content_sha256"},
+    )
+    digest = semantic_sha256(semantic)
+    return type(reference).model_validate(
+        draft.model_copy(
+            update={
+                "reference_id": f"yfm11econlegacy-{digest[:24]}",
+                "content_sha256": f"sha256:{digest}",
+            }
+        ).model_dump(mode="python", round_trip=True),
+        strict=True,
+    )
+
+
+def _repaired_receipt(
+    resolution,  # type: ignore[no-untyped-def]
+    *,
+    position: int,
+    corpus_id: str,
+    stream_id: str,
+    policy_id: str,
+):
+    from yieldforge.realistic_falsification.economic_evidence_store import (
+        Gate3CalibrationObservationReceipt,
+    )
+
+    policy_index = GATE3_BASELINE_POLICY_IDS.index(policy_id)
+    stream_index = int(stream_id[-2:], 16) % 8
+    ledger = build_gate3_cost_ledger(
+        purchase_cost=f"{100 + policy_index * 10 + stream_index}.000000",
+        storage_cost="0.000000",
+        return_handling_cost="0.000000",
+        retrieval_handling_cost="0.000000",
+        scrap_proceeds="0.000000",
+        terminal_credit="0.000000",
+    )
+    observation_hash = f"{position + 20_000:064x}"
+    compressed_hash = f"{position + 30_000:064x}"
+    semantic = {
+        "schema_version": "yieldforge.m11-gate3-calibration-receipt.v1",
+        "roots": _official_roots().model_dump(mode="json"),
+        "corpus_id": corpus_id,
+        "stream_id": stream_id,
+        "policy_id": policy_id,
+        "observation_id": f"yfm11g3calobs-{observation_hash[:24]}",
+        "observation_content_sha256": f"sha256:{observation_hash}",
+        "final_costs": ledger.model_dump(mode="json"),
+        "full_sheet_opening_count": position % 5 + 1,
+        "exact_event_census": True,
+        "source_lineage": "repaired_runtime",
+        "sidecar_name": (
+            f"m11-gate3-calibration-observation-{observation_hash}-{compressed_hash}.json.gz"
+        ),
+        "compressed_raw_sha256": f"sha256:{compressed_hash}",
+        "compressed_byte_count": 100,
+        "uncompressed_byte_count": 200,
+        "compression": "gzip-level-6-mtime-0-flags-0",
+    }
+    digest = semantic_sha256(semantic)
+    return Gate3CalibrationObservationReceipt(
+        receipt_id=f"yfm11g3calrcpt-{digest[:24]}",
+        content_sha256=f"sha256:{digest}",
+        **semantic,
+    )
+
+
+def _valid_checkpoints(resolution):  # type: ignore[no-untyped-def]
+    checkpoints = []
+    for reference in _official_references(resolution):
+        common = {
+            "protocol": resolution.build_economic_resolution_protocol(),
+            "roots": _official_roots(),
+            "execution_position": reference.execution_position,
+            "corpus_id": reference.corpus_id,
+            "stream_id": reference.stream_id,
+            "policy_id": reference.policy_id,
+        }
+        if reference.status == "success":
+            outcome = {"legacy_reference": reference}
+        else:
+            outcome = {
+                "repaired_receipt": _repaired_receipt(
+                    resolution,
+                    position=reference.execution_position,
+                    corpus_id=reference.corpus_id,
+                    stream_id=reference.stream_id,
+                    policy_id=reference.policy_id,
+                ),
+                "replaced_legacy_failure_reference": reference,
+            }
+        checkpoints.append(
+            resolution.build_gate3_calibration_attempt_checkpoint(
+                **common,
+                **outcome,
+            )
+        )
+    return tuple(checkpoints)
 
 
 def test_repair_lineage_protocol_freezes_every_decision_input_and_no_outcome() -> None:
@@ -220,13 +331,17 @@ def test_repair_lineage_protocol_freezes_every_decision_input_and_no_outcome() -
         "placed_plus_process_loss_plus_retained_plus_scrap_left_to_right"
     )
     assert protocol.bootstrap_bit_generator == "PCG64"
+    assert protocol.bootstrap_generator == "numpy.Generator(PCG64(0))"
     assert protocol.bootstrap_seed == 0
     assert protocol.bootstrap_resamples == 10_000
+    assert protocol.bootstrap_resampling_unit == "paired_stream"
+    assert protocol.bootstrap_quantile_method == "linear_type_7"
+    assert protocol.bootstrap_confidence_level == 0.95
+    assert protocol.bootstrap_lower_quantile == 0.025
+    assert protocol.bootstrap_upper_quantile == 0.975
+    assert protocol.max_attempt_object_bytes == 64 * 1024 * 1024
     assert protocol.central_full_future_mean_min_percent == "2.500000000000"
-    assert (
-        protocol.central_unknown_future_contribution_min_percentage_points
-        == "1.500000000000"
-    )
+    assert protocol.central_unknown_future_contribution_min_percentage_points == "1.500000000000"
     assert protocol.causal_known_only_mean_min_percent == "1.500000000000"
     assert protocol.lower_confidence_bound_rule == "strictly_greater_than_zero"
     assert protocol.median_savings_rule == "strictly_greater_than_zero"
@@ -234,7 +349,7 @@ def test_repair_lineage_protocol_freezes_every_decision_input_and_no_outcome() -
     assert not any(
         fragment in key
         for key in type(protocol).model_fields
-        for fragment in ("outcome", "attempt", "verdict", "status")
+        for fragment in ("outcome", "result", "verdict", "status")
     )
     assert resolution.build_economic_resolution_protocol() == protocol
 
@@ -275,9 +390,7 @@ def test_streaming_scan_frames_attempts_across_chunks_without_retaining_graphs(
     raw = _legacy_artifact_bytes(attempts)
     path = tmp_path / "legacy.json"
     size, raw_sha = _write_legacy(path, raw)
-    order = tuple(
-        (item.corpus_id, item.stream_id, item.policy_id) for item in attempts
-    )
+    order = tuple((item.corpus_id, item.stream_id, item.policy_id) for item in attempts)
 
     references = resolution._scan_legacy_calibration_attempts(
         path,
@@ -388,9 +501,7 @@ def test_streaming_scan_rejects_authentication_binding_and_census_mismatch(
         "expected_byte_count": size,
         "expected_raw_sha256": raw_sha,
         "expected_root_content_sha256": _roots().content_sha256,
-        "expected_attempt_order": (
-            ("loco-2dics", STREAM_A, "myopic_geometry"),
-        ),
+        "expected_attempt_order": (("loco-2dics", STREAM_A, "myopic_geometry"),),
         "expected_success_count": 0,
         "expected_failure_count": 1,
         "chunk_size": 19,
@@ -402,9 +513,7 @@ def test_streaming_scan_rejects_authentication_binding_and_census_mismatch(
     elif mismatch == "root":
         kwargs["expected_root_content_sha256"] = "sha256:" + "0" * 64
     elif mismatch == "order":
-        kwargs["expected_attempt_order"] = (
-            ("loco-2dics", "wrong-stream", "myopic_geometry"),
-        )
+        kwargs["expected_attempt_order"] = (("loco-2dics", "wrong-stream", "myopic_geometry"),)
     else:
         kwargs["expected_success_count"] = 1
         kwargs["expected_failure_count"] = 0
@@ -430,6 +539,7 @@ def test_official_legacy_scan_requires_exact_96_order_repeated_census_and_60_36(
         ("loco-2dics", tuple(item.stream_id for item in references[48:56])),
     )
     assert scan.legacy_artifact_byte_count == 2_270_455_752
+    assert scan.max_attempt_object_bytes == 64 * 1024 * 1024
 
     with pytest.raises(resolution.EconomicResolutionEvidenceError, match="order"):
         resolution.build_official_legacy_calibration_scan(
@@ -442,13 +552,167 @@ def test_official_legacy_scan_requires_exact_96_order_repeated_census_and_60_36(
         )
 
 
+@pytest.mark.parametrize("drift", ("stream", "corpus", "policy", "second_root"))
+def test_official_legacy_scan_rejects_each_structural_drift(drift: str) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    references = _official_references(resolution)
+    position = 8 if drift == "stream" else (48 if drift == "corpus" else 1)
+    updates = {
+        "stream": {"stream_id": "yfm11st-" + f"{999:024x}"},
+        "corpus": {"corpus_id": "lectra-m3-m4"},
+        "policy": {"policy_id": "remnant_first"},
+        "second_root": {"roots": _roots()},
+    }[drift]
+    changed = _resign_reference(references[position], **updates)
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError):
+        resolution.build_official_legacy_calibration_scan(
+            (*references[:position], changed, *references[position + 1 :])
+        )
+
+
+def test_public_official_scanner_wires_every_frozen_authentication_constant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    captured = {}
+    references = _official_references(resolution)
+
+    def capture(path, **kwargs):  # type: ignore[no-untyped-def]
+        captured["path"] = path
+        captured.update(kwargs)
+        return references
+
+    monkeypatch.setattr(resolution, "_scan_legacy_calibration_attempts", capture)
+    candidate = tmp_path / "official.json"
+    scan = resolution.scan_official_legacy_gate3_calibration_artifact(candidate)
+
+    assert scan.attempt_references == references
+    assert captured == {
+        "path": candidate,
+        "expected_byte_count": 2_270_455_752,
+        "expected_raw_sha256": (
+            "sha256:e5757919ddd9251bf374d1664be25faf175963e78478b223ea0d7e22f7439199"
+        ),
+        "expected_root_content_sha256": (
+            "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2"
+        ),
+        "expected_attempt_order": None,
+        "expected_success_count": 60,
+        "expected_failure_count": 36,
+        "max_attempt_object_bytes": 64 * 1024 * 1024,
+    }
+
+
+def test_legacy_reference_object_bound_is_exactly_64_mib() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    reference = _reference(resolution, position=0, status="success")
+    at_limit = _resign_reference(
+        reference,
+        attempt_byte_count=64 * 1024 * 1024,
+    )
+    assert at_limit.attempt_byte_count == 64 * 1024 * 1024
+
+    draft = at_limit.model_copy(update={"attempt_byte_count": 64 * 1024 * 1024 + 1})
+    semantic = draft.model_dump(
+        mode="json",
+        exclude={"reference_id", "content_sha256"},
+    )
+    digest = semantic_sha256(semantic)
+    forged = draft.model_copy(
+        update={
+            "reference_id": f"yfm11econlegacy-{digest[:24]}",
+            "content_sha256": f"sha256:{digest}",
+        }
+    )
+    with pytest.raises(ValidationError, match="less than or equal"):
+        resolution.Gate3LegacyCalibrationAttemptReference.model_validate(
+            forged.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+
+
+def test_official_legacy_scan_byte_ranges_use_exclusive_endpoints() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    cursor = 10_000
+    contiguous = []
+    for reference in _official_references(resolution):
+        contiguous.append(
+            _resign_reference(
+                reference,
+                attempt_byte_offset=cursor,
+                attempt_byte_count=100,
+            )
+        )
+        cursor += 100
+
+    assert resolution.build_official_legacy_calibration_scan(tuple(contiguous))
+
+
+def test_streaming_scan_rejects_unbounded_failure_text_before_retention(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _resign_attempt(
+        _calibration_attempt(position=0, status="failure", stream_id=STREAM_A),
+        failure_detail="x" * 1001,
+    )
+    raw = _legacy_artifact_bytes((attempt,))
+    path = tmp_path / "legacy.json"
+    size, raw_sha = _write_legacy(path, raw)
+
+    with pytest.raises(
+        resolution.EconomicResolutionEvidenceError,
+        match="failure.*bound|compact",
+    ):
+        resolution._scan_legacy_calibration_attempts(
+            path,
+            expected_byte_count=size,
+            expected_raw_sha256=raw_sha,
+            expected_root_content_sha256=_roots().content_sha256,
+            expected_attempt_order=(("loco-2dics", STREAM_A, "myopic_geometry"),),
+            expected_success_count=0,
+            expected_failure_count=1,
+        )
+
+
+def test_streaming_scan_rejects_chunk_size_above_64_mib_without_os_overflow(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _calibration_attempt(position=0, status="failure", stream_id=STREAM_A)
+    raw = _legacy_artifact_bytes((attempt,))
+    path = tmp_path / "legacy.json"
+    size, raw_sha = _write_legacy(path, raw)
+
+    with pytest.raises(
+        resolution.EconomicResolutionEvidenceError,
+        match="chunk.*malformed",
+    ):
+        resolution._scan_legacy_calibration_attempts(
+            path,
+            expected_byte_count=size,
+            expected_raw_sha256=raw_sha,
+            expected_root_content_sha256=_roots().content_sha256,
+            expected_attempt_order=(("loco-2dics", STREAM_A, "myopic_geometry"),),
+            expected_success_count=0,
+            expected_failure_count=1,
+            chunk_size=64 * 1024 * 1024 + 1,
+        )
+
+
 def test_legacy_reference_rejects_attempt_and_observation_sha_prefix_forgery() -> None:
     from yieldforge.realistic_falsification import economic_resolution as resolution
 
     reference = _reference(resolution, position=0, status="success")
-    forged_attempt = reference.model_copy(
-        update={"attempt_id": "yfm11g3calatt-" + "f" * 24}
-    )
+    forged_attempt = reference.model_copy(update={"attempt_id": "yfm11g3calatt-" + "f" * 24})
     forged_observation = reference.model_copy(
         update={"observation_id": "yfm11g3calobs-" + "f" * 24}
     )
@@ -470,8 +734,7 @@ def test_streaming_scan_requires_exactly_one_canonical_array_marker(
     raw = _legacy_artifact_bytes((attempt,))
     raw = raw.replace(
         b'"run_id": "synthetic"',
-        b'"run_id": "synthetic calibration_attempts marker",\n'
-        b'  "calibration_attempts": []',
+        b'"run_id": "synthetic calibration_attempts marker",\n  "calibration_attempts": []',
     )
     path = tmp_path / "legacy.json"
     size, raw_sha = _write_legacy(path, raw)
@@ -486,4 +749,659 @@ def test_streaming_scan_requires_exactly_one_canonical_array_marker(
             expected_success_count=0,
             expected_failure_count=1,
             chunk_size=17,
+        )
+
+
+def test_streaming_scan_rejects_fingerprint_change_during_authenticated_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _calibration_attempt(position=0, status="failure", stream_id=STREAM_A)
+    raw = _legacy_artifact_bytes((attempt,))
+    path = tmp_path / "legacy.json"
+    size, raw_sha = _write_legacy(path, raw)
+    real_fstat = resolution.os.fstat
+    calls = 0
+
+    def changing_fstat(descriptor: int):
+        nonlocal calls
+        metadata = real_fstat(descriptor)
+        calls += 1
+        if calls != 2:
+            return metadata
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns + 1,
+            st_ctime_ns=metadata.st_ctime_ns,
+        )
+
+    monkeypatch.setattr(resolution.os, "fstat", changing_fstat)
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="fingerprint"):
+        resolution._scan_legacy_calibration_attempts(
+            path,
+            expected_byte_count=size,
+            expected_raw_sha256=raw_sha,
+            expected_root_content_sha256=_roots().content_sha256,
+            expected_attempt_order=(("loco-2dics", STREAM_A, "myopic_geometry"),),
+            expected_success_count=0,
+            expected_failure_count=1,
+            chunk_size=97,
+        )
+
+
+def test_streaming_scan_rejects_nonregular_and_symlink_sources(tmp_path: Path) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _calibration_attempt(position=0, status="failure", stream_id=STREAM_A)
+    raw = _legacy_artifact_bytes((attempt,))
+    regular = tmp_path / "regular.json"
+    size, raw_sha = _write_legacy(regular, raw)
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(regular)
+    directory = tmp_path / "directory.json"
+    directory.mkdir()
+    common = {
+        "expected_byte_count": size,
+        "expected_raw_sha256": raw_sha,
+        "expected_root_content_sha256": _roots().content_sha256,
+        "expected_attempt_order": (("loco-2dics", STREAM_A, "myopic_geometry"),),
+        "expected_success_count": 0,
+        "expected_failure_count": 1,
+    }
+
+    for candidate in (linked, directory):
+        with pytest.raises(
+            resolution.EconomicResolutionEvidenceError,
+            match="regular non-symlink",
+        ):
+            resolution._scan_legacy_calibration_attempts(candidate, **common)
+
+
+def test_streaming_scan_opens_both_passes_nofollow_and_nonblocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _calibration_attempt(position=0, status="failure", stream_id=STREAM_A)
+    raw = _legacy_artifact_bytes((attempt,))
+    path = tmp_path / "legacy.json"
+    size, raw_sha = _write_legacy(path, raw)
+    real_open = resolution.os.open
+    observed_flags: list[int] = []
+
+    def recording_open(candidate, flags):  # type: ignore[no-untyped-def]
+        observed_flags.append(flags)
+        return real_open(candidate, flags)
+
+    monkeypatch.setattr(resolution.os, "open", recording_open)
+    resolution._scan_legacy_calibration_attempts(
+        path,
+        expected_byte_count=size,
+        expected_raw_sha256=raw_sha,
+        expected_root_content_sha256=_roots().content_sha256,
+        expected_attempt_order=(("loco-2dics", STREAM_A, "myopic_geometry"),),
+        expected_success_count=0,
+        expected_failure_count=1,
+    )
+
+    assert len(observed_flags) == 2
+    for flags in observed_flags:
+        assert flags & resolution.os.O_NOFOLLOW
+        assert flags & resolution.os.O_NONBLOCK
+
+
+def test_streaming_scan_rejects_mutation_between_authenticated_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _calibration_attempt(position=0, status="failure", stream_id=STREAM_A)
+    raw = _legacy_artifact_bytes((attempt,))
+    path = tmp_path / "legacy.json"
+    size, raw_sha = _write_legacy(path, raw)
+    real_framer = resolution._CalibrationAttemptArrayFramer
+
+    def mutating_framer(*, max_attempt_object_bytes: int):
+        metadata = path.stat()
+        resolution.os.utime(
+            path,
+            ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000),
+        )
+        return real_framer(max_attempt_object_bytes=max_attempt_object_bytes)
+
+    monkeypatch.setattr(resolution, "_CalibrationAttemptArrayFramer", mutating_framer)
+    with pytest.raises(
+        resolution.EconomicResolutionEvidenceError,
+        match="between authenticated passes",
+    ):
+        resolution._scan_legacy_calibration_attempts(
+            path,
+            expected_byte_count=size,
+            expected_raw_sha256=raw_sha,
+            expected_root_content_sha256=_roots().content_sha256,
+            expected_attempt_order=(("loco-2dics", STREAM_A, "myopic_geometry"),),
+            expected_success_count=0,
+            expected_failure_count=1,
+        )
+
+
+def test_streaming_scan_hashes_and_rejects_changed_second_pass_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    attempt = _calibration_attempt(position=0, status="failure", stream_id=STREAM_A)
+    raw = _legacy_artifact_bytes((attempt,))
+    path = tmp_path / "legacy.json"
+    size, raw_sha = _write_legacy(path, raw)
+    real_read = resolution.os.read
+    nonempty_reads = 0
+
+    def changing_read(descriptor: int, count: int) -> bytes:
+        nonlocal nonempty_reads
+        data = real_read(descriptor, count)
+        if data:
+            nonempty_reads += 1
+            if nonempty_reads == 2:
+                return b"[" + data[1:]
+        return data
+
+    monkeypatch.setattr(resolution.os, "read", changing_read)
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="raw hash"):
+        resolution._scan_legacy_calibration_attempts(
+            path,
+            expected_byte_count=size,
+            expected_raw_sha256=raw_sha,
+            expected_root_content_sha256=_roots().content_sha256,
+            expected_attempt_order=(("loco-2dics", STREAM_A, "myopic_geometry"),),
+            expected_success_count=0,
+            expected_failure_count=1,
+            chunk_size=size + 1,
+        )
+
+
+def test_calibration_checkpoint_supports_exactly_three_compact_outcomes() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    protocol = resolution.build_economic_resolution_protocol()
+    roots = _official_roots()
+    legacy_reference = _reference(resolution, position=0, status="success")
+    replaced_success_reference = _reference(resolution, position=50, status="failure")
+    replaced_failure_reference = _reference(resolution, position=51, status="failure")
+    repaired_receipt = _repaired_receipt(
+        resolution,
+        position=replaced_success_reference.execution_position,
+        corpus_id=replaced_success_reference.corpus_id,
+        stream_id=replaced_success_reference.stream_id,
+        policy_id="myopic_geometry",
+    )
+
+    legacy = resolution.build_gate3_calibration_attempt_checkpoint(
+        protocol=protocol,
+        roots=roots,
+        execution_position=0,
+        corpus_id="lectra-m3-m4",
+        stream_id=legacy_reference.stream_id,
+        policy_id="myopic_geometry",
+        legacy_reference=legacy_reference,
+    )
+    repaired = resolution.build_gate3_calibration_attempt_checkpoint(
+        protocol=protocol,
+        roots=roots,
+        execution_position=replaced_success_reference.execution_position,
+        corpus_id="loco-2dics",
+        stream_id=repaired_receipt.stream_id,
+        policy_id="myopic_geometry",
+        repaired_receipt=repaired_receipt,
+        replaced_legacy_failure_reference=replaced_success_reference,
+    )
+    failure = resolution.build_gate3_calibration_attempt_checkpoint(
+        protocol=protocol,
+        roots=roots,
+        execution_position=replaced_failure_reference.execution_position,
+        corpus_id="loco-2dics",
+        stream_id=replaced_failure_reference.stream_id,
+        policy_id="myopic_geometry",
+        replaced_legacy_failure_reference=replaced_failure_reference,
+        failure_type="builtins.ValueError",
+        failure_detail="repaired runtime preserved failure",
+    )
+
+    assert legacy.outcome_kind == "legacy_success_reference"
+    assert legacy.legacy_reference == legacy_reference
+    assert repaired.outcome_kind == "repaired_runtime_success"
+    assert repaired.repaired_receipt == repaired_receipt
+    assert repaired.replaced_legacy_failure_reference == replaced_success_reference
+    assert failure.outcome_kind == "repaired_runtime_failure"
+    assert failure.replaced_legacy_failure_reference == replaced_failure_reference
+    assert failure.failure_type == "builtins.ValueError"
+    assert len({legacy.checkpoint_id, repaired.checkpoint_id, failure.checkpoint_id}) == 3
+    assert "material_replays" not in json.dumps(
+        [item.model_dump(mode="json") for item in (legacy, repaired, failure)]
+    )
+
+
+def test_calibration_checkpoint_rejects_multiple_outcomes_and_binding_drift() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    reference = _reference(resolution, position=0, status="success")
+    replacement = _reference(resolution, position=50, status="failure")
+    receipt = _repaired_receipt(
+        resolution,
+        position=replacement.execution_position,
+        corpus_id=replacement.corpus_id,
+        stream_id=replacement.stream_id,
+        policy_id="myopic_geometry",
+    )
+    common = {
+        "protocol": resolution.build_economic_resolution_protocol(),
+        "roots": _official_roots(),
+        "execution_position": replacement.execution_position,
+        "corpus_id": replacement.corpus_id,
+        "stream_id": replacement.stream_id,
+        "policy_id": "myopic_geometry",
+    }
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="exactly one"):
+        resolution.build_gate3_calibration_attempt_checkpoint(
+            **common,
+            legacy_reference=reference,
+            repaired_receipt=receipt,
+        )
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="binding"):
+        resolution.build_gate3_calibration_attempt_checkpoint(
+            **(
+                common
+                | {
+                    "execution_position": reference.execution_position,
+                    "corpus_id": reference.corpus_id,
+                    "stream_id": STREAM_B,
+                }
+            ),
+            legacy_reference=reference,
+        )
+    with pytest.raises(
+        resolution.EconomicResolutionEvidenceError,
+        match="replaced legacy failure",
+    ):
+        resolution.build_gate3_calibration_attempt_checkpoint(
+            **common,
+            repaired_receipt=receipt,
+        )
+    for wrong_replacement in (
+        reference,
+        _reference(resolution, position=51, status="failure"),
+    ):
+        with pytest.raises(
+            resolution.EconomicResolutionEvidenceError,
+            match="replaced legacy failure",
+        ):
+            resolution.build_gate3_calibration_attempt_checkpoint(
+                **common,
+                repaired_receipt=receipt,
+                replaced_legacy_failure_reference=wrong_replacement,
+            )
+    legacy_lineage = receipt.model_copy(
+        update={"source_lineage": "legacy_success_output_equivalent"}
+    )
+    semantic = legacy_lineage.model_dump(
+        mode="python",
+        round_trip=True,
+        exclude={"receipt_id", "content_sha256"},
+    )
+    digest = semantic_sha256(semantic)
+    legacy_lineage = legacy_lineage.model_copy(
+        update={
+            "receipt_id": f"yfm11g3calrcpt-{digest[:24]}",
+            "content_sha256": f"sha256:{digest}",
+        }
+    )
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="repaired_runtime"):
+        resolution.build_gate3_calibration_attempt_checkpoint(
+            **common,
+            repaired_receipt=legacy_lineage,
+            replaced_legacy_failure_reference=replacement,
+        )
+
+
+def test_checkpoint_publish_load_is_canonical_idempotent_and_bound(tmp_path: Path) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+
+    first = resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, checkpoint)
+    second = resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, checkpoint)
+
+    assert first == second
+    assert first.name == (
+        f"m11-economic-calibration-checkpoint-{checkpoint.execution_position:03d}-"
+        f"{checkpoint.content_sha256.removeprefix('sha256:')}.json"
+    )
+    loaded = resolution.load_gate3_calibration_attempt_checkpoint(
+        first,
+        expected_protocol=checkpoint.protocol,
+        expected_roots=checkpoint.roots,
+        expected_execution_position=checkpoint.execution_position,
+        expected_corpus_id=checkpoint.corpus_id,
+        expected_stream_id=checkpoint.stream_id,
+        expected_policy_id=checkpoint.policy_id,
+        expected_checkpoint_id=checkpoint.checkpoint_id,
+        expected_content_sha256=checkpoint.content_sha256,
+    )
+    assert loaded == checkpoint
+
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="expected binding"):
+        resolution.load_gate3_calibration_attempt_checkpoint(
+            first,
+            expected_protocol=checkpoint.protocol,
+            expected_roots=checkpoint.roots,
+            expected_execution_position=1,
+            expected_corpus_id=checkpoint.corpus_id,
+            expected_stream_id=checkpoint.stream_id,
+            expected_policy_id=checkpoint.policy_id,
+            expected_checkpoint_id=checkpoint.checkpoint_id,
+            expected_content_sha256=checkpoint.content_sha256,
+        )
+
+
+def test_checkpoint_loader_rejects_tamper_wrong_path_and_symlink(tmp_path: Path) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    published = resolution.publish_gate3_calibration_attempt_checkpoint(
+        tmp_path,
+        checkpoint,
+    )
+    common = {
+        "expected_protocol": checkpoint.protocol,
+        "expected_roots": checkpoint.roots,
+        "expected_execution_position": checkpoint.execution_position,
+        "expected_corpus_id": checkpoint.corpus_id,
+        "expected_stream_id": checkpoint.stream_id,
+        "expected_policy_id": checkpoint.policy_id,
+        "expected_checkpoint_id": checkpoint.checkpoint_id,
+        "expected_content_sha256": checkpoint.content_sha256,
+    }
+    wrong = tmp_path / "wrong.json"
+    wrong.write_bytes(published.read_bytes())
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(published)
+    tampered = tmp_path / published.name
+    original = tampered.read_bytes()
+    tampered.write_bytes(original.replace(b'"stream_id":', b'"forged": 1, "stream_id":', 1))
+
+    for candidate in (wrong, linked, tampered):
+        with pytest.raises(resolution.EconomicResolutionEvidenceError):
+            resolution.load_gate3_calibration_attempt_checkpoint(candidate, **common)
+
+
+def test_checkpoint_publish_rejects_foreign_bytes_and_loader_rejects_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    destination = tmp_path / (
+        f"m11-economic-calibration-checkpoint-{checkpoint.execution_position:03d}-"
+        f"{checkpoint.content_sha256.removeprefix('sha256:')}.json"
+    )
+    destination.write_bytes(b"foreign")
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="publication"):
+        resolution.publish_gate3_calibration_attempt_checkpoint(tmp_path, checkpoint)
+    destination.unlink()
+    published = resolution.publish_gate3_calibration_attempt_checkpoint(
+        tmp_path,
+        checkpoint,
+    )
+    real_fstat = resolution.os.fstat
+    calls = 0
+
+    def changing_fstat(descriptor: int):
+        nonlocal calls
+        metadata = real_fstat(descriptor)
+        calls += 1
+        if calls != 2:
+            return metadata
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns + 1,
+        )
+
+    monkeypatch.setattr(resolution.os, "fstat", changing_fstat)
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="changed"):
+        resolution.load_gate3_calibration_attempt_checkpoint(
+            published,
+            expected_protocol=checkpoint.protocol,
+            expected_roots=checkpoint.roots,
+            expected_execution_position=checkpoint.execution_position,
+            expected_corpus_id=checkpoint.corpus_id,
+            expected_stream_id=checkpoint.stream_id,
+            expected_policy_id=checkpoint.policy_id,
+            expected_checkpoint_id=checkpoint.checkpoint_id,
+            expected_content_sha256=checkpoint.content_sha256,
+        )
+
+
+@pytest.mark.parametrize("malformation", ("duplicate", "nonfinite"))
+def test_checkpoint_loader_rejects_duplicate_and_nonfinite_json(
+    tmp_path: Path,
+    malformation: str,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoint = _valid_checkpoints(resolution)[0]
+    published = resolution.publish_gate3_calibration_attempt_checkpoint(
+        tmp_path,
+        checkpoint,
+    )
+    raw = published.read_bytes()
+    if malformation == "duplicate":
+        raw = raw.replace(
+            b'"stream_id":',
+            b'"stream_id": "duplicate",\n  "stream_id":',
+            1,
+        )
+    else:
+        raw = raw.replace(b'"stream_id":', b'"rogue": NaN,\n  "stream_id":', 1)
+    published.write_bytes(raw)
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match=malformation):
+        resolution.load_gate3_calibration_attempt_checkpoint(
+            published,
+            expected_protocol=checkpoint.protocol,
+            expected_roots=checkpoint.roots,
+            expected_execution_position=checkpoint.execution_position,
+            expected_corpus_id=checkpoint.corpus_id,
+            expected_stream_id=checkpoint.stream_id,
+            expected_policy_id=checkpoint.policy_id,
+            expected_checkpoint_id=checkpoint.checkpoint_id,
+            expected_content_sha256=checkpoint.content_sha256,
+        )
+
+
+def test_complete_invalid_manifest_embeds_96_checkpoints_and_no_freezes() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoints = []
+    for reference in _official_references(resolution):
+        common = {
+            "protocol": resolution.build_economic_resolution_protocol(),
+            "roots": _official_roots(),
+            "execution_position": reference.execution_position,
+            "corpus_id": reference.corpus_id,
+            "stream_id": reference.stream_id,
+            "policy_id": reference.policy_id,
+        }
+        checkpoints.append(
+            resolution.build_gate3_calibration_attempt_checkpoint(
+                **common,
+                **(
+                    {"legacy_reference": reference}
+                    if reference.status == "success"
+                    else {
+                        "replaced_legacy_failure_reference": reference,
+                        "failure_type": reference.failure_type,
+                        "failure_detail": reference.failure_detail,
+                    }
+                ),
+            )
+        )
+
+    legacy_scan = resolution.build_official_legacy_calibration_scan(
+        _official_references(resolution)
+    )
+    manifest = resolution.build_gate3_calibration_manifest(
+        tuple(checkpoints),
+        legacy_scan=legacy_scan,
+    )
+
+    assert manifest.status == "complete_invalid"
+    assert manifest.success_count == 60
+    assert manifest.failure_count == 36
+    assert manifest.baseline_freezes == ()
+    assert manifest.checkpoints == tuple(checkpoints)
+    assert manifest.legacy_scan_id == legacy_scan.scan_id
+    assert manifest.legacy_scan_content_sha256 == legacy_scan.content_sha256
+
+
+def test_complete_valid_manifest_rederives_both_exact_baseline_freezes() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoints = _valid_checkpoints(resolution)
+    legacy_scan = resolution.build_official_legacy_calibration_scan(
+        _official_references(resolution)
+    )
+    manifest = resolution.build_gate3_calibration_manifest(
+        checkpoints,
+        legacy_scan=legacy_scan,
+    )
+
+    assert manifest.status == "complete_valid"
+    assert manifest.success_count == 96
+    assert manifest.failure_count == 0
+    assert tuple(item.corpus_id for item in manifest.baseline_freezes) == (
+        "lectra-m3-m4",
+        "loco-2dics",
+    )
+    for corpus_id, stream_ids in manifest.calibration_stream_census:
+        per_corpus = tuple(item for item in checkpoints if item.corpus_id == corpus_id)
+        expected = select_gate3_baseline_policy(
+            roots=_official_roots(),
+            corpus_id=corpus_id,
+            calibration_stream_ids=stream_ids,
+            policy_stream_costs={
+                policy_id: tuple(
+                    (
+                        item.legacy_reference.final_costs.net_cost  # type: ignore[union-attr]
+                        if item.outcome_kind == "legacy_success_reference"
+                        else item.repaired_receipt.final_costs.net_cost  # type: ignore[union-attr]
+                    )
+                    for item in per_corpus
+                    if item.policy_id == policy_id
+                )
+                for policy_id in GATE3_BASELINE_POLICY_IDS
+            },
+            policy_stream_sheet_openings={
+                policy_id: tuple(
+                    (
+                        item.legacy_reference.full_sheet_opening_count  # type: ignore[union-attr]
+                        if item.outcome_kind == "legacy_success_reference"
+                        else item.repaired_receipt.full_sheet_opening_count  # type: ignore[union-attr]
+                    )
+                    for item in per_corpus
+                    if item.policy_id == policy_id
+                )
+                for policy_id in GATE3_BASELINE_POLICY_IDS
+            },
+            policy_invalid_stream_counts={policy_id: 0 for policy_id in GATE3_BASELINE_POLICY_IDS},
+        )
+        assert manifest.baseline_freezes[0 if corpus_id == "lectra-m3-m4" else 1] == expected
+
+
+def test_manifest_rejects_order_mutation_and_publish_load_round_trip(
+    tmp_path: Path,
+) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    checkpoints = _valid_checkpoints(resolution)
+    legacy_scan = resolution.build_official_legacy_calibration_scan(
+        _official_references(resolution)
+    )
+    with pytest.raises(resolution.EconomicResolutionEvidenceError, match="order"):
+        resolution.build_gate3_calibration_manifest(
+            (checkpoints[1], checkpoints[0], *checkpoints[2:]),
+            legacy_scan=legacy_scan,
+        )
+
+    manifest = resolution.build_gate3_calibration_manifest(
+        checkpoints,
+        legacy_scan=legacy_scan,
+    )
+    first = resolution.publish_gate3_calibration_manifest(tmp_path, manifest)
+    second = resolution.publish_gate3_calibration_manifest(tmp_path, manifest)
+    assert first == second
+    assert first.name == (
+        f"m11-economic-calibration-manifest-{manifest.content_sha256.removeprefix('sha256:')}.json"
+    )
+    assert (
+        resolution.load_gate3_calibration_manifest(
+            first,
+            expected_protocol=manifest.protocol,
+            expected_roots=manifest.roots,
+            expected_manifest_id=manifest.manifest_id,
+            expected_content_sha256=manifest.content_sha256,
+        )
+        == manifest
+    )
+
+
+def test_manifest_model_rejects_freeze_mutation_even_with_valid_nested_models() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    manifest = resolution.build_gate3_calibration_manifest(
+        _valid_checkpoints(resolution),
+        legacy_scan=resolution.build_official_legacy_calibration_scan(
+            _official_references(resolution)
+        ),
+    )
+    forged = manifest.model_copy(update={"baseline_freezes": ()})
+
+    with pytest.raises(ValidationError, match="freezes differ"):
+        resolution.Gate3CalibrationManifest.model_validate(
+            forged.model_dump(mode="python", round_trip=True),
+            strict=True,
+        )
+
+
+def test_manifest_rejects_scan_whose_legacy_failure_reference_differs() -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    references = _official_references(resolution)
+    changed = _resign_reference(
+        references[54],
+        failure_detail="different authenticated legacy failure",
+    )
+    changed_scan = resolution.build_official_legacy_calibration_scan(
+        (*references[:54], changed, *references[55:])
+    )
+
+    with pytest.raises(
+        resolution.EconomicResolutionEvidenceError,
+        match="legacy scan|legacy reference",
+    ):
+        resolution.build_gate3_calibration_manifest(
+            _valid_checkpoints(resolution),
+            legacy_scan=changed_scan,
         )
