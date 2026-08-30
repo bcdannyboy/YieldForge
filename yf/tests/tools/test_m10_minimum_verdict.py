@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -8,16 +9,33 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-from tools import run_m10_minimum_verdict as runner
 from yieldforge.experiments.m10_verdict import (
     M10EvidenceSnapshot,
     build_minimum_investment_verdict,
 )
 
 YF_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_runner_module() -> ModuleType:
+    module_name = "yieldforge_m10_runner_test_target"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        YF_ROOT / "tools/run_m10_minimum_verdict.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("M10 runner test target could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+runner = _load_runner_module()
 
 EXPECTED_PARENT_SPECS = (
     (
@@ -112,6 +130,41 @@ def test_parent_specs_are_the_exact_frozen_six_parent_census() -> None:
     )
 
     assert observed == EXPECTED_PARENT_SPECS
+
+
+def test_importing_runner_does_not_import_other_m8_oracle_modules() -> None:
+    runner_path = str(YF_ROOT / "tools/run_m10_minimum_verdict.py")
+    script = f"""
+import importlib.util
+import json
+import sys
+
+name = "isolated_m10_runner"
+spec = importlib.util.spec_from_file_location(
+    name,
+    {runner_path!r},
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules[name] = module
+spec.loader.exec_module(module)
+print(json.dumps(sorted(
+    loaded
+    for loaded in sys.modules
+    if loaded.startswith("yieldforge.oracle.")
+    and loaded != "yieldforge.oracle.artifact_publisher"
+)))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        cwd=YF_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == []
 
 
 def test_runner_loads_twice_builds_twice_and_publishes_canonical_result(
