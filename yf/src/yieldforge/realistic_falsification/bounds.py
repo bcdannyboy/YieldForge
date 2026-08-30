@@ -2398,9 +2398,6 @@ def build_gate1_stream_cell(
         raise Gate1EvidenceError(
             "Gate 1 cell calibration selection evidence does not match its corpus and pack"
         )
-    policy = _policy_spec(baseline_selection.selected_policy_id)
-    if stream.corpus_id not in policy.supported_corpora:
-        raise Gate1EvidenceError("selected baseline policy does not support this source corpus")
     if (
         context.m3_input.input_id != context.source_manifest.lectra.m3_input_id
         or context.m3_input.content_sha256 != context.source_manifest.lectra.m3_input_content_sha256
@@ -2409,6 +2406,14 @@ def build_gate1_stream_cell(
         != context.source_manifest.loco.catalog_content_sha256
     ):
         raise Gate1EvidenceError("Gate 1 context source identities changed after strict loading")
+    canonical_selection = select_gate1_baseline_policy(context, stream.corpus_id)
+    if baseline_selection != canonical_selection:
+        raise Gate1EvidenceError(
+            "Gate 1 cell selection differs from the canonical calibration selection"
+        )
+    policy = _policy_spec(canonical_selection.selected_policy_id)
+    if stream.corpus_id not in policy.supported_corpora:
+        raise Gate1EvidenceError("selected baseline policy does not support this source corpus")
     payloads = {item.payload_id: item for item in context.bundle.population.payloads}
     references = _reference_registry(context)
     proof_cache: dict[str, _PayloadProof] = {}

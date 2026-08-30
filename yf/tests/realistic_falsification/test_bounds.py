@@ -550,6 +550,76 @@ def test_confirmation_cell_requires_matching_calibration_selection_evidence(
         bounds.build_gate1_stream_cell(official_context, stream)
 
 
+def test_confirmation_rejects_a_resigned_forged_calibration_policy_winner(
+    official_context,
+    official_baseline_selections,
+) -> None:
+    bounds = _bounds()
+    canonical = official_baseline_selections["lectra-m3-m4"]
+    position_one = next(
+        item for item in canonical.policy_scores if item.policy_id == "fresh-candidate-position-1"
+    )
+    score_payload = position_one.model_dump(mode="python", round_trip=True)
+    costs = list(score_payload["calibration_stream_costs"])
+    stream_id, cost = costs[0]
+    costs[0] = (stream_id, cost - 1.0)
+    exact_total = sum((Fraction(str(item[1])) for item in costs), start=Fraction(0))
+    score_payload["calibration_stream_costs"] = tuple(costs)
+    score_payload["total_cost_exact"] = str(exact_total)
+    score_payload["total_cost"] = bounds.round_half_up_cost(exact_total)
+    score_semantic = {
+        key: value
+        for key, value in score_payload.items()
+        if key not in {"score_id", "content_sha256"}
+    }
+    score_id, score_content = bounds._identity("yfm11bsc-", score_semantic)
+    score_payload["score_id"] = score_id
+    score_payload["content_sha256"] = score_content
+    forged_score = bounds.Gate1CalibrationPolicyScore.model_validate(
+        score_payload,
+        strict=True,
+    )
+
+    selection_payload = canonical.model_dump(mode="python", round_trip=True)
+    selection_payload["policy_scores"] = tuple(
+        (forged_score if item.policy_id == forged_score.policy_id else item).model_dump(
+            mode="python",
+            round_trip=True,
+        )
+        for item in canonical.policy_scores
+    )
+    selection_payload["selected_policy_id"] = forged_score.policy_id
+    selection_payload["tied_lowest_policy_ids"] = (forged_score.policy_id,)
+    selection_semantic = {
+        key: value
+        for key, value in selection_payload.items()
+        if key not in {"selection_id", "content_sha256"}
+    }
+    selection_id, selection_content = bounds._identity("yfm11bs-", selection_semantic)
+    selection_payload["selection_id"] = selection_id
+    selection_payload["content_sha256"] = selection_content
+    forged_selection = bounds.Gate1BaselineSelectionEvidence.model_validate(
+        selection_payload,
+        strict=True,
+    )
+    assert forged_selection.selected_policy_id == "fresh-candidate-position-1"
+    assert forged_selection != canonical
+
+    confirmation = next(
+        item
+        for item in official_context.bundle.population.streams
+        if item.corpus_id == "lectra-m3-m4"
+        and item.partition == "confirmation"
+        and item.stream_kind == "primary"
+    )
+    with pytest.raises(bounds.Gate1EvidenceError, match="canonical calibration selection"):
+        bounds.build_gate1_stream_cell(
+            official_context,
+            confirmation,
+            baseline_selection=forged_selection,
+        )
+
+
 @pytest.mark.parametrize("corpus_id", ("lectra-m3-m4", "loco-2dics"))
 def test_representative_official_stream_builds_a_complete_verified_cell(
     official_context,
