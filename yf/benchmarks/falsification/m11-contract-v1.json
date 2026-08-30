@@ -1,0 +1,302 @@
+{
+  "claim_ceiling": "modeled_semi_synthetic_hypothesis_disposition_only_may_abandon_or_authorize_a_bounded_real_history_operator_pilot_never_authorizes_productization_factory_representativeness_realized_roi_buyer_demand_adoption_integration_reliability_or_commercial_proof",
+  "content_sha256": "sha256:59d8b2d8677957ae24dff3e4b475fd279b907cef0918fbc833def4470e686952",
+  "contract_id": "yfm11c-59d8b2d8677957ae24dff3e4",
+  "corpora": [
+    {
+      "calibration_stream_ids": [
+        "yfm11st-e8dfc9b753a472795b2cc6ec",
+        "yfm11st-e5e42910e34a79dc8f889577",
+        "yfm11st-d2eff8e8413a1af9654397ef",
+        "yfm11st-4e0077e5a973c408580406bd",
+        "yfm11st-72c18d1bc05e0373625c71da",
+        "yfm11st-19a8bb71e127aac557dd21a8",
+        "yfm11st-26bb0902bae3f8d344995a73",
+        "yfm11st-67944956cf13f5a1e7db7949"
+      ],
+      "confirmation_stream_ids": [
+        "yfm11st-7ef682932c7b355cfbca624c",
+        "yfm11st-a566124845cf7c55927e45c2",
+        "yfm11st-f8222cb923abffeb849f1d0c",
+        "yfm11st-22309dbaecfa2bd299f716eb",
+        "yfm11st-8606838f6f1f5c540a7ab1dc",
+        "yfm11st-7885165ddee312f94c15b300",
+        "yfm11st-d180b8a7063cd7148ff17f3e",
+        "yfm11st-00f78ff52dca0b7c701bdc2a",
+        "yfm11st-edeb1dda11bd04a9bbe43f50",
+        "yfm11st-22eedf35e19388a6f08b046b",
+        "yfm11st-32878cf14272eac4fc0f637a",
+        "yfm11st-88b7909d74fd577b2dab66e7",
+        "yfm11st-e81c7bf1a1bcc6b9589a881d",
+        "yfm11st-e41e17ed902d6f2736bbfb83",
+        "yfm11st-28fa786c670e58bfd3c06bb9",
+        "yfm11st-c2bbe014867de91d0ac8d87e",
+        "yfm11st-d8d36f3f5eb0b6c6094fb8eb",
+        "yfm11st-3079063296fe6a471891b514",
+        "yfm11st-d7a33df3d80dfd3741552d49",
+        "yfm11st-60f1bb40497345b8dcdd7ec4"
+      ],
+      "events_per_stream": 24,
+      "exact_audit_episode_ids": [
+        "yfm11audit-d7f3cf3578e483abf53db19d",
+        "yfm11audit-978377752a9ffb80323040a1",
+        "yfm11audit-dd06bdef8f640f6ed60e9f1a",
+        "yfm11audit-a0e2ff0d555ac08484a89f69",
+        "yfm11audit-bf17d0ce94a20af136150293",
+        "yfm11audit-82f7eb122d8f6a4259b1a7e8"
+      ],
+      "hard_null_fixture_ids": [
+        "yfm11null-228d67ee7959fe4c89b45fda",
+        "yfm11null-7a5292cf3f662e3740397c34",
+        "yfm11null-bcebddfb9489f3a0589d7ff0"
+      ],
+      "shuffled_twin_stream_ids": [
+        "yfm11st-9c9eafd3103fe9ad5ad9695b",
+        "yfm11st-6c7e8701f491da3cc35cdb84",
+        "yfm11st-3b475e5a8dba9d975214de9d",
+        "yfm11st-151aa35c30af585dadf4ffbb",
+        "yfm11st-92876b1ad9d5bf15c1d1bd9e",
+        "yfm11st-75b33ef98bee5d4309054449",
+        "yfm11st-b37c4fa460a052c0bc18f8af",
+        "yfm11st-0ad58cb17d773d72b7a166cc",
+        "yfm11st-c286f50f073a9367b6ddb9d0",
+        "yfm11st-331998d3c8ecb44662a7dc49",
+        "yfm11st-116cc1f429b5758709605b04",
+        "yfm11st-1b9bd47d980afbc2dd3971ec",
+        "yfm11st-76743f08ddeb611d63e285d4",
+        "yfm11st-1da3bab4f68f5d8b2de8c39b",
+        "yfm11st-e4c647af05c83d2a11c700a7",
+        "yfm11st-fa7dc68c04c08e40555ed355",
+        "yfm11st-80addbaedf4f9be39f7a3a66",
+        "yfm11st-b611b452386d5040c45cd322",
+        "yfm11st-796fa56cafb1bd953ea2c746",
+        "yfm11st-e882990054253913473182b9"
+      ],
+      "source": {
+        "content_sha256": "sha256:d275a8c1b72919dc0ba065e38c8a5d9da549481448ddd20e88132bd34afe5a7e",
+        "coordinate_units": "unknown",
+        "corpus_id": "lectra-m3-m4",
+        "geometry_provenance": "source_observed",
+        "lineage_kind": "lectra",
+        "normalized_manifest_sha256": "sha256:273d9169d5cbd5258ef7dd2f42ea1541a7cd96a58cf09209df416a7fdb24af9d",
+        "schema_version": "yieldforge.m11-source-binding.v1",
+        "source_id": "yfm11s-d275a8c1b72919dc0ba065e3",
+        "source_uri": "repository:experiments/results/residual-geometry-input-yfgi-2fe5b848ea643d282c284f90.json",
+        "upstream_sha256": "sha256:55ae844109e4d335f28d3a88cd34781be0ec2ab9627146aa4baa827aa14f24e9"
+      }
+    },
+    {
+      "calibration_stream_ids": [
+        "yfm11st-ebad9ff3d0d90987e4bdc74d",
+        "yfm11st-9a5cdb860449c379ca1c8edc",
+        "yfm11st-c4a9ebb451ae2f6d7e322510",
+        "yfm11st-259f6bdf4c8e9dc68cb61974",
+        "yfm11st-883893d69375e72c49071e39",
+        "yfm11st-0159edad7434b668682fa820",
+        "yfm11st-34a853adc46a81cc37083c6f",
+        "yfm11st-53634f1de82b7b6f200df6fc"
+      ],
+      "confirmation_stream_ids": [
+        "yfm11st-2053d3ac67c1943fb1f33545",
+        "yfm11st-7e6e5c1e3ba3b87df832c3d6",
+        "yfm11st-d81955c4aed77039a47b8a33",
+        "yfm11st-baf924db417f78ad085bf439",
+        "yfm11st-11eaf9a6c75ce3d4a4be76b5",
+        "yfm11st-e543e696c1708280027c829e",
+        "yfm11st-3c842346d5a0c5d16af9c243",
+        "yfm11st-ef27ce99bc6705b862baf485",
+        "yfm11st-0a69a57f90f2cfd2b4487a3d",
+        "yfm11st-7ac226aa1dd88c6136b55767",
+        "yfm11st-1476857c35d2a14f9993bda0",
+        "yfm11st-58791b0319bba6bb86f40ef7",
+        "yfm11st-d58658a38096e5a407e29ce4",
+        "yfm11st-b3c99d842a0a9553e2e918f2",
+        "yfm11st-098505d91c91680c22a116ec",
+        "yfm11st-ff880cfc533cbe0a9fd1e77a",
+        "yfm11st-390a7f14809d17a435c5bbe6",
+        "yfm11st-47620818f76dd846c1f186f9",
+        "yfm11st-f2220e569d28a9ceb55cf92f",
+        "yfm11st-3a98a982b82490f44edbf00d"
+      ],
+      "events_per_stream": 24,
+      "exact_audit_episode_ids": [
+        "yfm11audit-7eb00e26d673bbf34fefd4bc",
+        "yfm11audit-3b709d42433ddf77d106cdea",
+        "yfm11audit-6b26a2989e021d9d09bd3b15",
+        "yfm11audit-de2bd7e9ef7284aea8e2c11d",
+        "yfm11audit-214a7ab412b40a91ecfabd0f",
+        "yfm11audit-075b2411fbc826cf5b75b0d9"
+      ],
+      "hard_null_fixture_ids": [
+        "yfm11null-67fb4f6ab79cc5a04c66afa0",
+        "yfm11null-c0470bc1fc4a10e8d1939bdf",
+        "yfm11null-f99063ec7b52169daf111697"
+      ],
+      "shuffled_twin_stream_ids": [
+        "yfm11st-8ee0aebae24f46458da999f9",
+        "yfm11st-b7c5d27ee185a65361f327cf",
+        "yfm11st-76ea6355136ee0f6e6e9986a",
+        "yfm11st-a9f185c876b6e15c4036d398",
+        "yfm11st-420f00b46ca8090be5136bd3",
+        "yfm11st-943c9f29b6b1e70545be8cb2",
+        "yfm11st-29953c1775670152071b4b9f",
+        "yfm11st-d3732ef52008a7cad5f25b15",
+        "yfm11st-7836c02a3d7461985fbe0bf7",
+        "yfm11st-f68cc995236eb3802964dd41",
+        "yfm11st-31cc84ab95a0f19ebb2de864",
+        "yfm11st-1ad1b21a968e96ee07c490cc",
+        "yfm11st-7526910d51d8526503a0c8e3",
+        "yfm11st-bf763fb0162b9ab0d08e80d7",
+        "yfm11st-dc9cd278c8736dd758b2af6f",
+        "yfm11st-00e7e05e367de8290e02d9e2",
+        "yfm11st-b3e85068d0a0ea0a88039918",
+        "yfm11st-6d8bb161e18d5426c9d92651",
+        "yfm11st-0b8cca9ca96c38ef99fcea8a",
+        "yfm11st-23056d475ed555daa2e428a1"
+      ],
+      "source": {
+        "content_sha256": "sha256:53c18fb58e8020f801d57bafe1b1bcb4a0eff63c16393542e400676974ca2cc9",
+        "coordinate_units": "unknown",
+        "corpus_id": "loco-2dics",
+        "geometry_provenance": "source_observed",
+        "lineage_kind": "loco_2dics",
+        "normalized_manifest_sha256": "sha256:9f5bbd1ee54e18e5fa1cb86f996223cb67c62b94ff6f1a007549008699bce8b9",
+        "schema_version": "yieldforge.m11-source-binding.v1",
+        "source_id": "yfm11s-53c18fb58e8020f801d57baf",
+        "source_uri": "https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip",
+        "upstream_sha256": "sha256:86980c3d4a33fb329bd9a4cdc9464a6de9e8450baf70b1b4365944ab471a5133"
+      }
+    }
+  ],
+  "field_provenance": [
+    {
+      "field_name": "candidate_references",
+      "provenance": "externally_anchored"
+    },
+    {
+      "field_name": "chronology",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "customer_identity",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "due_time",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "economics",
+      "provenance": "assumed"
+    },
+    {
+      "field_name": "fallback_layout",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "family_identity",
+      "provenance": "derived"
+    },
+    {
+      "field_name": "geometry_reference",
+      "provenance": "source_observed"
+    },
+    {
+      "field_name": "job_identity",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "known_at",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "material_identity",
+      "provenance": "assumed"
+    },
+    {
+      "field_name": "priority",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "quantity",
+      "provenance": "derived"
+    },
+    {
+      "field_name": "release_time",
+      "provenance": "generated"
+    },
+    {
+      "field_name": "source_demand",
+      "provenance": "source_observed"
+    },
+    {
+      "field_name": "stock_boundary",
+      "provenance": "generated"
+    }
+  ],
+  "maximum_repairs": 1,
+  "metrics": {
+    "aggregate_weighting": "equal_stream_within_corpus_equal_total_weight_per_corpus",
+    "ceiling_savings": "100 * (B_feasible_i - L_i) / B_feasible_i",
+    "ceiling_unknown_contribution": "100 * (K_feasible_i - L_i) / B_feasible_i",
+    "deployable_savings": "100 * (B_i - D_i) / B_i",
+    "deployable_unknown_contribution": "100 * (D0_i - D_i) / B_i",
+    "full_future_savings": "100 * (B_i - F_i) / B_i",
+    "net_cost": "purchases + storage + return_handling + retrieval_handling - scrap_proceeds - terminal_credit",
+    "unknown_future_contribution": "100 * (K_i - F_i) / B_i"
+  },
+  "parents": [
+    {
+      "binding_id": "yfm11p-39c2ecbe573e23ca5c075a68",
+      "content_sha256": "sha256:39c2ecbe573e23ca5c075a68b44d6ad6a50d232ab87002e4ec15a93d66fd7d8b",
+      "parent_content_sha256": "sha256:29b7efe8ac2a0a9995c4f907a56d7ce0cb9b61217b167f0737f6973c648b9a5f",
+      "parent_schema_version": "yieldforge.m0-contract.v1",
+      "parent_semantic_id": "yfm0-29b7efe8ac2a0a9995c4f907",
+      "raw_file_sha256": "sha256:8ad20ca2ffaa4873588a4829d0d4fccfc85269429c6e2363b59d29be150d1c99",
+      "repository_path": "experiments/m0-contract-v1.json",
+      "role": "m0_contract",
+      "schema_version": "yieldforge.m11-parent-binding.v1"
+    },
+    {
+      "binding_id": "yfm11p-96ce4dae73cc0a5a9189311f",
+      "content_sha256": "sha256:96ce4dae73cc0a5a9189311f5cbc889f758f6611410c004b2f607eb2d4655dbb",
+      "parent_content_sha256": "sha256:931b3a95fe84cd96cff799f2fd697c6a31393442cdd0da9903d1aa6eaf27385d",
+      "parent_schema_version": "yieldforge.m10-minimum-investment-verdict.v1",
+      "parent_semantic_id": "yfm10-931b3a95fe84cd96cff799f2",
+      "raw_file_sha256": "sha256:63f0bfccb6d74ff7d6f6dbdde324a1061e60319eac33da1895b3b52355ece847",
+      "repository_path": "experiments/results/m10-minimum-investment-verdict-yfm10-931b3a95fe84cd96cff799f2.json",
+      "role": "m10_verdict",
+      "schema_version": "yieldforge.m11-parent-binding.v1"
+    }
+  ],
+  "productization_authorized": false,
+  "schema_version": "yieldforge.m11-realistic-falsification-contract.v1",
+  "status": "frozen_before_confirmation",
+  "thresholds": {
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 0,
+    "confidence_level": 0.95,
+    "fixed_adverse_minimum_savings_percent": 1.5,
+    "fixed_adverse_minimum_unknown_percentage_points": 0.5,
+    "hard_null_accounting_tolerance": 1e-06,
+    "maximum_mean_immediate_sacrifice_percent": 0.5,
+    "maximum_top_10_concentration_percent": 25.0,
+    "minimum_deployable_capture_percent": 50.0,
+    "minimum_deployable_savings_percent": 1.5,
+    "minimum_deployable_unknown_percentage_points": 0.5,
+    "minimum_lower_mean_bound_percent_exclusive": 0.0,
+    "minimum_median_savings_percent_exclusive": 0.0,
+    "minimum_opportunity_frequency_percent": 20.0,
+    "minimum_ordinary_availability_percent": 60.0,
+    "minimum_positive_stream_fraction_percent_exclusive": 50.0,
+    "minimum_remnant_realization_percent": 60.0,
+    "no_signal_diagnosis_minimum_percent": 0.3,
+    "no_signal_invalid_above_percent": 0.5,
+    "runtime_ceiling_hours": 72,
+    "savings_green_minimum_percent": 2.5,
+    "savings_red_below_percent": 1.5,
+    "unknown_green_minimum_percentage_points": 1.5,
+    "unknown_red_below_percentage_points": 0.5,
+    "verification_reserve_hours": 12
+  }
+}
