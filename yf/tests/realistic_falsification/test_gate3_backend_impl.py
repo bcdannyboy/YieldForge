@@ -557,6 +557,99 @@ def test_release_calibration_stream_evidence_keeps_retry_handle_if_projection_po
     assert backend._projection_cache[projection_key] is projection
 
 
+def test_discard_incomplete_calibration_stream_evidence_removes_only_exact_projection() -> None:
+    backend = _backend()
+    target_projection_key = ("lectra-cal-0", "central", "remnant_first")
+    other_projection_keys = (
+        ("lectra-cal-0", "adverse", "remnant_first"),
+        ("lectra-cal-0", "central", "known_only_m9_two_ply_scrap"),
+        ("lectra-cal-1", "central", "remnant_first"),
+    )
+    target_projection = (object(),)
+    backend._projection_cache[target_projection_key] = target_projection  # type: ignore[assignment]
+    for key in other_projection_keys:
+        backend._projection_cache[key] = (object(),)  # type: ignore[assignment]
+    unrelated_calibration_key = (
+        "lectra-m3-m4",
+        "lectra-cal-1",
+        "remnant_first",
+    )
+    unrelated_calibration = object()
+    backend._calibration_cache[unrelated_calibration_key] = unrelated_calibration  # type: ignore[assignment]
+    backend._central_cache[("lectra-con-0", "sha256:freeze")] = object()  # type: ignore[assignment]
+    backend._validity_cache[("sha256:a", "sha256:b")] = object()  # type: ignore[assignment]
+    expected_other_projections = {
+        key: backend._projection_cache[key] for key in other_projection_keys
+    }
+
+    backend.discard_incomplete_calibration_stream_evidence(
+        corpus_id="lectra-m3-m4",
+        stream_id="lectra-cal-0",
+        policy_id="remnant_first",
+    )
+    backend.discard_incomplete_calibration_stream_evidence(
+        corpus_id="lectra-m3-m4",
+        stream_id="lectra-cal-0",
+        policy_id="remnant_first",
+    )
+
+    assert target_projection_key not in backend._projection_cache
+    assert backend._projection_cache == expected_other_projections
+    assert backend._calibration_cache == {
+        unrelated_calibration_key: unrelated_calibration,
+    }
+    assert ("lectra-con-0", "sha256:freeze") in backend._central_cache
+    assert ("sha256:a", "sha256:b") in backend._validity_cache
+
+
+def test_discard_incomplete_calibration_stream_evidence_refuses_completed_observation() -> None:
+    backend = _backend()
+    calibration_key = ("lectra-m3-m4", "lectra-cal-0", "remnant_first")
+    projection_key = ("lectra-cal-0", "central", "remnant_first")
+    completed_observation = object()
+    projection = (object(),)
+    backend._calibration_cache[calibration_key] = completed_observation  # type: ignore[assignment]
+    backend._projection_cache[projection_key] = projection  # type: ignore[assignment]
+
+    with pytest.raises(AdapterGate3BackendError, match="completed calibration observation"):
+        backend.discard_incomplete_calibration_stream_evidence(
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+        )
+
+    assert backend._calibration_cache[calibration_key] is completed_observation
+    assert backend._projection_cache[projection_key] is projection
+
+
+def test_discard_incomplete_calibration_stream_evidence_validates_exact_tuple_and_policy() -> None:
+    backend = _backend()
+    projection_key = ("lectra-cal-0", "central", "remnant_first")
+    projection = (object(),)
+    backend._projection_cache[projection_key] = projection  # type: ignore[assignment]
+
+    with pytest.raises(AdapterGate3BackendError, match="unregistered Gate 3 calibration"):
+        backend.discard_incomplete_calibration_stream_evidence(
+            corpus_id="loco-2dics",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+        )
+    with pytest.raises(AdapterGate3BackendError, match="unregistered Gate 3 baseline policy"):
+        backend.discard_incomplete_calibration_stream_evidence(
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="forged-policy",  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError):
+        backend.discard_incomplete_calibration_stream_evidence(
+            "lectra-m3-m4",  # type: ignore[misc]
+            "lectra-cal-0",
+            "remnant_first",
+        )
+
+    assert backend._projection_cache[projection_key] is projection
+
+
 def test_factory_consumes_authenticated_parents_and_reconstructs_context_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

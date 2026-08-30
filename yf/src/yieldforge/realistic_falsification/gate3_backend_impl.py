@@ -422,6 +422,27 @@ class AdapterGate3Backend:
         self._projection_cache.pop((stream_id, "central", policy), None)
         del self._calibration_cache[calibration_key]
 
+    def discard_incomplete_calibration_stream_evidence(
+        self,
+        *,
+        corpus_id: Gate3CorpusId,
+        stream_id: str,
+        policy_id: Gate3BaselinePolicyId,
+    ) -> None:
+        """Discard a partial calibration projection so execution can retry cleanly."""
+
+        self._require_stream(
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            partition="calibration",
+        )
+        policy = self._require_policy(policy_id)
+        if (corpus_id, stream_id, policy) in self._calibration_cache:
+            raise AdapterGate3BackendError(
+                "Gate 3 completed calibration observation cannot be discarded"
+            )
+        self._projection_cache.pop((stream_id, "central", policy), None)
+
     def execute_validity_controls(
         self,
         *,
