@@ -32,15 +32,16 @@
 
 - Create: `yf/src/yieldforge/realistic_falsification/sources.py`
 - Create: `yf/tests/realistic_falsification/test_sources.py`
-- Create: `yf/tests/realistic_falsification/fixtures/loco-mini.zip`
+- Create: `yf/datasets/catalogs/loco-2dics-v1/loco-catalog.json`
+- Create: `yf/datasets/catalogs/loco-2dics-v1/catalog-manifest.json`
 - Create: `yf/benchmarks/falsification/source-manifest-v1.json`
 
 **Steps:**
 
-1. Write failing tests for the official LOCo archive hash, strict parser behavior, canonical polygon normalization, Lectra M3/M4 parent verification, cross-corpus geometry de-duplication, and malformed input rejection.
+1. Write failing tests for the official LOCo archive hash, strict parser behavior using in-memory ZIP fixtures, canonical polygon normalization, Lectra M3/M4 parent verification, cross-corpus geometry de-duplication, and malformed input rejection.
 2. Implement a bounded ZIP reader with no path extraction, normalized geometry-family hashes, and explicit source/derived/generated provenance.
 3. Bind the official LOCo URL and SHA-256 `86980c3d4a33fb329bd9a4cdc9464a6de9e8450baf70b1b4365944ab471a5133` without committing the raw upstream archive. Bind the committed Lectra M3/M4 artifact identities.
-4. Generate and validate a small source manifest; preserve source coordinate units as unknown where they are not declared.
+4. Generate and validate a compact normalized LOCo catalog plus a small two-corpus source manifest; preserve source coordinate units as unknown where they are not declared. The upstream ZIP remains an importer input and is not committed.
 5. Run focused tests and commit.
 
 ## Task 3: Generate and byte-regenerate the frozen semi-synthetic pack
