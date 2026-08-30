@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1505,6 +1506,7 @@ if mode == "argv_env":
                 "GIT_REPLACE_REF_BASE",
                 "GIT_COMMON_DIR",
                 "GIT_SHALLOW_FILE",
+                "GIT_GRAFT_FILE",
             )
         }},
     }}))
@@ -1565,8 +1567,85 @@ def test_bounded_git_uses_argument_vector_and_disables_replace_namespaces(
         "GIT_REPLACE_REF_BASE": None,
         "GIT_COMMON_DIR": None,
         "GIT_SHALLOW_FILE": None,
+        "GIT_GRAFT_FILE": os.devnull,
     }
     assert not marker.exists()
+
+
+def test_bounded_git_ignores_repository_local_info_grafts(tmp_path: Path) -> None:
+    from yieldforge.realistic_falsification import economic_resolution as resolution
+
+    repository = tmp_path / "repository"
+    subprocess.run(
+        ("git", "init", "--quiet", str(repository)),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(repository), "config", "user.name", "YieldForge Test"),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(repository), "config", "user.email", "test@yieldforge.invalid"),
+        check=True,
+        capture_output=True,
+    )
+    tree = (
+        subprocess.run(
+            ("git", "-C", str(repository), "mktree"),
+            input=b"",
+            check=True,
+            capture_output=True,
+        )
+        .stdout.strip()
+        .decode("ascii")
+    )
+
+    def root_commit(message: bytes) -> str:
+        return (
+            subprocess.run(
+                ("git", "-C", str(repository), "commit-tree", tree),
+                input=message,
+                check=True,
+                capture_output=True,
+            )
+            .stdout.strip()
+            .decode("ascii")
+        )
+
+    unrelated_parent = root_commit(b"unrelated parent\n")
+    unrelated_child = root_commit(b"unrelated child\n")
+    info_directory = repository / ".git/info"
+    info_directory.mkdir(exist_ok=True)
+    (info_directory / "grafts").write_text(f"{unrelated_child} {unrelated_parent}\n")
+
+    uncontrolled_environment = os.environ.copy()
+    uncontrolled_environment.pop("GIT_GRAFT_FILE", None)
+    uncontrolled_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    forged = subprocess.run(
+        (
+            "git",
+            "--no-replace-objects",
+            "-C",
+            str(repository),
+            "merge-base",
+            "--is-ancestor",
+            unrelated_parent,
+            unrelated_child,
+        ),
+        check=False,
+        capture_output=True,
+        env=uncontrolled_environment,
+    )
+    assert forged.returncode == 0
+
+    bounded = resolution._run_git_bounded(
+        repository,
+        ("merge-base", "--is-ancestor", unrelated_parent, unrelated_child),
+        max_stdout_bytes=0,
+    )
+    assert bounded.returncode == 1
 
 
 @pytest.mark.parametrize(

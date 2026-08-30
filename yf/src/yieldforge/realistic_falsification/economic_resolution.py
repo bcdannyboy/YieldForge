@@ -248,6 +248,7 @@ def _run_git_bounded(
             environment.pop(variable, None)
         environment.update(
             {
+                "GIT_GRAFT_FILE": os.devnull,
                 "GIT_NO_REPLACE_OBJECTS": "1",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_PAGER": "cat",
