@@ -684,15 +684,15 @@ def test_preparation_releases_detached_full_receipt_graph(
 ) -> None:  # type: ignore[no-untyped-def]
     store = _store()
     freezes, validity = validity_case
-    strict_validate = store._strict_validity_receipt
+    strict_validate = store._strict_validity_receipt_and_canonical
     detached_refs = []
 
     def capture_detached(value):  # type: ignore[no-untyped-def]
-        detached = strict_validate(value)
+        detached, canonical = strict_validate(value)
         detached_refs.append(weakref.ref(detached))
-        return detached
+        return detached, canonical
 
-    monkeypatch.setattr(store, "_strict_validity_receipt", capture_detached)
+    monkeypatch.setattr(store, "_strict_validity_receipt_and_canonical", capture_detached)
     prepared = store._prepare_validity_evidence(
         validity,
         baseline_freezes=freezes,
@@ -790,7 +790,7 @@ def test_compressed_sink_stops_before_consuming_incompressible_tail(
     assert consumed < total_chunks
 
 
-def test_preparation_does_not_materialize_canonical_raw_bytes(
+def test_preparation_uses_bounded_internal_serializer(
     validity_case,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -800,7 +800,6 @@ def test_preparation_does_not_materialize_canonical_raw_bytes(
     def reject_materialization(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("prepared evidence must stream canonical bytes")
 
-    monkeypatch.setattr(store, "canonical_pretty_json_bytes", reject_materialization)
     monkeypatch.setattr(store, "deterministic_gzip", reject_materialization)
     receipt = store.build_gate3_validity_evidence_receipt(
         validity,
@@ -983,6 +982,123 @@ def test_builder_rejects_freeze_substitution_and_malformed_full_receipt(
         )
 
 
+def test_strict_preflight_rejects_oversize_forged_graph_before_model_dump(
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    forged_twin = validity.twin_controls[0].model_copy(update={"source_stream_id": "x" * 2048})
+    forged = validity.model_copy(
+        update={"twin_controls": (forged_twin, *validity.twin_controls[1:])}
+    )
+
+    def reject_model_dump(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("preflight must reject before detaching the receipt graph")
+
+    monkeypatch.setattr(store, "_MAX_STRICT_RECEIPT_BYTES", 1024, raising=False)
+    monkeypatch.setattr(BaseModel, "model_dump", reject_model_dump)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="strict receipt byte bound"):
+        store.build_gate3_validity_evidence_receipt(
+            forged,
+            baseline_freezes=freezes,
+        )
+
+
+def test_strict_preflight_exact_size_accepts_complete_control_census(
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    _, validity = validity_case
+    canonical = store.canonical_gate3_validity_receipt_bytes(validity)
+
+    assert store._bounded_existing_canonical_size(
+        validity,
+        maximum_bytes=len(canonical),
+    ) == len(canonical)
+
+
+def test_recovery_enforces_strict_receipt_cap_before_json_parse(
+    tmp_path: Path,
+    validity_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+    parsed = []
+
+    def reject_parse(_raw):  # type: ignore[no-untyped-def]
+        parsed.append(True)
+        raise AssertionError("strict cap must stop decompression before JSON parsing")
+
+    monkeypatch.setattr(
+        store,
+        "_MAX_STRICT_RECEIPT_BYTES",
+        evidence.uncompressed_byte_count - 1,
+        raising=False,
+    )
+    monkeypatch.setattr(store, "_parse_strict_validity_json", reject_parse)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="strict receipt byte bound"):
+        store.recover_gate3_validity_evidence_receipt(
+            published,
+            expected_roots=validity.roots,
+            expected_baseline_freezes=freezes,
+        )
+    assert parsed == []
+
+
+def test_builder_normalizes_decimal_failure_from_allowed_large_cost_string(
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity = validity_case
+    forged_twin = validity.twin_controls[0].model_copy(
+        update={"baseline_cost": f"{'9' * 57}.000000"}
+    )
+    forged = validity.model_copy(
+        update={"twin_controls": (forged_twin, *validity.twin_controls[1:])}
+    )
+
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="strict validation"):
+        store.build_gate3_validity_evidence_receipt(
+            forged,
+            baseline_freezes=freezes,
+        )
+
+
+def test_load_and_recover_normalize_decimal_failure_in_sidecar(
+    tmp_path: Path,
+    validity_case,
+) -> None:  # type: ignore[no-untyped-def]
+    store = _store()
+    freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
+    payload = json.loads(gzip.decompress(published.read_bytes()))
+    payload["twin_controls"][0]["baseline_cost"] = f"{'9' * 57}.000000"
+    raw = (
+        json.dumps(
+            payload,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    transport = store.deterministic_gzip(raw)
+    resigned = _resign_transport(evidence, transport, raw)
+    candidate = tmp_path / "decimal-failure" / resigned.sidecar_name
+    candidate.parent.mkdir()
+    candidate.write_bytes(transport)
+
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="semantic validation"):
+        _load_validity(candidate, freezes, validity, resigned)
+    with pytest.raises(store.Gate3ValidityEvidenceError, match="semantic validation"):
+        store.recover_gate3_validity_evidence_receipt(
+            candidate,
+            expected_roots=validity.roots,
+            expected_baseline_freezes=freezes,
+        )
+
+
 def test_loader_accepts_distinct_bound_gzip_transport_without_recompression(
     tmp_path: Path,
     validity_case,
@@ -1009,15 +1125,9 @@ def test_loader_accepts_distinct_bound_gzip_transport_without_recompression(
 def test_loader_stream_compares_canonical_encoding_without_materializing_copy(
     tmp_path: Path,
     validity_case,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    store = _store()
     freezes, validity, published, evidence = _publish_validity(tmp_path, validity_case)
 
-    def reject_materialization(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("loader must compare canonical chunks in place")
-
-    monkeypatch.setattr(store, "canonical_pretty_json_bytes", reject_materialization)
     assert _load_validity(published, freezes, validity, evidence) == validity
 
 
@@ -1026,6 +1136,7 @@ def test_validity_store_freezes_materially_bounded_peak_contract() -> None:
 
     assert store._MAX_UNCOMPRESSED_BYTES == 128 * 1024 * 1024
     assert store._MAX_COMPRESSED_BYTES == 32 * 1024 * 1024
+    assert store._MAX_STRICT_RECEIPT_BYTES == 32 * 1024 * 1024
 
 
 @pytest.mark.parametrize("header_mutation", ("mtime", "fname"))

@@ -11,7 +11,7 @@ import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, localcontext
 from enum import Enum
 from gzip import GzipFile
 from io import BytesIO
@@ -32,7 +32,6 @@ from pydantic_core import to_json
 
 from yieldforge.experiments.contracts import (
     FrozenExperimentModel,
-    canonical_pretty_json_bytes,
     semantic_sha256,
 )
 from yieldforge.oracle.artifact_publisher import (
@@ -52,6 +51,7 @@ from yieldforge.realistic_falsification.confirmation import (
 _COMPRESSION = "gzip-level-6-mtime-0-flags-0"
 _MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+_MAX_STRICT_RECEIPT_BYTES = 32 * 1024 * 1024
 _COST_PATTERN = r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _SIGNED_COST_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _METRIC_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{12}$"
@@ -124,7 +124,10 @@ class Gate3ValidityHardNullRow(FrozenExperimentModel):
 
     @model_validator(mode="after")
     def require_frozen_tolerance_decision(self) -> Self:
-        expected = Decimal(self.maximum_absolute_cost_difference) <= Decimal("0.000001")
+        try:
+            expected = Decimal(self.maximum_absolute_cost_difference) <= Decimal("0.000001")
+        except DecimalException as error:
+            raise ValueError("Gate 3 compact hard-null cost is not finite decimal") from error
         if self.passes is not expected:
             raise ValueError("Gate 3 compact hard-null tolerance decision differs")
         return self
@@ -147,16 +150,19 @@ class Gate3ValidityTwinControlRow(FrozenExperimentModel):
 
     @model_validator(mode="after")
     def require_recomputed_metric(self) -> Self:
-        baseline = Decimal(self.baseline_cost)
-        if baseline <= 0:
-            raise ValueError("Gate 3 compact twin requires a positive baseline")
-        with localcontext() as context:
-            context.prec = 50
-            expected = Decimal(100) * (baseline - Decimal(self.full_future_cost)) / baseline
-        formatted = format(
-            expected.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_EVEN),
-            ".12f",
-        )
+        try:
+            baseline = Decimal(self.baseline_cost)
+            if baseline <= 0:
+                raise ValueError("Gate 3 compact twin requires a positive baseline")
+            with localcontext() as context:
+                context.prec = 50
+                expected = Decimal(100) * (baseline - Decimal(self.full_future_cost)) / baseline
+            formatted = format(
+                expected.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_EVEN),
+                ".12f",
+            )
+        except DecimalException as error:
+            raise ValueError("Gate 3 compact twin costs exceed decimal bounds") from error
         if self.no_signal_savings_percent != formatted:
             raise ValueError("Gate 3 compact twin savings does not reconcile")
         return self
@@ -324,16 +330,24 @@ class Gate3ValidityEvidenceReceipt(FrozenExperimentModel):
             self.no_signal_summaries,
             strict=True,
         ):
-            with localcontext() as context:
-                context.prec = 50
-                mean = sum(
-                    (Decimal(item.no_signal_savings_percent) for item in rows),
-                    Decimal(0),
-                ) / Decimal(20)
-            formatted = format(
-                mean.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_EVEN),
-                ".12f",
-            )
+            try:
+                with localcontext() as context:
+                    context.prec = 50
+                    mean = sum(
+                        (Decimal(item.no_signal_savings_percent) for item in rows),
+                        Decimal(0),
+                    ) / Decimal(20)
+                formatted = format(
+                    mean.quantize(
+                        Decimal("0.000000000001"),
+                        rounding=ROUND_HALF_EVEN,
+                    ),
+                    ".12f",
+                )
+            except DecimalException as error:
+                raise ValueError(
+                    "Gate 3 compact no-signal metrics exceed decimal bounds"
+                ) from error
             classification = (
                 "invalid"
                 if mean > Decimal("0.5")
@@ -415,6 +429,155 @@ def deterministic_gzip(data: bytes) -> bytes:
     ) as archive:
         archive.write(data)
     return output.getvalue()
+
+
+class _CanonicalSizeCounter:
+    """Count canonical bytes and fail before any receipt-sized allocation."""
+
+    __slots__ = ("maximum_bytes", "total")
+
+    def __init__(self, maximum_bytes: int) -> None:
+        self.maximum_bytes = maximum_bytes
+        self.total = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.maximum_bytes - self.total
+
+    def add(self, byte_count: int) -> None:
+        if byte_count < 0 or byte_count > self.remaining:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity receipt exceeds the strict receipt byte bound"
+            )
+        self.total += byte_count
+
+
+def _count_json_string(counter: _CanonicalSizeCounter, value: str) -> None:
+    counter.add(2)
+    if len(value) > counter.remaining:
+        counter.add(len(value))
+    encoded_size = 0
+    for character in value:
+        codepoint = ord(character)
+        if character in ('"', "\\", "\b", "\f", "\n", "\r", "\t"):
+            encoded_size += 2
+        elif codepoint < 0x20 or codepoint <= 0xFFFF and codepoint > 0x7F:
+            encoded_size += 6
+        elif codepoint > 0xFFFF:
+            encoded_size += 12
+        else:
+            encoded_size += 1
+        if encoded_size > counter.remaining:
+            counter.add(encoded_size)
+    counter.add(encoded_size)
+
+
+def _count_canonical_json_value(
+    counter: _CanonicalSizeCounter,
+    value: object,
+    *,
+    depth: int,
+) -> None:
+    if isinstance(value, BaseModel):
+        fields = type(value).model_fields
+        if not fields:
+            counter.add(2)
+            return
+        counter.add(2)
+        for index, field_name in enumerate(fields):
+            counter.add(2 * (depth + 1))
+            _count_json_string(counter, field_name)
+            counter.add(2)
+            _count_canonical_json_value(
+                counter,
+                getattr(value, field_name),
+                depth=depth + 1,
+            )
+            counter.add(2 if index + 1 < len(fields) else 1)
+        counter.add(2 * depth + 1)
+        return
+    if isinstance(value, dict):
+        if any(type(key) is not str for key in value):
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity canonical JSON requires string object keys"
+            )
+        if not value:
+            counter.add(2)
+            return
+        counter.add(2)
+        for index, (key, item) in enumerate(value.items()):
+            counter.add(2 * (depth + 1))
+            _count_json_string(counter, key)
+            counter.add(2)
+            _count_canonical_json_value(counter, item, depth=depth + 1)
+            counter.add(2 if index + 1 < len(value) else 1)
+        counter.add(2 * depth + 1)
+        return
+    if isinstance(value, (list, tuple)):
+        if not value:
+            counter.add(2)
+            return
+        counter.add(2)
+        for index, item in enumerate(value):
+            counter.add(2 * (depth + 1))
+            _count_canonical_json_value(counter, item, depth=depth + 1)
+            counter.add(2 if index + 1 < len(value) else 1)
+        counter.add(2 * depth + 1)
+        return
+    if isinstance(value, Enum):
+        _count_canonical_json_value(counter, value.value, depth=depth)
+        return
+    if type(value) in (date, datetime, time, timedelta):
+        counter.add(len(to_json(value)))
+        return
+    if type(value) is str:
+        _count_json_string(counter, value)
+        return
+    if value is None:
+        counter.add(4)
+        return
+    if type(value) is bool:
+        counter.add(4 if value else 5)
+        return
+    if type(value) is int:
+        decimal_digit_lower_bound = max(1, (value.bit_length() - 1) * 30103 // 100000 + 1)
+        if value < 0:
+            decimal_digit_lower_bound += 1
+        if decimal_digit_lower_bound > counter.remaining:
+            counter.add(decimal_digit_lower_bound)
+        try:
+            counter.add(len(str(value)))
+        except ValueError as error:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity integer exceeds the strict receipt byte bound"
+            ) from error
+        return
+    if type(value) is float:
+        try:
+            counter.add(len(json.dumps(value, allow_nan=False)))
+        except (TypeError, ValueError) as error:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity receipt contains a non-canonical JSON scalar"
+            ) from error
+        return
+    raise Gate3ValidityEvidenceError(
+        f"Gate 3 validity receipt contains unsupported JSON type {type(value).__name__}"
+    )
+
+
+def _bounded_existing_canonical_size(
+    value: Gate3ValidityReceipt,
+    *,
+    maximum_bytes: int,
+) -> int:
+    """Return exact canonical size without constructing serialized receipt data."""
+
+    if type(maximum_bytes) is not int or maximum_bytes <= 0:
+        raise Gate3ValidityEvidenceError("Gate 3 validity strict receipt bound is malformed")
+    counter = _CanonicalSizeCounter(maximum_bytes)
+    _count_canonical_json_value(counter, value, depth=0)
+    counter.add(1)
+    return counter.total
 
 
 def _iter_pretty_json_bytes(value: object, *, depth: int) -> Iterator[bytes]:
@@ -533,16 +696,69 @@ def _stream_canonical_gzip(
     return compressed, uncompressed_byte_count
 
 
-def _strict_validity_receipt(receipt: Gate3ValidityReceipt) -> Gate3ValidityReceipt:
-    try:
-        return Gate3ValidityReceipt.model_validate(
-            receipt.model_dump(mode="python", round_trip=True),
-            strict=True,
+def _compress_bounded_canonical_bytes(canonical: bytearray) -> bytes:
+    if len(canonical) > _MAX_UNCOMPRESSED_BYTES:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity sidecar exceeds the uncompressed byte bound"
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    output = _BoundedCompressedSink(_MAX_COMPRESSED_BYTES)
+    with GzipFile(
+        filename="",
+        mode="wb",
+        compresslevel=6,
+        fileobj=output,
+        mtime=0,
+    ) as archive:
+        view = memoryview(canonical)
+        for offset in range(0, len(view), 1024 * 1024):
+            archive.write(view[offset : offset + 1024 * 1024])
+    compressed = output.getvalue()
+    _validate_gzip_header(compressed)
+    return compressed
+
+
+def _strict_validity_receipt_and_canonical(
+    receipt: Gate3ValidityReceipt,
+) -> tuple[Gate3ValidityReceipt, bytearray]:
+    try:
+        expected_size = _bounded_existing_canonical_size(
+            receipt,
+            maximum_bytes=_MAX_STRICT_RECEIPT_BYTES,
+        )
+        canonical = bytearray()
+        for chunk in _iter_canonical_json_bytes(receipt):
+            if len(chunk) > _MAX_UNCOMPRESSED_BYTES - len(canonical):
+                raise Gate3ValidityEvidenceError(
+                    "Gate 3 validity sidecar exceeds the uncompressed byte bound"
+                )
+            if len(chunk) > expected_size - len(canonical):
+                raise Gate3ValidityEvidenceError(
+                    "Gate 3 validity receipt changed during strict serialization"
+                )
+            canonical.extend(chunk)
+        if len(canonical) != expected_size:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity receipt changed during strict serialization"
+            )
+        strict = Gate3ValidityReceipt.model_validate_json(canonical, strict=True)
+        return strict, canonical
+    except Gate3ValidityEvidenceError:
+        raise
+    except (
+        AttributeError,
+        DecimalException,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity receipt failed strict validation"
         ) from error
+
+
+def _strict_validity_receipt(receipt: Gate3ValidityReceipt) -> Gate3ValidityReceipt:
+    strict, _ = _strict_validity_receipt_and_canonical(receipt)
+    return strict
 
 
 def _strict_baseline_freezes(
@@ -563,7 +779,13 @@ def _strict_baseline_freezes(
             )
             for item in baseline_freezes
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity baseline freezes failed strict validation"
         ) from error
@@ -664,7 +886,8 @@ def _validate_receipt_freeze_bindings(
 def canonical_gate3_validity_receipt_bytes(receipt: Gate3ValidityReceipt) -> bytes:
     """Strictly detach and canonically serialize one complete validity receipt."""
 
-    return canonical_pretty_json_bytes(_strict_validity_receipt(receipt))
+    _, canonical = _strict_validity_receipt_and_canonical(receipt)
+    return bytes(canonical)
 
 
 @dataclass(frozen=True, slots=True)
@@ -751,7 +974,13 @@ def _build_evidence_receipt(
         )
     except Gate3ValidityEvidenceError:
         raise
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3ValidityEvidenceError(
             "Gate 3 compact validity receipt failed validation"
         ) from error
@@ -765,10 +994,11 @@ def _prepare_validity_evidence(
         Gate3BaselineCalibrationFreeze,
     ],
 ) -> _PreparedValidityEvidence:
-    strict = _strict_validity_receipt(validity_receipt)
+    strict, canonical = _strict_validity_receipt_and_canonical(validity_receipt)
     freezes = _strict_baseline_freezes(baseline_freezes, expected_roots=strict.roots)
     _validate_receipt_freeze_bindings(strict, freezes)
-    compressed, uncompressed_byte_count = _stream_canonical_gzip(strict)
+    compressed = _compress_bounded_canonical_bytes(canonical)
+    uncompressed_byte_count = len(canonical)
     evidence_receipt = _build_evidence_receipt(
         strict,
         freezes,
@@ -805,7 +1035,13 @@ def _strict_evidence_receipt(
             receipt.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3ValidityEvidenceError(
             "Gate 3 validity evidence receipt failed strict validation"
         ) from error
@@ -911,23 +1147,31 @@ def _validate_gzip_header(data: bytes) -> None:
 
 
 def _bounded_gzip_decompress(data: bytes) -> bytearray:
+    strict_bound_active = _MAX_STRICT_RECEIPT_BYTES <= _MAX_UNCOMPRESSED_BYTES
+    maximum_bytes = min(_MAX_STRICT_RECEIPT_BYTES, _MAX_UNCOMPRESSED_BYTES)
+
+    def raise_bound_error() -> None:
+        if strict_bound_active:
+            raise Gate3ValidityEvidenceError(
+                "Gate 3 validity receipt exceeds the strict receipt byte bound"
+            )
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity sidecar exceeds the uncompressed byte bound"
+        )
+
     try:
         with GzipFile(fileobj=BytesIO(data), mode="rb") as archive:
             raw = bytearray()
             while True:
-                remaining = _MAX_UNCOMPRESSED_BYTES + 1 - len(raw)
+                remaining = maximum_bytes + 1 - len(raw)
                 if remaining <= 0:
-                    raise Gate3ValidityEvidenceError(
-                        "Gate 3 validity sidecar exceeds the uncompressed byte bound"
-                    )
+                    raise_bound_error()
                 chunk = archive.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
                 raw.extend(chunk)
-                if len(raw) > _MAX_UNCOMPRESSED_BYTES:
-                    raise Gate3ValidityEvidenceError(
-                        "Gate 3 validity sidecar exceeds the uncompressed byte bound"
-                    )
+                if len(raw) > maximum_bytes:
+                    raise_bound_error()
     except Gate3ValidityEvidenceError:
         raise
     except (EOFError, OSError, zlib.error) as error:
@@ -949,6 +1193,10 @@ def _reject_nonfinite_json(value: str):
 
 
 def _parse_strict_validity_json(raw: bytes | bytearray) -> Gate3ValidityReceipt:
+    if len(raw) > _MAX_STRICT_RECEIPT_BYTES:
+        raise Gate3ValidityEvidenceError(
+            "Gate 3 validity receipt exceeds the strict receipt byte bound"
+        )
     try:
         json.loads(
             raw,
@@ -960,6 +1208,7 @@ def _parse_strict_validity_json(raw: bytes | bytearray) -> Gate3ValidityReceipt:
         raise
     except (
         UnicodeDecodeError,
+        DecimalException,
         json.JSONDecodeError,
         TypeError,
         ValidationError,
@@ -1034,7 +1283,13 @@ def _strict_compact_tuple(values, model, expected_length: int, label: str):  # t
             )
             for item in values
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3ValidityEvidenceError(
             f"Gate 3 validity expected {label} are malformed"
         ) from error
@@ -1046,7 +1301,13 @@ def _strict_expected_roots(expected_roots: Gate3RootBinding) -> Gate3RootBinding
             expected_roots.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3ValidityEvidenceError("Gate 3 validity expected roots are malformed") from error
 
 
