@@ -1,16 +1,43 @@
 # Current Work
 
-## Active milestone
+## Roadmap status
+
+[[M10 - Experiment and verdict]] is complete. There is no active product-development milestone in
+the current YieldForge roadmap.
+
+## Current decision
+
+Do not productize YieldForge and stop additional virtual-oracle investment. The final minimum
+investment verdict is `yfm10-931b3a95fe84cd96cff799f2`; its formal numeric economic band remains
+`not_computed`.
+
+## Optional next investment
+
+Acquire real manufacturer history only if there is appetite for a separate evidence stage and all
+four exact reopen conditions exist:
+
+1. permissioned real manufacturer chronology and remnant history;
+2. observed material identities and economically meaningful costs;
+3. an independent second geometry corpus; and
+4. a buyer- or operator-owned bounded decision and cost.
+
+Those conditions authorize a new frozen contract, not productization.
+
+## Superseded M8 objective — audit history
+
+Retained for audit only; this work is no longer authorized by the current roadmap decision.
+
+### Former active milestone
 
 [[M8 - Rollout oracle]]
 
-## Current objective
+### Former objective
 
 Implement the next M8 algorithmic boundary after bounded action/layout reuse preserved correctness
 but failed the Phase-B performance gate. Preserve complete action parity, baseline information
 masking, exact accounting, independent proof checking, and the sealed evaluation boundary.
 
-## Next step
+### Former next step
 
 Build the private C0 frontier-columnar influence kernel for the hard arm's 459 branches and
 13-member Pareto frontier, avoiding the current 459-by-459 expansion while reconstructing the same
@@ -155,6 +182,13 @@ Phase C. The full two-probe rerun and six-cell calibration remain unauthorized. 
   `156.515162` repeat, `276.558218` checker), already `19.570205x` the full M8 budget. Correctness
   passes; performance is a no-go. This is not a full two-probe rerun, no new held-out projection is
   claimed, six-cell calibration remains unauthorized, and evaluation remains unopened.
+- M9 repair `yfm9r-db0829451b1b0393f2d22559` selected an exact-optimal first action in all 45
+  registered finite cases under both terminal objectives. This is a bounded decision pass, not
+  universal search optimality or a savings result.
+- M10 result `yfm10-931b3a95fe84cd96cff799f2` independently binds the unchanged M0/M6/M7/M8/M9
+  parents and closes the current roadmap: acquire real manufacturer history if reopening evidence
+  work, do not productize, and stop additional virtual-oracle investment. Its formal economic band
+  is `not_computed`.
 
 ## Experiment status
 
@@ -178,12 +212,12 @@ future source-shape roles, and 1,331,906 eligible generated-order pairs. The can
 from task `2531` fits a task `147` remnant, creates one reconciled child remnant, and avoids one
 full-sheet opening in the declared one-order toy state.
 
-This proves exact remnant reuse is possible in the modeled M4 one-part geometry. M7 has now passed:
-its calibrated and frozen baseline reproduced all 36 evaluation streams and selected 38 remnant
+This proves exact remnant reuse is possible in the modeled M4 one-part geometry. M7 has passed: its
+calibrated and frozen baseline reproduced all 36 evaluation streams and selected 38 remnant
 retrievals. M5 proves deterministic mechanism replay, and M6 proves controlled temporal
-construction, partition integrity, regeneration, and lossless lowering. No observed chronology,
-future-aware policy, oracle comparison, paired advantage estimate, general reuse-frequency estimate,
-economic verdict, solver-optimality result, physical-recovery result, or validated savings claim
-exists.
+construction, partition integrity, regeneration, and lossless lowering. A roadmap investment
+verdict now exists, but no formal numeric M0 band, observed factory chronology, paired oracle-savings
+estimate, general reuse-frequency estimate, physical validation, adoption evidence, or commercial
+proof exists.
 
 See [[Research Workbench]] for local setup, runtime storage, and verification commands.

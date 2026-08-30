@@ -21,11 +21,12 @@ The milestones answer a chain of increasingly expensive questions:
 8. [[M7 - Strong baseline]] — build an opponent worth beating.
 9. [[M8 - Rollout oracle]] — measure the value of knowing the future.
 10. [[M9 - Search validation]] — determine whether the oracle is trustworthy.
-11. [[M10 - Experiment and verdict]] — run the evidence program and decide what comes next.
+11. [[M10 - Experiment and verdict]] — issue the final evidence-ceiling investment decision.
 
 ## Planning rule
 
-Only the active milestone receives a detailed implementation plan. Later milestone notes explain their meaning and acceptance boundary, but we will plan them when we reach them.
+M10 completes this roadmap. Any further stage requires all documented M10 reopen conditions and a
+separately frozen evidence contract; it is not an automatic continuation of the current program.
 
 M0 passed with a frozen executable economic constitution and a complete 51-task calibration. M2
 also passed: the registered 203-task confirmation completed all 812 cells with valid archives and
@@ -138,4 +139,12 @@ reproducibility SHA is
 M9 therefore passes only at the registered finite decision level. This is not universal search
 optimality, exact-value calibration, M6 evaluation, physical validation, savings evidence, or
 commercial proof. M8's formal performance gate remains unresolved, no evaluation was opened, and
-M10 remains a separate decision rather than an automatic next authorization.
+M10 was resolved separately rather than being automatically authorized by M9.
+
+M10 is now complete at the minimum honest decision boundary. Immutable result
+`yfm10-931b3a95fe84cd96cff799f2` has semantic content SHA
+`sha256:931b3a95fe84cd96cff799f2fd697c6a31393442cdd0da9903d1aa6eaf27385d`. It says to acquire real
+manufacturer history if a new evidence stage is desired, to not productize YieldForge now, and to
+stop further virtual-oracle investment. Its formal economic band is `not_computed`; it is not a
+numeric red/yellow/green M0 result. M8 remains a formal performance hold with evaluation unopened,
+and M9 remains only a bounded finite-case decision pass.
