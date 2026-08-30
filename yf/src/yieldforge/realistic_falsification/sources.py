@@ -9,10 +9,10 @@ import math
 import os
 import re
 import stat
+import unicodedata
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Self
@@ -23,10 +23,8 @@ from shapely.affinity import translate
 from shapely.geometry.base import BaseGeometry
 
 from yieldforge.experiments.contracts import (
-    ExperimentContractError,
     FrozenExperimentModel,
     canonical_pretty_json_bytes,
-    load_frozen_json,
     semantic_sha256,
 )
 from yieldforge.experiments.remnant_reuse import load_m4_input_pack
@@ -142,6 +140,7 @@ class LOCoItem(FrozenExperimentModel):
     source_demand: StrictInt = Field(gt=0)
     source_vertex_count: StrictInt = Field(ge=3)
     source_translation: tuple[StrictStr, StrictStr]
+    exact_normalized_vertices: tuple[tuple[StrictStr, StrictStr], ...]
     geometry: CanonicalPolygon
     translation_normalized_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
     quarter_turn_family_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
@@ -163,11 +162,28 @@ class LOCoItem(FrozenExperimentModel):
                 raise ValueError("LOCo source translation must use canonical rational syntax")
         if self.translation_normalized_sha256 != self.geometry.polygon_sha256:
             raise ValueError("LOCo translation-normalized hash does not match geometry")
+        exact_vertices = _exact_vertices_from_record(self.exact_normalized_vertices)
+        if len(exact_vertices) != self.source_vertex_count:
+            raise ValueError("LOCo exact vertex count does not match its source record")
+        if (
+            min(point[0] for point in exact_vertices) != 0
+            or min(point[1] for point in exact_vertices) != 0
+        ):
+            raise ValueError("LOCo exact vertices must be translated to the local origin")
+        exact_polygon = Polygon(tuple((float(x), float(y)) for x, y in exact_vertices))
+        try:
+            exact_geometry = canonical_polygon_record(exact_polygon)
+        except ReuseGeometryError as error:
+            raise ValueError("LOCo exact vertices do not encode valid geometry") from error
+        if exact_geometry != self.geometry:
+            raise ValueError("LOCo exact vertices do not match canonical geometry")
         polygon = polygon_from_record(self.geometry)
         if self.quarter_turn_family_sha256 != quarter_turn_family_sha256(polygon):
             raise ValueError("LOCo quarter-turn family hash does not match geometry")
-        if self.scale_invariant_family_id != scale_invariant_family_id(polygon):
-            raise ValueError("LOCo scale-invariant family ID does not match geometry")
+        if self.scale_invariant_family_id != scale_invariant_family_id_from_exact_vertices(
+            exact_vertices
+        ):
+            raise ValueError("LOCo scale-invariant family ID does not match exact geometry")
         digest = semantic_sha256(
             self,
             excluded_fields={"item_id", "content_sha256"},
@@ -216,6 +232,20 @@ class LOCoCatalog(FrozenExperimentModel):
         ):
             if names != tuple(sorted(set(names))):
                 raise ValueError(f"LOCo {label} must be sorted and unique")
+        try:
+            for name in self.archive_member_names:
+                _safe_member_name(name)
+            classified_items, classified_demands, classified_nfps = _classify_loco_archive_members(
+                self.archive_member_names
+            )
+        except SourceEvidenceError as error:
+            raise ValueError(f"LOCo archive membership is invalid: {error}") from error
+        if (
+            self.item_file_members != classified_items
+            or self.demand_file_members != classified_demands
+            or self.nfp_file_members != classified_nfps
+        ):
+            raise ValueError("LOCo catalog membership does not match archive members")
         order = tuple((item.source_member, item.source_item_index) for item in self.items)
         if order != tuple(sorted(order)) or len(order) != len(set(order)):
             raise ValueError("LOCo item records must use sorted unique source positions")
@@ -225,6 +255,25 @@ class LOCoCatalog(FrozenExperimentModel):
             raise ValueError("LOCo item source member is not registered")
         if any(item.demand_member not in self.demand_file_members for item in self.items):
             raise ValueError("LOCo item demand member is not registered")
+        demand_by_filename = {
+            PurePosixPath(member).name: member for member in self.demand_file_members
+        }
+        grouped: dict[str, list[LOCoItem]] = {member: [] for member in self.item_file_members}
+        for item in self.items:
+            filename = PurePosixPath(item.source_member).name
+            if (
+                item.demand_member != demand_by_filename[filename]
+                or item.instance_name != PurePosixPath(filename).stem
+            ):
+                raise ValueError("LOCo item-demand correspondence is contradictory")
+            grouped[item.source_member].append(item)
+        for _source_member, records in grouped.items():
+            if not records:
+                raise ValueError("LOCo catalog leaves a registered item file unparsed")
+            if tuple(item.source_item_index for item in records) != tuple(range(len(records))):
+                raise ValueError("LOCo source item indices must be complete and contiguous")
+            if len({item.instance_label for item in records}) != 1:
+                raise ValueError("LOCo demand-file label changes within one source instance")
 
         recomputed = LOCoCensus(
             member_count=len(self.archive_member_names),
@@ -659,9 +708,9 @@ def quarter_turn_family_sha256(geometry: BaseGeometry) -> str:
 
 
 def _quarter_turn_points(
-    points: tuple[tuple[Decimal, Decimal], ...],
+    points: tuple[tuple[Fraction, Fraction], ...],
     turns: int,
-) -> tuple[tuple[Decimal, Decimal], ...]:
+) -> tuple[tuple[Fraction, Fraction], ...]:
     if turns == 0:
         return points
     if turns == 1:
@@ -680,11 +729,77 @@ def _least_cyclic_or_reverse(
     return min(candidates)
 
 
+def _exact_vertices_from_record(
+    vertices: tuple[tuple[str, str], ...],
+) -> tuple[tuple[Fraction, Fraction], ...]:
+    if len(vertices) < 3:
+        raise ValueError("LOCo exact geometry needs at least three vertices")
+    result: list[tuple[Fraction, Fraction]] = []
+    for vertex in vertices:
+        if len(vertex) != 2:
+            raise ValueError("LOCo exact vertex must contain two rational coordinates")
+        parsed: list[Fraction] = []
+        for token in vertex:
+            try:
+                value = Fraction(token)
+            except (ValueError, ZeroDivisionError) as error:
+                raise ValueError("LOCo exact vertex contains an invalid rational") from error
+            if token != _fraction_string(value):
+                raise ValueError("LOCo exact vertex must use canonical rational syntax")
+            parsed.append(value)
+        result.append((parsed[0], parsed[1]))
+    if len(set(result)) < 3:
+        raise ValueError("LOCo exact geometry needs at least three distinct vertices")
+    return tuple(result)
+
+
+def scale_invariant_family_id_from_exact_vertices(
+    vertices: tuple[tuple[Fraction, Fraction], ...],
+) -> str:
+    """Identify an exact rational ring up to translation, scale, and quarter turns."""
+
+    points = tuple(vertices)
+    if len(points) >= 2 and points[0] == points[-1]:
+        points = points[:-1]
+    if len(points) < 3 or len(set(points)) < 3:
+        raise SourceEvidenceError("scale-family geometry needs at least three distinct vertices")
+
+    candidates: list[tuple[tuple[str, str], ...]] = []
+    for turns in range(4):
+        rotated = _quarter_turn_points(points, turns)
+        minimum_x = min(point[0] for point in rotated)
+        minimum_y = min(point[1] for point in rotated)
+        translated = tuple((x - minimum_x, y - minimum_y) for x, y in rotated)
+        maximum_x = max(point[0] for point in translated)
+        maximum_y = max(point[1] for point in translated)
+        scale = max(maximum_x, maximum_y)
+        if scale <= 0:
+            raise SourceEvidenceError("scale-family geometry has zero bounding-box span")
+        normalized = tuple(
+            (_fraction_string(x / scale), _fraction_string(y / scale)) for x, y in translated
+        )
+        candidates.append(_least_cyclic_or_reverse(normalized))
+    canonical = min(candidates)
+    encoded = json.dumps(
+        {
+            "coordinates": canonical,
+            "quarter_turn_invariant": True,
+            "reflection_invariant": False,
+            "schema_version": "yieldforge.loco-exact-scale-invariant-family.v1",
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return f"yflcf-{hashlib.sha256(encoded).hexdigest()[:24]}"
+
+
 def scale_invariant_family_id(geometry: BaseGeometry) -> str:
-    """Identify shape up to translation, uniform scale, and quarter turns, not reflection.
+    """Identify the exact numeric coordinates of a polygon under the frozen family policy.
 
     Ring traversal direction is immaterial and therefore both cyclic directions are
-    canonicalized. Mirrored coordinate transforms are deliberately absent.
+    canonicalized. Mirrored transforms are deliberately absent. Source importers must
+    call :func:`scale_invariant_family_id_from_exact_vertices` before float conversion.
     """
 
     if (
@@ -702,44 +817,8 @@ def scale_invariant_family_id(geometry: BaseGeometry) -> str:
         raise SourceEvidenceError("scale-family geometry needs at least three vertices")
     if coordinates[0] == coordinates[-1]:
         coordinates = coordinates[:-1]
-    exact = tuple((Decimal(str(float(x))), Decimal(str(float(y)))) for x, y in coordinates)
-
-    candidates: list[tuple[tuple[str, str], ...]] = []
-    quantum = Decimal("0.000000000001")
-    with localcontext() as context:
-        context.prec = 50
-        for turns in range(4):
-            rotated = _quarter_turn_points(exact, turns)
-            minimum_x = min(point[0] for point in rotated)
-            minimum_y = min(point[1] for point in rotated)
-            translated = tuple((x - minimum_x, y - minimum_y) for x, y in rotated)
-            maximum_x = max(point[0] for point in translated)
-            maximum_y = max(point[1] for point in translated)
-            scale = max(maximum_x, maximum_y)
-            if scale <= 0:
-                raise SourceEvidenceError("scale-family geometry has zero bounding-box span")
-            normalized = tuple(
-                (
-                    format((x / scale).quantize(quantum, rounding=ROUND_HALF_EVEN), ".12f"),
-                    format((y / scale).quantize(quantum, rounding=ROUND_HALF_EVEN), ".12f"),
-                )
-                for x, y in translated
-            )
-            candidates.append(_least_cyclic_or_reverse(normalized))
-    canonical = min(candidates)
-    encoded = json.dumps(
-        {
-            "coordinates": canonical,
-            "quarter_turn_invariant": True,
-            "reflection_invariant": False,
-            "scale_normalized_decimal_places": 12,
-            "schema_version": "yieldforge.loco-scale-invariant-family.v1",
-        },
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return f"yflcf-{hashlib.sha256(encoded).hexdigest()[:24]}"
+    exact = tuple((Fraction(str(float(x))), Fraction(str(float(y)))) for x, y in coordinates)
+    return scale_invariant_family_id_from_exact_vertices(exact)
 
 
 def _build_item(
@@ -781,10 +860,15 @@ def _build_item(
             _fraction_string(translation_x),
             _fraction_string(translation_y),
         ),
+        "exact_normalized_vertices": tuple(
+            (_fraction_string(x), _fraction_string(y)) for x, y in normalized_exact
+        ),
         "geometry": geometry,
         "translation_normalized_sha256": geometry.polygon_sha256,
         "quarter_turn_family_sha256": quarter_turn_family_sha256(polygon),
-        "scale_invariant_family_id": scale_invariant_family_id(polygon),
+        "scale_invariant_family_id": scale_invariant_family_id_from_exact_vertices(
+            normalized_exact
+        ),
         "coordinate_units": "unknown",
         "geometry_provenance": "source_observed",
         "demand_provenance": "source_observed",
@@ -808,6 +892,62 @@ def _safe_member_name(name: str) -> None:
         raise SourceEvidenceError("ZIP member path is unsafe")
     if path.parts and path.parts[0].endswith(":"):
         raise SourceEvidenceError("ZIP member path is unsafe")
+    canonical = path.as_posix() + ("/" if name.endswith("/") else "")
+    if canonical != name:
+        raise SourceEvidenceError("ZIP member path is unsafe")
+
+
+def _classify_loco_archive_members(
+    names: tuple[str, ...] | list[str],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    item_members: list[str] = []
+    demand_members: list[str] = []
+    nfp_members: list[str] = []
+    for name in names:
+        path = PurePosixPath(name)
+        parts = path.parts
+        prefix = parts[:2]
+        if prefix == ("cutting_stock", "Items"):
+            if name == "cutting_stock/Items/":
+                continue
+            if name.endswith("/") or len(parts) != 3 or path.suffix != ".dat":
+                raise SourceEvidenceError(
+                    "LOCo Items members must follow the direct-child .dat grammar"
+                )
+            item_members.append(name)
+        elif prefix == ("cutting_stock", "demand"):
+            if name == "cutting_stock/demand/":
+                continue
+            if name.endswith("/") or len(parts) != 3 or path.suffix != ".dat":
+                raise SourceEvidenceError(
+                    "LOCo demand members must follow the direct-child .dat grammar"
+                )
+            demand_members.append(name)
+        elif prefix == ("cutting_stock", "NFPS"):
+            if not name.endswith("/"):
+                nfp_members.append(name)
+        elif "Items" in parts or "demand" in parts:
+            raise SourceEvidenceError(
+                "LOCo archive permits only one direct-child Items/demand directory pair"
+            )
+
+    item_members.sort()
+    demand_members.sort()
+    nfp_members.sort()
+    for members, label in ((item_members, "Items"), (demand_members, "demand")):
+        logical_names = [
+            unicodedata.normalize("NFC", PurePosixPath(name).name).casefold() for name in members
+        ]
+        if len(logical_names) != len(set(logical_names)):
+            raise SourceEvidenceError(f"LOCo {label} contains duplicate logical names")
+
+    item_filenames = {PurePosixPath(name).name for name in item_members}
+    demand_filenames = {PurePosixPath(name).name for name in demand_members}
+    if not item_filenames or item_filenames != demand_filenames:
+        raise SourceEvidenceError(
+            "LOCo archive membership violates strict Items/demand pairs correspondence"
+        )
+    return tuple(item_members), tuple(demand_members), tuple(nfp_members)
 
 
 def _bounded_member_read(
@@ -875,34 +1015,13 @@ def parse_loco_archive(
             raise SourceEvidenceError("ZIP total uncompressed byte limit exceeded")
 
         by_name = {member.filename: member for member in members}
-        item_members = sorted(
-            name
-            for name in names
-            if name.startswith("cutting_stock/Items/")
-            and name.endswith(".dat")
-            and not name.endswith("/")
-        )
-        demand_members = sorted(
-            name
-            for name in names
-            if name.startswith("cutting_stock/demand/")
-            and name.endswith(".dat")
-            and not name.endswith("/")
-        )
-        nfp_members = sorted(
-            name
-            for name in names
-            if name.startswith("cutting_stock/NFPS/") and not name.endswith("/")
-        )
-        item_stems = {PurePosixPath(name).name for name in item_members}
-        demand_stems = {PurePosixPath(name).name for name in demand_members}
-        if not item_stems or item_stems != demand_stems:
-            raise SourceEvidenceError("LOCo archive is missing complete Items/demand pairs")
+        item_members, demand_members, nfp_members = _classify_loco_archive_members(names)
+        demand_by_filename = {PurePosixPath(name).name: name for name in demand_members}
 
         items: list[LOCoItem] = []
         for source_member in item_members:
             filename = PurePosixPath(source_member).name
-            demand_member = f"cutting_stock/demand/{filename}"
+            demand_member = demand_by_filename[filename]
             source_records = _parse_items(
                 _bounded_member_read(archive, by_name[source_member], limits=limits),
                 member=source_member,
@@ -1278,11 +1397,36 @@ def canonical_source_artifact_bytes(
     )
 
 
+def _reject_duplicate_source_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SourceEvidenceError(f"duplicate source artifact key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_source_constant(value: str) -> None:
+    raise SourceEvidenceError(f"nonfinite source artifact constant: {value}")
+
+
 def _load_source_model(path: Path, model):
+    data = _read_bounded_regular_file(
+        Path(path),
+        maximum_bytes=_MAX_COMMITTED_SOURCE_ARTIFACT_BYTES,
+    )
     try:
-        return load_frozen_json(path, model)
-    except ExperimentContractError as error:
+        json.loads(
+            data,
+            object_pairs_hook=_reject_duplicate_source_keys,
+            parse_constant=_reject_nonfinite_source_constant,
+        )
+        result = model.model_validate_json(data, strict=True)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as error:
         raise SourceEvidenceError(f"source artifact is not canonical: {path}") from error
+    if data != canonical_pretty_json_bytes(result):
+        raise SourceEvidenceError(f"source artifact is not canonical: {path}")
+    return result
 
 
 def load_loco_catalog(path: Path) -> LOCoCatalog:
@@ -1331,4 +1475,5 @@ __all__ = [
     "parse_loco_archive",
     "quarter_turn_family_sha256",
     "scale_invariant_family_id",
+    "scale_invariant_family_id_from_exact_vertices",
 ]

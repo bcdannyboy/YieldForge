@@ -5,6 +5,7 @@ import io
 import json
 import stat
 import zipfile
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from yieldforge.realistic_falsification.sources import (
     LOCO_EXPECTED_CENSUS,
     LOCoCatalog,
     LOCoCatalogManifest,
+    LOCoItem,
     M11SourceManifest,
     SourceEvidenceError,
     ZipSafetyLimits,
@@ -39,6 +41,7 @@ from yieldforge.realistic_falsification.sources import (
     parse_loco_archive,
     quarter_turn_family_sha256,
     scale_invariant_family_id,
+    scale_invariant_family_id_from_exact_vertices,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +77,15 @@ def _archive(
 
 def _one_rectangle_archive(*, demand: str = "1\n1\nfixture\n") -> bytes:
     return _archive("1\n4\n0 0\n2 0\n2 1\n0 1\n", demand)
+
+
+def _rehash_payload(payload: dict[str, object], *, id_field: str, prefix: str) -> None:
+    semantic = dict(payload)
+    semantic.pop(id_field)
+    semantic.pop("content_sha256")
+    digest = semantic_sha256(semantic)
+    payload[id_field] = f"{prefix}{digest[:24]}"
+    payload["content_sha256"] = f"sha256:{digest}"
 
 
 def test_parser_preserves_repeated_records_and_exact_translation() -> None:
@@ -115,6 +127,11 @@ def test_parser_preserves_repeated_records_and_exact_translation() -> None:
     )
     assert catalog.items[0].source_translation == ("-3/2", "2")
     assert catalog.items[1].source_translation == ("32/5", "-1")
+    assert catalog.items[1].exact_normalized_vertices == (
+        ("0", "0"),
+        ("2", "0"),
+        ("0", "3"),
+    )
     assert (
         catalog.items[0].translation_normalized_sha256
         == catalog.items[2].translation_normalized_sha256
@@ -149,12 +166,48 @@ def test_scale_family_is_scale_and_quarter_turn_invariant_but_not_reflection_inv
     reflected = Polygon(tuple((-x, y) for x, y in original.exterior.coords[:-1]))
 
     assert scale_invariant_family_id(original) == scale_invariant_family_id(scaled_rotated_shifted)
-    for scale in (0.1, 0.3, 3.7):
-        decimal_scaled = Polygon(
-            tuple((10 + scale * x, -3 + scale * y) for x, y in original.exterior.coords[:-1])
-        )
-        assert scale_invariant_family_id(original) == scale_invariant_family_id(decimal_scaled)
     assert scale_invariant_family_id(original) != scale_invariant_family_id(reflected)
+
+
+def test_exact_rational_scale_family_preserves_thirds_and_near_distinct_shapes() -> None:
+    one_third = Fraction(1, 3)
+    base = (
+        (Fraction(0), Fraction(0)),
+        (one_third, Fraction(0)),
+        (one_third, Fraction(2, 3)),
+        (Fraction(0), Fraction(1)),
+    )
+    scale = Fraction(7, 13)
+    shift_x = Fraction(17, 19)
+    shift_y = Fraction(-5, 11)
+    scaled_quarter_turned = tuple((-scale * y + shift_x, scale * x + shift_y) for x, y in base)
+    near_but_distinct = (
+        base[0],
+        (one_third + Fraction(1, 10**13), Fraction(0)),
+        base[2],
+        base[3],
+    )
+
+    assert scale_invariant_family_id_from_exact_vertices(base) == (
+        scale_invariant_family_id_from_exact_vertices(scaled_quarter_turned)
+    )
+    assert scale_invariant_family_id_from_exact_vertices(base) != (
+        scale_invariant_family_id_from_exact_vertices(near_but_distinct)
+    )
+
+
+def test_item_revalidates_persisted_exact_rational_geometry() -> None:
+    item = parse_loco_archive(_one_rectangle_archive()).items[0]
+    payload = item.model_dump(mode="python")
+    vertices = list(payload["exact_normalized_vertices"])
+    vertices[1] = (
+        "2000000000000000000000000000001/1000000000000000000000000000000",
+        "0",
+    )
+    payload["exact_normalized_vertices"] = tuple(vertices)
+
+    with pytest.raises(ValidationError, match="scale-invariant family"):
+        LOCoItem.model_validate(payload, strict=True)
 
 
 @pytest.mark.parametrize(
@@ -237,6 +290,46 @@ def test_archive_rejects_missing_item_demand_pairs() -> None:
         )
 
 
+def test_archive_rejects_nested_item_and_demand_descendants() -> None:
+    items = "1\n3\n0 0\n1 0\n0 1\n"
+    demand = "1\n1\nother\n"
+    archive = _archive(
+        "1\n3\n0 0\n1 0\n0 1\n",
+        "1\n1\nfixture\n",
+        extras=[
+            ("cutting_stock/Items/nested/other.dat", items),
+            ("cutting_stock/demand/nested/other.dat", demand),
+        ],
+    )
+
+    with pytest.raises(SourceEvidenceError, match="direct-child"):
+        parse_loco_archive(archive)
+
+
+def test_archive_rejects_duplicate_logical_names_across_descendants() -> None:
+    direct_items = "1\n3\n0 0\n1 0\n0 1\n"
+    direct_demand = "1\n1\nfixture\n"
+    archive = _archive(
+        direct_items,
+        direct_demand,
+        extras=[("cutting_stock/Items/nested/fixture.dat", direct_items)],
+    )
+
+    with pytest.raises(SourceEvidenceError, match="direct-child"):
+        parse_loco_archive(archive)
+
+
+def test_archive_rejects_unparsed_files_under_registered_directories() -> None:
+    archive = _archive(
+        "1\n3\n0 0\n1 0\n0 1\n",
+        "1\n1\nfixture\n",
+        extras=[("cutting_stock/demand/unparsed.txt", "must not be ignored")],
+    )
+
+    with pytest.raises(SourceEvidenceError, match="direct-child"):
+        parse_loco_archive(archive)
+
+
 @pytest.mark.parametrize(
     "limits",
     [
@@ -277,6 +370,44 @@ def test_models_reject_semantic_identity_forgery_and_noncanonical_bytes(tmp_path
         load_loco_catalog(compact_path)
 
 
+def test_catalog_rejects_unregistered_archive_members_and_crossed_demand_bindings() -> None:
+    items = "1\n3\n0 0\n1 0\n0 1\n"
+    catalog = parse_loco_archive(
+        _archive(
+            items,
+            "1\n1\nfixture\n",
+            extras=[
+                ("cutting_stock/Items/other.dat", items),
+                ("cutting_stock/demand/other.dat", "1\n2\nother\n"),
+            ],
+        )
+    )
+
+    membership_payload = catalog.model_dump(mode="python")
+    membership_payload["archive_member_names"] = tuple(
+        sorted(
+            (
+                *membership_payload["archive_member_names"],
+                "cutting_stock/demand/unparsed.dat",
+            )
+        )
+    )
+    _rehash_payload(membership_payload, id_field="catalog_id", prefix="yflc-")
+    with pytest.raises(ValidationError, match="membership"):
+        LOCoCatalog.model_validate(membership_payload, strict=True)
+
+    crossed_payload = catalog.model_dump(mode="python")
+    crossed_items = list(crossed_payload["items"])
+    first = dict(crossed_items[0])
+    first["demand_member"] = "cutting_stock/demand/other.dat"
+    _rehash_payload(first, id_field="item_id", prefix="yflci-")
+    crossed_items[0] = first
+    crossed_payload["items"] = tuple(crossed_items)
+    _rehash_payload(crossed_payload, id_field="catalog_id", prefix="yflc-")
+    with pytest.raises(ValidationError, match="correspondence"):
+        LOCoCatalog.model_validate(crossed_payload, strict=True)
+
+
 def test_fixture_regeneration_is_byte_deterministic() -> None:
     payload = _one_rectangle_archive()
     first = parse_loco_archive(payload)
@@ -293,6 +424,10 @@ def test_task_2_source_contracts_are_public_package_exports() -> None:
     assert public.M11SourceManifest is M11SourceManifest
     assert public.parse_loco_archive is parse_loco_archive
     assert public.scale_invariant_family_id is scale_invariant_family_id
+    assert (
+        public.scale_invariant_family_id_from_exact_vertices
+        is scale_invariant_family_id_from_exact_vertices
+    )
 
 
 @pytest.fixture(scope="module")

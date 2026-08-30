@@ -58,6 +58,7 @@ from yieldforge.realistic_falsification.sources import (
     parse_loco_archive,
     quarter_turn_family_sha256,
     scale_invariant_family_id,
+    scale_invariant_family_id_from_exact_vertices,
 )
 
 __all__ = [
@@ -116,4 +117,5 @@ __all__ = [
     "parse_loco_archive",
     "quarter_turn_family_sha256",
     "scale_invariant_family_id",
+    "scale_invariant_family_id_from_exact_vertices",
 ]
