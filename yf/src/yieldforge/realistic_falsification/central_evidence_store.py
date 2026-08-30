@@ -11,7 +11,7 @@ import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, localcontext
 from enum import Enum
 from gzip import GzipFile
 from io import BytesIO
@@ -31,7 +31,6 @@ from pydantic_core import to_json
 
 from yieldforge.experiments.contracts import (
     FrozenExperimentModel,
-    canonical_pretty_json_bytes,
     semantic_sha256,
 )
 from yieldforge.oracle.artifact_publisher import (
@@ -59,6 +58,7 @@ from yieldforge.realistic_falsification.economic_resolution import (
 _COMPRESSION = "gzip-level-6-mtime-0-flags-0"
 _MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+_MAX_STRICT_CELL_BYTES = 256 * 1024 * 1024
 _SIGNED_COST_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{6}$"
 _METRIC_PATTERN = r"^-?(?:0|[1-9][0-9]*)\.[0-9]{12}$"
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -101,7 +101,10 @@ def _validate_imported_string_bounds(value: object) -> None:
 def _format_metric(value: Decimal) -> str:
     if not value.is_finite():
         raise Gate3CentralEvidenceError("Gate 3 central metric must be finite")
-    return format(value.quantize(_METRIC_QUANTUM, rounding=ROUND_HALF_EVEN), ".12f")
+    try:
+        return format(value.quantize(_METRIC_QUANTUM, rounding=ROUND_HALF_EVEN), ".12f")
+    except DecimalException as error:
+        raise Gate3CentralEvidenceError("Gate 3 central metric exceeds decimal bounds") from error
 
 
 def _economic_metrics(
@@ -114,17 +117,20 @@ def _economic_metrics(
         baseline = Decimal(baseline_cost)
         full_future = Decimal(full_future_cost)
         known_only = Decimal(known_only_cost)
-    except (InvalidOperation, TypeError, ValueError) as error:  # pragma: no cover
+    except (DecimalException, TypeError, ValueError) as error:  # pragma: no cover
         raise Gate3CentralEvidenceError("Gate 3 central costs are malformed") from error
     if not all(item.is_finite() for item in (baseline, full_future, known_only)):
         raise Gate3CentralEvidenceError("Gate 3 central costs must be finite")
     if baseline <= 0:
         raise Gate3CentralEvidenceError("Gate 3 central baseline cost must be positive")
-    with localcontext() as context:
-        context.prec = 50
-        full_future_savings = Decimal(100) * (baseline - full_future) / baseline
-        unknown_contribution = Decimal(100) * (known_only - full_future) / baseline
-        known_only_savings = Decimal(100) * (baseline - known_only) / baseline
+    try:
+        with localcontext() as context:
+            context.prec = 50
+            full_future_savings = Decimal(100) * (baseline - full_future) / baseline
+            unknown_contribution = Decimal(100) * (known_only - full_future) / baseline
+            known_only_savings = Decimal(100) * (baseline - known_only) / baseline
+    except DecimalException as error:
+        raise Gate3CentralEvidenceError("Gate 3 central costs exceed decimal bounds") from error
     return (
         _format_metric(full_future_savings),
         _format_metric(unknown_contribution),
@@ -304,6 +310,163 @@ def deterministic_gzip(data: bytes) -> bytes:
     return output.getvalue()
 
 
+class _CanonicalSizeCounter:
+    """Count canonical bytes and fail before any cell-sized allocation."""
+
+    __slots__ = ("maximum_bytes", "total")
+
+    def __init__(self, maximum_bytes: int) -> None:
+        self.maximum_bytes = maximum_bytes
+        self.total = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.maximum_bytes - self.total
+
+    def add(self, byte_count: int) -> None:
+        if byte_count < 0 or byte_count > self.remaining:
+            raise Gate3CentralEvidenceError(
+                "Gate 3 central cell exceeds the strict cell byte bound"
+            )
+        self.total += byte_count
+
+
+def _count_json_string(counter: _CanonicalSizeCounter, value: str) -> None:
+    counter.add(2)
+    if len(value) > counter.remaining:
+        counter.add(len(value))
+    encoded_size = 0
+    for character in value:
+        codepoint = ord(character)
+        if character in ('"', "\\", "\b", "\f", "\n", "\r", "\t"):
+            encoded_size += 2
+        elif codepoint < 0x20 or codepoint <= 0xFFFF and codepoint > 0x7F:
+            encoded_size += 6
+        elif codepoint > 0xFFFF:
+            encoded_size += 12
+        else:
+            encoded_size += 1
+        if encoded_size > counter.remaining:
+            counter.add(encoded_size)
+    counter.add(encoded_size)
+
+
+def _count_canonical_json_value(
+    counter: _CanonicalSizeCounter,
+    value: object,
+    *,
+    depth: int,
+) -> None:
+    if isinstance(value, BaseModel):
+        fields = type(value).model_fields
+        if not fields:
+            counter.add(2)
+            return
+        counter.add(2)
+        for index, field_name in enumerate(fields):
+            counter.add(2 * (depth + 1))
+            _count_json_string(counter, field_name)
+            counter.add(2)
+            _count_canonical_json_value(
+                counter,
+                getattr(value, field_name),
+                depth=depth + 1,
+            )
+            counter.add(2 if index + 1 < len(fields) else 1)
+        counter.add(2 * depth + 1)
+        return
+    if isinstance(value, dict):
+        if any(type(key) is not str for key in value):
+            raise Gate3CentralEvidenceError(
+                "Gate 3 central canonical JSON requires string object keys"
+            )
+        if not value:
+            counter.add(2)
+            return
+        counter.add(2)
+        for index, (key, item) in enumerate(value.items()):
+            counter.add(2 * (depth + 1))
+            _count_json_string(counter, key)
+            counter.add(2)
+            _count_canonical_json_value(counter, item, depth=depth + 1)
+            counter.add(2 if index + 1 < len(value) else 1)
+        counter.add(2 * depth + 1)
+        return
+    if isinstance(value, (list, tuple)):
+        if not value:
+            counter.add(2)
+            return
+        counter.add(2)
+        for index, item in enumerate(value):
+            counter.add(2 * (depth + 1))
+            _count_canonical_json_value(counter, item, depth=depth + 1)
+            counter.add(2 if index + 1 < len(value) else 1)
+        counter.add(2 * depth + 1)
+        return
+    if isinstance(value, Enum):
+        _count_canonical_json_value(counter, value.value, depth=depth)
+        return
+    if type(value) in (date, datetime, time, timedelta):
+        counter.add(len(to_json(value)))
+        return
+    if type(value) is str:
+        _count_json_string(counter, value)
+        return
+    if value is None:
+        counter.add(4)
+        return
+    if type(value) is bool:
+        counter.add(4 if value else 5)
+        return
+    if type(value) is int:
+        digit_lower_bound = max(
+            1,
+            (value.bit_length() - 1) * 30103 // 100000 + 1,
+        )
+        if value < 0:
+            digit_lower_bound += 1
+        if digit_lower_bound > counter.remaining:
+            counter.add(digit_lower_bound)
+        try:
+            counter.add(len(str(value)))
+        except ValueError as error:
+            raise Gate3CentralEvidenceError(
+                "Gate 3 central integer exceeds the strict cell byte bound"
+            ) from error
+        return
+    if type(value) is float:
+        try:
+            counter.add(len(json.dumps(value, allow_nan=False)))
+        except (TypeError, ValueError) as error:
+            raise Gate3CentralEvidenceError(
+                "Gate 3 central cell contains a non-canonical JSON scalar"
+            ) from error
+        return
+    raise Gate3CentralEvidenceError(
+        f"Gate 3 central cell contains unsupported JSON type {type(value).__name__}"
+    )
+
+
+def _bounded_existing_canonical_size(
+    value: Gate3StreamCell,
+    *,
+    maximum_bytes: int,
+) -> int:
+    """Return exact canonical size without constructing serialized cell data."""
+
+    if type(maximum_bytes) is not int or maximum_bytes <= 0:
+        raise Gate3CentralEvidenceError("Gate 3 central strict cell bound is malformed")
+    counter = _CanonicalSizeCounter(maximum_bytes)
+    try:
+        _count_canonical_json_value(counter, value, depth=0)
+        counter.add(1)
+    except RecursionError as error:
+        raise Gate3CentralEvidenceError(
+            "Gate 3 central cell nesting exceeds the strict validation bound"
+        ) from error
+    return counter.total
+
+
 def _iter_pretty_json_bytes(value: object, *, depth: int) -> Iterator[bytes]:
     """Traverse an existing Pydantic graph using the canonical JSON layout."""
 
@@ -431,17 +594,71 @@ def _stream_canonical_gzip(cell: Gate3StreamCell) -> tuple[bytes, int]:
     return compressed, uncompressed_byte_count
 
 
-def _strict_cell(cell: Gate3StreamCell) -> Gate3StreamCell:
-    try:
-        _validate_imported_string_bounds(cell)
-        return Gate3StreamCell.model_validate(
-            cell.model_dump(mode="python", round_trip=True),
-            strict=True,
+def _compress_bounded_canonical_bytes(canonical: bytearray) -> bytes:
+    if len(canonical) > _MAX_UNCOMPRESSED_BYTES:
+        raise Gate3CentralEvidenceError(
+            "Gate 3 central sidecar exceeds the uncompressed byte bound"
         )
-    except (AttributeError, InvalidOperation, TypeError, ValidationError, ValueError) as error:
+    output = _BoundedCompressedSink(_MAX_COMPRESSED_BYTES)
+    with GzipFile(
+        filename="",
+        mode="wb",
+        compresslevel=6,
+        fileobj=output,
+        mtime=0,
+    ) as archive:
+        view = memoryview(canonical)
+        for offset in range(0, len(view), 1024 * 1024):
+            archive.write(view[offset : offset + 1024 * 1024])
+    compressed = output.getvalue()
+    _validate_gzip_header(compressed)
+    return compressed
+
+
+def _strict_cell_and_canonical(
+    cell: Gate3StreamCell,
+) -> tuple[Gate3StreamCell, bytearray]:
+    try:
+        expected_size = _bounded_existing_canonical_size(
+            cell,
+            maximum_bytes=_MAX_STRICT_CELL_BYTES,
+        )
+        _validate_imported_string_bounds(cell)
+        canonical = bytearray()
+        for chunk in _iter_canonical_json_bytes(cell):
+            if len(chunk) > _MAX_UNCOMPRESSED_BYTES - len(canonical):
+                raise Gate3CentralEvidenceError(
+                    "Gate 3 central sidecar exceeds the uncompressed byte bound"
+                )
+            if len(chunk) > expected_size - len(canonical):
+                raise Gate3CentralEvidenceError(
+                    "Gate 3 central cell changed during strict serialization"
+                )
+            canonical.extend(chunk)
+        if len(canonical) != expected_size:
+            raise Gate3CentralEvidenceError(
+                "Gate 3 central cell changed during strict serialization"
+            )
+        strict = Gate3StreamCell.model_validate_json(canonical, strict=True)
+        return strict, canonical
+    except Gate3CentralEvidenceError:
+        raise
+    except (
+        AttributeError,
+        DecimalException,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3CentralEvidenceError(
             "Gate 3 central full cell failed strict validation"
         ) from error
+
+
+def _strict_cell(cell: Gate3StreamCell) -> Gate3StreamCell:
+    strict, _ = _strict_cell_and_canonical(cell)
+    return strict
 
 
 def _strict_addendum(addendum: EconomicDecisionAddendum) -> EconomicDecisionAddendum:
@@ -451,7 +668,14 @@ def _strict_addendum(addendum: EconomicDecisionAddendum) -> EconomicDecisionAdde
             addendum.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3CentralEvidenceError(
             "Gate 3 central decision addendum failed strict validation"
         ) from error
@@ -537,7 +761,7 @@ def _build_receipt(
             content_sha256=f"sha256:{digest}",
             **semantic,
         )
-    except (TypeError, ValidationError, ValueError) as error:
+    except (DecimalException, TypeError, ValidationError, ValueError) as error:
         raise Gate3CentralEvidenceError(
             "Gate 3 compact central receipt failed validation"
         ) from error
@@ -556,9 +780,10 @@ def _prepare_central_cell_evidence(
 ) -> _PreparedCentralCellEvidence:
     """Validate, stream, compress, and compact one full central cell once."""
 
-    strict_cell = _strict_cell(cell)
+    strict_cell, canonical = _strict_cell_and_canonical(cell)
     strict_addendum = _strict_addendum(decision_addendum)
-    compressed, uncompressed_byte_count = _stream_canonical_gzip(strict_cell)
+    compressed = _compress_bounded_canonical_bytes(canonical)
+    uncompressed_byte_count = len(canonical)
     receipt = _build_receipt(
         strict_cell,
         strict_addendum,
@@ -587,7 +812,8 @@ def build_gate3_central_cell_receipt(
 def canonical_gate3_central_cell_bytes(cell: Gate3StreamCell) -> bytes:
     """Strictly detach and canonically serialize one full central cell."""
 
-    return canonical_pretty_json_bytes(_strict_cell(cell))
+    _, canonical = _strict_cell_and_canonical(cell)
+    return bytes(canonical)
 
 
 def _strict_receipt(receipt: Gate3CentralCellReceipt) -> Gate3CentralCellReceipt:
@@ -597,7 +823,14 @@ def _strict_receipt(receipt: Gate3CentralCellReceipt) -> Gate3CentralCellReceipt
             receipt.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3CentralEvidenceError(
             "Gate 3 central receipt failed strict validation"
         ) from error
@@ -610,7 +843,14 @@ def _strict_roots(roots: Gate3RootBinding) -> Gate3RootBinding:
             roots.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3CentralEvidenceError(
             "Gate 3 central expected roots failed strict validation"
         ) from error
@@ -628,7 +868,14 @@ def _strict_freeze(
             freeze.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3CentralEvidenceError(
             "Gate 3 central expected baseline freeze failed strict validation"
         ) from error
@@ -644,7 +891,14 @@ def _strict_ledger(ledger: Gate3CostLedger, *, label: str) -> Gate3CostLedger:
             ledger.model_dump(mode="python", round_trip=True),
             strict=True,
         )
-    except (AttributeError, TypeError, ValidationError, ValueError) as error:
+    except (
+        AttributeError,
+        DecimalException,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise Gate3CentralEvidenceError(
             f"Gate 3 central expected {label} ledger failed strict validation"
         ) from error
@@ -735,23 +989,31 @@ def _read_bounded_regular_file(path: Path) -> bytes:
 
 
 def _bounded_gzip_decompress(data: bytes) -> bytearray:
+    strict_bound_active = _MAX_STRICT_CELL_BYTES <= _MAX_UNCOMPRESSED_BYTES
+    maximum_bytes = min(_MAX_STRICT_CELL_BYTES, _MAX_UNCOMPRESSED_BYTES)
+
+    def raise_bound_error() -> None:
+        if strict_bound_active:
+            raise Gate3CentralEvidenceError(
+                "Gate 3 central cell exceeds the strict cell byte bound"
+            )
+        raise Gate3CentralEvidenceError(
+            "Gate 3 central sidecar exceeds the uncompressed byte bound"
+        )
+
     try:
         with GzipFile(fileobj=BytesIO(data), mode="rb") as archive:
             raw = bytearray()
             while True:
-                remaining = _MAX_UNCOMPRESSED_BYTES + 1 - len(raw)
+                remaining = maximum_bytes + 1 - len(raw)
                 if remaining <= 0:
-                    raise Gate3CentralEvidenceError(
-                        "Gate 3 central sidecar exceeds the uncompressed byte bound"
-                    )
+                    raise_bound_error()
                 chunk = archive.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
                 raw.extend(chunk)
-                if len(raw) > _MAX_UNCOMPRESSED_BYTES:
-                    raise Gate3CentralEvidenceError(
-                        "Gate 3 central sidecar exceeds the uncompressed byte bound"
-                    )
+                if len(raw) > maximum_bytes:
+                    raise_bound_error()
     except Gate3CentralEvidenceError:
         raise
     except (EOFError, OSError, zlib.error) as error:
@@ -773,6 +1035,8 @@ def _reject_nonfinite_json(value: str):  # type: ignore[no-untyped-def]
 
 
 def _parse_strict_cell_json(raw: bytes | bytearray) -> Gate3StreamCell:
+    if len(raw) > _MAX_STRICT_CELL_BYTES:
+        raise Gate3CentralEvidenceError("Gate 3 central cell exceeds the strict cell byte bound")
     try:
         json.loads(
             raw,
@@ -783,9 +1047,10 @@ def _parse_strict_cell_json(raw: bytes | bytearray) -> Gate3StreamCell:
     except Gate3CentralEvidenceError:
         raise
     except (
-        InvalidOperation,
         UnicodeDecodeError,
+        DecimalException,
         json.JSONDecodeError,
+        RecursionError,
         TypeError,
         ValidationError,
         ValueError,

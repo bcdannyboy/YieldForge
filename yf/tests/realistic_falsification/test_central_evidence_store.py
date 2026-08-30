@@ -482,15 +482,15 @@ def test_preparation_releases_detached_full_cell_graph(
 ) -> None:
     store = _store()
     cell = _central_cell()
-    strict_validate = store._strict_cell
+    strict_validate = store._strict_cell_and_canonical
     detached_refs = []
 
     def capture_detached(value):  # type: ignore[no-untyped-def]
-        detached = strict_validate(value)
+        detached, canonical = strict_validate(value)
         detached_refs.append(weakref.ref(detached))
-        return detached
+        return detached, canonical
 
-    monkeypatch.setattr(store, "_strict_cell", capture_detached)
+    monkeypatch.setattr(store, "_strict_cell_and_canonical", capture_detached)
     prepared = store._prepare_central_cell_evidence(
         cell,
         decision_addendum=_addendum(),
@@ -499,6 +499,37 @@ def test_preparation_releases_detached_full_cell_graph(
 
     assert prepared.compressed_bytes
     assert detached_refs[0]() is None
+
+
+def test_strict_preflight_rejects_oversize_forged_graph_before_model_dump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store()
+    cell = _central_cell()
+    forged = cell.model_copy(update={"stream_id": "x" * 2048})
+    addendum = _addendum()
+
+    def reject_model_dump(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("preflight must reject before detaching the cell graph")
+
+    monkeypatch.setattr(store, "_MAX_STRICT_CELL_BYTES", 1024, raising=False)
+    monkeypatch.setattr(BaseModel, "model_dump", reject_model_dump)
+    with pytest.raises(store.Gate3CentralEvidenceError, match="strict cell byte bound"):
+        store.build_gate3_central_cell_receipt(
+            forged,
+            decision_addendum=addendum,
+        )
+
+
+def test_strict_preflight_exact_size_accepts_complete_cell() -> None:
+    store = _store()
+    cell = _central_cell()
+    canonical = store.canonical_gate3_central_cell_bytes(cell)
+
+    assert store._bounded_existing_canonical_size(
+        cell,
+        maximum_bytes=len(canonical),
+    ) == len(canonical)
 
 
 def test_publication_streams_full_cell_exactly_once(
@@ -524,7 +555,7 @@ def test_publication_streams_full_cell_exactly_once(
     assert calls == 1
 
 
-def test_preparation_streams_without_materializing_canonical_raw(
+def test_preparation_avoids_unbounded_contract_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store()
@@ -532,7 +563,6 @@ def test_preparation_streams_without_materializing_canonical_raw(
     def reject_materialization(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("prepared central evidence must stream canonical bytes")
 
-    monkeypatch.setattr(store, "canonical_pretty_json_bytes", reject_materialization)
     monkeypatch.setattr(store, "deterministic_gzip", reject_materialization)
     receipt = store.build_gate3_central_cell_receipt(
         _central_cell(),
@@ -593,6 +623,7 @@ def test_streaming_stops_at_raw_and_compressed_bounds(
 
 def test_central_store_freezes_materially_bounded_peak_contract() -> None:
     store = _store()
+    assert store._MAX_STRICT_CELL_BYTES == 256 * 1024 * 1024
     assert store._MAX_UNCOMPRESSED_BYTES == 256 * 1024 * 1024
     assert store._MAX_COMPRESSED_BYTES == 64 * 1024 * 1024
 
@@ -873,6 +904,126 @@ def test_orphan_recovery_rejects_wrong_filename_and_binding(tmp_path: Path) -> N
             expected_roots=cell.roots,
             expected_corpus_id=cell.corpus_id,
             expected_stream_id="wrong-stream",
+            expected_regime=cell.regime,
+            expected_baseline_freeze=cell.baseline_freeze,
+        )
+
+
+def test_recovery_enforces_strict_cell_cap_before_json_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store()
+    cell, published, receipt = _publish(tmp_path)
+    parsed = []
+
+    def reject_parse(_raw):  # type: ignore[no-untyped-def]
+        parsed.append(True)
+        raise AssertionError("strict cap must stop decompression before JSON parsing")
+
+    monkeypatch.setattr(
+        store,
+        "_MAX_STRICT_CELL_BYTES",
+        receipt.uncompressed_byte_count - 1,
+        raising=False,
+    )
+    monkeypatch.setattr(store, "_parse_strict_cell_json", reject_parse)
+    with pytest.raises(store.Gate3CentralEvidenceError, match="strict cell byte bound"):
+        store.recover_gate3_central_cell_receipt(
+            published,
+            decision_addendum=_addendum(),
+            expected_roots=cell.roots,
+            expected_corpus_id=cell.corpus_id,
+            expected_stream_id=cell.stream_id,
+            expected_regime=cell.regime,
+            expected_baseline_freeze=cell.baseline_freeze,
+        )
+    assert parsed == []
+
+
+def test_builder_and_expected_freeze_normalize_decimal_failures(tmp_path: Path) -> None:
+    store = _store()
+    cell, published, _receipt = _publish(tmp_path)
+    large_cost = f"{'9' * 57}.000000"
+    malformed_ledger = cell.baseline.final_costs.model_copy(update={"purchase_cost": large_cost})
+    malformed_arm = cell.baseline.model_copy(update={"final_costs": malformed_ledger})
+    with pytest.raises(store.Gate3CentralEvidenceError, match="strict validation"):
+        store.build_gate3_central_cell_receipt(
+            cell.model_copy(update={"baseline": malformed_arm}),
+            decision_addendum=_addendum(),
+        )
+
+    score = cell.baseline_freeze.policy_scores[0].model_copy(update={"total_cost": large_cost})
+    malformed_freeze = cell.baseline_freeze.model_copy(
+        update={
+            "policy_scores": (
+                score,
+                *cell.baseline_freeze.policy_scores[1:],
+            )
+        }
+    )
+    with pytest.raises(
+        store.Gate3CentralEvidenceError,
+        match="baseline freeze failed strict validation",
+    ):
+        store.recover_gate3_central_cell_receipt(
+            published,
+            decision_addendum=_addendum(),
+            expected_roots=cell.roots,
+            expected_corpus_id=cell.corpus_id,
+            expected_stream_id=cell.stream_id,
+            expected_regime=cell.regime,
+            expected_baseline_freeze=malformed_freeze,
+        )
+
+
+def test_load_and_recover_normalize_decimal_failure_in_sidecar(tmp_path: Path) -> None:
+    store = _store()
+    cell, published, receipt = _publish(tmp_path)
+    payload = json.loads(gzip.decompress(published.read_bytes()))
+    payload["baseline"]["final_costs"]["purchase_cost"] = f"{'9' * 57}.000000"
+    raw = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    transport = store.deterministic_gzip(raw)
+    resigned = _resign_transport(receipt, transport, raw)
+    candidate = tmp_path / "decimal-failure" / resigned.sidecar_name
+    candidate.parent.mkdir()
+    candidate.write_bytes(transport)
+
+    with pytest.raises(store.Gate3CentralEvidenceError, match="semantic validation"):
+        _load(candidate, cell, resigned)
+    with pytest.raises(store.Gate3CentralEvidenceError, match="semantic validation"):
+        store.recover_gate3_central_cell_receipt(
+            candidate,
+            decision_addendum=_addendum(),
+            expected_roots=cell.roots,
+            expected_corpus_id=cell.corpus_id,
+            expected_stream_id=cell.stream_id,
+            expected_regime=cell.regime,
+            expected_baseline_freeze=cell.baseline_freeze,
+        )
+
+
+def test_load_and_recover_normalize_deep_json_recursion(tmp_path: Path) -> None:
+    store = _store()
+    cell, _published, receipt = _publish(tmp_path)
+    depth = 5000
+    raw = b"[" * depth + b"0" + b"]" * depth + b"\n"
+    assert len(raw) < 200 * 1024
+    transport = store.deterministic_gzip(raw)
+    resigned = _resign_transport(receipt, transport, raw)
+    candidate = tmp_path / "deep-json" / resigned.sidecar_name
+    candidate.parent.mkdir()
+    candidate.write_bytes(transport)
+
+    with pytest.raises(store.Gate3CentralEvidenceError, match="semantic validation"):
+        _load(candidate, cell, resigned)
+    with pytest.raises(store.Gate3CentralEvidenceError, match="semantic validation"):
+        store.recover_gate3_central_cell_receipt(
+            candidate,
+            decision_addendum=_addendum(),
+            expected_roots=cell.roots,
+            expected_corpus_id=cell.corpus_id,
+            expected_stream_id=cell.stream_id,
             expected_regime=cell.regime,
             expected_baseline_freeze=cell.baseline_freeze,
         )
