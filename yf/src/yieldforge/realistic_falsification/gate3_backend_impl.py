@@ -485,6 +485,53 @@ class AdapterGate3Backend:
         self._validity_cache[key] = receipt
         return receipt
 
+    def release_validity_controls_evidence(
+        self,
+        *,
+        roots: Gate3RootBinding,
+        baseline_freezes: tuple[
+            Gate3BaselineCalibrationFreeze,
+            Gate3BaselineCalibrationFreeze,
+        ],
+        expected_receipt_id: str,
+        expected_receipt_content_sha256: str,
+    ) -> None:
+        """Release one persisted validity result from only its exact cache slot."""
+
+        self._require_roots(roots)
+        if len(baseline_freezes) != 2:
+            raise AdapterGate3BackendError("Gate 3 validity freezes require two baseline freezes")
+        freezes = tuple(_strict_freeze(item) for item in baseline_freezes)
+        if (
+            tuple(item.corpus_id for item in freezes) != _CORPUS_ORDER
+            or any(item.roots != self.roots for item in freezes)
+            or any(
+                item.calibration_stream_ids != self._calibration_ids[item.corpus_id]
+                for item in freezes
+            )
+        ):
+            raise AdapterGate3BackendError(
+                "Gate 3 validity freezes differ from backend roots, corpus, or stream registry"
+            )
+        key = tuple(item.content_sha256 for item in freezes)
+        cached = self._validity_cache.get(key)
+        if cached is None:
+            raise AdapterGate3BackendError("Gate 3 validity cache receipt is missing")
+        if (
+            type(expected_receipt_id) is not str
+            or re.fullmatch(r"yfm11g3valid-[0-9a-f]{24}", expected_receipt_id) is None
+            or type(expected_receipt_content_sha256) is not str
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                expected_receipt_content_sha256,
+            )
+            is None
+            or cached.receipt_id != expected_receipt_id
+            or cached.content_sha256 != expected_receipt_content_sha256
+        ):
+            raise AdapterGate3BackendError("Gate 3 validity receipt identity differs")
+        del self._validity_cache[key]
+
     def execute_central_stream(
         self,
         *,

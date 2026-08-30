@@ -407,6 +407,108 @@ def test_validity_delegates_authenticated_context_and_caches(
         )
 
 
+def _cached_validity_case(monkeypatch: pytest.MonkeyPatch):
+    roots = object()
+    backend = _backend(roots=roots)
+    lectra = SimpleNamespace(
+        roots=roots,
+        corpus_id="lectra-m3-m4",
+        content_sha256="sha256:" + "1" * 64,
+        calibration_stream_ids=backend.calibration_stream_ids("lectra-m3-m4"),
+    )
+    loco = SimpleNamespace(
+        roots=roots,
+        corpus_id="loco-2dics",
+        content_sha256="sha256:" + "2" * 64,
+        calibration_stream_ids=backend.calibration_stream_ids("loco-2dics"),
+    )
+    receipt = SimpleNamespace(
+        roots=roots,
+        receipt_id="yfm11g3valid-" + "3" * 24,
+        content_sha256="sha256:" + "4" * 64,
+    )
+    key = (lectra.content_sha256, loco.content_sha256)
+    monkeypatch.setattr(impl, "_strict_roots", lambda value: value)
+    monkeypatch.setattr(impl, "_strict_freeze", lambda value: value)
+    backend._validity_cache[key] = receipt  # type: ignore[assignment]
+    return roots, backend, (lectra, loco), receipt, key
+
+
+def test_release_validity_controls_evidence_deletes_only_exact_cached_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots, backend, freezes, receipt, key = _cached_validity_case(monkeypatch)
+    other_validity_key = ("sha256:" + "5" * 64, "sha256:" + "6" * 64)
+    other_validity = object()
+    backend._validity_cache[other_validity_key] = other_validity  # type: ignore[assignment]
+    calibration_key = ("lectra-m3-m4", "lectra-cal-0", "remnant_first")
+    projection_key = ("lectra-cal-0", "central", "remnant_first")
+    central_key = ("lectra-con-0", "sha256:" + "7" * 64)
+    backend._calibration_cache[calibration_key] = object()  # type: ignore[assignment]
+    backend._projection_cache[projection_key] = (object(),)  # type: ignore[assignment]
+    backend._central_cache[central_key] = object()  # type: ignore[assignment]
+
+    backend.release_validity_controls_evidence(
+        roots=roots,
+        baseline_freezes=freezes,
+        expected_receipt_id=receipt.receipt_id,
+        expected_receipt_content_sha256=receipt.content_sha256,
+    )
+
+    assert key not in backend._validity_cache
+    assert backend._validity_cache == {other_validity_key: other_validity}
+    assert calibration_key in backend._calibration_cache
+    assert projection_key in backend._projection_cache
+    assert central_key in backend._central_cache
+
+
+@pytest.mark.parametrize("mismatch", ("id", "sha", "freeze_order", "missing"))
+def test_release_validity_controls_mismatch_releases_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    roots, backend, freezes, receipt, key = _cached_validity_case(monkeypatch)
+    expected_id = receipt.receipt_id
+    expected_sha = receipt.content_sha256
+    selected_freezes = freezes
+    if mismatch == "id":
+        expected_id = "yfm11g3valid-" + "f" * 24
+    elif mismatch == "sha":
+        expected_sha = "sha256:" + "f" * 64
+    elif mismatch == "freeze_order":
+        selected_freezes = (freezes[1], freezes[0])
+    else:
+        del backend._validity_cache[key]
+
+    with pytest.raises(
+        AdapterGate3BackendError,
+        match="validity (?:freezes|receipt|cache)",
+    ):
+        backend.release_validity_controls_evidence(
+            roots=roots,
+            baseline_freezes=selected_freezes,
+            expected_receipt_id=expected_id,
+            expected_receipt_content_sha256=expected_sha,
+        )
+
+    if mismatch != "missing":
+        assert backend._validity_cache[key] is receipt
+    else:
+        assert key not in backend._validity_cache
+
+
+def test_release_validity_controls_requires_keyword_arguments() -> None:
+    backend = _backend()
+
+    with pytest.raises(TypeError):
+        backend.release_validity_controls_evidence(
+            object(),  # type: ignore[misc]
+            (),
+            "yfm11g3valid-" + "1" * 24,
+            "sha256:" + "2" * 64,
+        )
+
+
 def test_release_calibration_stream_evidence_removes_only_exact_cache_pair() -> None:
     backend = _backend()
     target_key = ("lectra-m3-m4", "lectra-cal-0", "remnant_first")
