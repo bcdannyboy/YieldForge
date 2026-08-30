@@ -12,18 +12,28 @@ from pathlib import Path
 import pytest
 
 import yieldforge.oracle.search_validation as search_validation
-from tests.oracle.fixtures import exhaustive_certificate_cases
-from yieldforge.baseline.contracts import M7ActionKind
-from yieldforge.oracle.reference import score_reference_event
+from tests.oracle.fixtures import exhaustive_certificate_cases, two_problem_runtime
+from yieldforge.baseline.contracts import LayoutFitSearchConfig, M7ActionKind
+from yieldforge.baseline.replay import (
+    M7ReplayRuntime,
+    build_m7_replay_input,
+    enumerate_m7_action_catalog,
+    initial_m7_cursor,
+)
+from yieldforge.oracle.reference import M8OracleRequest, score_reference_event
 from yieldforge.oracle.search_validation import (
     evaluate_search_validation,
     evaluate_two_ply_repair_validation,
     score_two_ply_reoptimization,
     solve_exact_search,
 )
+from yieldforge.oracle.visibility import FullRealizedVisibility
 from yieldforge.replay.contracts import rounded_cost
 
 _RUNNER_PATH = Path(__file__).parents[2] / "tools" / "run_m9_minimal_search_validation.py"
+_BOUNDED_CATALOG_REQUIREMENT = (
+    "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+)
 
 
 @cache
@@ -59,9 +69,7 @@ def _semantic_bytes(payload: object) -> bytes:
 def _all_mapping_keys(payload: object) -> tuple[str, ...]:
     if isinstance(payload, dict):
         return tuple(payload) + tuple(
-            key
-            for value in payload.values()
-            for key in _all_mapping_keys(value)
+            key for value in payload.values() for key in _all_mapping_keys(value)
         )
     if isinstance(payload, list):
         return tuple(key for value in payload for key in _all_mapping_keys(value))
@@ -73,9 +81,7 @@ def _changed_telemetry_result():  # type: ignore[no-untyped-def]
     first = result.primary.cases[0]
     changed_telemetry = replace(
         first.exact_search_telemetry,
-        explored_transition_count=(
-            first.exact_search_telemetry.explored_transition_count + 1
-        ),
+        explored_transition_count=(first.exact_search_telemetry.explored_transition_count + 1),
     )
     changed_first = replace(first, exact_search_telemetry=changed_telemetry)
     changed_primary = replace(
@@ -123,9 +129,10 @@ def _wrong_tied_repair_selection_result():  # type: ignore[no-untyped-def]
     first = result.primary.cases[0]
     assert first.baseline_action_id == "m7-standard:candidate-one"
     assert first.repaired_selected_action_id == "m7-standard:candidate-one"
-    assert tuple(
-        score.bounded_objective_cost for score in first.two_ply_root_scores
-    ) == (105.0, 105.0)
+    assert tuple(score.bounded_objective_cost for score in first.two_ply_root_scores) == (
+        105.0,
+        105.0,
+    )
     wrong_first = replace(
         first,
         repaired_selected_action_id="m7-standard:candidate-two",
@@ -136,6 +143,105 @@ def _wrong_tied_repair_selection_result():  # type: ignore[no-untyped-def]
             result.primary,
             cases=(wrong_first, *result.primary.cases[1:]),
         ),
+    )
+
+
+def _registered_bounded_geometry_request() -> M8OracleRequest:
+    source_runtime = two_problem_runtime(
+        first_width=2.0,
+        second_width=4.0,
+        event_count=2,
+    )
+    source = source_runtime.replay_input
+    replay_input = build_m7_replay_input(
+        m0_contract_id=source.m0_contract_id,
+        m0_contract_sha256=source.m0_contract_sha256,
+        problem_index_id=source.problem_index_id,
+        problem_index_sha256=source.problem_index_sha256,
+        m6_contract_id=source.m6_contract_id,
+        m6_contract_sha256=source.m6_contract_sha256,
+        m6_population_id=source.m6_population_id,
+        m6_population_sha256=source.m6_population_sha256,
+        policy=source.policy,
+        rates=source.rates,
+        fit_config=source.fit_config,
+        search_config=LayoutFitSearchConfig(maximum_candidates=1),
+        problems=source.problems,
+        candidate_sets=source.candidate_sets,
+        instances=source.instances,
+        horizon_end=source.horizon_end,
+        collision_backend=source.collision_backend,
+        jagua_container_guard=source.jagua_container_guard,
+    )
+    runtime = M7ReplayRuntime(
+        replay_input=replay_input,
+        runtime_candidates=source_runtime.runtime_candidates,
+        rules=source_runtime.rules,
+    )
+    return M8OracleRequest(
+        runtime=runtime,
+        cursor=initial_m7_cursor(replay_input),
+        visibility=FullRealizedVisibility(stream=replay_input.instances),
+    )
+
+
+def test_strict_exact_search_still_rejects_registered_geometry_truncation() -> None:
+    request = _registered_bounded_geometry_request()
+
+    with pytest.raises(ValueError, match="exact search encountered a truncated"):
+        solve_exact_search(request, include_terminal_credit=True)
+
+
+def test_strict_two_ply_still_rejects_registered_geometry_truncation() -> None:
+    request = _registered_bounded_geometry_request()
+
+    with pytest.raises(ValueError, match="two-ply search encountered a truncated"):
+        score_two_ply_reoptimization(request, objective_label="scrap_only")
+
+
+def test_exact_search_completes_over_every_discovered_bounded_action() -> None:
+    request = _registered_bounded_geometry_request()
+    root_catalog = enumerate_m7_action_catalog(
+        request.runtime,
+        cursor=request.cursor,
+        complete=True,
+    )
+
+    result = solve_exact_search(
+        request,
+        include_terminal_credit=True,
+        action_catalog_requirement=_BOUNDED_CATALOG_REQUIREMENT,
+    )
+
+    assert result.action_catalog_requirement == _BOUNDED_CATALOG_REQUIREMENT
+    assert result.action_catalog_complete is True
+    assert result.complete is True
+    assert result.telemetry.truncated_catalog_count > 0
+    assert tuple(score.action_id for score in result.root_scores) == tuple(
+        action.action_id for action in root_catalog.actions
+    )
+
+
+def test_two_ply_completes_over_every_discovered_bounded_action() -> None:
+    request = _registered_bounded_geometry_request()
+    root_catalog = enumerate_m7_action_catalog(
+        request.runtime,
+        cursor=request.cursor,
+        complete=True,
+    )
+
+    result = score_two_ply_reoptimization(
+        request,
+        objective_label="scrap_only",
+        action_catalog_requirement=_BOUNDED_CATALOG_REQUIREMENT,
+    )
+
+    assert result.action_catalog_requirement == _BOUNDED_CATALOG_REQUIREMENT
+    assert result.action_catalog_complete is True
+    assert result.complete is True
+    assert result.telemetry.truncated_catalog_count > 0
+    assert tuple(score.action_id for score in result.root_scores) == tuple(
+        action.action_id for action in root_catalog.actions
     )
 
 
@@ -187,9 +293,7 @@ def test_two_ply_counterexample_selects_standard_through_strict_advantage() -> N
 
     assert result.depth == 2
     assert result.objective_label == "scrap_only"
-    assert result.objective_definition == (
-        "m7_final_net_cost_including_terminal_scrap_credit"
-    )
+    assert result.objective_definition == ("m7_final_net_cost_including_terminal_scrap_credit")
     assert tuple(
         score.bounded_objective_cost
         for score in result.root_scores
@@ -217,8 +321,7 @@ def test_two_ply_counterexample_selects_standard_through_strict_advantage() -> N
     assert result.telemetry.direct_terminalization_count == 0
     assert result.telemetry.truncated_catalog_count == 0
     assert result.telemetry.total_event_transition_count == (
-        result.telemetry.explicit_transition_count
-        + result.telemetry.continuation_event_count
+        result.telemetry.explicit_transition_count + result.telemetry.continuation_event_count
     )
 
     scorer_source = getsource(score_two_ply_reoptimization)
@@ -237,8 +340,8 @@ def test_two_ply_terminalizes_directly_after_second_explicit_decision() -> None:
         objective_label="scrap_only",
     )
 
-    second_ply_transition_count = (
-        result.telemetry.explicit_transition_count - len(result.root_scores)
+    second_ply_transition_count = result.telemetry.explicit_transition_count - len(
+        result.root_scores
     )
     assert second_ply_transition_count > 0
     assert result.telemetry.direct_terminalization_count == second_ply_transition_count
@@ -247,8 +350,7 @@ def test_two_ply_terminalizes_directly_after_second_explicit_decision() -> None:
     assert len({score.bounded_objective_cost for score in result.root_scores}) == 1
     assert result.selected_action_id == result.baseline_action_id
     assert (
-        result.telemetry.total_event_transition_count
-        == result.telemetry.explicit_transition_count
+        result.telemetry.total_event_transition_count == result.telemetry.explicit_transition_count
     )
     assert result.telemetry.truncated_catalog_count == 0
     assert result.complete is True
@@ -269,8 +371,7 @@ def test_search_validation_matrix_preserves_the_bounded_counterexample() -> None
     assert tuple(item.case_id for item in result.terminal_sensitivity.cases) == expected_ids
     assert result.primary.objective_label == "scrap_only"
     assert (
-        result.primary.objective_definition
-        == "m7_final_net_cost_including_terminal_scrap_credit"
+        result.primary.objective_definition == "m7_final_net_cost_including_terminal_scrap_credit"
     )
     assert result.terminal_sensitivity.objective_label == "zero_total_terminal_credit"
     assert result.terminal_sensitivity.objective_definition == (
@@ -284,9 +385,7 @@ def test_search_validation_matrix_preserves_the_bounded_counterexample() -> None
         assert record.rollout_selected_action_id in {
             score.action_id for score in record.one_step_scores
         }
-        assert record.baseline_action_id in {
-            score.action_id for score in record.one_step_scores
-        }
+        assert record.baseline_action_id in {score.action_id for score in record.one_step_scores}
         assert record.exact_optimal_first_action_ids
         assert record.exact_cost_after_selected_first_action >= record.exact_optimal_cost
         assert record.absolute_first_action_regret >= 0.0
@@ -313,11 +412,14 @@ def test_search_validation_matrix_preserves_the_bounded_counterexample() -> None
     assert counterexample.absolute_first_action_regret == 100.0
     assert counterexample.relative_first_action_regret == 0.333333
     assert counterexample.selected_action_is_globally_optimal is False
-    assert tuple(
-        score.action_id
-        for score in counterexample.exact_root_scores
-        if score.kind is M7ActionKind.OPEN_STANDARD_SHEET
-    ) == counterexample.exact_optimal_first_action_ids
+    assert (
+        tuple(
+            score.action_id
+            for score in counterexample.exact_root_scores
+            if score.kind is M7ActionKind.OPEN_STANDARD_SHEET
+        )
+        == counterexample.exact_optimal_first_action_ids
+    )
 
     exact_source = getsource(solve_exact_search)
     assert "score_reference_event" not in exact_source
@@ -337,9 +439,7 @@ def test_information_null_controls_are_honestly_labeled_and_tied() -> None:
     assert len(expected_control_ids) == 5
     assert result.information_null_control_case_ids == expected_control_ids
     for objective in (result.primary, result.terminal_sensitivity):
-        controls = tuple(
-            record for record in objective.cases if record.control_label is not None
-        )
+        controls = tuple(record for record in objective.cases if record.control_label is not None)
         assert tuple(record.case_id for record in controls) == expected_control_ids
         assert objective.information_null_controls_pass is True
         for record in controls:
@@ -389,9 +489,7 @@ def test_two_ply_repair_matrix_passes_exact_action_gate_in_fixture_order() -> No
         "zero_total_terminal_credit",
     )
     assert tuple(record.case_id for record in result.primary.cases) == expected_ids
-    assert tuple(record.case_id for record in result.terminal_sensitivity.cases) == (
-        expected_ids
-    )
+    assert tuple(record.case_id for record in result.terminal_sensitivity.cases) == (expected_ids)
     for objective in (result.primary, result.terminal_sensitivity):
         assert objective.complete is True
         assert objective.every_selected_action_is_globally_optimal is True
@@ -406,26 +504,23 @@ def test_two_ply_repair_matrix_passes_exact_action_gate_in_fixture_order() -> No
                 for score in record.two_ply_root_scores
             }
             exact_by_action = {
-                score.action_id: score.final_net_cost
-                for score in record.exact_root_scores
+                score.action_id: score.final_net_cost for score in record.exact_root_scores
             }
             assert tuple(bounded_by_action) == tuple(exact_by_action)
             assert record.baseline_action_id in bounded_by_action
             assert record.repaired_selected_action_id in bounded_by_action
             assert record.exact_optimal_first_action_ids
+            assert record.repaired_selected_action_id in record.exact_optimal_first_action_ids
             assert (
-                record.repaired_selected_action_id
-                in record.exact_optimal_first_action_ids
+                record.exact_cost_after_selected_first_action
+                == exact_by_action[record.repaired_selected_action_id]
             )
-            assert record.exact_cost_after_selected_first_action == exact_by_action[
-                record.repaired_selected_action_id
-            ]
-            assert record.bounded_selected_action_score == bounded_by_action[
-                record.repaired_selected_action_id
-            ]
-            assert record.bounded_selected_action_signed_error == rounded_cost(
+            assert (
                 record.bounded_selected_action_score
-                - record.exact_cost_after_selected_first_action
+                == bounded_by_action[record.repaired_selected_action_id]
+            )
+            assert record.bounded_selected_action_signed_error == rounded_cost(
+                record.bounded_selected_action_score - record.exact_cost_after_selected_first_action
             )
             assert record.bounded_selected_action_absolute_error == abs(
                 record.bounded_selected_action_signed_error
@@ -452,8 +547,7 @@ def test_two_ply_repair_compute_totals_reconcile_with_frozen_budget() -> None:
         assert compute.observed_continuation_event_count == 500
         assert compute.observed_total_event_transition_count == 1150
         assert compute.observed_total_event_transition_count == (
-            compute.observed_explicit_transition_count
-            + compute.observed_continuation_event_count
+            compute.observed_explicit_transition_count + compute.observed_continuation_event_count
         )
         assert compute.observed_truncated_catalog_count == 0
         assert compute.max_catalog_count == 200
@@ -461,26 +555,32 @@ def test_two_ply_repair_compute_totals_reconcile_with_frozen_budget() -> None:
         assert compute.max_total_event_transition_count == 1200
         assert compute.totals_reconcile is True
         assert compute.pass_budget is True
-        assert sum(
-            record.two_ply_search_telemetry.catalog_count
-            for record in objective.cases
-        ) == compute.observed_catalog_count
-        assert sum(
-            record.two_ply_search_telemetry.explicit_transition_count
-            for record in objective.cases
-        ) == compute.observed_explicit_transition_count
-        assert sum(
-            record.two_ply_search_telemetry.continuation_event_count
-            for record in objective.cases
-        ) == compute.observed_continuation_event_count
-        assert sum(
-            record.two_ply_search_telemetry.total_event_transition_count
-            for record in objective.cases
-        ) == compute.observed_total_event_transition_count
-        errors = tuple(
-            record.bounded_selected_action_signed_error
-            for record in objective.cases
+        assert (
+            sum(record.two_ply_search_telemetry.catalog_count for record in objective.cases)
+            == compute.observed_catalog_count
         )
+        assert (
+            sum(
+                record.two_ply_search_telemetry.explicit_transition_count
+                for record in objective.cases
+            )
+            == compute.observed_explicit_transition_count
+        )
+        assert (
+            sum(
+                record.two_ply_search_telemetry.continuation_event_count
+                for record in objective.cases
+            )
+            == compute.observed_continuation_event_count
+        )
+        assert (
+            sum(
+                record.two_ply_search_telemetry.total_event_transition_count
+                for record in objective.cases
+            )
+            == compute.observed_total_event_transition_count
+        )
+        errors = tuple(record.bounded_selected_action_signed_error for record in objective.cases)
         value = objective.value_error_summary
         assert value.case_count == 45
         assert value.exact_value_match_count + value.nonexact_value_count == 45
@@ -500,18 +600,14 @@ def test_two_ply_repair_controls_and_terminal_credit_sensitivity_are_honest() ->
 
     assert result.information_null_control_case_ids == expected_control_ids
     for objective in (result.primary, result.terminal_sensitivity):
-        controls = tuple(
-            record for record in objective.cases if record.control_label is not None
-        )
+        controls = tuple(record for record in objective.cases if record.control_label is not None)
         assert tuple(record.case_id for record in controls) == expected_control_ids
         assert all(record.control_label == "tiny_information_null" for record in controls)
         assert all("no_signal" not in record.control_label for record in controls)
         assert all(record.absolute_first_action_regret == 0.0 for record in controls)
 
     primary_by_id = {record.case_id: record for record in result.primary.cases}
-    sensitivity_by_id = {
-        record.case_id: record for record in result.terminal_sensitivity.cases
-    }
+    sensitivity_by_id = {record.case_id: record for record in result.terminal_sensitivity.cases}
     affected_ids = tuple(
         case_id
         for case_id in primary_by_id
@@ -546,9 +642,7 @@ def test_two_ply_repair_rejects_wrong_sensitivity_objective(
         return original_scorer(
             request,
             objective_label=(
-                "scrap_only"
-                if objective_label == "zero_total_terminal_credit"
-                else objective_label
+                "scrap_only" if objective_label == "zero_total_terminal_credit" else objective_label
             ),
         )
 
@@ -686,9 +780,7 @@ def test_runner_rebuilds_twice_and_publishes_content_addressed_fail_result(
     payload = json.loads(raw)
     assert raw.startswith(b"{\n") and raw.endswith(b"\n")
     assert payload["schema_version"] == "yieldforge.m9-minimal-search-validation.v1"
-    assert payload["fixture_source"] == (
-        "tests.oracle.fixtures.exhaustive_certificate_cases"
-    )
+    assert payload["fixture_source"] == ("tests.oracle.fixtures.exhaustive_certificate_cases")
     assert payload["fixture_build_count"] == 2
     assert payload["repeat_count"] == 2
     assert payload["repeat_semantic_identity_match"] is True
@@ -709,9 +801,7 @@ def test_runner_rebuilds_twice_and_publishes_content_addressed_fail_result(
     assert content_sha256 == f"sha256:{digest}"
     assert outcome.result_id == result_id
     assert outcome.content_sha256 == content_sha256
-    assert outcome.artifact_path.name == (
-        f"m9-minimal-search-validation-{result_id}.json"
-    )
+    assert outcome.artifact_path.name == (f"m9-minimal-search-validation-{result_id}.json")
 
     assert runner.main(["--output-directory", str(tmp_path)]) == 0
     cli_payload = json.loads(capsys.readouterr().out)
@@ -823,9 +913,7 @@ def test_two_ply_runner_rebuilds_twice_and_publishes_passing_repair(
     payload = json.loads(raw)
     assert raw.startswith(b"{\n") and raw.endswith(b"\n")
     assert payload["schema_version"] == "yieldforge.m9-two-ply-repair-validation.v1"
-    assert payload["fixture_source"] == (
-        "tests.oracle.fixtures.exhaustive_certificate_cases"
-    )
+    assert payload["fixture_source"] == ("tests.oracle.fixtures.exhaustive_certificate_cases")
     assert payload["fixture_build_count"] == 2
     assert payload["repeat_count"] == 2
     assert payload["repeat_semantic_identity_match"] is True
@@ -840,18 +928,13 @@ def test_two_ply_runner_rebuilds_twice_and_publishes_passing_repair(
         "tie_break": "bounded_cost_then_baseline_then_action_id",
     }
     assert payload["original_failure_binding"] == {
-        "artifact_name": (
-            "m9-minimal-search-validation-"
-            "yfm9-97e032de7a09247cc83e6c5a.json"
-        ),
+        "artifact_name": ("m9-minimal-search-validation-yfm9-97e032de7a09247cc83e6c5a.json"),
         "content_sha256": (
-            "sha256:97e032de7a09247cc83e6c5a7140c67"
-            "ea988712a1b493ca92b6513d95ea98dca"
+            "sha256:97e032de7a09247cc83e6c5a7140c67ea988712a1b493ca92b6513d95ea98dca"
         ),
         "decision": "fail_search_gap",
         "raw_file_sha256": (
-            "sha256:9ae6d7fdf2252023a96de8773877bb50"
-            "f3786f2f7c8b1c6c4bcb5a7de1ca82e3"
+            "sha256:9ae6d7fdf2252023a96de8773877bb50f3786f2f7c8b1c6c4bcb5a7de1ca82e3"
         ),
         "result_id": "yfm9-97e032de7a09247cc83e6c5a",
         "schema_version": "yieldforge.m9-minimal-search-validation.v1",
@@ -870,9 +953,7 @@ def test_two_ply_runner_rebuilds_twice_and_publishes_passing_repair(
     assert content_sha256 == f"sha256:{digest}"
     assert outcome.result_id == result_id
     assert outcome.content_sha256 == content_sha256
-    assert outcome.artifact_path.name == (
-        f"m9-two-ply-repair-validation-{result_id}.json"
-    )
+    assert outcome.artifact_path.name == (f"m9-two-ply-repair-validation-{result_id}.json")
 
     repeated = runner.run_two_ply_repair_validation(output_directory=tmp_path)
     assert repeated.artifact_path == outcome.artifact_path
@@ -899,18 +980,12 @@ def test_two_ply_runner_cli_is_additive_and_default_is_unchanged(
     assert runner.main(["--output-directory", str(tmp_path)]) == 0
     original_cli = json.loads(capsys.readouterr().out)
     assert original_cli["decision"] == "fail_search_gap"
-    assert Path(original_cli["artifact_path"]).name.startswith(
-        "m9-minimal-search-validation-yfm9-"
-    )
+    assert Path(original_cli["artifact_path"]).name.startswith("m9-minimal-search-validation-yfm9-")
 
-    assert runner.main(
-        ["--two-ply-repair", "--output-directory", str(tmp_path)]
-    ) == 0
+    assert runner.main(["--two-ply-repair", "--output-directory", str(tmp_path)]) == 0
     repair_cli = json.loads(capsys.readouterr().out)
     assert repair_cli["decision"] == "pass_decision_feasibility"
-    assert Path(repair_cli["artifact_path"]).name.startswith(
-        "m9-two-ply-repair-validation-yfm9r-"
-    )
+    assert Path(repair_cli["artifact_path"]).name.startswith("m9-two-ply-repair-validation-yfm9r-")
     assert set(repair_cli) == {
         "artifact_path",
         "content_sha256",
@@ -948,9 +1023,7 @@ def test_two_ply_runner_publishes_nothing_on_repeat_or_aggregate_mismatch(
 
 def test_two_ply_runner_rejects_nonbaseline_winner_in_bounded_tie() -> None:
     runner = _load_runner()
-    ordered_case_ids = tuple(
-        case.case_id for case in exhaustive_certificate_cases()
-    )
+    ordered_case_ids = tuple(case.case_id for case in exhaustive_certificate_cases())
 
     with pytest.raises(runner.M9RunnerError, match="tie selection"):
         runner._validate_two_ply_evaluator_result(
@@ -1023,9 +1096,7 @@ def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
     assert payload["schema_version"] == "yieldforge.m9-two-ply-repair-validation.v1"
     assert payload["evaluation_partition_opened"] is False
     assert payload["evaluator_result"]["decision"] == "pass_decision_feasibility"
-    ordered_case_ids = tuple(
-        case.case_id for case in exhaustive_certificate_cases()
-    )
+    ordered_case_ids = tuple(case.case_id for case in exhaustive_certificate_cases())
     assert tuple(payload["ordered_case_ids"]) == ordered_case_ids
     assert len(ordered_case_ids) == len(set(ordered_case_ids)) == 45
 
@@ -1064,8 +1135,7 @@ def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
         assert objective["conclusion"] == "pass_decision_feasibility"
         for record in records:
             exact_by_action = {
-                score["action_id"]: score["final_net_cost"]
-                for score in record["exact_root_scores"]
+                score["action_id"]: score["final_net_cost"] for score in record["exact_root_scores"]
             }
             bounded_by_action = {
                 score["action_id"]: score["bounded_objective_cost"]
@@ -1074,9 +1144,7 @@ def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
             assert tuple(exact_by_action) == tuple(bounded_by_action)
             exact_optimum = min(exact_by_action.values())
             exact_optimal_ids = tuple(
-                action_id
-                for action_id, cost in exact_by_action.items()
-                if cost == exact_optimum
+                action_id for action_id, cost in exact_by_action.items() if cost == exact_optimum
             )
             selected = record["repaired_selected_action_id"]
             expected_bounded_winner = min(
@@ -1113,9 +1181,7 @@ def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
         assert budget["max_catalog_count"] == 200
         assert budget["max_explicit_transition_count"] == 700
         assert budget["max_total_event_transition_count"] == 1200
-        exact_count, nonexact_count, max_error = expected_value_error[
-            objective["objective_label"]
-        ]
+        exact_count, nonexact_count, max_error = expected_value_error[objective["objective_label"]]
         value_error = objective["value_error_summary"]
         assert value_error["case_count"] == 45
         assert value_error["exact_value_match_count"] == exact_count
@@ -1124,8 +1190,7 @@ def test_two_ply_runner_committed_artifact_independently_reconciles() -> None:
 
     assert evaluator["terminal_conclusion_does_not_reverse"] is True
     original_path = (
-        results_directory
-        / "m9-minimal-search-validation-yfm9-97e032de7a09247cc83e6c5a.json"
+        results_directory / "m9-minimal-search-validation-yfm9-97e032de7a09247cc83e6c5a.json"
     )
     original_raw = original_path.read_bytes()
     assert hashlib.sha256(original_raw).hexdigest() == (

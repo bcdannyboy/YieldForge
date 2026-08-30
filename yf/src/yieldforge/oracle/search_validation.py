@@ -21,6 +21,10 @@ from yieldforge.replay.contracts import rounded_cost
 M9ObjectiveLabel = Literal["scrap_only", "zero_total_terminal_credit"]
 M9Decision = Literal["pass_decision_feasibility", "fail_search_gap"]
 M9ControlLabel = Literal["tiny_information_null"]
+M9ActionCatalogRequirement = Literal[
+    "complete_no_truncation",
+    "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search",
+]
 
 _PRIMARY_OBJECTIVE: M9ObjectiveLabel = "scrap_only"
 _TERMINAL_SENSITIVITY_OBJECTIVE: M9ObjectiveLabel = "zero_total_terminal_credit"
@@ -35,6 +39,14 @@ _INFORMATION_NULL_SUFFIX = "zero-no-fit-equal-separated-two"
 _TWO_PLY_MAX_CATALOG_COUNT = 200
 _TWO_PLY_MAX_EXPLICIT_TRANSITION_COUNT = 700
 _TWO_PLY_MAX_TOTAL_EVENT_TRANSITION_COUNT = 1200
+_STRICT_ACTION_CATALOG_REQUIREMENT: M9ActionCatalogRequirement = "complete_no_truncation"
+_BOUNDED_ACTION_CATALOG_REQUIREMENT: M9ActionCatalogRequirement = (
+    "complete_over_all_actions_discovered_by_registered_bounded_m7_geometry_search"
+)
+_ACTION_CATALOG_REQUIREMENTS = (
+    _STRICT_ACTION_CATALOG_REQUIREMENT,
+    _BOUNDED_ACTION_CATALOG_REQUIREMENT,
+)
 
 
 class _FutureVisibility(Protocol):
@@ -82,6 +94,8 @@ class M9ExactSearchResult:
     optimal_final_net_cost: float
     optimal_first_action_ids: tuple[str, ...]
     root_scores: tuple[M9ExactRootScore, ...]
+    action_catalog_requirement: M9ActionCatalogRequirement
+    action_catalog_complete: bool
     complete: bool
     telemetry: M9ExactSearchTelemetry
 
@@ -144,6 +158,7 @@ class M9TwoPlyResult:
     baseline_action_id: str
     selected_action_id: str
     root_scores: tuple[M9TwoPlyRootScore, ...]
+    action_catalog_requirement: M9ActionCatalogRequirement
     action_catalog_complete: bool
     complete: bool
     telemetry: M9TwoPlySearchTelemetry
@@ -318,6 +333,22 @@ def _objective_parameters(objective_label: M9ObjectiveLabel) -> tuple[bool, str]
     return objective_label == _PRIMARY_OBJECTIVE, definition
 
 
+def _validate_action_catalog_requirement(
+    requirement: M9ActionCatalogRequirement,
+) -> M9ActionCatalogRequirement:
+    if requirement not in _ACTION_CATALOG_REQUIREMENTS:
+        raise ValueError("M9 action catalog requirement is not registered")
+    return requirement
+
+
+def _action_catalog_requirement_satisfied(
+    *,
+    requirement: M9ActionCatalogRequirement,
+    truncated_catalog_count: int,
+) -> bool:
+    return requirement == _BOUNDED_ACTION_CATALOG_REQUIREMENT or truncated_catalog_count == 0
+
+
 def _visible_stop(request: M9ExactSearchRequest) -> tuple[int, int]:
     start = request.cursor.next_event_position
     visible_suffix = request.visibility.visible_suffix(current_position=start)
@@ -351,6 +382,8 @@ def _complete_catalog(
     runtime: M7ReplayRuntime,
     cursor: M7ReplayCursor,
     telemetry: _MutableTelemetry,
+    *,
+    action_catalog_requirement: M9ActionCatalogRequirement,
 ) -> M7ActionCatalog:
     catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
     telemetry.catalog_count += 1
@@ -360,7 +393,7 @@ def _complete_catalog(
     )
     truncated = catalog.generated.fit_search_budget_truncated_count
     telemetry.truncated_catalog_count += truncated
-    if truncated:
+    if truncated and action_catalog_requirement == _STRICT_ACTION_CATALOG_REQUIREMENT:
         raise ValueError("M9 exact search encountered a truncated action catalog")
     if not catalog.actions:
         raise ValueError("M9 exact search encountered an empty action catalog")
@@ -371,9 +404,11 @@ def solve_exact_search(
     request: M9ExactSearchRequest,
     *,
     include_terminal_credit: bool = True,
+    action_catalog_requirement: M9ActionCatalogRequirement = (_STRICT_ACTION_CATALOG_REQUIREMENT),
 ) -> M9ExactSearchResult:
     """Exhaustively reoptimize every visible future M7 decision."""
 
+    action_catalog_requirement = _validate_action_catalog_requirement(action_catalog_requirement)
     runtime = request.runtime
     root_cursor = request.cursor
     start, stop = _visible_stop(request)
@@ -391,7 +426,12 @@ def solve_exact_search(
             )
         if cursor.next_event_position > stop:
             raise RuntimeError("M9 exact search advanced beyond the visible suffix")
-        catalog = _complete_catalog(runtime, cursor, telemetry)
+        catalog = _complete_catalog(
+            runtime,
+            cursor,
+            telemetry,
+            action_catalog_requirement=action_catalog_requirement,
+        )
         branch_costs: list[float] = []
         for descriptor in catalog.actions:
             telemetry.explored_transition_count += 1
@@ -405,7 +445,12 @@ def solve_exact_search(
             branch_costs.append(recurse(step.cursor))
         return min(branch_costs)
 
-    root_catalog = _complete_catalog(runtime, root_cursor, telemetry)
+    root_catalog = _complete_catalog(
+        runtime,
+        root_cursor,
+        telemetry,
+        action_catalog_requirement=action_catalog_requirement,
+    )
     root_scores = []
     for descriptor in root_catalog.actions:
         telemetry.explored_transition_count += 1
@@ -433,6 +478,10 @@ def solve_exact_search(
         peak_branching_factor=telemetry.peak_branching_factor,
         truncated_catalog_count=telemetry.truncated_catalog_count,
     )
+    action_catalog_complete = _action_catalog_requirement_satisfied(
+        requirement=action_catalog_requirement,
+        truncated_catalog_count=immutable_telemetry.truncated_catalog_count,
+    )
     return M9ExactSearchResult(
         start_event_position=start,
         stop_event_position=stop,
@@ -442,7 +491,9 @@ def solve_exact_search(
             item.action_id for item in score_tuple if item.final_net_cost == optimum
         ),
         root_scores=score_tuple,
-        complete=immutable_telemetry.truncated_catalog_count == 0,
+        action_catalog_requirement=action_catalog_requirement,
+        action_catalog_complete=action_catalog_complete,
+        complete=action_catalog_complete,
         telemetry=immutable_telemetry,
     )
 
@@ -521,6 +572,8 @@ def _complete_two_ply_catalog(
     runtime: M7ReplayRuntime,
     cursor: M7ReplayCursor,
     telemetry: _MutableTwoPlyTelemetry,
+    *,
+    action_catalog_requirement: M9ActionCatalogRequirement,
 ) -> M7ActionCatalog:
     catalog = enumerate_m7_action_catalog(runtime, cursor=cursor, complete=True)
     telemetry.catalog_count += 1
@@ -530,7 +583,7 @@ def _complete_two_ply_catalog(
     )
     truncated = catalog.generated.fit_search_budget_truncated_count
     telemetry.truncated_catalog_count += truncated
-    if truncated:
+    if truncated and action_catalog_requirement == _STRICT_ACTION_CATALOG_REQUIREMENT:
         raise ValueError("M9 two-ply search encountered a truncated action catalog")
     if not catalog.actions:
         raise ValueError("M9 two-ply search encountered an empty action catalog")
@@ -541,14 +594,21 @@ def score_two_ply_reoptimization(
     request: M9ExactSearchRequest,
     *,
     objective_label: M9ObjectiveLabel,
+    action_catalog_requirement: M9ActionCatalogRequirement = (_STRICT_ACTION_CATALOG_REQUIREMENT),
 ) -> M9TwoPlyResult:
     """Optimize the current and next decisions, then follow frozen M7."""
 
+    action_catalog_requirement = _validate_action_catalog_requirement(action_catalog_requirement)
     include_terminal_credit, objective_definition = _objective_parameters(objective_label)
     runtime = request.runtime
     start, stop = _visible_stop(request)
     telemetry = _MutableTwoPlyTelemetry()
-    root_catalog = _complete_two_ply_catalog(runtime, request.cursor, telemetry)
+    root_catalog = _complete_two_ply_catalog(
+        runtime,
+        request.cursor,
+        telemetry,
+        action_catalog_requirement=action_catalog_requirement,
+    )
     fallback = select_m7_fallback(
         root_catalog,
         policy=runtime.replay_input.policy,
@@ -578,6 +638,7 @@ def score_two_ply_reoptimization(
                 runtime,
                 root_step.cursor,
                 telemetry,
+                action_catalog_requirement=action_catalog_requirement,
             )
             second_costs: list[float] = []
             for second_descriptor in second_catalog.actions:
@@ -587,14 +648,10 @@ def score_two_ply_reoptimization(
                     cursor=root_step.cursor,
                     catalog=second_catalog,
                     descriptor=second_descriptor,
-                    decision_key=(
-                        f"m9_two_ply_second_action_id={second_descriptor.action_id}",
-                    ),
+                    decision_key=(f"m9_two_ply_second_action_id={second_descriptor.action_id}",),
                 )
                 if second_step.cursor.next_event_position > stop:
-                    raise RuntimeError(
-                        "M9 two-ply search advanced beyond the visible suffix"
-                    )
+                    raise RuntimeError("M9 two-ply search advanced beyond the visible suffix")
                 if second_step.cursor.next_event_position == stop:
                     telemetry.direct_terminalization_count += 1
                     cost = _terminal_cost(
@@ -612,15 +669,11 @@ def score_two_ply_reoptimization(
                     )
                     expected_events = stop - second_step.cursor.next_event_position
                     if len(terminal.events) != expected_events:
-                        raise RuntimeError(
-                            "M9 two-ply continuation event count does not reconcile"
-                        )
+                        raise RuntimeError("M9 two-ply continuation event count does not reconcile")
                     telemetry.continuation_event_count += len(terminal.events)
                     cost = terminal.final_costs.net_cost
                     if not include_terminal_credit:
-                        cost = rounded_cost(
-                            cost + terminal.final_costs.terminal_scrap_credit
-                        )
+                        cost = rounded_cost(cost + terminal.final_costs.terminal_scrap_credit)
                 second_costs.append(cost)
             root_cost = min(second_costs)
         root_scores.append(
@@ -649,9 +702,12 @@ def score_two_ply_reoptimization(
         peak_branching_factor=telemetry.peak_branching_factor,
         truncated_catalog_count=telemetry.truncated_catalog_count,
         total_event_transition_count=(
-            telemetry.explicit_transition_count
-            + telemetry.continuation_event_count
+            telemetry.explicit_transition_count + telemetry.continuation_event_count
         ),
+    )
+    action_catalog_complete = _action_catalog_requirement_satisfied(
+        requirement=action_catalog_requirement,
+        truncated_catalog_count=immutable_telemetry.truncated_catalog_count,
     )
     return M9TwoPlyResult(
         objective_label=objective_label,
@@ -662,8 +718,9 @@ def score_two_ply_reoptimization(
         baseline_action_id=fallback.action_id,
         selected_action_id=selected.action_id,
         root_scores=score_tuple,
-        action_catalog_complete=immutable_telemetry.truncated_catalog_count == 0,
-        complete=immutable_telemetry.truncated_catalog_count == 0,
+        action_catalog_requirement=action_catalog_requirement,
+        action_catalog_complete=action_catalog_complete,
+        complete=action_catalog_complete,
         telemetry=immutable_telemetry,
     )
 
@@ -743,9 +800,7 @@ def _evaluate_objective(
     objective_label: M9ObjectiveLabel,
 ) -> M9ObjectiveEvaluation:
     _, objective_definition = _objective_parameters(objective_label)
-    records = tuple(
-        _compare_case(case, objective_label=objective_label) for case in cases
-    )
+    records = tuple(_compare_case(case, objective_label=objective_label) for case in cases)
     complete = len(records) == 45 and all(record.complete for record in records)
     every_optimal = all(record.selected_action_is_globally_optimal for record in records)
     max_regret = max(
@@ -785,9 +840,7 @@ def evaluate_search_validation(
         raise ValueError("M9 search validation requires at least one case")
     if any(not case_id for case_id in case_ids) or len(case_ids) != len(set(case_ids)):
         raise ValueError("M9 registered case IDs must be nonempty and unique")
-    controls = tuple(
-        case_id for case_id in case_ids if case_id.endswith(_INFORMATION_NULL_SUFFIX)
-    )
+    controls = tuple(case_id for case_id in case_ids if case_id.endswith(_INFORMATION_NULL_SUFFIX))
     primary = _evaluate_objective(cases, objective_label=_PRIMARY_OBJECTIVE)
     sensitivity = _evaluate_objective(
         cases,
@@ -856,9 +909,7 @@ def _compare_two_ply_case(
             bounded_score.bounded_objective_cost - exact_score.final_net_cost
         )
         if signed_root_error < 0.0:
-            raise RuntimeError(
-                "M9 bounded root cost is below its exact reachable cost"
-            )
+            raise RuntimeError("M9 bounded root cost is below its exact reachable cost")
     exact_by_action = {item.action_id: item.final_net_cost for item in exact.root_scores}
     bounded_by_action = {
         item.action_id: item.bounded_objective_cost for item in two_ply.root_scores
@@ -908,13 +959,7 @@ def _two_ply_controls_pass(records: tuple[M9TwoPlyCaseComparison, ...]) -> bool:
         and record.absolute_first_action_regret == 0.0
         and record.relative_first_action_regret == 0.0
         and record.repaired_selected_action_id == record.baseline_action_id
-        and len(
-            {
-                score.bounded_objective_cost
-                for score in record.two_ply_root_scores
-            }
-        )
-        == 1
+        and len({score.bounded_objective_cost for score in record.two_ply_root_scores}) == 1
         and len({score.final_net_cost for score in record.exact_root_scores}) == 1
         for record in controls
     )
@@ -923,43 +968,31 @@ def _two_ply_controls_pass(records: tuple[M9TwoPlyCaseComparison, ...]) -> bool:
 def _two_ply_compute_budget(
     records: tuple[M9TwoPlyCaseComparison, ...],
 ) -> M9TwoPlyComputeBudgetEvaluation:
-    catalog_count = sum(
-        record.two_ply_search_telemetry.catalog_count for record in records
-    )
+    catalog_count = sum(record.two_ply_search_telemetry.catalog_count for record in records)
     explicit_count = sum(
-        record.two_ply_search_telemetry.explicit_transition_count
-        for record in records
+        record.two_ply_search_telemetry.explicit_transition_count for record in records
     )
     continuation_event_count = sum(
-        record.two_ply_search_telemetry.continuation_event_count
-        for record in records
+        record.two_ply_search_telemetry.continuation_event_count for record in records
     )
     continuation_call_count = sum(
-        record.two_ply_search_telemetry.continuation_call_count
-        for record in records
+        record.two_ply_search_telemetry.continuation_call_count for record in records
     )
     direct_terminalization_count = sum(
-        record.two_ply_search_telemetry.direct_terminalization_count
-        for record in records
+        record.two_ply_search_telemetry.direct_terminalization_count for record in records
     )
     total_event_transition_count = sum(
-        record.two_ply_search_telemetry.total_event_transition_count
-        for record in records
+        record.two_ply_search_telemetry.total_event_transition_count for record in records
     )
     truncated_count = sum(
-        record.two_ply_search_telemetry.truncated_catalog_count
-        for record in records
+        record.two_ply_search_telemetry.truncated_catalog_count for record in records
     )
     peak_branching_factor = max(
-        (
-            record.two_ply_search_telemetry.peak_branching_factor
-            for record in records
-        ),
+        (record.two_ply_search_telemetry.peak_branching_factor for record in records),
         default=0,
     )
     totals_reconcile = (
-        total_event_transition_count
-        == explicit_count + continuation_event_count
+        total_event_transition_count == explicit_count + continuation_event_count
         and all(
             record.two_ply_search_telemetry.total_event_transition_count
             == record.two_ply_search_telemetry.explicit_transition_count
@@ -994,9 +1027,7 @@ def _two_ply_compute_budget(
 def _two_ply_value_error_summary(
     records: tuple[M9TwoPlyCaseComparison, ...],
 ) -> M9TwoPlyValueErrorSummary:
-    signed_errors = tuple(
-        record.bounded_selected_action_signed_error for record in records
-    )
+    signed_errors = tuple(record.bounded_selected_action_signed_error for record in records)
     exact_match_count = sum(error == 0.0 for error in signed_errors)
     return M9TwoPlyValueErrorSummary(
         case_count=len(records),
@@ -1014,9 +1045,7 @@ def _evaluate_two_ply_objective(
     objective_label: M9ObjectiveLabel,
 ) -> M9TwoPlyObjectiveEvaluation:
     _, objective_definition = _objective_parameters(objective_label)
-    records = tuple(
-        _compare_two_ply_case(case, objective_label=objective_label) for case in cases
-    )
+    records = tuple(_compare_two_ply_case(case, objective_label=objective_label) for case in cases)
     complete = len(records) == 45 and all(record.complete for record in records)
     every_optimal = all(record.selected_action_is_globally_optimal for record in records)
     max_regret = max(
@@ -1064,9 +1093,7 @@ def evaluate_two_ply_repair_validation(
         raise ValueError("M9 two-ply repair validation requires at least one case")
     if any(not case_id for case_id in case_ids) or len(case_ids) != len(set(case_ids)):
         raise ValueError("M9 registered case IDs must be nonempty and unique")
-    controls = tuple(
-        case_id for case_id in case_ids if case_id.endswith(_INFORMATION_NULL_SUFFIX)
-    )
+    controls = tuple(case_id for case_id in case_ids if case_id.endswith(_INFORMATION_NULL_SUFFIX))
     primary = _evaluate_two_ply_objective(
         cases,
         objective_label=_PRIMARY_OBJECTIVE,
@@ -1095,6 +1122,7 @@ def evaluate_two_ply_repair_validation(
 
 
 __all__ = [
+    "M9ActionCatalogRequirement",
     "M9CaseComparison",
     "M9Decision",
     "M9ExactRootScore",
