@@ -49,6 +49,9 @@ LECTRA_CATALOG_RAW_SHA256 = "0e5c3d8aa39846fc69a1c662d01f0a0a9a1761f5d7ce0fbb10e
 LECTRA_CATALOG_MANIFEST_RAW_SHA256 = (
     "95a404847a112b47ae27bd6269bc5e3e797c83848cabea2ce3b155004e82976e"
 )
+LECTRA_QUARTER_TURN_FAMILY_ROOT_SHA256 = (
+    "a2234b7c4481cd502b3b014a64e2aa2bdd71747d3b1904c169e285dade536d91"
+)
 
 LECTRA_M4_PATH = Path(
     "experiments/results/remnant-reuse-input-yfri-26460ffca19eebfc9e479d01.json.gz"
@@ -63,8 +66,14 @@ LECTRA_CATALOG_PATH = Path("datasets/catalogs/lectra-7030786-v1.1/lectra-catalog
 LECTRA_CATALOG_MANIFEST_PATH = Path("datasets/catalogs/lectra-7030786-v1.1/catalog-manifest.json")
 
 _COORDINATE_TOKEN = re.compile(r"^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|\d+/[1-9]\d*)$")
+_CANONICAL_RATIONAL_TOKEN = re.compile(r"^-?(?:0|[1-9]\d*)(?:/[1-9]\d*)?$")
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_COMMITTED_SOURCE_ARTIFACT_BYTES = 4 * 1024 * 1024
+_MAX_COORDINATE_TOKEN_CHARS = 96
+_MAX_COORDINATE_COMPONENT_DIGITS = 32
+_MAX_COORDINATE_EXPONENT_ABS = 18
+_MAX_CANONICAL_RATIONAL_TOKEN_CHARS = 160
+_MAX_CANONICAL_RATIONAL_COMPONENT_DIGITS = 72
 
 
 class SourceEvidenceError(ValueError):
@@ -155,11 +164,9 @@ class LOCoItem(FrozenExperimentModel):
     def require_geometry_and_content_identity(self) -> Self:
         for token in self.source_translation:
             try:
-                value = Fraction(token)
-            except (ValueError, ZeroDivisionError) as error:
+                _parse_canonical_rational_token(token, label="LOCo source translation")
+            except ValueError as error:
                 raise ValueError("LOCo source translation must be an exact rational") from error
-            if token != _fraction_string(value):
-                raise ValueError("LOCo source translation must use canonical rational syntax")
         if self.translation_normalized_sha256 != self.geometry.polygon_sha256:
             raise ValueError("LOCo translation-normalized hash does not match geometry")
         exact_vertices = _exact_vertices_from_record(self.exact_normalized_vertices)
@@ -443,6 +450,11 @@ class LectraSourceAttestation(FrozenExperimentModel):
             self.quarter_turn_family_root_sha256,
             label="Lectra",
         )
+        if (
+            len(self.quarter_turn_family_sha256s) != 405
+            or self.quarter_turn_family_root_sha256 != LECTRA_QUARTER_TURN_FAMILY_ROOT_SHA256
+        ):
+            raise ValueError("Lectra derived family root differs from the frozen source")
         digest = semantic_sha256(
             self,
             excluded_fields={"attestation_id", "content_sha256"},
@@ -563,13 +575,49 @@ class SourceArtifactBytes(NamedTuple):
     source_manifest: bytes
 
 
+class SourceArtifactBundle(NamedTuple):
+    catalog: LOCoCatalog
+    catalog_manifest: LOCoCatalogManifest
+    source_manifest: M11SourceManifest
+
+
 def _fraction_string(value: Fraction) -> str:
     return (
         str(value.numerator) if value.denominator == 1 else f"{value.numerator}/{value.denominator}"
     )
 
 
+def _coordinate_complexity_exceeded(token: str) -> bool:
+    if len(token) > _MAX_COORDINATE_TOKEN_CHARS:
+        return True
+    unsigned = token.lstrip("+-")
+    if "/" in unsigned:
+        numerator, denominator = unsigned.split("/", 1)
+        return (
+            len(numerator) > _MAX_COORDINATE_COMPONENT_DIGITS
+            or len(denominator) > _MAX_COORDINATE_COMPONENT_DIGITS
+        )
+    mantissa = unsigned
+    exponent = ""
+    for marker in ("e", "E"):
+        if marker in mantissa:
+            mantissa, exponent = mantissa.split(marker, 1)
+            break
+    mantissa_digits = sum(character.isdigit() for character in mantissa)
+    if mantissa_digits > _MAX_COORDINATE_COMPONENT_DIGITS:
+        return True
+    if exponent:
+        exponent_digits = exponent.lstrip("+-")
+        if len(exponent_digits) > 3:
+            return True
+        if exponent_digits.isdigit() and int(exponent_digits) > _MAX_COORDINATE_EXPONENT_ABS:
+            return True
+    return False
+
+
 def _parse_coordinate(token: str, *, label: str) -> Fraction:
+    if _coordinate_complexity_exceeded(token):
+        raise SourceEvidenceError(f"{label} coordinate token exceeds the complexity limit")
     if not _COORDINATE_TOKEN.fullmatch(token):
         raise SourceEvidenceError(f"{label} coordinate token is malformed or nonfinite")
     try:
@@ -579,6 +627,21 @@ def _parse_coordinate(token: str, *, label: str) -> Fraction:
         raise SourceEvidenceError(f"{label} coordinate token is malformed or nonfinite") from error
     if not math.isfinite(numeric):
         raise SourceEvidenceError(f"{label} coordinate token is malformed or nonfinite")
+    return value
+
+
+def _parse_canonical_rational_token(token: str, *, label: str) -> Fraction:
+    if len(token) > _MAX_CANONICAL_RATIONAL_TOKEN_CHARS:
+        raise ValueError(f"{label} exceeds the canonical rational complexity limit")
+    unsigned = token.lstrip("-")
+    components = unsigned.split("/", 1)
+    if any(len(component) > _MAX_CANONICAL_RATIONAL_COMPONENT_DIGITS for component in components):
+        raise ValueError(f"{label} exceeds the canonical rational complexity limit")
+    if not _CANONICAL_RATIONAL_TOKEN.fullmatch(token):
+        raise ValueError(f"{label} is not a canonical rational")
+    value = Fraction(token)
+    if token != _fraction_string(value):
+        raise ValueError(f"{label} is not a reduced canonical rational")
     return value
 
 
@@ -741,11 +804,12 @@ def _exact_vertices_from_record(
         parsed: list[Fraction] = []
         for token in vertex:
             try:
-                value = Fraction(token)
-            except (ValueError, ZeroDivisionError) as error:
+                value = _parse_canonical_rational_token(
+                    token,
+                    label="LOCo exact vertex coordinate",
+                )
+            except ValueError as error:
                 raise ValueError("LOCo exact vertex contains an invalid rational") from error
-            if token != _fraction_string(value):
-                raise ValueError("LOCo exact vertex must use canonical rational syntax")
             parsed.append(value)
         result.append((parsed[0], parsed[1]))
     if len(set(result)) < 3:
@@ -1390,10 +1454,63 @@ def canonical_source_artifact_bytes(
 ) -> SourceArtifactBytes:
     """Return the sole accepted bytes for all three committed source artifacts."""
 
+    validated = validate_source_artifact_bundle(
+        catalog=catalog,
+        catalog_manifest=catalog_manifest,
+        source_manifest=source_manifest,
+    )
     return SourceArtifactBytes(
-        catalog=canonical_pretty_json_bytes(catalog),
-        catalog_manifest=canonical_pretty_json_bytes(catalog_manifest),
-        source_manifest=canonical_pretty_json_bytes(source_manifest),
+        catalog=canonical_pretty_json_bytes(validated.catalog),
+        catalog_manifest=canonical_pretty_json_bytes(validated.catalog_manifest),
+        source_manifest=canonical_pretty_json_bytes(validated.source_manifest),
+    )
+
+
+def validate_source_artifact_bundle(
+    *,
+    catalog: LOCoCatalog,
+    catalog_manifest: LOCoCatalogManifest,
+    source_manifest: M11SourceManifest,
+) -> SourceArtifactBundle:
+    """Revalidate and cross-bind every identity and raw hash in a source bundle."""
+
+    try:
+        validated_catalog = LOCoCatalog.model_validate(
+            catalog.model_dump(mode="python", round_trip=True, warnings=False),
+            strict=True,
+        )
+        validated_catalog_manifest = LOCoCatalogManifest.model_validate(
+            catalog_manifest.model_dump(mode="python", round_trip=True, warnings=False),
+            strict=True,
+        )
+        validated_source_manifest = M11SourceManifest.model_validate(
+            source_manifest.model_dump(mode="python", round_trip=True, warnings=False),
+            strict=True,
+        )
+    except (AttributeError, ValidationError, ValueError) as error:
+        raise SourceEvidenceError("source artifact bundle contains an invalid model") from error
+
+    try:
+        expected_catalog_manifest = build_loco_catalog_manifest(validated_catalog)
+        if validated_catalog_manifest != expected_catalog_manifest:
+            raise SourceEvidenceError("catalog manifest does not bind the catalog")
+        expected_loco = _build_loco_attestation(
+            validated_catalog,
+            validated_catalog_manifest,
+        )
+    except (ValidationError, ValueError) as error:
+        raise SourceEvidenceError("source artifact bundle has inconsistent LOCo roots") from error
+    if (
+        validated_source_manifest.parser_identity != validated_catalog.parser_identity
+        or validated_source_manifest.loco != expected_loco
+    ):
+        raise SourceEvidenceError(
+            "source artifact bundle source manifest does not bind the LOCo artifacts"
+        )
+    return SourceArtifactBundle(
+        catalog=validated_catalog,
+        catalog_manifest=validated_catalog_manifest,
+        source_manifest=validated_source_manifest,
     )
 
 
@@ -1441,6 +1558,21 @@ def load_m11_source_manifest(path: Path) -> M11SourceManifest:
     return _load_source_model(Path(path), M11SourceManifest)
 
 
+def load_source_artifact_bundle(
+    *,
+    catalog_path: Path,
+    catalog_manifest_path: Path,
+    source_manifest_path: Path,
+) -> SourceArtifactBundle:
+    """Strict-load and cross-bind the complete committed source bundle."""
+
+    return validate_source_artifact_bundle(
+        catalog=load_loco_catalog(catalog_path),
+        catalog_manifest=load_loco_catalog_manifest(catalog_manifest_path),
+        source_manifest=load_m11_source_manifest(source_manifest_path),
+    )
+
+
 __all__ = [
     "DEFAULT_ZIP_SAFETY_LIMITS",
     "LECTRA_CATALOG_MANIFEST_RAW_SHA256",
@@ -1449,6 +1581,7 @@ __all__ = [
     "LECTRA_M3_RESULT_RAW_SHA256",
     "LECTRA_M4_INPUT_ID",
     "LECTRA_M4_RAW_SHA256",
+    "LECTRA_QUARTER_TURN_FAMILY_ROOT_SHA256",
     "LOCO_ARCHIVE_SHA256",
     "LOCO_ARCHIVE_SIZE_BYTES",
     "LOCO_ARCHIVE_URL",
@@ -1461,6 +1594,7 @@ __all__ = [
     "LOCoSourceAttestation",
     "LectraSourceAttestation",
     "M11SourceManifest",
+    "SourceArtifactBundle",
     "SourceArtifactBytes",
     "SourceEvidenceError",
     "ZipSafetyLimits",
@@ -1472,8 +1606,10 @@ __all__ = [
     "load_loco_catalog",
     "load_loco_catalog_manifest",
     "load_m11_source_manifest",
+    "load_source_artifact_bundle",
     "parse_loco_archive",
     "quarter_turn_family_sha256",
     "scale_invariant_family_id",
     "scale_invariant_family_id_from_exact_vertices",
+    "validate_source_artifact_bundle",
 ]

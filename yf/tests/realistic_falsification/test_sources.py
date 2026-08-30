@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import stat
+import time
 import zipfile
 from fractions import Fraction
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 from shapely import Polygon, from_wkb
 
+import yieldforge.realistic_falsification.sources as source_api
 from yieldforge.experiments.contracts import canonical_pretty_json_bytes, semantic_sha256
 from yieldforge.realistic_falsification.sources import (
     LECTRA_CATALOG_MANIFEST_RAW_SHA256,
@@ -231,6 +233,29 @@ def test_parser_fails_closed_on_malformed_geometry_and_grammar(
 ) -> None:
     with pytest.raises(SourceEvidenceError, match=match):
         parse_loco_archive(_archive(items, demand))
+
+
+@pytest.mark.parametrize(
+    "token",
+    (
+        "1e10000000",
+        "9" * 5_000,
+        "1/" + "9" * 5_000,
+        "9" * 33,
+        "1/" + "9" * 33,
+        "1e999",
+    ),
+)
+def test_coordinate_complexity_is_rejected_before_fraction_expansion(token: str) -> None:
+    started = time.perf_counter()
+    with pytest.raises(SourceEvidenceError, match="complexity limit"):
+        parse_loco_archive(
+            _archive(
+                f"1\n3\n0 0\n{token} 0\n0 1\n",
+                "1\n1\nfixture\n",
+            )
+        )
+    assert time.perf_counter() - started < 0.5
 
 
 def test_archive_hash_and_size_pins_fail_closed() -> None:
@@ -513,6 +538,46 @@ def test_committed_artifacts_strict_load_and_regenerate_byte_identically(
     assert load_m11_source_manifest(COMMITTED_SOURCE_MANIFEST) == source_manifest
 
 
+def test_canonical_bundle_serialization_rejects_fixture_official_aliasing(
+    official_catalog: LOCoCatalog,
+) -> None:
+    fixture_catalog = parse_loco_archive(_one_rectangle_archive())
+    fixture_manifest = build_loco_catalog_manifest(fixture_catalog)
+    official_source = load_m11_source_manifest(COMMITTED_SOURCE_MANIFEST)
+
+    with pytest.raises(SourceEvidenceError, match="bundle"):
+        canonical_source_artifact_bytes(
+            official_catalog,
+            fixture_manifest,
+            official_source,
+        )
+
+
+def test_bundle_loader_cross_binds_all_three_artifacts(tmp_path: Path) -> None:
+    official = source_api.load_source_artifact_bundle(
+        catalog_path=COMMITTED_CATALOG,
+        catalog_manifest_path=COMMITTED_CATALOG_MANIFEST,
+        source_manifest_path=COMMITTED_SOURCE_MANIFEST,
+    )
+    assert official.catalog.catalog_id == load_loco_catalog(COMMITTED_CATALOG).catalog_id
+
+    fixture_catalog = parse_loco_archive(_one_rectangle_archive())
+    fixture_manifest = build_loco_catalog_manifest(fixture_catalog)
+    fixture_catalog_path = tmp_path / "loco-catalog.json"
+    fixture_manifest_path = tmp_path / "catalog-manifest.json"
+    fixture_source_path = tmp_path / "source-manifest-v1.json"
+    fixture_catalog_path.write_bytes(canonical_pretty_json_bytes(fixture_catalog))
+    fixture_manifest_path.write_bytes(canonical_pretty_json_bytes(fixture_manifest))
+    fixture_source_path.write_bytes(COMMITTED_SOURCE_MANIFEST.read_bytes())
+
+    with pytest.raises(SourceEvidenceError, match="bundle"):
+        source_api.load_source_artifact_bundle(
+            catalog_path=fixture_catalog_path,
+            catalog_manifest_path=fixture_manifest_path,
+            source_manifest_path=fixture_source_path,
+        )
+
+
 def test_source_manifest_rejects_family_collision_and_root_aliasing(
     official_catalog: LOCoCatalog,
     lectra_attestation,
@@ -542,12 +607,28 @@ def test_source_manifest_rejects_family_collision_and_root_aliasing(
     lectra_digest = semantic_sha256(lectra_semantic)
     payload["lectra"]["attestation_id"] = f"yfm11la-{lectra_digest[:24]}"
     payload["lectra"]["content_sha256"] = f"sha256:{lectra_digest}"
-    with pytest.raises(ValidationError, match="collision"):
+    with pytest.raises(ValidationError, match="derived family root"):
         M11SourceManifest.model_validate(payload, strict=True)
 
     payload = source_manifest.model_dump(mode="python")
     payload["lectra"]["origin_root_sha256"] = payload["loco"]["origin_root_sha256"]
     with pytest.raises(ValidationError, match="root"):
+        M11SourceManifest.model_validate(payload, strict=True)
+
+
+def test_source_manifest_rejects_rehashed_lectra_family_drift() -> None:
+    source_manifest = load_m11_source_manifest(COMMITTED_SOURCE_MANIFEST)
+    payload = source_manifest.model_dump(mode="python")
+    families = list(payload["lectra"]["quarter_turn_family_sha256s"])
+    families[0] = "0" * 64
+    payload["lectra"]["quarter_turn_family_sha256s"] = tuple(sorted(families))
+    payload["lectra"]["quarter_turn_family_root_sha256"] = hashlib.sha256(
+        ("\n".join(payload["lectra"]["quarter_turn_family_sha256s"]) + "\n").encode()
+    ).hexdigest()
+    _rehash_payload(payload["lectra"], id_field="attestation_id", prefix="yfm11la-")
+    _rehash_payload(payload, id_field="source_manifest_id", prefix="yfm11sm-")
+
+    with pytest.raises(ValidationError, match="derived family root"):
         M11SourceManifest.model_validate(payload, strict=True)
 
 
