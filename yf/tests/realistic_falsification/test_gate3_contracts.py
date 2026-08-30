@@ -160,8 +160,40 @@ def test_gate3_policy_freezes_bounded_geometry_catalog_without_exhaustiveness_cl
     assert policy.geometric_exhaustiveness_claim == "not_claimed"
     assert policy.confirmation_inputs_used is False
 
+
+@pytest.mark.parametrize(
+    ("field", "mutated_value"),
+    (
+        pytest.param(
+            "action_catalog_requirement",
+            "complete_no_truncation",
+            id="old-unbounded-catalog-claim",
+        ),
+        pytest.param(
+            "geometry_placement_search_maximum_candidates",
+            257,
+            id="different-geometry-candidate-bound",
+        ),
+        pytest.param(
+            "geometric_exhaustiveness_claim",
+            "claimed",
+            id="geometric-exhaustiveness-claim",
+        ),
+        pytest.param(
+            "confirmation_inputs_used",
+            True,
+            id="confirmation-input-leakage",
+        ),
+    ),
+)
+def test_gate3_policy_rejects_mutation_of_bounded_outcome_blind_claim(
+    gate3: ModuleType,
+    config: Any,
+    field: str,
+    mutated_value: object,
+) -> None:
     payload = config.model_dump(mode="python", round_trip=True)
-    payload["policy"]["action_catalog_requirement"] = "complete_no_truncation"
+    payload["policy"][field] = mutated_value
     with pytest.raises(ValidationError):
         gate3.M11Gate3ConfirmationConfig.model_validate(payload, strict=True)
 
