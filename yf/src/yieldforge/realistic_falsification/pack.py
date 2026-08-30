@@ -83,6 +83,16 @@ _LECTRA_CATALOG_PATH = Path("datasets/catalogs/lectra-7030786-v1.1/lectra-catalo
 _LOCO_CATALOG_PATH = Path("datasets/catalogs/loco-2dics-v1/loco-catalog.json")
 _SOURCE_MANIFEST_PATH = Path("benchmarks/falsification/source-manifest-v1.json")
 _MAX_PACK_ARTIFACT_BYTES = 32 * 1024 * 1024
+_OFFICIAL_CONTRACT_ID = "yfm11c-e956019aeef85350f2ffa9d3"
+_OFFICIAL_CONTRACT_CONTENT_SHA256 = (
+    "sha256:e956019aeef85350f2ffa9d351ab15539d1b23137d7566118f73c5f29882143b"
+)
+_OFFICIAL_CONTRACT_RAW_SHA256 = "0cddf4e144a1eae26159403a8f456fe55fd3bb76bcc28b676c8edc71ae35ccf4"
+_OFFICIAL_POPULATION_ID = "yfm11pop-a26084179d2e8f776630f8ac"
+_OFFICIAL_POPULATION_CONTENT_SHA256 = (
+    "sha256:a26084179d2e8f776630f8ac272d5651069500a5df996869d20df9893ca0bc56"
+)
+_OFFICIAL_POPULATION_RAW_SHA256 = "c16f38ec48aabfd97a90ff9ff3b2bdd52a280c042bd8786bff6a2224236d163b"
 
 M11CorpusId = Literal["lectra-m3-m4", "loco-2dics"]
 M11PartitionKind = Literal["calibration", "confirmation"]
@@ -387,6 +397,8 @@ class M11Stream(FrozenExperimentModel):
         ]:
             raise ValueError("M11 stream customer multiplicities differ")
         if self.stream_kind == "primary":
+            if any(item.payload_source_event_id is not None for item in self.events):
+                raise ValueError("primary events cannot carry twin payload lineage")
             if self.source_stream_id is not None or self.no_signal_control:
                 raise ValueError("primary streams cannot carry twin lineage")
             counts = Counter(item.payload_id for item in self.events)
@@ -404,12 +416,15 @@ class M11Stream(FrozenExperimentModel):
                 Counter(item.material_key for item in self.events).values()
             ) != [3, 3, 4, 6, 8]:
                 raise ValueError("Lectra stream material multiplicities differ")
-        elif (
-            self.partition != "confirmation"
-            or self.source_stream_id is None
-            or not self.no_signal_control
-        ):
-            raise ValueError("shuffled twins must be confirmation no-signal controls")
+        else:
+            if (
+                self.partition != "confirmation"
+                or self.source_stream_id is None
+                or not self.no_signal_control
+            ):
+                raise ValueError("shuffled twins must be confirmation no-signal controls")
+            if any(item.payload_source_event_id is None for item in self.events):
+                raise ValueError("twin events require explicit source-event lineage")
         digest = semantic_sha256(self, excluded_fields={"stream_id", "content_sha256"})
         if self.stream_id != f"yfm11st-{digest[:24]}" or self.content_sha256 != f"sha256:{digest}":
             raise ValueError("M11 stream identity does not match semantic content")
@@ -1120,13 +1135,33 @@ def _lectra_payloads(
     return payloads
 
 
+def _canonical_loco_items(items: tuple[LOCoItem, ...]) -> tuple[LOCoItem, ...]:
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (item.instance_name, item.source_item_index, item.item_id),
+        )
+    )
+
+
+def _loco_composition_key(items: tuple[LOCoItem, ...]) -> tuple[tuple[str, int], ...]:
+    return tuple(
+        (item.item_id, 1 + (item.source_demand - 1) // 25) for item in _canonical_loco_items(items)
+    )
+
+
 def _loco_payload(items: tuple[LOCoItem, ...], family_id: str) -> M11Payload:
-    references = tuple(_geometry_reference(item) for item in items)
-    quantities = tuple(1 + (item.source_demand - 1) // 25 for item in items)
+    canonical_items = _canonical_loco_items(items)
+    references = tuple(_geometry_reference(item) for item in canonical_items)
+    quantities = tuple(quantity for _item_id, quantity in _loco_composition_key(canonical_items))
     if any(value > 4 for value in quantities):
         raise PackEvidenceError("LOCo quantity transform exceeded its frozen cap")
     fallback = build_loco_fallback(references, quantities)
-    case_digest = hashlib.sha256("|".join(item.item_id for item in items).encode()).hexdigest()
+    case_digest = hashlib.sha256(
+        "|".join(
+            f"{item_id}:{quantity}" for item_id, quantity in _loco_composition_key(items)
+        ).encode()
+    ).hexdigest()
     semantic: dict[str, object] = {
         "schema_version": "yieldforge.m11-event-payload.v1",
         "source_kind": "loco_2dics",
@@ -1207,22 +1242,23 @@ def _loco_sequence(
         count: int, allowed: tuple[M11HoldoutFamily, ...], operation: str
     ) -> tuple[M11Payload, ...]:
         selected: list[M11Payload] = []
-        seen: set[str] = set()
+        seen: set[tuple[tuple[str, int], ...]] = set()
         attempt = 0
         while len(selected) < count:
             generator = random.Random(m11_subseed(f"{label}|{operation}|attempt-{attempt}"))
             family = generator.choice(allowed)
             instance = generator.choice(family.source_instances)
             items = tuple(generator.sample(list(items_by_instance[instance]), 8))
-            payload = _loco_payload(items, family.family_id)
+            composition = _loco_composition_key(items)
             attempt += 1
-            if payload.payload_id in seen:
-                continue
-            seen.add(payload.payload_id)
-            payload_catalog[payload.payload_id] = payload
-            selected.append(payload)
             if attempt > 10_000:
                 raise PackEvidenceError("could not construct distinct LOCo templates")
+            if composition in seen:
+                continue
+            seen.add(composition)
+            payload = _loco_payload(items, family.family_id)
+            payload_catalog[payload.payload_id] = payload
+            selected.append(payload)
         return tuple(selected)
 
     if regime == "recurrent":
@@ -1836,6 +1872,59 @@ def _validate_pack_cross_binding(bundle: M11PackBundle) -> M11PackBundle:
     streams = {item.stream_id: item for item in population.streams}
     nulls = {item.null_id for item in population.hard_nulls}
     audits = {item.audit_id for item in population.exact_audits}
+    for twin in (item for item in population.streams if item.stream_kind == "shuffled_twin"):
+        source = streams.get(twin.source_stream_id or "")
+        if (
+            source is None
+            or source.stream_kind != "primary"
+            or source.partition != "confirmation"
+            or twin.corpus_id != source.corpus_id
+            or twin.regime != source.regime
+            or twin.partition_ordinal != source.partition_ordinal
+            or twin.regime_ordinal != source.regime_ordinal
+        ):
+            raise PackEvidenceError("M11 twin does not bind its confirmation source stream")
+        source_events = {item.event_id: item for item in source.events}
+        lineage: list[str] = []
+        for position, (source_event, twin_event) in enumerate(
+            zip(source.events, twin.events, strict=True)
+        ):
+            payload_source = source_events.get(twin_event.payload_source_event_id or "")
+            stable_source_fields = (
+                source_event.position,
+                source_event.known_at,
+                source_event.released_at,
+                source_event.due_at,
+                source_event.due_hours,
+                source_event.customer_id,
+                source_event.job_id,
+                source_event.priority,
+            )
+            stable_twin_fields = (
+                twin_event.position,
+                twin_event.known_at,
+                twin_event.released_at,
+                twin_event.due_at,
+                twin_event.due_hours,
+                twin_event.customer_id,
+                twin_event.job_id,
+                twin_event.priority,
+            )
+            if stable_twin_fields != stable_source_fields:
+                raise PackEvidenceError(
+                    "M11 twin stable chronology or priority differs from source"
+                )
+            if (
+                payload_source is None
+                or twin_event.payload_id != payload_source.payload_id
+                or twin_event.family_id != payload_source.family_id
+                or twin_event.payload_id == source_event.payload_id
+                or twin_event.material_key != f"twin:{source.stream_id}:{position:02d}"
+            ):
+                raise PackEvidenceError("M11 twin payload lineage is invalid")
+            lineage.append(payload_source.event_id)
+        if Counter(lineage) != Counter(source_events.keys()):
+            raise PackEvidenceError("M11 twin payload lineage is not an exact source permutation")
     for control in population.hard_nulls:
         source = streams[control.source_stream_id]
         if (
@@ -1953,7 +2042,7 @@ def _load_pack_model(path: Path, model):
         raise PackEvidenceError(f"M11 artifact is not canonical: {path}") from error
     if raw != canonical_pretty_json_bytes(value):
         raise PackEvidenceError(f"M11 artifact is not canonical: {path}")
-    return value
+    return value, hashlib.sha256(raw).hexdigest()
 
 
 def _bounded_file_sha256(path: Path, *, maximum_bytes: int) -> str:
@@ -2078,14 +2167,17 @@ def _validate_population_against_pinned_sources(
         raise PackEvidenceError("M11 reference areas differ from pinned deterministic derivation")
 
 
-def load_m11_pack_bundle(
-    *, repository_root: Path, contract_path: Path, population_path: Path, source_manifest_path: Path
+def _load_m11_pack_bundle(
+    *,
+    repository_root: Path,
+    contract_path: Path,
+    population_path: Path,
+    source_manifest_path: Path,
+    authenticate_official: bool,
 ) -> M11PackBundle:
-    """Strict-load and cross-bind Task 3 to both Task 1 and Task 2 parents."""
-
     root = Path(repository_root)
-    contract = _load_pack_model(Path(contract_path), M11ExperimentContract)
-    population = _load_pack_model(Path(population_path), M11Population)
+    contract, contract_raw_sha256 = _load_pack_model(Path(contract_path), M11ExperimentContract)
+    population, population_raw_sha256 = _load_pack_model(Path(population_path), M11Population)
     source_manifest = load_m11_source_manifest(Path(source_manifest_path))
     bundle = _validate_pack_cross_binding(M11PackBundle(contract, population))
     if (
@@ -2107,7 +2199,44 @@ def load_m11_pack_bundle(
     parents = _parent_bindings(root)
     if bundle.contract.parents != parents:
         raise PackEvidenceError("M11 contract does not bind the supplied Task 1 parent files")
+    if authenticate_official and (
+        contract.contract_id != _OFFICIAL_CONTRACT_ID
+        or contract.content_sha256 != _OFFICIAL_CONTRACT_CONTENT_SHA256
+        or contract_raw_sha256 != _OFFICIAL_CONTRACT_RAW_SHA256
+        or population.population_id != _OFFICIAL_POPULATION_ID
+        or population.content_sha256 != _OFFICIAL_POPULATION_CONTENT_SHA256
+        or population_raw_sha256 != _OFFICIAL_POPULATION_RAW_SHA256
+    ):
+        raise PackEvidenceError("M11 artifacts differ from the official canonical identity")
     return bundle
+
+
+def _load_unpublished_m11_pack_bundle(
+    *, repository_root: Path, contract_path: Path, population_path: Path, source_manifest_path: Path
+) -> M11PackBundle:
+    """Strict-load a generated candidate before publishing its official identity."""
+
+    return _load_m11_pack_bundle(
+        repository_root=repository_root,
+        contract_path=contract_path,
+        population_path=population_path,
+        source_manifest_path=source_manifest_path,
+        authenticate_official=False,
+    )
+
+
+def load_m11_pack_bundle(
+    *, repository_root: Path, contract_path: Path, population_path: Path, source_manifest_path: Path
+) -> M11PackBundle:
+    """Strict-load the official seed-derived Task 3 pack and both frozen parents."""
+
+    return _load_m11_pack_bundle(
+        repository_root=repository_root,
+        contract_path=contract_path,
+        population_path=population_path,
+        source_manifest_path=source_manifest_path,
+        authenticate_official=True,
+    )
 
 
 __all__ = [

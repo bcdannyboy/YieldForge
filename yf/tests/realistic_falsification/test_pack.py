@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import yieldforge.realistic_falsification.pack as pack_module
 from yieldforge.experiments.contracts import canonical_pretty_json_bytes, semantic_sha256
 from yieldforge.experiments.residual_geometry import load_m3_input_pack
 from yieldforge.realistic_falsification.contracts import M11ExperimentContract
@@ -55,6 +56,18 @@ def _corpus_streams(population: M11Population, corpus_id: str, *, kind: str | No
     if kind is not None:
         streams = tuple(item for item in streams if item.stream_kind == kind)
     return streams
+
+
+def _loco_physical_template(payload: M11Payload) -> tuple[tuple[str, int], ...]:
+    return tuple(
+        sorted(
+            zip(
+                (reference.reference_id for reference in payload.geometry_references),
+                payload.quantities,
+                strict=True,
+            )
+        )
+    )
 
 
 def _rehash(payload: dict[str, object], *, id_field: str, prefix: str) -> None:
@@ -112,11 +125,12 @@ def _write_recertified_mutation(
     for stream in twin_streams:
         old_stream_id = stream["stream_id"]
         stream["source_stream_id"] = stream_id_map[stream["source_stream_id"]]
-        for event in stream["events"]:
+        for position, event in enumerate(stream["events"]):
             old_event_id = event["event_id"]
             event["payload_id"] = payload_id_map[event["payload_id"]]
             event["family_id"] = payloads[event["payload_id"]]["family_id"]
             event["payload_source_event_id"] = event_id_map[event["payload_source_event_id"]]
+            event["material_key"] = f"twin:{stream['source_stream_id']}:{position:02d}"
             _rehash(event, id_field="event_id", prefix="yfm11e-")
             event_id_map[old_event_id] = event["event_id"]
         _rehash(stream, id_field="stream_id", prefix="yfm11st-")
@@ -342,6 +356,42 @@ def test_loco_raw_geometry_instance_isolation_quantity_and_bbox_witness(generate
                 assert separated
 
 
+def test_loco_payload_identity_canonicalizes_unordered_physical_composition(generated) -> None:
+    identities_by_composition: dict[tuple[tuple[str, int], ...], set[str]] = {}
+    for payload in (
+        item for item in generated.population.payloads if item.source_kind == "loco_2dics"
+    ):
+        source_keys = tuple(
+            (reference.instance_name, reference.source_item_index, reference.reference_id)
+            for reference in payload.geometry_references
+        )
+        assert source_keys == tuple(sorted(source_keys))
+        identities_by_composition.setdefault(_loco_physical_template(payload), set()).add(
+            payload.payload_id
+        )
+    assert all(len(payload_ids) == 1 for payload_ids in identities_by_composition.values())
+
+
+def test_loco_regime_counts_use_unordered_physical_templates(generated) -> None:
+    payloads = {item.payload_id: item for item in generated.population.payloads}
+    for stream in (
+        item
+        for item in generated.population.streams
+        if item.corpus_id == "loco-2dics" and item.stream_kind == "primary"
+    ):
+        counts = Counter(
+            _loco_physical_template(payloads[event.payload_id]) for event in stream.events
+        )
+        if stream.regime == "recurrent":
+            assert sorted(counts.values()) == [6, 6, 6, 6]
+        elif stream.regime == "mixed":
+            assert sorted(counts.values()) == [2] * 12
+        elif stream.regime == "high_mix":
+            assert len(counts) == 24
+        else:
+            assert sorted(counts.values()) == [1] * 24
+
+
 def test_sampling_is_invariant_to_prohibited_source_outcome_fields() -> None:
     m3 = load_m3_input_pack(M3_INPUT_PATH)
     catalog = json.loads(LECTRA_CATALOG_PATH.read_bytes())
@@ -389,6 +439,19 @@ def test_twins_are_payload_derangements_with_unique_materials_and_no_signal(gene
         ]
         assert len({event.material_key for event in twin.events}) == 24
         assert twin.no_signal_control is True
+
+
+def test_primary_stream_model_forbids_twin_payload_lineage(generated) -> None:
+    stream = next(
+        item
+        for item in generated.population.streams
+        if item.stream_kind == "primary" and item.partition == "confirmation"
+    ).model_dump(mode="python")
+    stream["events"][0]["payload_source_event_id"] = stream["events"][1]["event_id"]
+    _rehash(stream["events"][0], id_field="event_id", prefix="yfm11e-")
+    _rehash(stream, id_field="stream_id", prefix="yfm11st-")
+    with pytest.raises(ValidationError, match="primary events cannot carry twin payload lineage"):
+        M11Stream.model_validate(stream, strict=True)
 
 
 def test_hard_nulls_and_exact_audits_are_frozen_by_construction(generated) -> None:
@@ -682,6 +745,86 @@ def test_full_loader_binds_control_event_ids_to_frozen_source_windows(
     paths = _write_recertified_mutation(tmp_path, generated, mutate)
     with pytest.raises(PackEvidenceError):
         _load_mutated_bundle(*paths)
+
+
+def test_official_loader_rejects_recursively_rehashed_seed_priority_swap(
+    tmp_path: Path, generated
+) -> None:
+    def mutate(_contract, population) -> None:
+        primary = next(
+            item
+            for item in population["streams"]
+            if item["stream_kind"] == "primary" and item["partition"] == "confirmation"
+        )
+        twin = next(
+            item
+            for item in population["streams"]
+            if item["stream_kind"] == "shuffled_twin"
+            and item["source_stream_id"] == primary["stream_id"]
+        )
+        left = 0
+        right = next(
+            index
+            for index, event in enumerate(primary["events"])
+            if event["priority"] != primary["events"][left]["priority"]
+        )
+        for stream in (primary, twin):
+            stream["events"][left]["priority"], stream["events"][right]["priority"] = (
+                stream["events"][right]["priority"],
+                stream["events"][left]["priority"],
+            )
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    unpublished = pack_module._load_unpublished_m11_pack_bundle(
+        repository_root=REPO_ROOT,
+        contract_path=paths[0],
+        population_path=paths[1],
+        source_manifest_path=SOURCE_MANIFEST_PATH,
+    )
+    assert unpublished.population.root_seed == M11_ROOT_SEED
+    with pytest.raises(PackEvidenceError, match="official canonical identity"):
+        _load_mutated_bundle(*paths)
+
+
+@pytest.mark.parametrize("mutation", ["priority", "payload_source_event_id"])
+def test_full_loader_binds_twin_priority_and_payload_source_lineage(
+    tmp_path: Path, generated, mutation: str
+) -> None:
+    def mutate(_contract, population) -> None:
+        twin = next(
+            item for item in population["streams"] if item["stream_kind"] == "shuffled_twin"
+        )
+        source = next(
+            item for item in population["streams"] if item["stream_id"] == twin["source_stream_id"]
+        )
+        if mutation == "priority":
+            priority = twin["events"][0]["priority"]
+            twin["events"][0]["priority"] = 1 if priority != 1 else 2
+        else:
+            current = twin["events"][0]["payload_source_event_id"]
+            twin["events"][0]["payload_source_event_id"] = next(
+                event["event_id"] for event in source["events"] if event["event_id"] != current
+            )
+
+    paths = _write_recertified_mutation(tmp_path, generated, mutate)
+    with pytest.raises(PackEvidenceError, match="twin"):
+        _load_mutated_bundle(*paths)
+
+
+def test_internal_unpublished_loader_validates_temp_regeneration(tmp_path: Path, generated) -> None:
+    assert hasattr(pack_module, "_load_unpublished_m11_pack_bundle")
+    canonical = canonical_pack_artifact_bytes(generated)
+    contract_path = tmp_path / "contract.json"
+    population_path = tmp_path / "population.json"
+    contract_path.write_bytes(canonical.contract)
+    population_path.write_bytes(canonical.population)
+    loaded = pack_module._load_unpublished_m11_pack_bundle(
+        repository_root=REPO_ROOT,
+        contract_path=contract_path,
+        population_path=population_path,
+        source_manifest_path=SOURCE_MANIFEST_PATH,
+    )
+    assert loaded == generated
 
 
 def test_provenance_distinguishes_lectra_and_generated_loco_candidates(generated) -> None:
