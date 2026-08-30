@@ -1845,17 +1845,7 @@ class Gate2EvaluationResult(FrozenExperimentModel):
         return self
 
 
-def assess_gate2_edge(
-    origin: Gate2Origin,
-    target: Gate2Target,
-    *,
-    fit_config: RemnantFitConfig | None = None,
-    search_config: LayoutFitSearchConfig | None = None,
-    rules: ResidualRuleSet | None = None,
-    economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile] | None = None,
-) -> Gate2EdgeEvidence:
-    """Apply safe necessary filters before any bounded exact witness search."""
-
+def _require_forward_edge(origin: Gate2Origin, target: Gate2Target) -> None:
     if (
         origin.stream_id != target.stream_id
         or origin.event_position >= target.event_position
@@ -1864,19 +1854,40 @@ def assess_gate2_edge(
         raise Gate2EvidenceError(
             "Gate 2 edges require one strictly later target in the same stream"
         )
-    config = fit_config or RemnantFitConfig()
-    try:
-        layout = prepare_layout_footprint(
-            target.problem,
-            target.candidate,
-            config,
-        )
-    except (TypeError, ValueError):
+
+
+def _layout_preparation_failure(
+    origin: Gate2Origin,
+    target: Gate2Target,
+) -> Gate2EdgeEvidence:
+    return _build_edge(
+        origin,
+        target,
+        status="blocking_error",
+        blocking_error_code="layout_preparation_failed",
+        rejection_certificate=None,
+    )
+
+
+def _assess_gate2_exact_from_official_layout(
+    origin: Gate2Origin,
+    target: Gate2Target,
+    *,
+    layout,
+    fit_config: RemnantFitConfig,
+    search_config: LayoutFitSearchConfig,
+    rules: ResidualRuleSet | None,
+    economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile],
+) -> Gate2EdgeEvidence:
+    """Classify against a layout derived inside the current official stream stage."""
+
+    _require_forward_edge(origin, target)
+    if layout.candidate_id != target.candidate.candidate_id:
         return _build_edge(
             origin,
             target,
             status="blocking_error",
-            blocking_error_code="layout_preparation_failed",
+            blocking_error_code="necessary_filter_failed",
             rejection_certificate=None,
         )
     try:
@@ -1884,7 +1895,7 @@ def assess_gate2_edge(
             layout,
             origin.remnant,
             material=target.material,
-            fit_config=config,
+            fit_config=fit_config,
         )
     except (TypeError, ValueError):
         return _build_edge(
@@ -1916,8 +1927,8 @@ def assess_gate2_edge(
             target.problem,
             target.candidate,
             material=target.material,
-            fit_config=config,
-            search_config=search_config or LayoutFitSearchConfig(),
+            fit_config=fit_config,
+            search_config=search_config,
             prepared_layout=layout,
         )
     except (TypeError, ValueError):
@@ -1928,7 +1939,7 @@ def assess_gate2_edge(
             blocking_error_code="search_failed",
             rejection_certificate=None,
         )
-    central_profile, adverse_profile = economic_profiles or _default_economic_profiles()
+    central_profile, adverse_profile = economic_profiles
     try:
         central_reward = _reward(origin, target, central_profile)
         adverse_reward = _reward(origin, target, adverse_profile)
@@ -1961,7 +1972,7 @@ def assess_gate2_edge(
             search.translation,
             material=target.material,
             rules=rules,
-            fit_config=config,
+            fit_config=fit_config,
             reroot_standard_sheet=False,
         )
     except (TypeError, ValueError):
@@ -1985,40 +1996,23 @@ def assess_gate2_edge(
     )
 
 
-def _assess_gate2_necessary_bound(
+def _assess_gate2_necessary_from_official_layout(
     origin: Gate2Origin,
     target: Gate2Target,
     *,
+    layout,
     fit_config: RemnantFitConfig,
     economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile],
 ) -> Gate2EdgeEvidence:
-    """Apply only safe no-fit certificates, then count every survivor favorably.
+    """Apply the favorable bound against an internally derived target layout."""
 
-    This is the official whole-graph path. A witnessed fit and an unresolved
-    survivor receive the same chronology-dependent reward and matching endpoints,
-    so exact search cannot change a stream reward, aggregate, or Gate 2 branch.
-    """
-
-    if (
-        origin.stream_id != target.stream_id
-        or origin.event_position >= target.event_position
-        or origin.released_at >= target.released_at
-    ):
-        raise Gate2EvidenceError(
-            "Gate 2 edges require one strictly later target in the same stream"
-        )
-    try:
-        layout = prepare_layout_footprint(
-            target.problem,
-            target.candidate,
-            fit_config,
-        )
-    except (TypeError, ValueError):
+    _require_forward_edge(origin, target)
+    if layout.candidate_id != target.candidate.candidate_id:
         return _build_edge(
             origin,
             target,
             status="blocking_error",
-            blocking_error_code="layout_preparation_failed",
+            blocking_error_code="necessary_filter_failed",
             rejection_certificate=None,
         )
     try:
@@ -2064,6 +2058,108 @@ def _assess_gate2_necessary_bound(
         central_reward=central_reward,
         adverse_reward=adverse_reward,
     )
+
+
+def assess_gate2_edge(
+    origin: Gate2Origin,
+    target: Gate2Target,
+    *,
+    fit_config: RemnantFitConfig | None = None,
+    search_config: LayoutFitSearchConfig | None = None,
+    rules: ResidualRuleSet | None = None,
+    economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile] | None = None,
+) -> Gate2EdgeEvidence:
+    """Apply safe necessary filters before any bounded exact witness search."""
+
+    _require_forward_edge(origin, target)
+    config = fit_config or RemnantFitConfig()
+    try:
+        layout = prepare_layout_footprint(target.problem, target.candidate, config)
+    except (TypeError, ValueError):
+        return _layout_preparation_failure(origin, target)
+    return _assess_gate2_exact_from_official_layout(
+        origin,
+        target,
+        layout=layout,
+        fit_config=config,
+        search_config=search_config or LayoutFitSearchConfig(),
+        rules=rules,
+        economic_profiles=economic_profiles or _default_economic_profiles(),
+    )
+
+
+def _assess_gate2_necessary_bound(
+    origin: Gate2Origin,
+    target: Gate2Target,
+    *,
+    fit_config: RemnantFitConfig,
+    economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile],
+) -> Gate2EdgeEvidence:
+    """Apply only safe no-fit certificates, then count every survivor favorably."""
+
+    _require_forward_edge(origin, target)
+    try:
+        layout = prepare_layout_footprint(target.problem, target.candidate, fit_config)
+    except (TypeError, ValueError):
+        return _layout_preparation_failure(origin, target)
+    return _assess_gate2_necessary_from_official_layout(
+        origin,
+        target,
+        layout=layout,
+        fit_config=fit_config,
+        economic_profiles=economic_profiles,
+    )
+
+
+def _evaluate_official_edge_graph(
+    *,
+    origins: tuple[Gate2Origin, ...],
+    targets: tuple[Gate2Target, ...],
+    fit_config: RemnantFitConfig,
+    search_config: LayoutFitSearchConfig,
+    rules: ResidualRuleSet,
+    economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile],
+    evaluation_stage: Literal[
+        "stage_a_favorable_superset",
+        "stage_b_exact_attempted",
+    ],
+) -> tuple[Gate2EdgeEvidence, ...]:
+    """Derive and reuse each target footprint only inside one official stage."""
+
+    prepared_targets = []
+    for target in targets:
+        try:
+            layout = prepare_layout_footprint(target.problem, target.candidate, fit_config)
+        except (TypeError, ValueError):
+            layout = None
+        prepared_targets.append((target, layout))
+    edges = []
+    for origin in origins:
+        for target, layout in prepared_targets:
+            if target.event_position <= origin.event_position:
+                continue
+            if layout is None:
+                edge = _layout_preparation_failure(origin, target)
+            elif evaluation_stage == "stage_a_favorable_superset":
+                edge = _assess_gate2_necessary_from_official_layout(
+                    origin,
+                    target,
+                    layout=layout,
+                    fit_config=fit_config,
+                    economic_profiles=economic_profiles,
+                )
+            else:
+                edge = _assess_gate2_exact_from_official_layout(
+                    origin,
+                    target,
+                    layout=layout,
+                    fit_config=fit_config,
+                    search_config=search_config,
+                    rules=rules,
+                    economic_profiles=economic_profiles,
+                )
+            edges.append(edge)
+    return tuple(edges)
 
 
 def _parse_gate2_timestamp(value: str) -> datetime:
@@ -2241,34 +2337,21 @@ def _evaluate_official_stream(
         )
         event_origins.extend(origins)
         event_targets.extend(targets)
-    edges = []
-    for origin in event_origins:
-        for target in event_targets:
-            if target.event_position <= origin.event_position:
-                continue
-            edges.append(
-                _assess_gate2_necessary_bound(
-                    origin,
-                    target,
-                    fit_config=context.fit_config,
-                    economic_profiles=_default_economic_profiles(),
-                )
-                if evaluation_stage == "stage_a_favorable_superset"
-                else assess_gate2_edge(
-                    origin,
-                    target,
-                    fit_config=context.fit_config,
-                    search_config=context.search_config,
-                    rules=context.rules,
-                    economic_profiles=_default_economic_profiles(),
-                )
-            )
+    edges = _evaluate_official_edge_graph(
+        origins=tuple(event_origins),
+        targets=tuple(event_targets),
+        fit_config=context.fit_config,
+        search_config=context.search_config,
+        rules=context.rules,
+        economic_profiles=_default_economic_profiles(),
+        evaluation_stage=evaluation_stage,
+    )
     return evaluate_gate2_stream(
         stream_id=stream.stream_id,
         corpus_id=stream.corpus_id,
         baseline_cost=cell.baseline_feasible_cost,
         lower_bound_cost=cell.lower_bound.lower_bound_cost,
-        edges=tuple(edges),
+        edges=edges,
     )
 
 

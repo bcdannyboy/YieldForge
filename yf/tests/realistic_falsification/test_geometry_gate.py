@@ -494,6 +494,116 @@ def test_fast_path_optimistic_graph_is_a_superset_of_exact_witness_graph() -> No
     )
 
 
+@pytest.mark.parametrize(
+    "evaluation_stage",
+    ("stage_a_favorable_superset", "stage_b_exact_attempted"),
+)
+def test_official_stage_prepares_each_target_layout_once_across_multiple_origins(
+    monkeypatch: pytest.MonkeyPatch,
+    evaluation_stage: str,
+) -> None:
+    origins = (
+        _origin(),
+        replace(
+            _origin(),
+            event_position=1,
+            event_id="event-origin-second",
+            released_at=datetime(2026, 1, 2, tzinfo=UTC),
+        ),
+    )
+    target = _target(event_position=3, release_day=4)
+    expected = tuple(
+        _assess_gate2_necessary_bound(
+            origin,
+            target,
+            fit_config=RemnantFitConfig(),
+            economic_profiles=_default_economic_profiles(),
+        )
+        if evaluation_stage == "stage_a_favorable_superset"
+        else assess_gate2_edge(
+            origin,
+            target,
+            fit_config=RemnantFitConfig(),
+            search_config=LayoutFitSearchConfig(),
+            rules=_rules(),
+            economic_profiles=_default_economic_profiles(),
+        )
+        for origin in origins
+    )
+    calls = []
+    original = geometry_gate_module.prepare_layout_footprint
+
+    def counted_prepare(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "prepare_layout_footprint",
+        counted_prepare,
+    )
+
+    edges = geometry_gate_module._evaluate_official_edge_graph(
+        origins=origins,
+        targets=(target,),
+        fit_config=RemnantFitConfig(),
+        search_config=LayoutFitSearchConfig(),
+        rules=_rules(),
+        economic_profiles=_default_economic_profiles(),
+        evaluation_stage=evaluation_stage,
+    )
+
+    assert len(edges) == 2
+    assert edges == expected
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "evaluation_stage",
+    ("stage_a_favorable_superset", "stage_b_exact_attempted"),
+)
+def test_official_stage_repeats_one_preparation_failure_for_every_eligible_edge(
+    monkeypatch: pytest.MonkeyPatch,
+    evaluation_stage: str,
+) -> None:
+    origins = (
+        _origin(),
+        replace(
+            _origin(),
+            event_position=1,
+            event_id="event-origin-second",
+            released_at=datetime(2026, 1, 2, tzinfo=UTC),
+        ),
+    )
+    target = _target(event_position=3, release_day=4)
+    calls = []
+
+    def failed_prepare(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise ValueError("synthetic preparation failure")
+
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "prepare_layout_footprint",
+        failed_prepare,
+    )
+
+    edges = geometry_gate_module._evaluate_official_edge_graph(
+        origins=origins,
+        targets=(target,),
+        fit_config=RemnantFitConfig(),
+        search_config=LayoutFitSearchConfig(),
+        rules=_rules(),
+        economic_profiles=_default_economic_profiles(),
+        evaluation_stage=evaluation_stage,
+    )
+
+    assert len(calls) == 1
+    assert len(edges) == 2
+    assert all(edge.status == "blocking_error" for edge in edges)
+    assert all(edge.blocking_error_code == "layout_preparation_failed" for edge in edges)
+
+
 def _stream_result(stream_id: str, corpus_id: str, purchase_cost: float):
     origin = replace(
         _origin(),
