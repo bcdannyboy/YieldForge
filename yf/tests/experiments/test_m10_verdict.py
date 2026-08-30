@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from yieldforge.experiments.contracts import semantic_sha256
 from yieldforge.experiments.m10_verdict import (
     M10EvidenceSnapshot,
     M10MinimumInvestmentVerdict,
@@ -195,6 +196,70 @@ def test_builder_does_not_accept_a_caller_supplied_verdict() -> None:
 
     with pytest.raises(TypeError):
         builder(_snapshot(), investment_verdict="stop")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("m8_decision", "pass_performance"),
+        ("oracle_savings_percent", 2.5),
+    ],
+)
+def test_builder_revalidates_bypass_mutated_evidence_scalars(
+    field: str,
+    value: object,
+) -> None:
+    bypass_mutated = _snapshot().model_copy(update={field: value})
+
+    with pytest.raises(ValidationError):
+        build_minimum_investment_verdict(bypass_mutated)
+
+
+def test_builder_revalidates_a_bypass_mutated_nested_parent() -> None:
+    evidence = _snapshot()
+    parents = list(evidence.parents)
+    parents[0] = parents[0].model_copy(update={"content_sha256": "garbage"})
+    bypass_mutated = evidence.model_copy(update={"parents": tuple(parents)})
+
+    with pytest.raises(ValidationError):
+        build_minimum_investment_verdict(bypass_mutated)
+
+
+def test_builder_detaches_stored_evidence_from_caller_owned_instances() -> None:
+    evidence = _snapshot()
+
+    result = build_minimum_investment_verdict(evidence)
+    object.__setattr__(evidence, "m8_decision", "pass_performance")
+    object.__setattr__(evidence.parents[0], "content_sha256", "garbage")
+
+    assert result.evidence is not evidence
+    assert result.evidence.parents[0] is not evidence.parents[0]
+    assert result.evidence.m8_decision == "hold_performance"
+    assert result.evidence.parents[0].content_sha256 == f"sha256:{'1' * 64}"
+
+
+def test_result_validation_revalidates_bypass_mutated_nested_evidence() -> None:
+    valid = build_minimum_investment_verdict(_snapshot())
+    parents = list(valid.evidence.parents)
+    parents[0] = parents[0].model_copy(update={"content_sha256": "garbage"})
+    bypass_evidence = valid.evidence.model_copy(update={"parents": tuple(parents)})
+    bypass_result = valid.model_copy(update={"evidence": bypass_evidence})
+    digest = semantic_sha256(
+        bypass_result,
+        excluded_fields={"result_id", "content_sha256"},
+    )
+    identity_consistent_bypass_result = bypass_result.model_copy(
+        update={
+            "result_id": f"yfm10-{digest[:24]}",
+            "content_sha256": f"sha256:{digest}",
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        M10MinimumInvestmentVerdict.model_validate(
+            identity_consistent_bypass_result,
+            strict=True,
+        )
 
 
 @pytest.mark.parametrize("identity_field", ["result_id", "content_sha256"])

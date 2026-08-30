@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import Field, StrictStr, model_validator
+from pydantic import ConfigDict, Field, StrictStr, model_validator
 
 from yieldforge.baseline.contracts import BaselineContractModel
 from yieldforge.experiments.contracts import semantic_sha256
@@ -60,6 +60,8 @@ M10_CLAIM_CEILING = (
 class M10ParentBinding(BaselineContractModel):
     """One exact semantic and raw-file parent of the M10 decision."""
 
+    model_config = ConfigDict(revalidate_instances="always")
+
     role: M10ParentRole
     repository_path: StrictStr = Field(min_length=1)
     schema_version: StrictStr = Field(min_length=1)
@@ -70,6 +72,8 @@ class M10ParentBinding(BaselineContractModel):
 
 class M10EvidenceSnapshot(BaselineContractModel):
     """The sole current evidence state admitted by the minimum M10 rule."""
+
+    model_config = ConfigDict(revalidate_instances="always")
 
     parents: tuple[M10ParentBinding, ...]
     geometry_corpus_ids: tuple[StrictStr, ...]
@@ -106,6 +110,8 @@ class M10EvidenceSnapshot(BaselineContractModel):
 
 class M10MinimumInvestmentVerdict(BaselineContractModel):
     """Content-addressed roadmap decision without a fabricated M0 economic band."""
+
+    model_config = ConfigDict(revalidate_instances="always")
 
     schema_version: Literal["yieldforge.m10-minimum-investment-verdict.v1"] = (
         "yieldforge.m10-minimum-investment-verdict.v1"
@@ -166,9 +172,13 @@ def build_minimum_investment_verdict(
 ) -> M10MinimumInvestmentVerdict:
     """Derive the only authorized decision from the exact current evidence state."""
 
+    canonical_evidence = M10EvidenceSnapshot.model_validate(
+        evidence.model_dump(mode="python", round_trip=True, warnings=False),
+        strict=True,
+    )
     semantic = {
         "schema_version": "yieldforge.m10-minimum-investment-verdict.v1",
-        "evidence": evidence.model_dump(mode="json"),
+        "evidence": canonical_evidence.model_dump(mode="json"),
         "decision_basis": "current_evidence_ceiling_without_formal_numeric_m0_band",
         "formal_economic_band": "not_computed",
         "formal_numeric_m10_complete": False,
@@ -186,7 +196,7 @@ def build_minimum_investment_verdict(
     return M10MinimumInvestmentVerdict(
         result_id=f"yfm10-{digest[:24]}",
         content_sha256=f"sha256:{digest}",
-        evidence=evidence,
+        evidence=canonical_evidence,
     )
 
 
