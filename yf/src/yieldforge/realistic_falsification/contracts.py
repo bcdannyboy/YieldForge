@@ -27,6 +27,17 @@ M11Provenance = Literal[
 ]
 
 M11SourceLineageKind = Literal["lectra", "loco_2dics"]
+M11InvalidReasonCode = Literal[
+    "deterministic_regeneration_defect",
+    "artifact_integrity_defect",
+    "software_implementation_defect",
+    "future_information_leakage",
+    "candidate_parity_failure",
+    "accounting_reconciliation_failure",
+    "source_lineage_failure",
+    "control_failure",
+    "runtime_ceiling_exceeded",
+]
 
 M11_PARENT_ROLE_ORDER = ("m0_contract", "m10_verdict")
 M11_PARENT_ROLE_SPECS = MappingProxyType(
@@ -83,11 +94,30 @@ class M11InvalidReasonCategory(StrEnum):
     RUNTIME_OVERRUN = "runtime_overrun"
 
 
+M11_INVALID_REASON_CODES = MappingProxyType(
+    {
+        M11InvalidReasonCategory.PREREGISTERED_INTEGRITY_OR_SOFTWARE_DEFECT: (
+            "deterministic_regeneration_defect",
+            "artifact_integrity_defect",
+            "software_implementation_defect",
+        ),
+        M11InvalidReasonCategory.OTHER_VALIDITY_FAILURE: (
+            "future_information_leakage",
+            "candidate_parity_failure",
+            "accounting_reconciliation_failure",
+            "source_lineage_failure",
+            "control_failure",
+        ),
+        M11InvalidReasonCategory.RUNTIME_OVERRUN: ("runtime_ceiling_exceeded",),
+    }
+)
+
+
 class M11InvalidReason(FrozenExperimentModel):
     """One explicit invalid-test reason and its mechanically checked repair eligibility."""
 
     category: M11InvalidReasonCategory
-    reason_code: StrictStr = Field(min_length=1)
+    reason_code: M11InvalidReasonCode
     repair_eligible: StrictBool
 
     @model_validator(mode="after")
@@ -97,6 +127,8 @@ class M11InvalidReason(FrozenExperimentModel):
         )
         if self.repair_eligible is not expected:
             raise ValueError("M11 invalid-reason repair eligibility does not match its category")
+        if self.reason_code not in M11_INVALID_REASON_CODES[self.category]:
+            raise ValueError("M11 invalid reason code does not match its category")
         return self
 
 
@@ -333,6 +365,7 @@ class M11ExperimentContract(FrozenExperimentModel):
             semantic_suffix = parent.parent_semantic_id.removeprefix(semantic_prefix)
             if (
                 parent.parent_schema_version != expected_schema
+                or not parent.parent_semantic_id.startswith(semantic_prefix)
                 or len(semantic_suffix) != 24
                 or any(character not in "0123456789abcdef" for character in semantic_suffix)
             ):
@@ -618,6 +651,8 @@ __all__ = [
     "M11EvidenceState",
     "M11ExperimentContract",
     "M11FieldProvenance",
+    "M11_INVALID_REASON_CODES",
+    "M11InvalidReasonCode",
     "M11InvalidReason",
     "M11InvalidReasonCategory",
     "M11MetricDefinitions",

@@ -107,7 +107,7 @@ def _invalid_reason(*, eligible: bool) -> M11InvalidReason:
     )
     return M11InvalidReason(
         category=category,
-        reason_code="deterministic_regeneration_mismatch" if eligible else "invalid_null_control",
+        reason_code="deterministic_regeneration_defect" if eligible else "control_failure",
         repair_eligible=eligible,
     )
 
@@ -363,6 +363,7 @@ def test_contract_rejects_parent_artifact_relabeling(duplicate_field: str) -> No
     [
         ("parent_schema_version", "yieldforge.m0-contract.v1"),
         ("parent_semantic_id", "yfm0-" + "3" * 24),
+        ("parent_semantic_id", "3" * 24),
     ],
 )
 def test_contract_rejects_role_specific_parent_identity_drift(
@@ -591,8 +592,50 @@ def test_invalid_reason_repair_eligibility_is_derived_from_category() -> None:
     with pytest.raises(ValidationError, match="repair eligibility"):
         M11InvalidReason(
             category=M11InvalidReasonCategory.OTHER_VALIDITY_FAILURE,
-            reason_code="invalid_null_control",
+            reason_code="control_failure",
             repair_eligible=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("category", "reason_code", "repair_eligible"),
+    [
+        (
+            M11InvalidReasonCategory.PREREGISTERED_INTEGRITY_OR_SOFTWARE_DEFECT,
+            "runtime_ceiling_exceeded",
+            True,
+        ),
+        (
+            M11InvalidReasonCategory.RUNTIME_OVERRUN,
+            "software_implementation_defect",
+            False,
+        ),
+        (
+            M11InvalidReasonCategory.OTHER_VALIDITY_FAILURE,
+            "artifact_integrity_defect",
+            False,
+        ),
+    ],
+)
+def test_invalid_reason_rejects_cross_category_code_forgery(
+    category: M11InvalidReasonCategory,
+    reason_code: str,
+    repair_eligible: bool,
+) -> None:
+    with pytest.raises(ValidationError, match="reason code does not match its category"):
+        M11InvalidReason(
+            category=category,
+            reason_code=reason_code,
+            repair_eligible=repair_eligible,
+        )
+
+
+def test_invalid_reason_code_enumeration_is_closed() -> None:
+    with pytest.raises(ValidationError):
+        M11InvalidReason(
+            category=M11InvalidReasonCategory.OTHER_VALIDITY_FAILURE,
+            reason_code="novel_post_hoc_exception",
+            repair_eligible=False,
         )
 
 
