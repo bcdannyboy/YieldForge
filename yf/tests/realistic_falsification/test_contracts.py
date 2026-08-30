@@ -13,6 +13,7 @@ from yieldforge.realistic_falsification.contracts import (
     M11EvidenceState,
     M11ExperimentContract,
     M11FieldProvenance,
+    M11MetricDefinitions,
     M11ParentBinding,
     M11SourceBinding,
     M11Thresholds,
@@ -25,33 +26,43 @@ from yieldforge.realistic_falsification.contracts import (
 )
 
 
-def _parent(position: int = 1) -> M11ParentBinding:
+def _parent(role: str, position: int = 1) -> M11ParentBinding:
     digit = format(position, "x")
     return build_m11_parent_binding(
-        role=f"parent_{position}",
-        repository_path=f"evidence/parent-{position}.json",
-        schema_version=f"yieldforge.parent-{position}.v1",
+        role=role,
+        repository_path=f"evidence/{role}.json",
+        schema_version=f"yieldforge.{role}.v1",
         parent_semantic_id=f"yfparent-{digit * 24}",
         parent_content_sha256=f"sha256:{digit * 64}",
         raw_file_sha256=f"sha256:{digit * 64}",
     )
 
 
-def _source(corpus: str, lineage: str, digit: str) -> M11SourceBinding:
+def _source(
+    corpus: str,
+    lineage_kind: str,
+    digit: str,
+    **changes: str,
+) -> M11SourceBinding:
+    kwargs = {
+        "corpus_id": corpus,
+        "lineage_kind": lineage_kind,
+        "source_uri": f"https://example.test/{lineage_kind}",
+        "upstream_sha256": f"sha256:{digit * 64}",
+        "normalized_manifest_sha256": f"sha256:{digit * 64}",
+        "coordinate_units": "unknown",
+        "geometry_provenance": "source_observed",
+    }
+    kwargs.update(changes)
     return build_m11_source_binding(
-        corpus_id=corpus,
-        source_lineage_id=lineage,
-        source_uri=f"https://example.test/{lineage}",
-        upstream_sha256=f"sha256:{digit * 64}",
-        normalized_manifest_sha256=f"sha256:{digit * 64}",
-        coordinate_units="unknown",
-        geometry_provenance="source_observed",
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
 def _corpus(position: int) -> M11CorpusContract:
     corpus_id = f"corpus-{position}"
-    source = _source(corpus_id, f"independent-lineage-{position}", str(position))
+    lineage_kind = "lectra" if position == 1 else "loco_2dics"
+    source = _source(corpus_id, lineage_kind, str(position))
     return M11CorpusContract(
         source=source,
         calibration_stream_ids=tuple(f"{corpus_id}-calibration-{index:02d}" for index in range(8)),
@@ -77,7 +88,7 @@ def _provenance() -> tuple[M11FieldProvenance, ...]:
 
 def _contract(**changes: object) -> M11ExperimentContract:
     kwargs: dict[str, object] = {
-        "parents": (_parent(1), _parent(2)),
+        "parents": (_parent("m0_contract", 1), _parent("m10_verdict", 2)),
         "corpora": (_corpus(1), _corpus(2)),
         "field_provenance": _provenance(),
     }
@@ -116,6 +127,10 @@ def test_contract_freezes_census_thresholds_metrics_and_claim_ceiling() -> None:
     assert contract.metrics.unknown_future_contribution == "100 * (K_i - F_i) / B_i"
     assert contract.metrics.deployable_savings == "100 * (B_i - D_i) / B_i"
     assert contract.metrics.deployable_unknown_contribution == "100 * (D0_i - D_i) / B_i"
+    assert contract.metrics.ceiling_savings == "100 * (B_feasible_i - L_i) / B_feasible_i"
+    assert (
+        contract.metrics.ceiling_unknown_contribution == "100 * (K_feasible_i - L_i) / B_feasible_i"
+    )
     assert contract.claim_ceiling == M11_CLAIM_CEILING
     assert "never_authorizes_productization" in contract.claim_ceiling
     assert contract.productization_authorized is False
@@ -133,6 +148,18 @@ def test_provenance_is_an_exhaustive_closed_enumeration() -> None:
 
     with pytest.raises(ValidationError):
         M11FieldProvenance(field_name="geometry", provenance="realistic")  # type: ignore[arg-type]
+
+
+def test_gate_1_metric_identities_reject_formula_drift() -> None:
+    metrics = M11MetricDefinitions()
+    for field, drifted_formula in (
+        ("ceiling_savings", "100 * (B_i - L_i) / B_i"),
+        ("ceiling_unknown_contribution", "100 * (K_feasible_i - L_i) / K_feasible_i"),
+    ):
+        payload = metrics.model_dump(mode="python")
+        payload[field] = drifted_formula
+        with pytest.raises(ValidationError):
+            M11MetricDefinitions.model_validate(payload, strict=True)
 
 
 def test_contract_and_nested_models_are_strict_and_frozen() -> None:
@@ -190,23 +217,72 @@ def test_contract_rejects_nonindependent_two_corpus_census(mutation: str) -> Non
     if mutation == "one_corpus":
         corpora.pop()
     elif mutation == "same_lineage":
-        duplicate_source = _source("corpus-2", "independent-lineage-1", "2")
+        duplicate_source = _source("corpus-2", "lectra", "2")
         corpora[1] = corpora[1].model_copy(update={"source": duplicate_source})
     else:
-        duplicate_source = _source("corpus-1", "independent-lineage-2", "2")
+        duplicate_source = _source("corpus-1", "loco_2dics", "2")
         corpora[1] = corpora[1].model_copy(update={"source": duplicate_source})
 
     with pytest.raises(ValidationError, match="two distinct"):
         build_m11_contract(
-            parents=(_parent(1), _parent(2)),
+            parents=(_parent("m0_contract", 1), _parent("m10_verdict", 2)),
             corpora=tuple(corpora),
             field_provenance=_provenance(),
         )
 
 
+def test_source_lineages_are_a_closed_attested_enumeration() -> None:
+    with pytest.raises(ValidationError):
+        _source("corpus-1", "lectra_relabelled", "1")
+
+
+@pytest.mark.parametrize(
+    "duplicate_field",
+    ["source_uri", "upstream_sha256", "normalized_manifest_sha256"],
+)
+def test_contract_rejects_relabelled_or_same_root_sources(duplicate_field: str) -> None:
+    lectra = _corpus(1)
+    loco = _corpus(2)
+    duplicate_value = getattr(lectra.source, duplicate_field)
+    replacement = _source(
+        "corpus-2",
+        "loco_2dics",
+        "2",
+        **{duplicate_field: duplicate_value},
+    )
+    relabelled_same_root = loco.model_copy(update={"source": replacement})
+
+    with pytest.raises(ValidationError, match="independent root origins"):
+        build_m11_contract(
+            parents=(_parent("m0_contract", 1), _parent("m10_verdict", 2)),
+            corpora=(lectra, relabelled_same_root),
+            field_provenance=_provenance(),
+        )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "substitute", "reorder"])
+def test_contract_rejects_parent_role_census_drift(mutation: str) -> None:
+    parents = [_parent("m0_contract", 1), _parent("m10_verdict", 2)]
+    if mutation == "missing":
+        parents.pop()
+    elif mutation == "duplicate":
+        parents[1] = _parent("m0_contract", 2)
+    elif mutation == "substitute":
+        parents[1] = _parent("m9_repair", 2)
+    else:
+        parents.reverse()
+
+    with pytest.raises(ValidationError, match="parent roles"):
+        build_m11_contract(
+            parents=tuple(parents),
+            corpora=(_corpus(1), _corpus(2)),
+            field_provenance=_provenance(),
+        )
+
+
 def test_identity_builders_are_content_addressed_and_recomputed() -> None:
-    parent = _parent(1)
-    source = _source("corpus-1", "lineage-1", "1")
+    parent = _parent("m0_contract", 1)
+    source = _source("corpus-1", "lectra", "1")
     contract = _contract()
 
     for model, id_field, prefix in (
@@ -222,8 +298,8 @@ def test_identity_builders_are_content_addressed_and_recomputed() -> None:
 @pytest.mark.parametrize(
     ("factory", "id_field"),
     [
-        (lambda: _parent(1), "binding_id"),
-        (lambda: _source("corpus-1", "lineage-1", "1"), "source_id"),
+        (lambda: _parent("m0_contract", 1), "binding_id"),
+        (lambda: _source("corpus-1", "lectra", "1"), "source_id"),
         (_contract, "contract_id"),
     ],
 )
@@ -243,20 +319,20 @@ def test_contract_builder_revalidates_and_detaches_nested_inputs() -> None:
 
     with pytest.raises(ValidationError):
         build_m11_contract(
-            parents=(_parent(1), _parent(2)),
+            parents=(_parent("m0_contract", 1), _parent("m10_verdict", 2)),
             corpora=(invalid_corpus, _corpus(2)),
             field_provenance=_provenance(),
         )
 
-    parent = _parent(1)
+    parent = _parent("m0_contract", 1)
     valid = build_m11_contract(
-        parents=(parent, _parent(2)),
+        parents=(parent, _parent("m10_verdict", 2)),
         corpora=(_corpus(1), _corpus(2)),
         field_provenance=_provenance(),
     )
     object.__setattr__(parent, "role", "mutated")
     assert valid.parents[0] is not parent
-    assert valid.parents[0].role == "parent_1"
+    assert valid.parents[0].role == "m0_contract"
 
 
 @pytest.mark.parametrize(

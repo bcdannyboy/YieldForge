@@ -25,6 +25,14 @@ M11Provenance = Literal[
     "assumed",
 ]
 
+M11SourceLineageKind = Literal["lectra", "loco_2dics"]
+
+M11_PARENT_ROLE_ORDER = ("m0_contract", "m10_verdict")
+M11_SOURCE_LINEAGE_ORDER: tuple[M11SourceLineageKind, ...] = (
+    "lectra",
+    "loco_2dics",
+)
+
 M11_ALLOWED_PROVENANCE: tuple[M11Provenance, ...] = (
     "source_observed",
     "derived",
@@ -88,7 +96,7 @@ class M11SourceBinding(FrozenExperimentModel):
     source_id: StrictStr = Field(pattern=r"^yfm11s-[0-9a-f]{24}$")
     content_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     corpus_id: StrictStr = Field(min_length=1)
-    source_lineage_id: StrictStr = Field(min_length=1)
+    lineage_kind: M11SourceLineageKind
     source_uri: StrictStr = Field(min_length=1)
     upstream_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     normalized_manifest_sha256: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -225,6 +233,12 @@ class M11MetricDefinitions(FrozenExperimentModel):
     deployable_unknown_contribution: Literal["100 * (D0_i - D_i) / B_i"] = (
         "100 * (D0_i - D_i) / B_i"
     )
+    ceiling_savings: Literal["100 * (B_feasible_i - L_i) / B_feasible_i"] = (
+        "100 * (B_feasible_i - L_i) / B_feasible_i"
+    )
+    ceiling_unknown_contribution: Literal["100 * (K_feasible_i - L_i) / B_feasible_i"] = (
+        "100 * (K_feasible_i - L_i) / B_feasible_i"
+    )
     net_cost: Literal[
         "purchases + storage + return_handling + retrieval_handling - scrap_proceeds - "
         "terminal_credit"
@@ -265,18 +279,25 @@ class M11ExperimentContract(FrozenExperimentModel):
     def require_frozen_census_and_identity(self) -> Self:
         if self.productization_authorized or self.maximum_repairs != 1:
             raise ValueError("M11 cannot authorize productization or permit multiple repairs")
-        if len(self.parents) == 0:
-            raise ValueError("M11 requires at least one exact parent binding")
+        roles = tuple(parent.role for parent in self.parents)
+        if roles != M11_PARENT_ROLE_ORDER:
+            raise ValueError("M11 parent roles differ from the frozen required order")
         if len({parent.binding_id for parent in self.parents}) != len(self.parents):
             raise ValueError("M11 parent bindings must be unique")
-        if len({parent.role for parent in self.parents}) != len(self.parents):
-            raise ValueError("M11 parent roles must be unique")
         if len(self.corpora) != 2:
             raise ValueError("M11 requires exactly two distinct source lineages and corpora")
         corpus_ids = {corpus.source.corpus_id for corpus in self.corpora}
-        lineage_ids = {corpus.source.source_lineage_id for corpus in self.corpora}
-        if len(corpus_ids) != 2 or len(lineage_ids) != 2:
+        lineage_kinds = tuple(corpus.source.lineage_kind for corpus in self.corpora)
+        if len(corpus_ids) != 2 or lineage_kinds != M11_SOURCE_LINEAGE_ORDER:
             raise ValueError("M11 requires exactly two distinct source lineages and corpora")
+        for origin_field in (
+            "source_uri",
+            "upstream_sha256",
+            "normalized_manifest_sha256",
+        ):
+            origins = {getattr(corpus.source, origin_field) for corpus in self.corpora}
+            if len(origins) != 2:
+                raise ValueError("M11 sources must attest independent root origins")
         fields = tuple(item.field_name for item in self.field_provenance)
         if len(fields) == 0 or len(set(fields)) != len(fields):
             raise ValueError("M11 field provenance entries must be nonempty and unique")
@@ -360,7 +381,7 @@ def build_m11_parent_binding(
 def build_m11_source_binding(
     *,
     corpus_id: str,
-    source_lineage_id: str,
+    lineage_kind: M11SourceLineageKind,
     source_uri: str,
     upstream_sha256: str,
     normalized_manifest_sha256: str,
@@ -372,7 +393,7 @@ def build_m11_source_binding(
     semantic = {
         "schema_version": "yieldforge.m11-source-binding.v1",
         "corpus_id": corpus_id,
-        "source_lineage_id": source_lineage_id,
+        "lineage_kind": lineage_kind,
         "source_uri": source_uri,
         "upstream_sha256": upstream_sha256,
         "normalized_manifest_sha256": normalized_manifest_sha256,
@@ -496,9 +517,12 @@ __all__ = [
     "M11ExperimentContract",
     "M11FieldProvenance",
     "M11MetricDefinitions",
+    "M11_PARENT_ROLE_ORDER",
     "M11ParentBinding",
     "M11Provenance",
     "M11SourceBinding",
+    "M11SourceLineageKind",
+    "M11_SOURCE_LINEAGE_ORDER",
     "M11Thresholds",
     "M11VerdictAction",
     "M11VerdictResult",
