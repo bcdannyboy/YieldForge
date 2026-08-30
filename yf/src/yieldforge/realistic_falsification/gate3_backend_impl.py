@@ -380,6 +380,34 @@ class AdapterGate3Backend:
         self._calibration_cache[cache_key] = observation
         return observation
 
+    def release_calibration_stream_evidence(
+        self,
+        corpus_id: Gate3CorpusId,
+        stream_id: str,
+        policy_id: Gate3BaselinePolicyId,
+        expected_observation_id: str,
+    ) -> None:
+        """Release one persisted calibration result from the runtime caches."""
+
+        self._require_stream(
+            corpus_id=corpus_id,
+            stream_id=stream_id,
+            partition="calibration",
+        )
+        policy = self._require_policy(policy_id)
+        calibration_key = (corpus_id, stream_id, policy)
+        observation = self._calibration_cache.get(calibration_key)
+        if observation is None:
+            raise AdapterGate3BackendError(
+                "Gate 3 cached calibration observation is missing"
+            )
+        if observation.observation_id != expected_observation_id:
+            raise AdapterGate3BackendError(
+                "Gate 3 cached calibration observation identity differs"
+            )
+        self._projection_cache.pop((stream_id, "central", policy), None)
+        del self._calibration_cache[calibration_key]
+
     def execute_validity_controls(
         self,
         *,
