@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,11 @@ from shapely import Polygon, box
 
 import yieldforge.realistic_falsification.geometry_gate as geometry_gate_module
 from yieldforge.baseline.contracts import LayoutFitSearchConfig, LayoutFitSearchStatus
+from yieldforge.baseline.geometry import generate_layout_translations
+from yieldforge.baseline.jagua import (
+    JaguaGeneratedPrefilterResult,
+    JaguaRepresentationError,
+)
 from yieldforge.domain import (
     Candidate,
     CandidateReportType,
@@ -176,6 +182,23 @@ def _rules():
         Path(__file__).parents[2] / "experiments/m0-contract-v1.json", M0ExperimentContract
     )
     return rule_set_from_m0(m0.remnant_eligibility)
+
+
+def _synthetic_pinned_jagua(
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    payload = b"synthetic pinned Jagua 0.7 test executable"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    path.chmod(0o700)
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "_PINNED_JAGUA_SHA256",
+        hashlib.sha256(payload).hexdigest(),
+        raising=False,
+    )
+    return path.resolve()
 
 
 def test_material_mismatch_is_a_certified_no_fit() -> None:
@@ -602,6 +625,211 @@ def test_official_stage_repeats_one_preparation_failure_for_every_eligible_edge(
     assert len(edges) == 2
     assert all(edge.status == "blocking_error" for edge in edges)
     assert all(edge.blocking_error_code == "layout_preparation_failed" for edge in edges)
+
+
+def test_official_jagua_discovery_requires_the_exact_pinned_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative = Path("native/m7-jagua-spike/target/release/yieldforge-m7-jagua-spike")
+    executable = _synthetic_pinned_jagua(tmp_path / relative, monkeypatch)
+
+    assert geometry_gate_module._discover_pinned_jagua_executable(tmp_path) == executable
+
+    executable.write_bytes(b"tampered")
+    executable.chmod(0o700)
+
+    assert geometry_gate_module._discover_pinned_jagua_executable(tmp_path) is None
+
+
+def test_official_stage_b_passes_frozen_jagua_prefilter_to_authoritative_shapely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = _origin()
+    targets = (
+        _target(event_position=2, event_id="target-first", release_day=3),
+        _target(
+            width=2.0,
+            height=2.0,
+            event_position=3,
+            event_id="target-second",
+            release_day=4,
+        ),
+    )
+    fit_config = RemnantFitConfig()
+    search_config = LayoutFitSearchConfig()
+    profiles = _default_economic_profiles()
+    expected = tuple(
+        assess_gate2_edge(
+            origin,
+            target,
+            fit_config=fit_config,
+            search_config=search_config,
+            rules=_rules(),
+            economic_profiles=profiles,
+        )
+        for target in targets
+    )
+    executable = _synthetic_pinned_jagua(tmp_path / "jagua", monkeypatch)
+    prefilter_calls = []
+    shapely_calls = []
+    remnant_preparations = []
+    original_search = geometry_gate_module.search_layout_translation
+    original_prepare_remnant = geometry_gate_module.prepare_remnant_geometry
+
+    def fake_prefilter(
+        received_executable,
+        *,
+        remnant,
+        layouts,
+        fit_config,
+        search_config,
+        container_guard,
+    ):
+        prefilter_calls.append((received_executable, remnant, layouts, container_guard))
+        batches = tuple(
+            generate_layout_translations(
+                origin.remnant,
+                target.candidate,
+                fit_config=fit_config,
+                search_config=search_config,
+                prepared_layout=layout,
+                prepared_remnant=remnant,
+            )
+            for target, layout in zip(targets, layouts, strict=True)
+        )
+        masks = tuple((False,) * len(batch.translations) for batch in batches)
+        return JaguaGeneratedPrefilterResult(
+            translation_batches=batches,
+            collision_masks=masks,
+            guarded_query_count=sum(len(mask) for mask in masks),
+            jagua_rejection_count=0,
+            build_microseconds=1,
+            generation_microseconds=2,
+            query_microseconds=3,
+            wall_seconds=0.001,
+        )
+
+    def recorded_search(*args, **kwargs):
+        shapely_calls.append(kwargs)
+        return original_search(*args, **kwargs)
+
+    def counted_prepare_remnant(*args, **kwargs):
+        remnant_preparations.append((args, kwargs))
+        return original_prepare_remnant(*args, **kwargs)
+
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "run_jagua_generated_prefilter",
+        fake_prefilter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "search_layout_translation",
+        recorded_search,
+    )
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "prepare_remnant_geometry",
+        counted_prepare_remnant,
+        raising=False,
+    )
+
+    edges = geometry_gate_module._evaluate_official_edge_graph(
+        origins=(origin,),
+        targets=targets,
+        fit_config=fit_config,
+        search_config=search_config,
+        rules=_rules(),
+        economic_profiles=profiles,
+        evaluation_stage="stage_b_exact_attempted",
+        jagua_executable=executable,
+    )
+
+    assert edges == expected
+    assert len(prefilter_calls) == 1
+    assert prefilter_calls[0][0] == executable
+    assert tuple(item.candidate_id for item in prefilter_calls[0][2]) == tuple(
+        target.candidate.candidate_id for target in targets
+    )
+    assert len(remnant_preparations) == 1
+    assert len(shapely_calls) == 2
+    assert all(call["prepared_remnant"] is prefilter_calls[0][1] for call in shapely_calls)
+    assert all(call["translation_candidates"] is not None for call in shapely_calls)
+    assert all(call["collision_prefilter"] is not None for call in shapely_calls)
+
+
+def test_official_stage_b_never_executes_a_tampered_jagua_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = _origin()
+    target = _target()
+    expected = assess_gate2_edge(origin, target, rules=_rules())
+    executable = _synthetic_pinned_jagua(tmp_path / "jagua", monkeypatch)
+    executable.write_bytes(b"tampered after discovery")
+    executable.chmod(0o700)
+
+    def forbidden_prefilter(*args, **kwargs):
+        raise AssertionError("tampered Jagua binary must never execute")
+
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "run_jagua_generated_prefilter",
+        forbidden_prefilter,
+        raising=False,
+    )
+
+    edges = geometry_gate_module._evaluate_official_edge_graph(
+        origins=(origin,),
+        targets=(target,),
+        fit_config=RemnantFitConfig(),
+        search_config=LayoutFitSearchConfig(),
+        rules=_rules(),
+        economic_profiles=_default_economic_profiles(),
+        evaluation_stage="stage_b_exact_attempted",
+        jagua_executable=executable,
+    )
+
+    assert edges == (expected,)
+
+
+def test_official_stage_b_falls_back_to_exact_shapely_when_jagua_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = _origin()
+    target = _target()
+    expected = assess_gate2_edge(origin, target, rules=_rules())
+    executable = _synthetic_pinned_jagua(tmp_path / "jagua", monkeypatch)
+    calls = []
+
+    def unsupported(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise JaguaRepresentationError("synthetic unsupported representation")
+
+    monkeypatch.setattr(
+        geometry_gate_module,
+        "run_jagua_generated_prefilter",
+        unsupported,
+        raising=False,
+    )
+
+    edges = geometry_gate_module._evaluate_official_edge_graph(
+        origins=(origin,),
+        targets=(target,),
+        fit_config=RemnantFitConfig(),
+        search_config=LayoutFitSearchConfig(),
+        rules=_rules(),
+        economic_profiles=_default_economic_profiles(),
+        evaluation_stage="stage_b_exact_attempted",
+        jagua_executable=executable,
+    )
+
+    assert len(calls) == 1
+    assert edges == (expected,)
 
 
 def _stream_result(stream_id: str, corpus_id: str, purchase_cost: float):

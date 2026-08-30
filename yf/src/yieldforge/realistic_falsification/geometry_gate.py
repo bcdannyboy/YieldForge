@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
+import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
@@ -30,10 +33,18 @@ from yieldforge.baseline.contracts import (
 )
 from yieldforge.baseline.geometry import (
     LayoutConsumption,
+    LayoutTranslationCandidates,
+    PreparedLayoutFootprint,
+    PreparedRemnantGeometry,
     certify_translation_impossible,
     consume_layout,
     prepare_layout_footprint,
+    prepare_remnant_geometry,
     search_layout_translation,
+)
+from yieldforge.baseline.jagua import (
+    JaguaRepresentationError,
+    run_jagua_generated_prefilter,
 )
 from yieldforge.domain import (
     Candidate,
@@ -98,6 +109,9 @@ from yieldforge.reuse.contracts import (
 from yieldforge.reuse.geometry import validate_fit_placement
 
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
+_PINNED_JAGUA_RELATIVE_PATH = Path("native/m7-jagua-spike/target/release/yieldforge-m7-jagua-spike")
+_PINNED_JAGUA_SHA256 = "f886f49f1132a8f9023ef8a1feda9b9f4f8296ce07812afba3bea5ee54fdb1c3"
+_JAGUA_CONTAINER_GUARD = 1.0
 
 Gate2EdgeStatus = Literal[
     "certified_no_fit",
@@ -133,6 +147,7 @@ class _OfficialGate2Context:
     rules: ResidualRuleSet
     fit_config: RemnantFitConfig
     search_config: LayoutFitSearchConfig
+    jagua_executable: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +248,45 @@ class Gate2Target:
         )
 
 
+def _pinned_jagua_executable_is_usable(path: Path) -> bool:
+    """Accept only stable regular executable bytes matching the frozen M7 pin."""
+
+    executable = Path(path)
+    try:
+        before = executable.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or not before.st_mode & 0o111
+            or not os.access(executable, os.X_OK)
+        ):
+            return False
+        raw = executable.read_bytes()
+        after = executable.lstat()
+    except OSError:
+        return False
+    identity_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in identity_fields):
+        return False
+    return len(raw) == before.st_size and hashlib.sha256(raw).hexdigest() == _PINNED_JAGUA_SHA256
+
+
+def _discover_pinned_jagua_executable(repository_root: Path) -> Path | None:
+    """Discover the optional pinned accelerator without making it evidence authority."""
+
+    root = Path(repository_root).resolve()
+    candidate = root / _PINNED_JAGUA_RELATIVE_PATH
+    if not _pinned_jagua_executable_is_usable(candidate):
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_relative_to(root):
+        return None
+    return resolved
+
+
 def _load_official_gate2_context(repository_root: Path) -> _OfficialGate2Context:
     """Strictly load the official M0/M3/M4/LOCo geometry leaves for Gate 2."""
 
@@ -268,6 +322,7 @@ def _load_official_gate2_context(repository_root: Path) -> _OfficialGate2Context
         rules=rule_set_from_m0(m0.remnant_eligibility),
         fit_config=m4.primary_fit_config,
         search_config=LayoutFitSearchConfig(),
+        jagua_executable=_discover_pinned_jagua_executable(root),
     )
 
 
@@ -1878,6 +1933,9 @@ def _assess_gate2_exact_from_official_layout(
     search_config: LayoutFitSearchConfig,
     rules: ResidualRuleSet | None,
     economic_profiles: tuple[M11EconomicProfile, M11EconomicProfile],
+    prepared_remnant: PreparedRemnantGeometry | None = None,
+    translation_candidates: LayoutTranslationCandidates | None = None,
+    collision_prefilter: tuple[bool, ...] | None = None,
 ) -> Gate2EdgeEvidence:
     """Classify against a layout derived inside the current official stream stage."""
 
@@ -1930,6 +1988,9 @@ def _assess_gate2_exact_from_official_layout(
             fit_config=fit_config,
             search_config=search_config,
             prepared_layout=layout,
+            prepared_remnant=prepared_remnant,
+            translation_candidates=translation_candidates,
+            collision_prefilter=collision_prefilter,
         )
     except (TypeError, ValueError):
         return _build_edge(
@@ -2111,6 +2172,103 @@ def _assess_gate2_necessary_bound(
     )
 
 
+def _unique_candidate_batches(
+    items: tuple[tuple[int, Gate2Target, PreparedLayoutFootprint], ...],
+) -> tuple[tuple[tuple[int, Gate2Target, PreparedLayoutFootprint], ...], ...]:
+    """Partition one origin's targets into Jagua-valid unique-ID batches."""
+
+    batches = []
+    current = []
+    candidate_ids = set()
+    for item in items:
+        candidate_id = item[1].candidate.candidate_id
+        if candidate_id in candidate_ids:
+            batches.append(tuple(current))
+            current = []
+            candidate_ids = set()
+        current.append(item)
+        candidate_ids.add(candidate_id)
+    if current:
+        batches.append(tuple(current))
+    return tuple(batches)
+
+
+def _stage_b_jagua_acceleration(
+    *,
+    origin: Gate2Origin,
+    prepared_targets: tuple[tuple[int, Gate2Target, PreparedLayoutFootprint], ...],
+    fit_config: RemnantFitConfig,
+    search_config: LayoutFitSearchConfig,
+    jagua_executable: Path | None,
+) -> dict[
+    int,
+    tuple[PreparedRemnantGeometry, LayoutTranslationCandidates, tuple[bool, ...]],
+]:
+    """Build optional masks for every plausible target while retaining pure fallback."""
+
+    if jagua_executable is None or not _pinned_jagua_executable_is_usable(jagua_executable):
+        return {}
+    plausible = []
+    for item in prepared_targets:
+        _, target, layout = item
+        try:
+            certificate = certify_translation_impossible(
+                layout,
+                origin.remnant,
+                material=target.material,
+                fit_config=fit_config,
+            )
+        except (TypeError, ValueError):
+            continue
+        if not certificate.impossible:
+            plausible.append(item)
+    if not plausible:
+        return {}
+    try:
+        prepared_remnant = prepare_remnant_geometry(origin.remnant)
+    except (TypeError, ValueError):
+        return {}
+    accelerated = {}
+    for batch in _unique_candidate_batches(tuple(plausible)):
+        if not _pinned_jagua_executable_is_usable(jagua_executable):
+            break
+        try:
+            generated = run_jagua_generated_prefilter(
+                jagua_executable,
+                remnant=prepared_remnant,
+                layouts=tuple(item[2] for item in batch),
+                fit_config=fit_config,
+                search_config=search_config,
+                container_guard=_JAGUA_CONTAINER_GUARD,
+            )
+        except (
+            JaguaRepresentationError,
+            OSError,
+            subprocess.SubprocessError,
+            TypeError,
+            ValueError,
+        ):
+            continue
+        if not _pinned_jagua_executable_is_usable(jagua_executable):
+            continue
+        if len(generated.translation_batches) != len(batch) or len(
+            generated.collision_masks
+        ) != len(batch):
+            continue
+        accelerated.update(
+            {
+                item[0]: (prepared_remnant, candidates, mask)
+                for item, candidates, mask in zip(
+                    batch,
+                    generated.translation_batches,
+                    generated.collision_masks,
+                    strict=True,
+                )
+            }
+        )
+    return accelerated
+
+
 def _evaluate_official_edge_graph(
     *,
     origins: tuple[Gate2Origin, ...],
@@ -2123,6 +2281,7 @@ def _evaluate_official_edge_graph(
         "stage_a_favorable_superset",
         "stage_b_exact_attempted",
     ],
+    jagua_executable: Path | None = None,
 ) -> tuple[Gate2EdgeEvidence, ...]:
     """Derive and reuse each target footprint only inside one official stage."""
 
@@ -2135,7 +2294,27 @@ def _evaluate_official_edge_graph(
         prepared_targets.append((target, layout))
     edges = []
     for origin in origins:
-        for target, layout in prepared_targets:
+        eligible_targets = tuple(
+            (index, target, layout)
+            for index, (target, layout) in enumerate(prepared_targets)
+            if target.event_position > origin.event_position
+        )
+        acceleration = (
+            _stage_b_jagua_acceleration(
+                origin=origin,
+                prepared_targets=tuple(
+                    (index, target, layout)
+                    for index, target, layout in eligible_targets
+                    if layout is not None
+                ),
+                fit_config=fit_config,
+                search_config=search_config,
+                jagua_executable=jagua_executable,
+            )
+            if evaluation_stage == "stage_b_exact_attempted"
+            else {}
+        )
+        for index, target, layout in eligible_targets:
             if target.event_position <= origin.event_position:
                 continue
             if layout is None:
@@ -2149,6 +2328,7 @@ def _evaluate_official_edge_graph(
                     economic_profiles=economic_profiles,
                 )
             else:
+                accelerated = acceleration.get(index)
                 edge = _assess_gate2_exact_from_official_layout(
                     origin,
                     target,
@@ -2157,6 +2337,9 @@ def _evaluate_official_edge_graph(
                     search_config=search_config,
                     rules=rules,
                     economic_profiles=economic_profiles,
+                    prepared_remnant=(None if accelerated is None else accelerated[0]),
+                    translation_candidates=(None if accelerated is None else accelerated[1]),
+                    collision_prefilter=(None if accelerated is None else accelerated[2]),
                 )
             edges.append(edge)
     return tuple(edges)
@@ -2345,6 +2528,7 @@ def _evaluate_official_stream(
         rules=context.rules,
         economic_profiles=_default_economic_profiles(),
         evaluation_stage=evaluation_stage,
+        jagua_executable=context.jagua_executable,
     )
     return evaluate_gate2_stream(
         stream_id=stream.stream_id,
