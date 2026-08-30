@@ -8,6 +8,7 @@ confirmation models.  It never derives aggregate decisions.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -382,10 +383,12 @@ class AdapterGate3Backend:
 
     def release_calibration_stream_evidence(
         self,
+        *,
         corpus_id: Gate3CorpusId,
         stream_id: str,
         policy_id: Gate3BaselinePolicyId,
         expected_observation_id: str,
+        expected_observation_content_sha256: str,
     ) -> None:
         """Release one persisted calibration result from the runtime caches."""
 
@@ -401,7 +404,18 @@ class AdapterGate3Backend:
             raise AdapterGate3BackendError(
                 "Gate 3 cached calibration observation is missing"
             )
-        if observation.observation_id != expected_observation_id:
+        if (
+            type(expected_observation_id) is not str
+            or re.fullmatch(r"yfm11g3calobs-[0-9a-f]{24}", expected_observation_id) is None
+            or type(expected_observation_content_sha256) is not str
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                expected_observation_content_sha256,
+            )
+            is None
+            or observation.observation_id != expected_observation_id
+            or observation.content_sha256 != expected_observation_content_sha256
+        ):
             raise AdapterGate3BackendError(
                 "Gate 3 cached calibration observation identity differs"
             )

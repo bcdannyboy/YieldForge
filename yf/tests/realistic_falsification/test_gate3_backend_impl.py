@@ -413,8 +413,14 @@ def test_release_calibration_stream_evidence_removes_only_exact_cache_pair() -> 
     other_calibration_key = ("lectra-m3-m4", "lectra-cal-1", "remnant_first")
     target_projection_key = ("lectra-cal-0", "central", "remnant_first")
     other_projection_key = ("lectra-cal-1", "central", "remnant_first")
-    target = SimpleNamespace(observation_id="yfm11g3calobs-" + "1" * 24)
-    unrelated = SimpleNamespace(observation_id="yfm11g3calobs-" + "2" * 24)
+    target = SimpleNamespace(
+        observation_id="yfm11g3calobs-" + "1" * 24,
+        content_sha256="sha256:" + "3" * 64,
+    )
+    unrelated = SimpleNamespace(
+        observation_id="yfm11g3calobs-" + "2" * 24,
+        content_sha256="sha256:" + "4" * 64,
+    )
     backend._calibration_cache[target_key] = target  # type: ignore[assignment]
     backend._calibration_cache[other_calibration_key] = unrelated  # type: ignore[assignment]
     backend._projection_cache[target_projection_key] = (object(),)  # type: ignore[assignment]
@@ -423,10 +429,11 @@ def test_release_calibration_stream_evidence_removes_only_exact_cache_pair() -> 
     backend._validity_cache[("sha256:a", "sha256:b")] = object()  # type: ignore[assignment]
 
     backend.release_calibration_stream_evidence(
-        "lectra-m3-m4",
-        "lectra-cal-0",
-        "remnant_first",
-        target.observation_id,
+        corpus_id="lectra-m3-m4",
+        stream_id="lectra-cal-0",
+        policy_id="remnant_first",
+        expected_observation_id=target.observation_id,
+        expected_observation_content_sha256=target.content_sha256,
     )
 
     assert target_key not in backend._calibration_cache
@@ -437,10 +444,11 @@ def test_release_calibration_stream_evidence_removes_only_exact_cache_pair() -> 
     assert ("sha256:a", "sha256:b") in backend._validity_cache
     with pytest.raises(AdapterGate3BackendError, match="cached calibration observation"):
         backend.release_calibration_stream_evidence(
-            "lectra-m3-m4",
-            "lectra-cal-0",
-            "remnant_first",
-            target.observation_id,
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+            expected_observation_id=target.observation_id,
+            expected_observation_content_sha256=target.content_sha256,
         )
 
 
@@ -448,17 +456,21 @@ def test_release_calibration_stream_evidence_mismatch_releases_nothing() -> None
     backend = _backend()
     cache_key = ("lectra-m3-m4", "lectra-cal-0", "remnant_first")
     projection_key = ("lectra-cal-0", "central", "remnant_first")
-    observation = SimpleNamespace(observation_id="yfm11g3calobs-" + "1" * 24)
+    observation = SimpleNamespace(
+        observation_id="yfm11g3calobs-" + "1" * 24,
+        content_sha256="sha256:" + "2" * 64,
+    )
     projection = (object(),)
     backend._calibration_cache[cache_key] = observation  # type: ignore[assignment]
     backend._projection_cache[projection_key] = projection  # type: ignore[assignment]
 
     with pytest.raises(AdapterGate3BackendError, match="identity differs"):
         backend.release_calibration_stream_evidence(
-            "lectra-m3-m4",
-            "lectra-cal-0",
-            "remnant_first",
-            "yfm11g3calobs-" + "f" * 24,
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+            expected_observation_id="yfm11g3calobs-" + "f" * 24,
+            expected_observation_content_sha256=observation.content_sha256,
         )
     assert backend._calibration_cache[cache_key] is observation
     assert backend._projection_cache[projection_key] is projection
@@ -467,12 +479,51 @@ def test_release_calibration_stream_evidence_mismatch_releases_nothing() -> None
     empty._projection_cache[projection_key] = projection  # type: ignore[assignment]
     with pytest.raises(AdapterGate3BackendError, match="cached calibration observation"):
         empty.release_calibration_stream_evidence(
-            "lectra-m3-m4",
-            "lectra-cal-0",
-            "remnant_first",
-            observation.observation_id,
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+            expected_observation_id=observation.observation_id,
+            expected_observation_content_sha256=observation.content_sha256,
         )
     assert empty._projection_cache[projection_key] is projection
+
+
+def test_release_calibration_stream_evidence_requires_full_sha_before_mutation() -> None:
+    backend = _backend()
+    cache_key = ("lectra-m3-m4", "lectra-cal-0", "remnant_first")
+    projection_key = ("lectra-cal-0", "central", "remnant_first")
+    observation = SimpleNamespace(
+        observation_id="yfm11g3calobs-" + "1" * 24,
+        content_sha256="sha256:" + "2" * 64,
+    )
+    projection = (object(),)
+    backend._calibration_cache[cache_key] = observation  # type: ignore[assignment]
+    backend._projection_cache[projection_key] = projection  # type: ignore[assignment]
+
+    with pytest.raises(AdapterGate3BackendError, match="identity differs"):
+        backend.release_calibration_stream_evidence(
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+            expected_observation_id=observation.observation_id,
+            expected_observation_content_sha256="sha256:" + "f" * 64,
+        )
+
+    assert backend._calibration_cache[cache_key] is observation
+    assert backend._projection_cache[projection_key] is projection
+
+
+def test_release_calibration_stream_evidence_arguments_are_keyword_only() -> None:
+    backend = _backend()
+
+    with pytest.raises(TypeError):
+        backend.release_calibration_stream_evidence(
+            "lectra-m3-m4",  # type: ignore[misc]
+            "lectra-cal-0",
+            "remnant_first",
+            "yfm11g3calobs-" + "1" * 24,
+            "sha256:" + "2" * 64,
+        )
 
 
 def test_release_calibration_stream_evidence_keeps_retry_handle_if_projection_pop_fails() -> None:
@@ -483,7 +534,10 @@ def test_release_calibration_stream_evidence_keeps_retry_handle_if_projection_po
     backend = _backend()
     cache_key = ("lectra-m3-m4", "lectra-cal-0", "remnant_first")
     projection_key = ("lectra-cal-0", "central", "remnant_first")
-    observation = SimpleNamespace(observation_id="yfm11g3calobs-" + "1" * 24)
+    observation = SimpleNamespace(
+        observation_id="yfm11g3calobs-" + "1" * 24,
+        content_sha256="sha256:" + "2" * 64,
+    )
     projection = (object(),)
     backend._calibration_cache[cache_key] = observation  # type: ignore[assignment]
     backend._projection_cache = FailingProjectionCache(  # type: ignore[assignment]
@@ -492,10 +546,11 @@ def test_release_calibration_stream_evidence_keeps_retry_handle_if_projection_po
 
     with pytest.raises(RuntimeError, match="injected projection release failure"):
         backend.release_calibration_stream_evidence(
-            "lectra-m3-m4",
-            "lectra-cal-0",
-            "remnant_first",
-            observation.observation_id,
+            corpus_id="lectra-m3-m4",
+            stream_id="lectra-cal-0",
+            policy_id="remnant_first",
+            expected_observation_id=observation.observation_id,
+            expected_observation_content_sha256=observation.content_sha256,
         )
 
     assert backend._calibration_cache[cache_key] is observation

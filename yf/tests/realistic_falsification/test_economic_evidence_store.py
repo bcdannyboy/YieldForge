@@ -97,6 +97,77 @@ def test_receipt_builder_strictly_revalidates_before_copying_fields() -> None:
         )
 
 
+def test_receipt_model_accepts_exact_size_limits_and_rejects_one_over() -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation = _fake_calibration_observation(
+        "loco-2dics",
+        "yfm11st-0000000000000000000003e8",
+        "myopic_geometry",
+    )
+    receipt = store.build_gate3_calibration_observation_receipt(
+        observation,
+        source_lineage="repaired_runtime",
+    )
+
+    at_limit = _resign_receipt(
+        receipt,
+        compressed_byte_count=store._MAX_COMPRESSED_BYTES,
+        uncompressed_byte_count=store._MAX_UNCOMPRESSED_BYTES,
+    )
+    assert at_limit.compressed_byte_count == store._MAX_COMPRESSED_BYTES
+    assert at_limit.uncompressed_byte_count == store._MAX_UNCOMPRESSED_BYTES
+
+    with pytest.raises(ValidationError, match="compressed_byte_count"):
+        _resign_receipt(
+            receipt,
+            compressed_byte_count=store._MAX_COMPRESSED_BYTES + 1,
+        )
+    with pytest.raises(ValidationError, match="uncompressed_byte_count"):
+        _resign_receipt(
+            receipt,
+            uncompressed_byte_count=store._MAX_UNCOMPRESSED_BYTES + 1,
+        )
+
+
+def test_preparation_enforces_exact_size_limits_before_signing_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation = _fake_calibration_observation(
+        "loco-2dics",
+        "yfm11st-0000000000000000000003e8",
+        "myopic_geometry",
+    )
+    canonical = store.canonical_gate3_calibration_observation_bytes(observation)
+    compressed = store.deterministic_gzip(canonical)
+    monkeypatch.setattr(store, "_MAX_UNCOMPRESSED_BYTES", len(canonical))
+    monkeypatch.setattr(store, "_MAX_COMPRESSED_BYTES", len(compressed))
+
+    receipt = store.build_gate3_calibration_observation_receipt(
+        observation,
+        source_lineage="repaired_runtime",
+    )
+    assert receipt.uncompressed_byte_count == len(canonical)
+    assert receipt.compressed_byte_count == len(compressed)
+
+    monkeypatch.setattr(store, "_MAX_UNCOMPRESSED_BYTES", len(canonical) - 1)
+    with pytest.raises(store.Gate3EconomicEvidenceError, match="uncompressed byte bound"):
+        store.build_gate3_calibration_observation_receipt(
+            observation,
+            source_lineage="repaired_runtime",
+        )
+
+    monkeypatch.setattr(store, "_MAX_UNCOMPRESSED_BYTES", len(canonical))
+    monkeypatch.setattr(store, "_MAX_COMPRESSED_BYTES", len(compressed) - 1)
+    with pytest.raises(store.Gate3EconomicEvidenceError, match="compressed byte bound"):
+        store.build_gate3_calibration_observation_receipt(
+            observation,
+            source_lineage="repaired_runtime",
+        )
+
+
 def _publish_observation(tmp_path: Path):
     from yieldforge.realistic_falsification import economic_evidence_store as store
 
@@ -124,6 +195,7 @@ def _load_observation(path: Path, receipt, observation):  # type: ignore[no-unty
         expected_stream_id=observation.stream_id,
         expected_policy_id=observation.policy_id,
         expected_observation_id=observation.observation_id,
+        expected_observation_content_sha256=observation.content_sha256,
         expected_final_costs=observation.final_costs,
         expected_full_sheet_opening_count=observation.full_sheet_opening_count,
         expected_source_lineage="repaired_runtime",
@@ -162,6 +234,46 @@ def test_publish_is_idempotent_and_load_returns_exact_observation(tmp_path: Path
     assert Path(first_receipt.sidecar_name).parent == Path(".")
     assert first_receipt == second_receipt
     assert _load_observation(first_path, first_receipt, observation) == observation
+
+
+def test_publish_prepares_serialization_and_compression_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation = _fake_calibration_observation(
+        "loco-2dics",
+        "yfm11st-0000000000000000000003e8",
+        "myopic_geometry",
+    )
+    serialize = store.canonical_pretty_json_bytes
+    compress = store.deterministic_gzip
+    calls = {"serialize": 0, "compress": 0}
+
+    def counted_serialize(value):  # type: ignore[no-untyped-def]
+        calls["serialize"] += 1
+        return serialize(value)
+
+    def counted_compress(data):  # type: ignore[no-untyped-def]
+        calls["compress"] += 1
+        return compress(data)
+
+    def reject_deep_publication_validation(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("publisher validator must not rebuild the full observation")
+
+    monkeypatch.setattr(store, "canonical_pretty_json_bytes", counted_serialize)
+    monkeypatch.setattr(store, "deterministic_gzip", counted_compress)
+    monkeypatch.setattr(store, "_validate_sidecar_bytes", reject_deep_publication_validation)
+
+    published, receipt = store.publish_gate3_calibration_observation_evidence(
+        tmp_path,
+        observation,
+        source_lineage="repaired_runtime",
+    )
+
+    assert published == tmp_path / receipt.sidecar_name
+    assert calls == {"serialize": 1, "compress": 1}
 
 
 def test_publish_refuses_to_overwrite_foreign_bytes(tmp_path: Path) -> None:
@@ -249,6 +361,7 @@ def test_loader_rejects_source_lineage_substitution(tmp_path: Path) -> None:
             expected_stream_id=observation.stream_id,
             expected_policy_id=observation.policy_id,
             expected_observation_id=observation.observation_id,
+            expected_observation_content_sha256=observation.content_sha256,
             expected_final_costs=observation.final_costs,
             expected_full_sheet_opening_count=observation.full_sheet_opening_count,
             expected_source_lineage="repaired_runtime",
@@ -279,6 +392,22 @@ def test_loader_wraps_malformed_deflate_as_evidence_error(tmp_path: Path) -> Non
         _load_observation(candidate, substituted_receipt, observation)
 
 
+def test_loader_treats_bound_gzip_as_transport_without_recompression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation, published, receipt = _publish_observation(tmp_path)
+
+    def reject_recompression(data):  # type: ignore[no-untyped-def]
+        raise AssertionError("load must not reproduce a historical gzip bitstream")
+
+    monkeypatch.setattr(store, "deterministic_gzip", reject_recompression)
+
+    assert _load_observation(published, receipt, observation) == observation
+
+
 def test_loader_rejects_expected_ledger_and_opening_mismatch(tmp_path: Path) -> None:
     from yieldforge.realistic_falsification import economic_evidence_store as store
 
@@ -298,6 +427,7 @@ def test_loader_rejects_expected_ledger_and_opening_mismatch(tmp_path: Path) -> 
         "expected_stream_id": observation.stream_id,
         "expected_policy_id": observation.policy_id,
         "expected_observation_id": observation.observation_id,
+        "expected_observation_content_sha256": observation.content_sha256,
     }
     root_values = observation.roots.model_dump(
         mode="python",
@@ -330,6 +460,39 @@ def test_loader_rejects_expected_ledger_and_opening_mismatch(tmp_path: Path) -> 
             expected_full_sheet_opening_count=observation.full_sheet_opening_count + 1,
             expected_source_lineage="repaired_runtime",
         )
+
+
+def test_loader_rejects_expected_binding_before_opening_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yieldforge.realistic_falsification import economic_evidence_store as store
+
+    observation, published, receipt = _publish_observation(tmp_path)
+    reads = []
+
+    def reject_read(path):  # type: ignore[no-untyped-def]
+        reads.append(path)
+        raise AssertionError("mismatched compact receipt must fail before file I/O")
+
+    monkeypatch.setattr(store, "_read_bounded_regular_file", reject_read)
+
+    with pytest.raises(store.Gate3EconomicEvidenceError, match="expected binding"):
+        store.load_gate3_calibration_observation_evidence(
+            published,
+            receipt=receipt,
+            expected_roots=observation.roots,
+            expected_corpus_id=observation.corpus_id,
+            expected_stream_id="forged-stream",
+            expected_policy_id=observation.policy_id,
+            expected_observation_id=observation.observation_id,
+            expected_observation_content_sha256=observation.content_sha256,
+            expected_final_costs=observation.final_costs,
+            expected_full_sheet_opening_count=observation.full_sheet_opening_count,
+            expected_source_lineage="repaired_runtime",
+        )
+
+    assert reads == []
 
 
 def test_loader_rejects_symlink_and_nonregular_file(tmp_path: Path) -> None:
