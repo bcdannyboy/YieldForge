@@ -82,14 +82,39 @@ def test_builder_derives_the_minimum_current_investment_verdict() -> None:
         "remnant_eligibility_evaluation_sensitivity",
         "ordinary_vs_expanded_search_evaluation",
         "rollout_vs_beam_evaluation",
+        "strong_vs_myopic_baseline_evaluation",
     )
     assert result.reopen_conditions == (
         "permissioned_real_manufacturer_chronology_and_remnant_history",
         "observed_material_identities_and_economically_meaningful_costs",
         "independent_second_geometry_corpus",
-        "buyer_or_operator_owned_bounded_decision",
+        "buyer_or_operator_owned_bounded_decision_and_cost",
     )
     assert result.result_id == f"yfm10-{result.content_sha256[7:31]}"
+
+
+def test_claim_ceiling_names_every_unproven_product_outcome() -> None:
+    result = build_minimum_investment_verdict(_snapshot())
+
+    for excluded_claim in (
+        "factory_representativeness",
+        "adoption",
+        "realized_roi",
+        "integration_reliability",
+    ):
+        assert excluded_claim in result.claim_ceiling
+
+
+def test_missing_controls_include_strong_vs_myopic_evaluation() -> None:
+    result = build_minimum_investment_verdict(_snapshot())
+
+    assert "strong_vs_myopic_baseline_evaluation" in result.missing_required_controls
+
+
+def test_reopen_requires_a_buyer_owned_decision_and_its_cost() -> None:
+    result = build_minimum_investment_verdict(_snapshot())
+
+    assert result.reopen_conditions[-1] == "buyer_or_operator_owned_bounded_decision_and_cost"
 
 
 @pytest.mark.parametrize(

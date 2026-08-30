@@ -40,18 +40,20 @@ M10_MISSING_REQUIRED_CONTROLS = (
     "remnant_eligibility_evaluation_sensitivity",
     "ordinary_vs_expanded_search_evaluation",
     "rollout_vs_beam_evaluation",
+    "strong_vs_myopic_baseline_evaluation",
 )
 
 M10_REOPEN_CONDITIONS = (
     "permissioned_real_manufacturer_chronology_and_remnant_history",
     "observed_material_identities_and_economically_meaningful_costs",
     "independent_second_geometry_corpus",
-    "buyer_or_operator_owned_bounded_decision",
+    "buyer_or_operator_owned_bounded_decision_and_cost",
 )
 
 M10_CLAIM_CEILING = (
     "investment_decision_only_not_formal_m0_economic_band_oracle_savings_unknown_future_"
-    "contribution_physical_recoverability_buyer_demand_or_commercial_proof"
+    "contribution_physical_recoverability_factory_representativeness_adoption_realized_roi_"
+    "integration_reliability_buyer_demand_or_commercial_proof"
 )
 
 
@@ -135,16 +137,18 @@ class M10MinimumInvestmentVerdict(BaselineContractModel):
         Literal["remnant_eligibility_evaluation_sensitivity"],
         Literal["ordinary_vs_expanded_search_evaluation"],
         Literal["rollout_vs_beam_evaluation"],
+        Literal["strong_vs_myopic_baseline_evaluation"],
     ] = M10_MISSING_REQUIRED_CONTROLS
     reopen_conditions: tuple[
         Literal["permissioned_real_manufacturer_chronology_and_remnant_history"],
         Literal["observed_material_identities_and_economically_meaningful_costs"],
         Literal["independent_second_geometry_corpus"],
-        Literal["buyer_or_operator_owned_bounded_decision"],
+        Literal["buyer_or_operator_owned_bounded_decision_and_cost"],
     ] = M10_REOPEN_CONDITIONS
     claim_ceiling: Literal[
         "investment_decision_only_not_formal_m0_economic_band_oracle_savings_unknown_future_"
-        "contribution_physical_recoverability_buyer_demand_or_commercial_proof"
+        "contribution_physical_recoverability_factory_representativeness_adoption_realized_roi_"
+        "integration_reliability_buyer_demand_or_commercial_proof"
     ] = M10_CLAIM_CEILING
 
     @model_validator(mode="after")
