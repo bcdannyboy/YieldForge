@@ -1,0 +1,39 @@
+"""Semi-synthetic hypothesis-disposition evidence for YieldForge M11."""
+
+from yieldforge.realistic_falsification.contracts import (
+    M11_ALLOWED_PROVENANCE,
+    M11_CLAIM_CEILING,
+    M11CorpusContract,
+    M11EvidenceState,
+    M11ExperimentContract,
+    M11FieldProvenance,
+    M11MetricDefinitions,
+    M11ParentBinding,
+    M11SourceBinding,
+    M11Thresholds,
+    M11VerdictAction,
+    M11VerdictResult,
+    build_m11_contract,
+    build_m11_parent_binding,
+    build_m11_source_binding,
+    build_m11_verdict,
+)
+
+__all__ = [
+    "M11_ALLOWED_PROVENANCE",
+    "M11_CLAIM_CEILING",
+    "M11CorpusContract",
+    "M11EvidenceState",
+    "M11ExperimentContract",
+    "M11FieldProvenance",
+    "M11MetricDefinitions",
+    "M11ParentBinding",
+    "M11SourceBinding",
+    "M11Thresholds",
+    "M11VerdictAction",
+    "M11VerdictResult",
+    "build_m11_contract",
+    "build_m11_parent_binding",
+    "build_m11_source_binding",
+    "build_m11_verdict",
+]
