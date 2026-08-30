@@ -9,15 +9,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from yieldforge.baseline.jagua import JaguaRepresentationError
+from yieldforge.realistic_falsification.adapter import AdapterEvidenceError
 from yieldforge.realistic_falsification.confirmation import Gate3CalibrationObservation
 from yieldforge.realistic_falsification.economic_evidence_store import (
     Gate3CalibrationObservationReceipt,
-    Gate3EconomicEvidenceError,
     load_gate3_calibration_observation_evidence,
     publish_gate3_calibration_observation_evidence,
 )
 from yieldforge.realistic_falsification.economic_resolution import (
-    EconomicResolutionEvidenceError,
     EconomicResolutionProtocol,
     Gate3CalibrationAttemptCheckpoint,
     Gate3CalibrationManifest,
@@ -35,14 +37,16 @@ from yieldforge.realistic_falsification.economic_resolution import (
     scan_official_legacy_gate3_calibration_artifact,
     verify_economic_resolution_runtime_lineage,
 )
+from yieldforge.realistic_falsification.gate3_backend import Gate3BackendEvidenceError
 from yieldforge.realistic_falsification.gate3_backend_impl import (
     AdapterGate3Backend,
+    AdapterGate3BackendError,
     build_adapter_gate3_backend,
 )
 from yieldforge.realistic_falsification.gate3_runner import (
-    M11Gate3RunnerError,
     authenticate_official_gate3_early_inputs,
 )
+from yieldforge.reuse.contracts import ReuseGeometryError
 
 _CORPUS_ORDER = ("lectra-m3-m4", "loco-2dics")
 _DEFAULT_GATE1 = "experiments/results/" "m11-gate1-yfm11g1run-c35f10fa4f4d7b6b01c59c29.json"
@@ -187,6 +191,41 @@ def _failure_fields(error: Exception) -> tuple[str, str]:
     return failure_type, failure_detail
 
 
+def _is_known_reuse_accounting_validation(error: BaseException) -> bool:
+    """Admit only the exact deterministic accounting failure seen in the legacy run."""
+
+    if not isinstance(error, ValidationError) or error.title != "ReuseAccounting":
+        return False
+    try:
+        details = error.errors(
+            include_url=False,
+            include_context=False,
+            include_input=False,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return details == [
+        {
+            "type": "value_error",
+            "loc": (),
+            "msg": "Value error, reuse accounting delta does not match material categories",
+        }
+    ]
+
+
+def _is_expected_domain_execution_error(error: BaseException) -> bool:
+    """Classify only explicit deterministic backend/domain failures as test outcomes."""
+
+    return isinstance(
+        error,
+        AdapterGate3BackendError
+        | AdapterEvidenceError
+        | Gate3BackendEvidenceError
+        | JaguaRepresentationError
+        | ReuseGeometryError,
+    ) or _is_known_reuse_accounting_validation(error)
+
+
 def _discard_incomplete_best_effort(
     backend: AdapterGate3Backend,
     reference: Gate3LegacyCalibrationAttemptReference,
@@ -242,19 +281,7 @@ def _execute_missing_failure(
             policy_id=reference.policy_id,
         )
     except BaseException as error:
-        infrastructure = isinstance(
-            error,
-            OSError
-            | MemoryError
-            | TimeoutError
-            | KeyboardInterrupt
-            | SystemExit
-            | EconomicResolutionEvidenceError
-            | Gate3EconomicEvidenceError
-            | M11Gate3RunnerError
-            | M11EconomicResolutionRunnerError,
-        )
-        if infrastructure or not isinstance(error, Exception):
+        if not isinstance(error, Exception) or not _is_expected_domain_execution_error(error):
             _discard_incomplete_best_effort(backend, reference, error)
             raise
         _discard_incomplete_required(backend, reference)
@@ -283,12 +310,45 @@ def _execute_missing_failure(
         expected_observation_id=receipt.observation_id,
         expected_observation_content_sha256=receipt.observation_content_sha256,
     )
+    del observation
     _load_repaired_sidecar(output_directory, receipt)
     checkpoint = build_gate3_calibration_attempt_checkpoint(
         **common,
         repaired_receipt=receipt,
     )
     return _publish_and_load_checkpoint(output_directory, checkpoint)
+
+
+def _rediscover_complete_checkpoints(
+    *,
+    output_directory: Path,
+    protocol: EconomicResolutionProtocol,
+    legacy_scan: Gate3LegacyCalibrationScan,
+    expected: tuple[Gate3CalibrationAttemptCheckpoint, ...],
+) -> tuple[Gate3CalibrationAttemptCheckpoint, ...]:
+    """Require the post-write directory to contain one exact checkpoint per position."""
+
+    if len(expected) != 96:
+        raise M11EconomicResolutionRunnerError(
+            "post-write checkpoint census requires exactly 96 expected checkpoints"
+        )
+    confirmed: list[Gate3CalibrationAttemptCheckpoint] = []
+    for reference, checkpoint in zip(
+        legacy_scan.attempt_references,
+        expected,
+        strict=True,
+    ):
+        discovered = discover_gate3_calibration_attempt_checkpoint(
+            output_directory,
+            protocol=protocol,
+            legacy_reference=reference,
+        )
+        if discovered is None or discovered[1] != checkpoint:
+            raise M11EconomicResolutionRunnerError(
+                "post-write checkpoint census is missing or differs from executed state"
+            )
+        confirmed.append(discovered[1])
+    return tuple(confirmed)
 
 
 def _publish_or_reuse_manifest(
@@ -311,20 +371,30 @@ def _publish_or_reuse_manifest(
             raise M11EconomicResolutionRunnerError(
                 "existing calibration manifest differs from complete derived state"
             )
-        return path, manifest
-    path = publish_gate3_calibration_manifest(output_directory, derived)
-    loaded = load_gate3_calibration_manifest(
-        path,
-        expected_protocol=protocol,
-        expected_roots=legacy_scan.roots,
-        expected_manifest_id=derived.manifest_id,
-        expected_content_sha256=derived.content_sha256,
-    )
-    if loaded != derived:
-        raise M11EconomicResolutionRunnerError(
-            "calibration manifest read-back differs from complete derived state"
+    else:
+        path = publish_gate3_calibration_manifest(output_directory, derived)
+        manifest = load_gate3_calibration_manifest(
+            path,
+            expected_protocol=protocol,
+            expected_roots=legacy_scan.roots,
+            expected_manifest_id=derived.manifest_id,
+            expected_content_sha256=derived.content_sha256,
         )
-    return path, loaded
+        if manifest != derived:
+            raise M11EconomicResolutionRunnerError(
+                "calibration manifest read-back differs from complete derived state"
+            )
+    confirmed = discover_gate3_calibration_manifest(
+        output_directory,
+        protocol=protocol,
+        legacy_scan=legacy_scan,
+        checkpoints=checkpoints,
+    )
+    if confirmed is None or confirmed != (path, manifest) or manifest != derived:
+        raise M11EconomicResolutionRunnerError(
+            "post-publication sole calibration manifest differs from derived state"
+        )
+    return confirmed
 
 
 def run_economic_resolution_calibration(
@@ -409,7 +479,12 @@ def run_economic_resolution_calibration(
             )
         )
 
-    complete = tuple(checkpoints)
+    complete = _rediscover_complete_checkpoints(
+        output_directory=output,
+        protocol=protocol,
+        legacy_scan=scan,
+        expected=tuple(checkpoints),
+    )
     manifest_path, manifest = _publish_or_reuse_manifest(
         output_directory=output,
         protocol=protocol,
@@ -491,6 +566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "failure_count": manifest.failure_count,
                 "manifest_content_sha256": manifest.content_sha256,
                 "manifest_id": manifest.manifest_id,
+                "manifest_path": str(outcome.manifest_path),
                 "protocol_content_sha256": outcome.protocol.content_sha256,
                 "protocol_id": outcome.protocol.protocol_id,
                 "status": manifest.status,
