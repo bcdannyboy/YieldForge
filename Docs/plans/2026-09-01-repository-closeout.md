@@ -248,10 +248,11 @@ Do not rewrite Git author metadata or delete the historical plans.
 Run:
 
 ```bash
-git grep -n -I -E '/[U]sers/danielbloom' -- .
+git grep -n -I -E '/[U]sers/' -- .
+git grep -n -I -E '/[h]ome/' -- .
 ```
 
-Expected: no matches in the current tracked tree.
+Expected: neither command finds a local user-home path in the current tracked tree.
 
 **Step 3: Commit**
 

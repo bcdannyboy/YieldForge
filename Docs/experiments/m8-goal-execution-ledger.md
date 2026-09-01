@@ -15,6 +15,10 @@ Only one row may be `in_progress`; a component result never authorizes a later g
 | Specification SHA-256 | `89fc4604075ad0a6f943c54ec21d1c488497e69ad6671b80b8637ee85d83d0c6` |
 | Goal boundary | Official technical M8 pass through G10; evaluation remains sealed |
 
+The current-tree specification is a path-sanitized derivative. The commit and SHA-256 above identify
+the canonical attested bytes; the historical attestation applies to those bytes, not to the current
+sanitized blob.
+
 `SELF` in a completion-commit field means the ledger-only Git commit containing that row. This is
 used because a commit cannot contain its own hash; the value is resolved unambiguously from history.
 

@@ -2,6 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **Provenance:** This current-tree file is a path-sanitized derivative. The canonical attested
+> bytes remain at Git commit `6b8453706641f7ffac4e8b56c6ce0ca91683a8f9`, where this file's
+> SHA-256 is `89fc4604075ad0a6f943c54ec21d1c488497e69ad6671b80b8637ee85d83d0c6`.
+> The historical attestation applies to those bytes, not to this sanitized blob.
+
 **Goal:** Move YieldForge from the sealed M8 Phase-B performance hold to an official technical M8
 certificate pass without changing the frozen semantics, thresholds, checker independence, eight-slot
 ceiling, or evaluation boundary. Then prepare—but do not silently authorize—the full-horizon pilot
