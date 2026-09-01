@@ -12,14 +12,14 @@ or grant permission to publish them.
 | Class | Repository treatment | What it can support |
 |---|---|---|
 | Canonical tracked evidence | Track bounded contracts, reports, source manifests, normalized test fixtures, and selected result records only when their provenance, rights, content, and size have been reviewed. | The claim stated by that artifact and its validator; never a broader physical or commercial claim. |
-| Compact public M11 manifests | Track exactly the three authenticated manifests listed below. A policy test pins both the exact file set and raw bytes and recursively rejects source-rich geometry/demand fields. | Parent bindings, execution completeness, receipt identities, aggregate economics, and the terminal disposition. They are not a replay packet. |
-| Local or source-rich evidence | Keep raw sources, resumable state, observations, validity receipts, cell sidecars, checkpoints, raw Gate 2/Gate 3 results, browser/build output, and other reconstructive evidence outside Git or under conservative ignore rules. | Full local validation or resume only when the separately preserved packet and its permissioned inputs are present. |
+| Selected M11 manifests | Track exactly the three authenticated manifests listed below. A policy test pins both the exact tracked file set and raw bytes, rejects source-rich geometry/demand fields, and permits ignored local replay files to coexist. | Parent bindings, execution completeness, embedded checkpoint/receipt/summary payloads, aggregate economics, and the terminal disposition. They are not the full raw replay packet. |
+| Local or source-rich evidence | Keep raw sources, resumable state, standalone observation/validity/cell sidecars, standalone checkpoint/summary files, raw Gate 2/Gate 3 results, browser/build output, and other reconstructive evidence outside Git or under conservative ignore rules. | Full local validation or resume only when the separately preserved packet and its permissioned inputs are present. |
 | Permissioned source inputs | Acquire separately under the source's actual terms. Record version, origin, checksums, transformations, and failed/blocked acquisition explicitly. | Source-bound validation within the permission granted; public readability never substitutes for redistribution permission. |
 | Historical source-rich material | Treat existing private commits as preservation records, not automatically publishable artifacts. | Private audit only until the public-release rights and history gates are resolved. |
 
-## Compact M11 public set
+## Selected M11 manifest set
 
-The public-safe M11 economic directory contains only these files:
+The tracked M11 economic manifest directory contains exactly these files:
 
 | Manifest | Raw file SHA-256 |
 |---|---|
@@ -29,12 +29,17 @@ The public-safe M11 economic directory contains only these files:
 
 The long digests in the filenames are the experiment's semantic content identities. The raw hashes
 above additionally authenticate the exact serialized files copied from the preserved M11
-worktree. The manifests contain identifiers, content hashes, compact receipts, costs, aggregate
-metrics, and decisions. They intentionally exclude WKB/WKT, polygon coordinates, parts,
-placements, source demand, and other reconstructive source fields.
+worktree. The manifests intentionally exclude WKB/WKT, polygon coordinates, parts, placements,
+source demand, and other reconstructive source fields. They nevertheless disclose extensive
+experiment metadata and collectively embed complete checkpoint, receipt, and segment-summary
+payloads: per-stream/per-policy records and costs, legacy offsets and failure details, plus
+standalone sidecar names and hashes.
 
-The exact-set rule is deliberate. Segment summaries and all supporting checkpoints or sidecars
-remain part of the private replay packet even when some are individually compact.
+The exact tracked-set rule is deliberate. Standalone segment-summary and checkpoint files and all
+raw supporting sidecars are omitted and ignored, but the corresponding non-reconstructive record
+payloads embedded in the three manifests are disclosed. “Non-reconstructive” describes the absence
+of recoverable source geometry and demand; it is not a finding that the files are licensed or
+otherwise cleared for publication.
 
 ## Local preservation boundary
 
@@ -44,7 +49,7 @@ ignored result family. In particular, do not add the following M11 families to a
 - raw Gate 2 or early Gate 3 results;
 - Gate 3 calibration-observation or validity-receipt compressed sidecars;
 - Gate 3 central-cell compressed sidecars;
-- calibration, validity, or central-cell checkpoints; or
+- standalone calibration, validity, or central-cell checkpoints and segment summaries; or
 - source geometry, source demand, source archives, or reconstructive normalized derivatives whose
   public rights have not been established.
 
@@ -59,18 +64,20 @@ The Lectra v1.1 dataset is attributed and transformed under CC BY 4.0 as recorde
 no express redistribution grant found during this review. Existing LOCo-derived current-tree and
 history content therefore remains private unless permission is obtained or an owner-authorized
 sanitized history is verified. See [PUBLIC_RELEASE.md](../../PUBLIC_RELEASE.md).
+The selected manifests' lack of reconstructive geometry/demand does not resolve this rights gate.
 
 ## Clean-clone and source-distribution limits
 
-A clean Git clone can inspect the reports, authenticate the three compact manifests, and run tests
+A clean Git clone can inspect the reports, authenticate the three selected manifests, and run tests
 that do not require separately acquired sources or local services. It cannot recreate omitted raw
 source/evidence bytes from their hashes.
 
 The M11 independent notebook can be inspected in a clean clone, but its complete raw reconciliation
-cannot run without the separately preserved, permissioned replay packet: source-bound parents,
-calibration observations, validity evidence, checkpoints, segment records, and central-cell
-sidecars. Supplying that packet permits authentication against the compact manifests; the compact
-manifests alone do not reproduce it.
+cannot run without the separately preserved, permissioned replay packet: source-bound parents and
+raw calibration-observation, validity-receipt, and central-cell sidecars, plus the standalone file
+layout expected by the replay. Supplying that packet permits authentication against the selected
+manifests. Their embedded checkpoint/receipt/summary records are already disclosed, but they do not
+reproduce the omitted raw sidecar bytes.
 
 The Python source distribution is narrower still. Its explicit allowlist contains package source
 and build metadata, and excludes datasets, documentation, tests, local evidence, web dependencies,

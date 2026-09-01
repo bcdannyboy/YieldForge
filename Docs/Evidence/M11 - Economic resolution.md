@@ -134,13 +134,19 @@ bootstrap intervals, every gate, and the cross-segment reducer to the same termi
 
 ### Publication boundary
 
-The full authenticated replay packet remains preserved separately as private local evidence. For
-the M11 economic publication packet, this repository tracks only the calibration, validity, and
-central manifests: three compact, non-reconstructive records that preserve bindings, receipts,
-aggregate outcomes, and the verdict without source geometry or demand. A clean clone can
-authenticate those files and inspect this report, but the notebook cannot perform its complete raw
-reconciliation without the separately permissioned packet of source-bound parents, checkpoints,
-receipts, and cell sidecars. See [[Development/Artifact Policy]] and
+The full authenticated replay packet remains preserved separately as private local evidence. The
+repository also tracks three selected calibration, validity, and central manifests. They contain no
+source geometry or source demand, but collectively embed complete non-reconstructive checkpoint,
+receipt, and segment-summary payloads, including per-stream/per-policy records, legacy offsets and
+failure details, and standalone sidecar names and hashes. The corresponding standalone checkpoint,
+summary, and raw sidecar files are omitted; their embedded record payloads are disclosed.
+
+A clean clone can authenticate the selected manifests and inspect this report, but the notebook
+cannot perform its complete raw reconciliation without the separately permissioned source-bound
+parents, raw observation/validity/central-cell sidecars, and expected standalone file layout.
+“Non-reconstructive” is a technical observation about source geometry and demand, not rights
+clearance or publication authorization. See
+[Artifact Policy](../Development/Artifact%20Policy.md) and
 [PUBLIC_RELEASE.md](../../PUBLIC_RELEASE.md).
 
 ## This result adds economic evidence; it does not rewrite history

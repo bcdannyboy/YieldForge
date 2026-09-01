@@ -4,12 +4,14 @@ import hashlib
 import json
 import re
 import subprocess
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 YF_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = YF_ROOT.parent
-PUBLIC_EVIDENCE_ROOT = YF_ROOT / "experiments/results/m11-economic-resolution"
+PUBLIC_EVIDENCE_RELATIVE_ROOT = "yf/experiments/results/m11-economic-resolution"
+PUBLIC_EVIDENCE_ROOT = REPOSITORY_ROOT / PUBLIC_EVIDENCE_RELATIVE_ROOT
 
 EXPECTED_MANIFESTS = {
     "m11-economic-calibration-manifest-"
@@ -101,6 +103,17 @@ _WKB_HEX = re.compile(
 _SOURCE_FORMAT_VALUE = re.compile(r"(?i)(?:^|[\s;/])(?:ewkb|geojson|wkb)\s*[:=]")
 
 
+def _tracked_files() -> set[str]:
+    completed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {path for path in completed.stdout.split("\0") if path}
+
+
 def _normalized_key(key: str) -> str:
     return re.sub(r"[\s-]+", "_", key.casefold())
 
@@ -125,9 +138,12 @@ def _assert_non_reconstructive(value: Any, path: str = "$") -> None:
         assert not _SOURCE_FORMAT_VALUE.search(value), f"encoded source geometry found at {path}"
 
 
-def test_public_economic_evidence_is_the_exact_authenticated_manifest_set() -> None:
-    actual = {path.name for path in PUBLIC_EVIDENCE_ROOT.iterdir()}
-    assert actual == set(EXPECTED_MANIFESTS)
+def test_public_economic_evidence_is_the_exact_tracked_authenticated_manifest_set() -> None:
+    expected_paths = {f"{PUBLIC_EVIDENCE_RELATIVE_ROOT}/{name}" for name in EXPECTED_MANIFESTS}
+    tracked_paths = {
+        path for path in _tracked_files() if path.startswith(f"{PUBLIC_EVIDENCE_RELATIVE_ROOT}/")
+    }
+    assert tracked_paths == expected_paths
 
     for name, expected_sha256 in EXPECTED_MANIFESTS.items():
         path = PUBLIC_EVIDENCE_ROOT / name
@@ -141,7 +157,7 @@ def test_public_economic_manifests_are_non_reconstructive() -> None:
         _assert_non_reconstructive(payload)
 
 
-def test_source_rich_scanner_allows_compact_audit_metadata() -> None:
+def test_source_rich_scanner_allows_non_reconstructive_audit_metadata() -> None:
     safe_metadata = {
         "compressed_raw_sha256": "sha256:" + "a" * 64,
         "positive_stream_count": 3,
@@ -153,7 +169,14 @@ def test_source_rich_scanner_allows_compact_audit_metadata() -> None:
     _assert_non_reconstructive(safe_metadata)
 
 
-def test_private_economic_evidence_families_are_ignored() -> None:
+def test_private_economic_evidence_families_are_untracked_and_ignored() -> None:
+    tracked_private_paths = {
+        path
+        for path in _tracked_files()
+        if any(fnmatchcase(path, pattern) for pattern in PRIVATE_EVIDENCE_RULES)
+    }
+    assert not tracked_private_paths
+
     rules = {
         line.strip()
         for line in (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()

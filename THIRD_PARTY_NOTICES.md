@@ -47,5 +47,11 @@ derivatives as cleared for public redistribution.
 The existing private Git history contains LOCo-derived material. That history is **not cleared for
 public visibility** unless the owner first obtains sufficient written permission or explicitly
 authorizes and verifies a sanitized history that removes the uncleared source and derivatives.
-The three compact public M11 manifests retain only non-reconstructive identities, receipts, and
-aggregate outcomes; their inclusion does not clear any other LOCo-derived artifact.
+The three selected M11 manifests contain no source geometry or source demand, but they collectively
+embed complete non-reconstructive checkpoint, receipt, and segment-summary payloads. Those payloads
+disclose per-stream/per-policy records, legacy byte offsets and failure details, and standalone
+sidecar names and hashes. The corresponding standalone checkpoint, summary, and sidecar files are
+omitted; their embedded record payloads are disclosed in the tracked manifests.
+“Non-reconstructive” is a technical observation about geometry and demand, not a license or rights
+clearance. Including these manifests does not clear any other LOCo-derived artifact or the existing
+history for public visibility.

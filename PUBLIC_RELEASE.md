@@ -15,6 +15,12 @@ was found for the LOCo 2D-ICS source or pinned archive. The current private tree
 contain LOCo-derived source geometry/demand material and are therefore not cleared for public
 visibility as they stand.
 
+The three selected M11 manifests do not contain source geometry or source demand, but they disclose
+embedded checkpoint, receipt, and segment-summary payloads, including per-stream/per-policy records,
+legacy offsets and failure details, and standalone sidecar names and hashes. Their
+non-reconstructive character is a technical content observation, not third-party rights clearance
+or publication authorization.
+
 Before publication, the owner must either:
 
 1. obtain written permission sufficient for the intended LOCo redistribution; or
@@ -23,8 +29,9 @@ Before publication, the owner must either:
    reconstructive derivative.
 
 Removing a file only from the current checkout is insufficient when its bytes remain in Git
-history. Compact hashes, citations, and aggregate non-reconstructive findings may remain only after
-the sanitized result is reviewed against the artifact policy.
+history. Hashes, citations, and retained derived evidence may remain only after the sanitized result
+is reviewed against the artifact policy; describing a record as non-reconstructive does not grant
+permission to publish it.
 
 ## Unresolved owner decisions
 
@@ -41,8 +48,10 @@ the sanitized result is reviewed against the artifact policy.
 
 - Verify the intended public history from a fresh clone, including a secret/credential scan,
   machine-path scan, link check, and third-party-rights inventory.
-- Authenticate the exact three compact M11 manifests and confirm that no source geometry, source
-  demand, raw execution packets, sidecars, or checkpoints are tracked unintentionally.
+- Authenticate the exact three selected M11 manifests and review their disclosed embedded
+  checkpoint, receipt, and segment-summary payloads.
+- Confirm that no standalone source geometry/demand, raw execution packet, sidecar, checkpoint, or
+  segment-summary file is tracked unintentionally.
 - Build and inspect the source distribution. It is a software source package, not a research-data
   or full-replay bundle.
 - Run the repository's Python, web, formatting, and clean-clone checks at the exact release commit.
