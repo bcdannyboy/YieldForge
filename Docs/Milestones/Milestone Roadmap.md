@@ -1,6 +1,12 @@
 # Milestone Roadmap
 
-This is the working implementation sequence. It is adapted from [[Proposal/09 7. MVP Milestones and Acceptance Gates|Section 7 of the proposal]], but it corrects two practical dependency problems:
+> **Historical roadmap note:** this document preserves the sequence and evidence available at each
+> checkpoint. Any “next step,” “may begin,” or open-gate language below records what was true at
+> that time; it is not current authorization. The current status is a paused research archive. See
+> [[Evidence/M11 - Economic resolution|M11 economic resolution]] for the later terminal economic
+> result.
+
+This is the preserved implementation sequence. It is adapted from [[Proposal/09 7. MVP Milestones and Acceptance Gates|Section 7 of the proposal]], but it corrects two practical dependency problems:
 
 - Static polygon data is needed early for Sparrow, while chronological benchmark data belongs after the simulator exists.
 - Exact residual diversity can only be accepted after residual geometry and material accounting exist.
@@ -27,6 +33,27 @@ The milestones answer a chain of increasingly expensive questions:
 
 M10 completes this roadmap. Any further stage requires all documented M10 reopen conditions and a
 separately frozen evidence contract; it is not an automatic continuation of the current program.
+
+## Postscript: M11 economic resolution and archive status
+
+M10 remains the historical minimum roadmap verdict. It stopped productization and further
+virtual-oracle investment with `formal_economic_band=not_computed`; it did not produce a numeric
+savings result.
+
+M11 was a later, separately bound repair-lineage falsification test, not an automatic extension of
+the original roadmap. Its complete paired B/F/K evaluation covered 40 held-out streams across two
+segments. Known-only savings were exactly `0%` in both. Full-future savings were `0%` on LOCo and
+averaged `0.536368330506%` on Lectra, with interval `[0%, 1.098250947619%]`, zero median, and only
+3/20 positive streams. Both segments failed the frozen magnitude, lower-bound, median, and majority
+prevalence gates. The terminal disposition is `INSUFFICIENT_CURRENT_MODELED_VALUE`; a bounded pilot
+and productization are not authorized.
+
+YieldForge is therefore archived on the current evidence. Reopening requires a materially new
+known-only mechanism, segment, or permissioned factory chronology and economics under a newly
+frozen prospective test. It does not begin by rebuilding Sparrow or adding similar streams. See
+[[Evidence/M11 - Economic resolution|M11 economic resolution]],
+[[Development/Artifact Policy|Artifact policy]], and the repository-level
+[public-release gate](../../PUBLIC_RELEASE.md).
 
 M0 passed with a frozen executable economic constitution and a complete 51-task calibration. M2
 also passed: the registered 203-task confirmation completed all 812 cells with valid archives and

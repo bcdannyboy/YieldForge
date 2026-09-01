@@ -1,111 +1,229 @@
 # YieldForge
 
-YieldForge is a research project testing whether future demand should change which high-quality 2D nesting layout a manufacturer chooses today.
+> **Status: paused research archive.** YieldForge tested a specific material-nesting hypothesis
+> thoroughly enough to decide against further investment in the current modeled system. The later
+> M11 test found no known-only savings in either tested segment and only `0.536368330506%` mean
+> savings from perfect future information in one segment. That is not enough to justify rebuilding
+> the nesting layer, integrating a factory system, or productizing the idea.
 
-> **Current status:** M0, M2, M3, and M4 passed their bounded technical gates. M3 replayed one residual-blind pair for each of 203 tasks and found 202 exact residual differences. M4 then searched exact M3 remnants against later source-shape roles and found a mechanically valid reuse witness after 123 ordered pair attempts. That witness avoids one full-sheet opening only in its declared one-order toy state. M5 deterministic replay is next. No reuse-frequency, chronology, oracle, savings, physical-recovery, or commercial result exists.
+This is a research record, not a production application or a claim that future-aware nesting can
+never work. It preserves the idea, the tests that progressively reduced uncertainty, the negative
+result, and the evidence that would be needed to reopen the hypothesis.
+
+The repository is **not currently cleared for public visibility**. Publication still requires the
+rights and owner decisions listed in [PUBLIC_RELEASE.md](PUBLIC_RELEASE.md), and no project license
+has been selected.
 
 ## The idea
 
-Traditional nesting optimizes immediate utilization: fit the current parts compactly and minimize today's waste. But two layouts with nearly identical immediate utilization can leave very different residual shapes. One remnant may fit valuable future work while another may be practically useless.
+Irregular 2D nesting normally rewards the layout that uses a sheet most efficiently for the job in
+front of it. YieldForge asked whether that is sometimes shortsighted. Two layouts can use almost the
+same area now but leave differently shaped remnants; one residual shape may fit a later order while
+the other may have little reuse value.
 
-YieldForge asks whether that future geometric utility is large and frequent enough to matter economically.
+The product hypothesis was that a system could generate several strong, near-tied nests, value the
+future usefulness of their exact residual geometry, and choose the layout that lowers total
+purchased-material cost across a sequence of jobs. A useful system would eventually have to make
+that choice from information actually known at the time, reconcile remnant inventory and costs,
+and beat a strong conventional policy often enough to pay for itself.
 
-The first program is deliberately not a production application. It is a perfect-information research MVP designed to answer one question:
+## Why test with perfect future information
 
-> If every future order were known, how much net purchased-material cost could be avoided by choosing future-aware nests and remnants instead of the strongest policy using only information available at the time?
+Perfect future information was an intentionally favorable upper-bound test, not a proposed product
+feature. Giving the research policy every later order removes forecasting error and asks a simpler
+question first: **does this residual-selection mechanism contain enough value even with an unfair
+informational advantage?**
 
-If the advantage is too small or fragile, the correct outcome is to stop before investing in forecasting, CAM integration, and shop-floor deployment.
+This was an information upper bound for the tested executor, not a proof of globally optimal
+material cost. The search checks were deliberately finite and bounded.
 
-## Validation approach
+If the full-future arm cannot produce a material, repeatable advantage within the same candidate,
+inventory, and cost model, there is no evidence that adding forecasts and production integration to
+the same mechanism will create the missing headroom. A positive result would still have required a
+deployable known-only policy and real factory evidence; a weak result lets us stop before making
+those larger investments.
 
-The MVP will:
+Sparrow supplied the underlying nesting capability through a reproducible Spyrrow adapter and
+immutable candidate archives. Replacing or substantially rebuilding that layer would be a new
+engineering investment, not a prerequisite for interpreting the completed experiment.
 
-1. Generate several feasible, near-tied layouts rather than accepting one solver answer.
-2. Calculate the exact residual geometry and material accounting for each layout.
-3. Reuse retained remnants as irregular stock in later orders.
-4. Replay timestamped order streams through a deterministic inventory simulator.
-5. Compare a strong as-of-time baseline with a perfect-information rollout oracle using the same candidates and compute rules.
-6. Validate scalable search against exhaustive solutions on small cases.
-7. Produce a stop, real-data, or continue decision under thresholds defined before evaluation.
+## How we tested it
 
-Synthetic benchmarks can test the mechanism, but they cannot establish physical recoverability, operator adoption, integration reliability, customer ROI, or market demand. A positive virtual result would justify acquiring real manufacturer history—not launching a product.
+The work advanced through progressively more expensive falsification stages. Each stage had a
+bounded claim: technical feasibility was never treated as economic or commercial proof.
 
-## Working milestones
+| Milestones | Question tested | What the stage established |
+|---|---|---|
+| M0 | What counts as savings or failure? | Froze information boundaries, net-cost accounting, candidate parity, statistical reporting, and decision thresholds before confirmatory outcomes. |
+| M1–M2 | Can every component speak the same language and reproduce candidate nests? | Built the canonical model and a deterministic, content-addressed Sparrow/Spyrrow candidate boundary. |
+| M3–M4 | Do near-tied nests actually leave different useful geometry? | Reconciled exact residuals, found exact differences in 202 of 203 tested pairs, and found one mechanically valid later reuse witness. |
+| M5–M7 | Can choices be replayed through time against a credible baseline? | Built deterministic inventory replay, controlled temporal streams, and selected the M7 baseline from five registered policies on separate calibration streams. |
+| M8–M9 | Is the oracle/search machinery trustworthy enough to inform a decision? | M8 exposed a formal performance hold. M9 found one one-step search counterexample, then a bounded two-ply repair selected the exact-optimal first action in all 45 registered finite cases. Neither result established universal optimality or savings. |
+| M10 | Had the virtual program earned more investment? | Stopped productization and further virtual-oracle work and recommended real manufacturer evidence if work continued. M10's economic band was `not_computed`; it did **not** produce the later 0.54% result. |
+| M11 | Does a repaired, cost-complete test retain the hypothesis? | Selected its baseline from six registered policies on separate calibration streams, then ran paired baseline/full-future/known-only comparisons on 40 held-out streams across Lectra and LOCo-derived segments. It resolved the current modeled product and algorithms as economically insufficient. |
 
-| Stage | Purpose |
-| --- | --- |
-| M0–M2 | Freeze the experiment, establish the shared data model, and make Sparrow a reproducible candidate source. |
-| M3–M5 | Prove exact residual accounting, remnant reuse, and deterministic chronological replay. |
-| M6–M8 | Build controlled temporal benchmarks, freeze a strong baseline, and measure perfect-information value. |
-| M9–M10 | Validate search quality, run the experiment, and issue the investment verdict. |
+The first M11 attempt invalidated itself on reuse-accounting reconciliation and evidence-readback
+rules before producing an economic result. That failure remains in the audit trail. The numbers
+below come only from the later, separately bound repair-lineage test after those non-economic
+execution and evidence defects were corrected.
 
-Detailed planning happens one milestone at a time. See the [Milestone Roadmap](Docs/Milestones/Milestone%20Roadmap.md) for the current sequence and semantic explanation of every milestone.
+The M11 chronology and economics were generated or assumed around source-observed geometry and
+source demand. The result is therefore a semi-synthetic disposition of the modeled hypothesis, not
+a measurement of representative factory ROI.
 
-## MVP boundary
+## What the final test found
 
-The perfect-information MVP intentionally excludes:
+Each held-out stream used the same released jobs, candidate catalog, event sequence, inventory
+rules, and cost ledger for three arms:
 
-- demand forecasting or learned value functions;
-- quoting, purchasing optimization, and order scheduling;
-- multi-machine dispatch and shop-floor control;
-- CAM postprocessing, NC generation, and cut sequencing;
-- production UI, authentication, hosted services, and customer dashboards;
-- claims that synthetic results prove real-world or commercial value.
+- **B — baseline:** the frozen `age_regularity` policy, using only released information;
+- **F — full future:** the tested YieldForge executor with complete future visibility; and
+- **K — known only:** the tested YieldForge executor using only information available when each
+  decision was made.
 
-## Local research workbench
+| Segment | Arm | Mean savings vs. B | 95% interval | Median | Positive streams | Result |
+|---|---|---:|---:|---:|---:|---|
+| LOCo 2D-ICS | B | Reference | — | — | — | Frozen baseline |
+| LOCo 2D-ICS | F | `0%` | `[0%, 0%]` | `0%` | 0/20 | Red |
+| LOCo 2D-ICS | K | `0%` | `[0%, 0%]` | `0%` | 0/20 | Red |
+| Lectra M3/M4 | B | Reference | — | — | — | Frozen baseline |
+| Lectra M3/M4 | F | `0.536368330506%` | `[0%, 1.098250947619%]` | `0%` | 3/20 | Red |
+| Lectra M3/M4 | K | `0%` | `[0%, 0%]` | `0%` | 0/20 | Red |
 
-The browser workbench under `yf/web/` is a local research instrument, not a production application:
+The preregistered F gate required at least `2.5%` mean savings. The deployable K gate required at
+least `1.5%`. Both also required a 95% lower confidence bound above zero, a positive median, and
+savings on more than half of streams. Every segment/arm failed every applicable magnitude and
+reliability gate.
 
-- **Corpus Explorer** pages through the committed 256-task source-lossless Lectra catalog and its server-owned support states. Ruleset v2 classifies 254 tasks as runnable only with their exact listed assumptions and keeps the two non-`s1` tasks blocked. The catalog is a bounded research selection, not a prevalence sample of the full release.
-- **Nest Lab** keeps task `25801` view-only, requires acknowledgement of `interpret_s1_degenerate_entries_as_allowed_rotations` for task `13958`, and does not discard recorded `s1` flips. Flip-bearing tasks such as `6669` require the additional local-x-negation-before-rotation assumption. They can run either the source-recorded projection or an explicitly acknowledged derived no-flip ablation, and can launch both as one matched pair with the same solver configuration. FastAPI supervises each arm across the Spyrrow worker boundary. Newest-first history records projection mode and identity, pair/arm identity, exact solver settings, and verified archive SHA-256 identities; researchers can reopen either immutable candidate archive, render its derived geometry, and inspect the pair. The side-by-side table reports exact recorded values plus neutral Same/Different relations; it does not select a winner, and candidate count is inventory rather than quality.
-- **Order Book Lab** opens three committed deterministic books and can generate additional immutable local books. Geometry and task composition are source-observed; chronology and economics are generated; material is assumed.
+The terminal M11 disposition was `INSUFFICIENT_CURRENT_MODELED_VALUE`: no bounded pilot and no
+productization were authorized.
 
-The frozen M0 artifact defines net cost, information sets, event timing, candidate parity, remnant eligibility, failure treatment, statistical reporting, and go/no-go gates. Its companion geometry protocol binds the exact 254-task eligible population to a prelisted 51-task calibration set and 203-task evaluation set. Calibration completed with 100% archive validity and selected the registered 10-second reference budget. Confirmation then completed 812/812 cells with valid archives and 203/203 qualifying tasks. The content-addressed result is `yfgfr-47d42952e0003154baceee02`. M3's result, `yfgr-0ac2c37f0938d9d399e7a076`, proves exact residual accounting and widespread exact residual differences. M4's result, `yfrr-b8b1578fc5e0225f00c4386e`, proves one later source-shape role can exactly consume a retained M3 remnant and create a reconciled child. It does not establish how often that occurs or whether it saves money in a real sequence.
+## Why this was not just a sample-size problem
 
-The expanded view requires the documented local Postgres service; without `YIELDFORGE_DATABASE_URL`, the API deliberately falls back to the original two-task fixture. The matched flip experiment is a controlled projection-sensitivity test, not a baseline/oracle comparison or a nesting-quality result. The browser workbench does not expose the M3/M4 analysis, reuse remnants interactively, simulate inventory, compare a baseline with an oracle, or report savings. See [Research Workbench](Docs/Development/Research%20Workbench.md) for the exact source-evidence reproduction, database import, direct API, local runtime, and verification commands.
+The decision did not rest on a single p-value or an imprecise mean.
 
-## Repository documentation
+1. **The measured effect was far below the precommitted bar.** Even the upper end of Lectra F's
+   interval, `1.098250947619%`, was below the `2.5%` full-future threshold. LOCo F was exactly zero.
+2. **The effect was not reliable across streams.** Lectra F had a zero median and helped in only
+   3/20 streams, far from the required positive majority. The lower confidence bound was zero.
+3. **The deployable mechanism produced no measured effect.** K matched B in all 40 streams across
+   both segments, so its mean, interval, median, and positive-stream count were all zero.
+4. **Magnitude and prevalence were separate gates.** More same-distribution streams can narrow
+   uncertainty or reveal rare cases, but they cannot create a missing known-only decision
+   mechanism. A larger sample would change this decision only by exhibiting a materially different
+   effect and prevalence pattern; the current evidence provides no such signal.
 
-The repository's primary project and developer documentation is an Obsidian vault under [`Docs/`](Docs/Home.md). The original DOCX is preserved inside the vault, while its contents are split into section-sized Markdown notes for easier navigation and maintenance.
+This evidence falsifies the **current modeled product and tested algorithms**. It does not prove
+that every future algorithm, material segment, or factory would behave the same way. A materially
+better algorithm or different population would be a new hypothesis requiring a new prospective
+test, not a sample-size reinterpretation of this one.
 
-- [Notebook Home](Docs/Home.md)
-- [Current Work](Docs/Current%20Work.md)
-- [Developer setup](Docs/Development/Getting%20Started.md)
-- [Proposal Contents](Docs/Proposal%20Contents.md)
-- [Proposal at a Glance](Docs/Proposal/03%201.%20Proposal%20at%20a%20Glance.md)
-- [Validation Thesis](Docs/Proposal/07%205.%20Validation%20Thesis%20and%20Falsifiable%20Hypotheses.md)
-- [Perfect-Information MVP](Docs/Proposal/08%206.%20The%20Perfect-Information%20MVP.md)
-- [Milestone Roadmap](Docs/Milestones/Milestone%20Roadmap.md)
-- [Go/No-Go Framework](Docs/Proposal/11%209.%20Go%20-%20No-Go%20Decision%20Framework.md)
+## What we learned
 
-To use the notebook in Obsidian, open the repository's `Docs/` directory as a vault. The Markdown files remain readable in GitHub and ordinary editors without Obsidian.
+### Direct findings
 
-## Developer quick start
+- Near-tied nests often did leave measurably different exact residual geometry: 202/203 M3 pairs
+  differed.
+- At least one exact M4 remnant could satisfy a later source-shape role in the declared toy state.
+  That proves the modeled reuse mechanism can occur, not how frequently it occurs or whether it
+  saves money in production.
+- Deterministic chronology, inventory conservation, cost reconciliation, baseline selection, and
+  bounded search checks were all needed before geometry differences could be interpreted
+  economically.
+- In the final cost-complete test, those geometric possibilities did not translate into any
+  measured known-only savings. Full-future value was absent on LOCo and small and sparse on Lectra.
 
-All implementation work accumulates in one directory: `yf/`. Milestones extend this package; they do not create `yf0`, `yf1`, or parallel application trees.
+### Bounded inferences
+
+- **Mechanism versus value:** the geometry mechanism is real within the model, but a possible reuse
+  event is not the same as frequent, reliable, deployable economic value.
+- **Possible segment dependence:** the Lectra-only full-future signal is consistent with narrow
+  forecast headroom or segment dependence. With a zero median, only 3/20 positive streams, and no K
+  effect, it is not evidence for a product or even for a pilot.
+- **Value of the falsification sequence:** the upper-bound test gave a rational stopping point
+  before a Sparrow replacement, factory integration, or forecasting program. That avoided
+  committing to a much larger build on the strength of geometry demonstrations alone; it is a
+  decision implication, not a measured return on research spending.
+
+## Why the project is on the back burner
+
+The current deployable policy saved exactly `0%` in the model, while even perfect hindsight missed
+the full-future magnitude and reliability gates. Rebuilding Sparrow specifically for YieldForge
+would be a substantial new investment with no evidence that solver replacement is the bottleneck
+between the current result and deployable value. The prudent action is to preserve the work and use
+the result, rather than continue optimizing the experiment until it passes.
+
+## What would justify reopening it
+
+Reopening should begin with materially new evidence, not more versions of the same test. A credible
+trigger would be at least one of:
+
+- a new **known-only** decision mechanism that can plausibly change choices, exceed `1.5%` mean
+  savings without future information, and save on most streams;
+- a materially different segment with a concrete reason for higher remnant reuse frequency or
+  value; or
+- permissioned factory chronology, remnant history, material identities, and economics owned by a
+  practitioner or buyer.
+
+That trigger should face a prospectively frozen comparison against a current strong baseline, with
+separate calibration and held-out streams and the same positive lower-bound, median, and majority
+prevalence requirements. A retained result should then replicate in a second segment before a
+bounded operator-owned pilot is considered.
+
+Do not start by rebuilding Sparrow or adding more similar streams. First demonstrate why a new
+mechanism or population should change the known-only economic result.
+
+## Evidence and reproducibility
+
+The primary closeout record is [M11 — Economic resolution](Docs/Evidence/M11%20-%20Economic%20resolution.md).
+It preserves the B/F/K definitions, exact results, thresholds, provenance, artifact identities, and
+claim ceiling. M10 remains separately preserved in
+[M10 — Experiment and verdict](Docs/Milestones/M10%20-%20Experiment%20and%20verdict.md) so its
+historical `not_computed` economic status is not rewritten after the fact.
+
+The repository tracks three authenticated, non-reconstructive M11 manifests under
+[`yf/experiments/results/m11-economic-resolution/`](yf/experiments/results/m11-economic-resolution/).
+A clean clone can inspect and authenticate those selected records. It cannot rerun the independent
+notebook's complete raw reconciliation without the separately preserved, permissioned source-bound
+parents and raw sidecars. See the [Artifact Policy](Docs/Development/Artifact%20Policy.md) for the
+tracked/private boundary and [Third-party notices](THIRD_PARTY_NOTICES.md) for source attribution
+and redistribution limits.
+
+## Repository guide and local verification
+
+- [`Docs/`](Docs/Home.md) is the Obsidian-compatible research notebook and evidence map.
+- [`yf/src/`](yf/src/) contains the Python package and experiment machinery.
+- [`yf/tests/`](yf/tests/) contains policy, model, replay, and evidence tests.
+- [`yf/notebooks/`](yf/notebooks/) contains independent analysis notebooks.
+- [`yf/web/`](yf/web/) is a local research workbench, not a hardened hosted application.
+
+Basic source verification starts with:
 
 ```bash
 cd yf
 uv sync --locked --all-groups
 uv run --all-groups pytest
-uv run yieldforge candidates generate \
-  --input benchmarks/static/m0-smoke.json \
-  --output var/archives/m0-smoke-seed-0 \
-  --seed 0 --seconds 1 --workers 1
+uv run --all-groups ruff check .
+uv run --all-groups ruff format --check .
 
 cd web
 npm ci
-npm run playwright:install
 npm test
 npm run build
 ```
 
-Candidate output directories are immutable. Choose a new output path for every run; committed source and tests never depend on generated archives.
+Some full evidence replays and source-bound checks require the separately permissioned local packet
+or documented local services. See [Getting Started](Docs/Development/Getting%20Started.md) for the
+current environment and verification details.
 
-## Current next step
+## Public-release and name status
 
-Work through [M5—Deterministic Replay](Docs/Milestones/M5%20-%20Deterministic%20replay.md). The next task is to freeze the event order, inventory transitions, information boundary, terminal rule, and canonical history for a hand-computable replay. The existing Shapely backend supplies exact collision truth; a faster `jagua-rs` search adapter is an optional measured performance spike, not a missing correctness gate. Benchmark construction, oracle work, savings, and commercial claims remain deferred.
+Repository consolidation and publication are different decisions. The present history includes
+LOCo-derived material that is not cleared for redistribution, and the selected M11 manifests'
+non-reconstructive character does not grant publication rights. Before visibility changes, the
+owner must resolve LOCo permission or sanitized history, proposal and diagram ownership, Git author
+identity, the intended release history, and the repository name. See
+[PUBLIC_RELEASE.md](PUBLIC_RELEASE.md) for the full gate.
 
-## Name status
-
-“YieldForge” is a provisional internal working name. Naming, domain, trademark, and market-confusion checks are required before external use.
+No license has been chosen for YieldForge's own code or documentation. “YieldForge” is a
+provisional working name; naming, trademark, and market-confusion checks have not been completed.
