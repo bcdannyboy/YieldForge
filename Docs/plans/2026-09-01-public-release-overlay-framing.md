@@ -87,7 +87,7 @@ for entry_point in README.md Docs/Home.md; do
     "alternative nests" \
     "integration"
   do
-    rg -n -i "$required_phrase" "$entry_point"
+    rg -n -i "$required_phrase" "$entry_point" || exit 1
   done
 done
 ```
