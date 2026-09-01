@@ -19,11 +19,11 @@ has been selected.
 YieldForge was designed around the existing nesting workflow. A manufacturer would keep its
 incumbent nesting system, and that system would continue doing the hard work of producing
 process-feasible nests that use the current sheet efficiently. YieldForge would sit after that
-optimizer as a selection layer: instead of accepting only its first answer, it would compare
-multiple strong, near-tied alternative nests and select among them using the future usefulness of
-their exact residual geometry. Operators would still receive an ordinary nest through their
-familiar workflow; they would not have to replace the core optimizer or adopt a separate way to
-nest each job.
+optimizer as a selection layer: instead of passing through only the single nest it would
+ordinarily return, YieldForge would compare multiple strong, near-tied alternative nests and select
+among them using the future usefulness of their exact residual geometry. Operators would still
+receive an ordinary nest through their familiar workflow; they would not have to replace the core
+optimizer or adopt a separate way to nest each job.
 
 The hypothesis was that immediate space efficiency can be nearly tied while cumulative material
 cost is not. Two layouts can use almost the same area now but leave differently shaped remnants;
