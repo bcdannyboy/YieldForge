@@ -46,14 +46,17 @@ not imply that customers would have needed to abandon their established nesting 
 - Update `Docs/Home.md` with the same concise conceptual boundary.
 - Reinforce the Sparrow/Spyrrow paragraph only as needed to connect the experiment to the overlay
   architecture.
-- Do not rewrite historical proposal, milestone, protocol, or evidence records.
+- Remove the superseded publication-blocker language from every tracked current-tree document,
+  including earlier closeout plans, so the prepared public checkout has one coherent boundary.
+- Do not alter experiment outcomes, protocol rules, milestone results, or artifact identities.
 
 ## Prepared-publication boundary
 
 The owner has approved the retained proposal, diagrams, source-derived research material, project
 name, and existing Git author metadata for publication. Current release documentation will retain
 factual source attribution and transformation provenance without presenting those approved
-materials as unresolved publication blockers. No project-level permissions file will be added.
+materials as unresolved publication blockers. No project-level permissions file will be added or
+treated as a release requirement.
 
 The tracked research tree, compact M11 manifests, proposal, and attachments are candidates for the
 public archive. Ignored raw/resumable evidence under `yf/var`, the external preservation archive,
@@ -77,4 +80,6 @@ Review the final wording for these four claims:
 Run tracked Markdown link checks, path/privacy scans, and `git diff --check`. No executable code or
 experiment artifact should change. Re-run the focused public-evidence and packaging tests, source
 distribution inspection, secret/path scans, large-object inventory, and clean Git/remote checks
-before pushing the prepared candidate to private `main`.
+before pushing the prepared candidate to private `main`. A whole-tree semantic scan must find no
+remaining statement that LOCo-derived material, the lack of a project-level permissions file, the
+proposal/assets, author metadata, or project name blocks publication.
