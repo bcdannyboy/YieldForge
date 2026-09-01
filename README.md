@@ -3,8 +3,8 @@
 > **Status: paused research archive.** YieldForge tested a specific material-nesting hypothesis
 > thoroughly enough to decide against further investment in the current modeled system. The later
 > M11 test found no known-only savings in either tested segment and only `0.536368330506%` mean
-> savings from perfect future information in one segment. That is not enough to justify rebuilding
-> the nesting layer, integrating a factory system, or productizing the idea.
+> savings from perfect future information in one segment. That is not enough to justify
+> productizing the tested selection layer or its factory integration.
 
 This is a research record, not a production application or a claim that future-aware nesting can
 never work. It preserves the idea, the tests that progressively reduced uncertainty, the negative
@@ -16,16 +16,34 @@ has been selected.
 
 ## The idea
 
-Irregular 2D nesting normally rewards the layout that uses a sheet most efficiently for the job in
-front of it. YieldForge asked whether that is sometimes shortsighted. Two layouts can use almost the
-same area now but leave differently shaped remnants; one residual shape may fit a later order while
-the other may have little reuse value.
+YieldForge was designed around the existing nesting workflow. A manufacturer would keep its
+incumbent nesting system, and that system would continue doing the hard work of producing
+process-feasible nests that use the current sheet efficiently. YieldForge would sit after that
+optimizer as a selection layer: instead of accepting only its first answer, it would compare
+multiple strong, near-tied alternative nests and select among them using the future usefulness of
+their exact residual geometry. Operators would still receive an ordinary nest through their
+familiar workflow; they would not have to replace the core optimizer or adopt a separate way to
+nest each job.
 
-The product hypothesis was that a system could generate several strong, near-tied nests, value the
-future usefulness of their exact residual geometry, and choose the layout that lowers total
-purchased-material cost across a sequence of jobs. A useful system would eventually have to make
-that choice from information actually known at the time, reconcile remnant inventory and costs,
-and beat a strong conventional policy often enough to pay for itself.
+The hypothesis was that immediate space efficiency can be nearly tied while cumulative material
+cost is not. Two layouts can use almost the same area now but leave differently shaped remnants;
+one residual shape may fit a later order while the other may have little reuse value. If the
+selection layer could recognize that difference from information available at decision time, it
+might reduce purchased material across a sequence of jobs while preserving the incumbent's strong
+single-job optimization.
+
+We started with Sparrow because it was a strong immediate-space optimizer whose progressive
+reports could be drained by the Spyrrow adapter into immutable archives of intermediate and
+alternative nests. Sparrow was therefore a practical first candidate source, not the intended
+replacement target. Applying the idea to another incumbent would require an adapter or equivalent
+interface that exposes multiple strong candidates. That is real integration work, but it is
+different from replacing the manufacturer's nesting workflow.
+
+A useful system would still have to reconcile remnant inventory and costs, make selections from
+information actually known at the time, and beat a strong conventional policy often enough to pay
+for itself. The experiment tested one candidate-producing adapter; it did not prove arbitrary
+vendor compatibility, live inventory synchronization, operator acceptance, or literally zero
+integration effort.
 
 ## Why test with perfect future information
 
@@ -46,9 +64,10 @@ and K to be red in both segments. An F-green/K-red result would have opened the 
 branch; pilot or product investment would still have required later deployable confirmation and
 real factory evidence.
 
-Sparrow supplied the underlying nesting capability through a reproducible Spyrrow adapter and
-immutable candidate archives. Replacing or substantially rebuilding that layer would be a new
-engineering investment, not a prerequisite for interpreting the completed experiment.
+Sparrow supplied the underlying nesting capability through a reproducible Spyrrow adapter. Spyrrow
+drained Sparrow's progressive reports and exposed intermediate or alternative nests as immutable
+candidate archives for the YieldForge selection layer. This was the one tested integration path;
+the experiment did not establish equivalent access to arbitrary commercial nesting systems.
 
 ## How we tested it
 
@@ -149,16 +168,19 @@ test, not a sample-size reinterpretation of this one.
   forecast headroom or segment dependence. With a zero median, only 3/20 positive streams, and no K
   effect, it is not evidence for a product or even for a pilot.
 - **Value of the falsification sequence:** the favorable-information test helped establish a
-  rational stopping point, when combined with the known-only result, before a Sparrow replacement,
-  factory integration, or forecasting program. That avoided
-  committing to a much larger build on the strength of geometry demonstrations alone; it is a
-  decision implication, not a measured return on research spending.
+  rational stopping point, when combined with the known-only result, before broader incumbent
+  adapters, live factory integration, or a forecasting program. That avoided committing to a much
+  larger build on the strength of geometry demonstrations alone; it is a decision implication, not
+  a measured return on research spending.
 
 ## Why the project is on the back burner
 
 The current deployable policy saved exactly `0%` in the model, while even perfect hindsight missed
-the full-future magnitude and reliability gates. Rebuilding Sparrow specifically for YieldForge
-would be a substantial new investment with no evidence that solver replacement is the bottleneck
+the full-future magnitude and reliability gates. The intended workflow advantage was that an
+incumbent optimizer could remain in place, but even an overlay needs candidate access, inventory
+integration, and a selection mechanism valuable enough to justify deployment. Rebuilding Sparrow
+specifically for YieldForge—or developing additional incumbent adapters—would be substantial new
+investment with no evidence that candidate generation or solver replacement is the bottleneck
 between the current result and deployable value. The prudent action is to preserve the work and use
 the result, rather than continue optimizing the experiment until it passes.
 
@@ -180,7 +202,10 @@ prevalence requirements. A retained result should then replicate in a second seg
 bounded operator-owned pilot is considered.
 
 Do not start by rebuilding Sparrow or adding more similar streams. First demonstrate why a new
-mechanism or population should change the known-only economic result.
+mechanism or population should change the known-only economic result. If that evidence appears,
+resume with the workflow-first architecture: keep a strong existing nesting system, expose its
+progressive or otherwise available alternative nests through a bounded adapter, and prospectively
+test the selection layer before investing in broader integration.
 
 ## Evidence and reproducibility
 

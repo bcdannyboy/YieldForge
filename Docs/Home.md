@@ -7,6 +7,22 @@
 This repository preserves the YieldForge proposal, implementation lineage, and falsification
 evidence. It is not an active product roadmap.
 
+## The workflow-first idea
+
+YieldForge was not intended to replace a manufacturer's existing nesting system or nesting
+workflow. The incumbent optimizer would keep producing strong, process-feasible nests for each
+job. YieldForge would act as a selection layer over multiple near-tied alternative nests, choosing
+between them based on whether their residual geometry could lower cumulative material cost over
+later jobs.
+
+Sparrow was the first candidate source because it is a strong immediate-space optimizer and its
+progressive reports could be drained by the Spyrrow adapter into immutable archives of intermediate
+and alternative nests. That made the hypothesis testable without rebuilding the core optimizer.
+Using another incumbent would require equivalent candidate access and an adapter. This is
+integration work, but it is not a replacement nesting workflow. The research tested only the
+Sparrow/Spyrrow path; it did not establish arbitrary vendor compatibility, live inventory sync,
+operator acceptance, or literally zero integration.
+
 ## Start here
 
 - [[Proposal Contents]] — the complete proposal, split into manageable section notes.
