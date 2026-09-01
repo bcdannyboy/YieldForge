@@ -6,7 +6,7 @@ This note records upstream software and public-data leads so implementation evid
 
 - [Spyrrow](https://github.com/PaulDL-RS/spyrrow) — Python bindings and progress reporting for Sparrow; pinned to 0.9.0.
 - [Sparrow](https://github.com/JeroenGar/sparrow) — irregular strip-packing solver used through Spyrrow.
-- [Jaguar](https://github.com/JeroenGar/jagua-rs) — geometry and collision-detection engine beneath Sparrow.
+- [Jagua](https://github.com/JeroenGar/jagua-rs) — geometry and collision-detection engine beneath Sparrow.
 - [Shapely](https://shapely.readthedocs.io/) — pinned geometry library reserved for residual construction and invariants.
 
 ## Research datasets used
@@ -16,8 +16,8 @@ This note records upstream software and public-data leads so implementation evid
   semi-synthetic evaluation; version 1.1 is licensed CC BY 4.0.
 - [LOCo 2D irregular cutting-stock instances](https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip)
   — source-observed geometry and demand used in M11. No express redistribution license was found
-  for the reviewed source/archive, so the existing LOCo-derived tree and history remain outside the
-  public-release boundary pending permission or verified sanitization.
+  for the reviewed source/archive. LOCo-derived content is not cleared for public release without
+  permission or verified sanitization.
 
 See [Third-party notices](../../THIRD_PARTY_NOTICES.md) for exact attribution, versions, checksums,
 transformations, and redistribution limits. External datasets did enter the research benchmark and

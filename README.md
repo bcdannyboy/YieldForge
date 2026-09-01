@@ -64,8 +64,8 @@ bounded claim: technical feasibility was never treated as economic or commercial
 
 The first M11 attempt invalidated itself on reuse-accounting reconciliation and evidence-readback
 rules before producing an economic result. That failure remains in the audit trail. The numbers
-below come only from the later, separately bound repair-lineage test after those non-economic
-execution and evidence defects were corrected.
+below come only from a later, separately preregistered rerun after correcting those non-economic
+execution and evidence defects.
 
 The M11 chronology and economics were generated or assumed around source-observed geometry and
 source demand. The result is therefore a semi-synthetic disposition of the modeled hypothesis, not
@@ -127,9 +127,9 @@ test, not a sample-size reinterpretation of this one.
 - At least one exact M4 remnant could satisfy a later source-shape role in the declared toy state.
   That proves the modeled reuse mechanism can occur, not how frequently it occurs or whether it
   saves money in production.
-- Deterministic chronology, inventory conservation, cost reconciliation, baseline selection, and
-  bounded search checks were all needed before geometry differences could be interpreted
-  economically.
+- The implementation produced deterministic replays and reconciled inventory and cost ledgers;
+  baseline selection used separate calibration streams, and bounded search was checked against
+  exact finite cases.
 - In the final cost-complete test, those geometric possibilities did not translate into any
   measured known-only savings. Full-future value was absent on LOCo and small and sparse on Lectra.
 

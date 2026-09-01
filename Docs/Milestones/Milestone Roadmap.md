@@ -40,10 +40,11 @@ M10 remains the historical minimum roadmap verdict. It stopped productization an
 virtual-oracle investment with `formal_economic_band=not_computed`; it did not produce a numeric
 savings result.
 
-M11 was a later, separately bound repair-lineage falsification test, not an automatic extension of
-the original roadmap. Its complete paired B/F/K evaluation covered 40 held-out streams across two
-segments. Known-only savings were exactly `0%` in both. Full-future savings were `0%` on LOCo and
-averaged `0.536368330506%` on Lectra, with interval `[0%, 1.098250947619%]`, zero median, and only
+M11 was a later, separately preregistered rerun after correcting non-economic execution and evidence
+defects, not an automatic extension of the original roadmap. Its complete paired B/F/K evaluation
+covered 40 held-out streams across two segments. Known-only savings were exactly `0%` in both;
+full-future savings were `0%` on LOCo and averaged `0.536368330506%` on Lectra, with interval
+`[0%, 1.098250947619%]`, zero median, and only
 3/20 positive streams. Both segments failed the frozen magnitude, lower-bound, median, and majority
 prevalence gates. The terminal disposition is `INSUFFICIENT_CURRENT_MODELED_VALUE`; a bounded pilot
 and productization are not authorized.
