@@ -129,7 +129,7 @@ a new hypothesis, not a reinterpretation of this result.
 
 The central manifest's raw-file SHA-256 is
 `sha256:3f3eb6aaa59ea4a1809e8684b3603096b180ecad4d53e42af6e950d08f7f4633`.
-Its 40 content-addressed compressed cell sidecars are present in the authenticated private packet,
+Its 40 content-addressed compressed cell sidecars are present in the authenticated external packet,
 not the tracked tree, and no failure sidecars exist.
 
 The independent recomputation notebook is
@@ -139,20 +139,21 @@ cell errors. Both executions produced byte-identical normalized outputs with SHA
 reconciled 40 checkpoints, 40 compressed cell sidecars, 120 ledgers, all per-stream metrics, both
 bootstrap intervals, every gate, and the cross-segment reducer to the same terminal verdict.
 
-### Publication boundary
+### Tracked and local evidence boundary
 
-The full authenticated replay packet remains preserved separately as private local evidence. The
-repository also tracks three selected calibration, validity, and central manifests. They contain no
-source geometry or source demand, but collectively embed complete non-reconstructive checkpoint,
+The full authenticated replay packet remains preserved separately as local evidence outside Git.
+The repository also tracks three selected calibration, validity, and central manifests. They
+contain no source geometry or source demand, but collectively embed complete non-reconstructive
+checkpoint,
 receipt, and segment-summary payloads, including per-stream/per-policy records, legacy offsets and
 failure details, and standalone sidecar names and hashes. The corresponding standalone checkpoint,
 summary, and raw sidecar files are omitted; their embedded record payloads are disclosed.
 
 A clean clone can authenticate the selected manifests and inspect this report, but the notebook
-cannot perform its complete raw reconciliation without the separately permissioned source-bound
+cannot perform its complete raw reconciliation without the separately preserved source-bound
 parents, raw observation/validity/central-cell sidecars, and expected standalone file layout.
-“Non-reconstructive” is a technical observation about source geometry and demand, not rights
-clearance or publication authorization. See
+“Non-reconstructive” is a technical observation about source geometry and demand, not a claim that
+the manifests are the complete replay packet. See
 [Artifact Policy](../Development/Artifact%20Policy.md) and
 [PUBLIC_RELEASE.md](../../PUBLIC_RELEASE.md).
 

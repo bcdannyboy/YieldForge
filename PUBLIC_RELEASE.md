@@ -1,63 +1,86 @@
-# Public release gate
+# Public release candidate record
 
-**Status:** not authorized for public visibility.
+**Status:** content approved and technically prepared, subject to exact final verification.
 
-This repository is being consolidated as a private, paused research archive. Consolidating the
-research lineage onto private `main` and making a repository public are separate operations. A
-clean merge, passing tests, or a complete README does not grant data rights, choose a project
-license, approve embedded identity metadata, or authorize a visibility change.
+YieldForge is prepared as a public research archive. The owner has reviewed and approved the
+tracked publication boundary described below. This records an owner decision about what belongs in
+the public archive; it is not an independent legal certification of every upstream source.
 
-## Current rights boundary
+The GitHub repository remains **private**. Changing its visibility is a separate external action
+that must not happen without a new explicit command after final verification of the exact commit.
 
-Lectra-derived material is covered by CC BY 4.0 when the attribution and change notice in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) travels with it. No express redistribution license
-was found for the LOCo 2D-ICS source or pinned archive. The current private tree and Git history
-contain LOCo-derived source geometry/demand material and are therefore not cleared for public
-visibility as they stand.
+## Approved tracked boundary
 
-The three selected M11 manifests do not contain source geometry or source demand, but they disclose
-embedded checkpoint, receipt, and segment-summary payloads, including per-stream/per-policy records,
-legacy offsets and failure details, and standalone sidecar names and hashes. Their
-non-reconstructive character is a technical content observation, not third-party rights clearance
-or publication authorization.
+The intended public archive includes the complete tracked research tree and history, including:
 
-Before publication, the owner must either:
+- the YieldForge proposal and all six tracked diagrams under `Docs/Attachments/`;
+- the source code, tests, notebooks, documentation, experiment contracts, and historical plans;
+- the tracked source-derived datasets, normalized benchmarks, fixtures, and canonical evidence;
+- the three compact M11 calibration, validity, and central manifests, including their disclosed
+  embedded checkpoint, receipt, and segment-summary records; and
+- existing Git author metadata and the YieldForge working name.
 
-1. obtain written permission sufficient for the intended LOCo redistribution; or
-2. explicitly authorize a sanitized-history procedure, then verify from a fresh clone that the
-   current tree and all history intended for publication contain no uncleared LOCo source or
-   reconstructive derivative.
+Upstream material retains factual citations, versions, checksums, and transformation provenance in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No project-level permissions file is part of this
+release candidate, by owner decision.
 
-Removing a file only from the current checkout is insufficient when its bytes remain in Git
-history. Hashes, citations, and retained derived evidence may remain only after the sanitized result
-is reviewed against the artifact policy; describing a record as non-reconstructive does not grant
-permission to publish it.
+## Excluded local boundary
 
-## Unresolved owner decisions
+The public archive does not include material outside the tracked tree, including:
 
-| Decision | Why it cannot be inferred during cleanup | Required owner resolution |
-|---|---|---|
-| LOCo permission or sanitized history | The official source supplies no express redistribution grant, while derived material exists in history. | Provide sufficient written permission, or authorize a specific history-sanitization boundary and its verification. |
-| Project license | No cleanup task can decide how others may use YieldForge's original code and documentation. | Select and approve a `LICENSE`, including any intentional differences between code and content. |
-| Proposal and diagram ownership | The repository includes a proposal conversion and visual material whose ownership and third-party elements require confirmation. | Confirm the owner has the right to publish each item, replace/remove uncleared items, and record any required notices. |
-| Git author identity | Commit metadata embeds author names and email addresses. Rewriting or retaining that metadata is an identity/privacy decision. | Confirm the existing metadata is acceptable or authorize a defined rewrite before publication. |
-| Provisional project name | “YieldForge” has not been cleared here as a durable public project or product name. | Approve the provisional name for publication or rename the repository and public-facing references. |
-| Repository visibility | Publication is an external state change with legal, privacy, and reputational consequences. | Explicitly approve the final reviewed commit/history and the change from private to public. |
+- ignored local state under `yf/var/`;
+- the external closeout archive and its complete M11 replay packet;
+- raw or resumable observations, sidecars, checkpoints, execution packets, and oversized local
+  intermediate results that were deliberately kept outside Git;
+- local environments, dependency trees, caches, browser downloads, build output, and test output;
+  or
+- credentials, tokens, machine-specific configuration, and other secrets.
 
-## Technical release checks after those decisions
+The tracked M11 manifests intentionally disclose compact experiment records but omit the standalone
+raw packet. A clean clone can authenticate and inspect those manifests; it cannot reconstruct or
+fully replay the omitted raw sidecars from hashes alone.
 
-- Verify the intended public history from a fresh clone, including a secret/credential scan,
-  machine-path scan, link check, and third-party-rights inventory.
-- Authenticate the exact three selected M11 manifests and review their disclosed embedded
-  checkpoint, receipt, and segment-summary payloads.
-- Confirm that no standalone source geometry/demand, raw execution packet, sidecar, checkpoint, or
-  segment-summary file is tracked unintentionally.
-- Build and inspect the source distribution. It is a software source package, not a research-data
-  or full-replay bundle.
-- Run the repository's Python, web, formatting, and clean-clone checks at the exact release commit.
-- Keep the research workbench local. Its development services have not been reviewed or hardened
-  for exposure to untrusted networks.
-- Record the owner decisions and release commit before changing remote visibility.
+## Resolved publication decisions
 
-Until every applicable owner decision and technical check is complete, the private consolidated
-repository is the preservation artifact; it is not a public release candidate.
+- The proposal, six diagrams, tracked source-derived research material, and current research
+  history are approved for publication.
+- Existing Git author names and email metadata are approved for retention.
+- “YieldForge” is approved as the public research-project name.
+- The tracked datasets, benchmarks, canonical evidence, and compact M11 manifests are within the
+  approved publication boundary.
+- Source attribution and transformation provenance remain part of the archive.
+
+These decisions do not expand YieldForge's claims. The M11 result remains a semi-synthetic
+disposition of the current modeled product and algorithms, not a measurement of representative
+factory ROI or proof about every possible future algorithm.
+
+## Large tracked research artifacts
+
+The tracked tree retains two research-relevant JSON artifacts of approximately 70.12 MiB and
+52.43 MiB. The latter produced GitHub's 52.43 MiB advisory warning. Both are intentionally retained
+because they are part of the research lineage and remain below GitHub's 100 MiB per-file hard
+limit. This is a repository-size tradeoff, not a failed release check. See
+[GitHub's large-file guidance](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github).
+
+## Final technical verification
+
+Before changing visibility, verify the exact candidate commit and its complete intended public
+history from a clean checkout:
+
+- authenticate the selected M11 manifests and confirm the tracked artifact set;
+- scan both the checkout and every reachable commit in the intended public history for credentials,
+  local machine paths, unintended raw packets, and unreviewed generated output;
+- resolve tracked Markdown links and source attributions;
+- run the focused Python policy/evidence tests, Ruff checks, web tests, typecheck, and production
+  build; and
+- build and inspect the Python source distribution against its explicit allowlist.
+
+Record the verified commit before the separate visibility change. Final verification confirms that
+the approved boundary was implemented correctly; it is not a new content-approval gate.
+
+## Operational boundary
+
+Publishing the workbench source does not make the development services production-ready. The
+FastAPI and web workbench remain local research tools and have not been hardened for exposure to
+untrusted networks. Repository publication must not be treated as approval to deploy or expose
+those services.

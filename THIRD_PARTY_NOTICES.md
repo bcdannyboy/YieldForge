@@ -1,8 +1,7 @@
-# Third-party notices
+# Third-party notices and source provenance
 
-This file records attribution and redistribution boundaries for third-party research data used by
-YieldForge. It does not select a license for YieldForge's own code, documentation, proposal, or
-diagrams. See [PUBLIC_RELEASE.md](PUBLIC_RELEASE.md) before changing repository visibility.
+This file records attribution, upstream identities, and YieldForge transformations for research
+data used by the project. YieldForge did not create the upstream datasets described here.
 
 ## Lectra / University of Bordeaux nesting dataset
 
@@ -27,9 +26,8 @@ Aggregate result manifests and reports are additional YieldForge transformations
 original dataset measurements of chronology, cost, savings, or factory performance.
 
 These transformations changed format, selected subsets, and added derived/generated fields. They
-are not endorsed by the dataset authors or their institutions. The CC BY 4.0 license and its
-attribution and change-notice requirements continue to apply to redistributed Lectra-derived
-material.
+are not endorsed by the dataset authors or their institutions. The CC BY 4.0 attribution and
+change-notice terms continue to accompany the Lectra-derived material.
 
 ## LOCo 2D irregular cutting-stock instances
 
@@ -41,21 +39,17 @@ YieldForge also used the official LOCo 2D irregular cutting-stock (`2D-ICS`) ins
 - **Archive:** [LOCo 2D-ICS download](https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip)
 - **Pinned archive SHA-256:** `86980c3d4a33fb329bd9a4cdc9464a6de9e8450baf70b1b4365944ab471a5133`
 
-As reviewed on 2026-09-01, neither the official landing page nor the pinned archive supplied an
-express license granting redistribution of the dataset or derived source material. Public
-availability of a download is not itself a redistribution license. YieldForge therefore does not
-treat the LOCo archive, normalized LOCo catalog, source demand, source geometry, or reconstructive
-derivatives as cleared for public redistribution.
+### YieldForge transformations
 
-The existing private Git history contains LOCo-derived material. That history is **not cleared for
-public visibility** unless the owner first obtains sufficient written permission or explicitly
-authorizes and verifies a sanitized history that removes the uncleared source and derivatives.
-The three selected M11 manifests contain no source geometry or source demand, but they collectively
-embed complete non-reconstructive checkpoint, receipt, and segment-summary payloads. Those payloads
-disclose per-stream/per-policy records, legacy byte offsets and failure details, and standalone
-sidecar names and hashes. The corresponding standalone checkpoint, summary, and sidecar files are
-present in the authenticated private packet, not the tracked tree; their embedded record payloads
-are disclosed in the tracked manifests.
-“Non-reconstructive” is a technical observation about geometry and demand, not a license or rights
-clearance. Including these manifests does not clear any other LOCo-derived artifact or the existing
-history for public visibility.
+YieldForge verified the pinned archive, parsed and normalized its source geometry and demand, and
+used selected source-derived records in the research benchmark and M11 LOCo segment. M11 combined
+those upstream observations with YieldForge-derived geometry families and cost ledgers, generated
+chronology, generated fallback/candidate structures, and assumed material economics. The resulting
+benchmarks, manifests, and reports are transformations used to test YieldForge's modeled selection
+policy; they are not measurements published by the LOCo authors and are not endorsed by them or
+their institutions.
+
+The tracked M11 manifests omit source geometry and source demand while disclosing compact
+checkpoint, receipt, and segment-summary records. Their standalone raw sidecars and replay packet
+remain outside the tracked repository, as described in
+[the artifact policy](Docs/Development/Artifact%20Policy.md).

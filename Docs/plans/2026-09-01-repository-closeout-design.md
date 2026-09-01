@@ -6,7 +6,8 @@ Date: 2026-09-01
 
 Close the active YieldForge research phase without erasing either the work or the negative result. The repository should explain the hypothesis, the sequence of tests, what was learned, why the result was not dismissed as a sample-size problem, and what genuinely new evidence would justify reopening the idea.
 
-The closeout also prepares the current tree for an eventual public release while keeping publication itself behind explicit rights, licensing, naming, and history decisions.
+The closeout also prepares the tracked tree as an owner-approved public research archive while
+keeping the GitHub visibility change as a separate explicit action.
 
 ## Chosen approach
 
@@ -36,20 +37,31 @@ The sample-size explanation must remain bounded: more streams from the same mode
 
 ## Public-release boundary
 
-The closeout branch may be merged to the current private `main`, but changing repository visibility is a separate gate.
+The closeout branch may be merged to the current private `main`. The tracked tree and history are
+within the owner-approved publication boundary, while changing repository visibility remains a
+separate external action.
 
 - Add complete CC BY 4.0 attribution for the Lectra-derived data and state the transformations.
-- State that LOCo-derived material is not cleared for redistribution because the official source and pinned archive provide no express reuse or redistribution license. A public release of the existing history requires written permission or an explicitly authorized sanitized history.
-- Do not select a project software license or rewrite author/history metadata without the owner's decision.
-- Retain the provisional-name warning and clarify that the local research workbench is not safe for network exposure.
-- Track only compact M11 manifests that contain derived receipts and aggregate results without recoverable source geometry or demand. Preserve source-rich raw evidence outside Git.
+- Record the LOCo citation, official source, pinned archive checksum, and YieldForge transformations
+  without claiming that YieldForge created the upstream observations.
+- Record the owner's approval of the proposal, six diagrams, tracked source-derived material,
+  YieldForge name, and existing Git author metadata.
+- Clarify that the local research workbench source is publishable but its services are not hardened
+  for network exposure.
+- Track compact M11 manifests that contain derived receipts and aggregate results without
+  recoverable source geometry or demand. Preserve source-rich raw evidence outside Git.
+- Exclude ignored `yf/var`, the external archive, raw/resumable packets, environments, dependencies,
+  caches, browser output, and credentials from the publication boundary.
 - Remove absolute local paths from the current tree where they are operational residue, while preserving the semantic content of historical plans.
 
 ## Packaging and artifact policy
 
 The Python source-distribution boundary must explicitly include only intended package material and exclude local `var/`, build output, caches, browser dependencies, test output, and native build artifacts. A regression test will fail before this configuration exists and will verify the corrected archive contents afterward.
 
-Canonical, bounded result artifacts may remain tracked when tests and reports authenticate them. Raw resumable execution state, source-rich local evidence, and artifacts above hosting limits remain local and explicitly ignored. The artifact policy must explain this distinction and disclose when a clean public clone cannot reproduce a source-bound validation step without separately permissioned inputs.
+Canonical, bounded result artifacts may remain tracked when tests and reports authenticate them.
+Raw resumable execution state and source-rich local evidence remain external or explicitly ignored.
+The artifact policy must explain this distinction and disclose when a clean public clone cannot
+reproduce a source-bound validation step without the separately preserved packet.
 
 ## Local preservation and Git integration
 
@@ -73,11 +85,13 @@ Verification covers:
 - web tests, TypeScript checks, and production build;
 - a source-distribution content and size check;
 - Markdown link resolution and public-path/secret scans;
-- authentication of the three public-safe M11 manifests;
+- authentication of the three selected M11 manifests;
 - archive hashes and preserved-worktree manifests;
 - branch ancestry, remote freshness, and a clean `main` after integration; and
 - the same relevant checks again on the merged `main` tip.
 
 ## Non-goals
 
-This closeout does not restart algorithm development, rebuild Sparrow, run a new economic experiment, claim commercial proof, choose a software license, make the repository public, obtain third-party permissions, or rewrite Git history.
+This closeout does not restart algorithm development, rebuild Sparrow, run a new economic
+experiment, claim commercial proof, change repository visibility, expose the local workbench to
+untrusted networks, or rewrite Git history.

@@ -10,9 +10,11 @@ This is a research record, not a production application or a claim that future-a
 never work. It preserves the idea, the tests that progressively reduced uncertainty, the negative
 result, and the evidence that would be needed to reopen the hypothesis.
 
-The repository is **not currently cleared for public visibility**. Publication still requires the
-rights and owner decisions listed in [PUBLIC_RELEASE.md](PUBLIC_RELEASE.md), and no project license
-has been selected.
+The tracked repository is prepared as a public research archive: its proposal, six diagrams,
+source-derived research material, code, tests, documentation, evidence, name, and existing Git
+author metadata are within the owner-approved publication boundary. GitHub visibility remains
+private until a separate explicit command after final verification. See the
+[public release candidate record](PUBLIC_RELEASE.md) for the exact included and excluded boundary.
 
 ## The idea
 
@@ -193,7 +195,7 @@ trigger would be at least one of:
   savings without future information, and save on most streams;
 - a materially different segment with a concrete reason for higher remnant reuse frequency or
   value; or
-- permissioned factory chronology, remnant history, material identities, and economics owned by a
+- owner-controlled factory chronology, remnant history, material identities, and economics from a
   practitioner or buyer.
 
 That trigger should face a prospectively frozen comparison against a current strong baseline, with
@@ -218,10 +220,10 @@ historical `not_computed` economic status is not rewritten after the fact.
 The repository tracks three authenticated, non-reconstructive M11 manifests under
 [`yf/experiments/results/m11-economic-resolution/`](yf/experiments/results/m11-economic-resolution/).
 A clean clone can inspect and authenticate those selected records. It cannot rerun the independent
-notebook's complete raw reconciliation without the separately preserved, permissioned source-bound
+notebook's complete raw reconciliation without the separately preserved source-bound
 parents and raw sidecars. See the [Artifact Policy](Docs/Development/Artifact%20Policy.md) for the
-tracked/private boundary and [Third-party notices](THIRD_PARTY_NOTICES.md) for source attribution
-and redistribution limits.
+tracked/local boundary and [Third-party notices](THIRD_PARTY_NOTICES.md) for source attribution and
+transformation provenance.
 
 ## Repository guide and local verification
 
@@ -262,18 +264,21 @@ closeout, and a whole-tree format pass is not claimed.
 The full Python suite is a local evidence verification, not a clean-clone command: it needs the
 ignored pinned audit input and a compatible local PostgreSQL service, and its tight process-timeout
 cases are run separately from the broad partition. Some raw evidence replays additionally require
-the separately permissioned local packet. See
+the separately preserved local packet. See
 [Getting Started](Docs/Development/Getting%20Started.md) for the current environment and
 verification details.
 
-## Public-release and name status
+## Prepared public archive status
 
-Repository consolidation and publication are different decisions. The present history includes
-LOCo-derived material that is not cleared for redistribution, and the selected M11 manifests'
-non-reconstructive character does not grant publication rights. Before visibility changes, the
-owner must resolve LOCo permission or sanitized history, proposal and diagram ownership, Git author
-identity, the intended release history, and the repository name. See
-[PUBLIC_RELEASE.md](PUBLIC_RELEASE.md) for the full gate.
+The tracked tree and history are owner-approved for publication as a research archive. This
+includes the YieldForge name, existing Git author metadata, proposal and six diagrams, source and
+tests, tracked source-derived datasets and benchmarks, canonical evidence, and the three compact
+M11 manifests. Factual upstream attribution and YieldForge transformation provenance remain
+attached to the retained research material.
 
-No license has been chosen for YieldForge's own code or documentation. “YieldForge” is a
-provisional working name; naming, trademark, and market-confusion checks have not been completed.
+Ignored `yf/var` state, the external closeout archive, raw/resumable packets, environments,
+dependencies, caches, browser output, and credentials are outside that boundary. The repository is
+still private because changing GitHub visibility is a separate external action, not because a
+content decision remains unresolved. See the
+[public release candidate record](PUBLIC_RELEASE.md) for the exact boundary and final verification
+checklist.

@@ -2,9 +2,15 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Consolidate the completed YieldForge research lineage onto `main`, publish an evidence-faithful semantic closeout, preserve unique local work, and leave an explicit boundary between the private research archive and a future public release.
+**Goal:** Consolidate the completed YieldForge research lineage onto `main`, publish an
+evidence-faithful semantic closeout, preserve unique local work, and prepare an explicit
+owner-approved public-research boundary while leaving repository visibility private.
 
-**Architecture:** Treat the repository as a paused research archive: README and vault entry points summarize the decision, canonical manifests preserve non-reconstructive audit evidence, and source-rich/raw execution state stays in a verified local archive. Limit executable changes to a tested Python source-distribution boundary; do not alter the nesting, replay, oracle, or economic algorithms.
+**Architecture:** Treat the repository as a paused, prepared public research archive: README and
+vault entry points summarize the decision, canonical manifests preserve non-reconstructive audit
+evidence, and source-rich/raw execution state stays in a verified local archive. Limit executable
+changes to a tested Python source-distribution boundary; do not alter the nesting, replay, oracle,
+or economic algorithms.
 
 **Tech Stack:** Markdown/Obsidian, Git worktrees, Python 3.12, `uv`, Hatchling, pytest, Ruff, FastAPI research workbench, React/TypeScript/Vitest/Vite.
 
@@ -26,7 +32,9 @@ rg -n "0\.536368330506|known-only|sample-size|public release|Sparrow" \
   Docs/plans/2026-09-01-repository-closeout-design.md
 ```
 
-Expected: the design distinguishes M10 from M11, full-future from known-only value, current-tree integration from public release, and rebuilding Sparrow from a valid reopen trigger.
+Expected: the design distinguishes M10 from M11, full-future from known-only value, the approved
+tracked publication boundary from the separate visibility action, and rebuilding Sparrow from a
+valid reopen trigger.
 
 **Step 2: Check Markdown whitespace**
 
@@ -136,15 +144,25 @@ Copy the three manifests from the preserved M11 worktree. Do not copy:
 - the 235 MB Gate 2 raw result; or
 - the 2.27 GB early Gate 3 raw result.
 
-**Step 4: Document public rights and evidence limits**
+**Step 4: Document source attribution and evidence limits**
 
-`THIRD_PARTY_NOTICES.md` must attribute the Lectra dataset authors, title, version, DOI, CC BY 4.0 license URL, and YieldForge transformations. It must state that the official LOCo source and pinned archive provide no express redistribution license and that existing LOCo-derived history is not cleared for public release.
+`THIRD_PARTY_NOTICES.md` must attribute the Lectra dataset authors, title, version, DOI, CC BY 4.0
+terms, and YieldForge transformations. It must also record the LOCo citation, official source,
+pinned archive checksum, and YieldForge transformations without claiming that YieldForge created
+either upstream dataset.
 
-`PUBLIC_RELEASE.md` must separate repository consolidation from publication and list unresolved owner decisions: LOCo permission or sanitized history, project license, proposal/diagram ownership, Git author identity, provisional name, and repository visibility.
+`PUBLIC_RELEASE.md` must record the owner-approved tracked boundary: proposal and six diagrams,
+code, tests, documentation, tracked source-derived material, datasets, benchmarks, canonical
+evidence, three compact M11 manifests, existing Git author metadata, and the YieldForge name. It
+must exclude ignored local/raw material and keep the repository private until a separate explicit
+visibility command.
 
-`Artifact Policy.md` must distinguish canonical tracked evidence, compact public manifests, ignored resumable/raw evidence, permissioned source inputs, and reproducibility limits for a clean clone.
+`Artifact Policy.md` must distinguish canonical tracked evidence, compact public manifests, ignored
+resumable/raw evidence, upstream source provenance, and reproducibility limits for a clean clone.
 
-Add a publication note to the M11 report: the full private packet remains preserved, the three non-reconstructive manifests are tracked, and the notebook cannot perform its complete raw replay from a clean clone without the separately permissioned packet.
+Add a publication note to the M11 report: the full local packet remains preserved outside Git, the
+three non-reconstructive manifests are tracked, and the notebook cannot perform its complete raw
+replay from a clean clone without the separately preserved packet.
 
 **Step 5: Run the public-evidence test to verify GREEN**
 
@@ -187,7 +205,7 @@ The README must use this information architecture:
 9. `What would justify reopening it`;
 10. `Evidence and reproducibility`;
 11. `Repository guide and local verification`;
-12. `Public-release and name status`.
+12. `Prepared public archive status`.
 
 Required semantic statements:
 
@@ -197,7 +215,8 @@ Required semantic statements:
 - The full-future threshold was `2.5%`; the known-only threshold was `1.5%` plus positive median/lower bound/majority prevalence gates.
 - More same-distribution samples can narrow uncertainty but cannot create a missing deployable mechanism.
 - The result falsifies the current modeled product/algorithms, not every possible algorithm, segment, or factory.
-- Reopening begins with a materially new known-only mechanism, segment, or permissioned factory evidence—not rebuilding Sparrow or adding more similar streams.
+- Reopening begins with a materially new known-only mechanism, segment, or owner-controlled factory
+  evidence—not rebuilding Sparrow or adding more similar streams.
 
 Explain Sparrow/Spyrrow once: Sparrow was the underlying nesting capability accessed through the reproducible Spyrrow adapter/candidate archives; replacing it is a new investment, not a prerequisite for interpreting this result.
 

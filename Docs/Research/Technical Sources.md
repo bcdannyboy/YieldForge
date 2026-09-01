@@ -15,14 +15,12 @@ This note records upstream software and public-data leads so implementation evid
   source-observed geometry and task composition used in the canonical Lectra lineage and the M11
   semi-synthetic evaluation; version 1.1 is licensed CC BY 4.0.
 - [LOCo 2D irregular cutting-stock instances](https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip)
-  — source-observed geometry and demand used in M11. No express redistribution license was found
-  for the reviewed source/archive. LOCo-derived content is not cleared for public release without
-  permission or verified sanitization.
+  — source-observed geometry and demand used in M11; the pinned source archive and YieldForge
+  transformations are recorded in the notices below.
 
 See [Third-party notices](../../THIRD_PARTY_NOTICES.md) for exact attribution, versions, checksums,
-transformations, and redistribution limits. External datasets did enter the research benchmark and
-M11 evidence lineage; generated chronology and assumed economics must not be mistaken for source
-measurements.
+and transformations. External datasets did enter the research benchmark and M11 evidence lineage;
+generated chronology and assumed economics must not be mistaken for source measurements.
 
 ## Deferred adapters and fixture leads
 

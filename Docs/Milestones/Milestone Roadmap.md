@@ -54,7 +54,7 @@ known-only mechanism, segment, or permissioned factory chronology and economics 
 frozen prospective test. It does not begin by rebuilding Sparrow or adding similar streams. See
 [[Evidence/M11 - Economic resolution|M11 economic resolution]],
 [[Development/Artifact Policy|Artifact policy]], and the repository-level
-[public-release gate](../../PUBLIC_RELEASE.md).
+[public release candidate record](../../PUBLIC_RELEASE.md).
 
 M0 passed with a frozen executable economic constitution and a complete 51-task calibration. M2
 also passed: the registered 203-task confirmation completed all 812 cells with valid archives and

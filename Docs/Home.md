@@ -5,7 +5,8 @@
 > no pilot or productization is authorized.
 
 This repository preserves the YieldForge proposal, implementation lineage, and falsification
-evidence. It is not an active product roadmap.
+evidence. It is not an active product roadmap. The tracked tree is prepared as an owner-approved
+public research archive; its GitHub visibility remains private until a separate explicit command.
 
 ## The workflow-first idea
 
@@ -33,17 +34,18 @@ operator acceptance, or literally zero integration.
 - [[Development/Spyrrow Adapter|Spyrrow adapter]] — the candidate boundary and archive semantics.
 - [[Research/Technical Sources|Technical sources]] — upstream projects and dataset leads.
 
-## Closeout evidence and release boundary
+## Closeout evidence and publication boundary
 
 - [[Evidence/M11 - Economic resolution|M11 economic resolution]] — the final B/F/K economic result,
   decision gates, provenance, and bounded conclusion.
 - [[Milestones/M10 - Experiment and verdict|M10 investment verdict]] — the earlier non-numeric
   decision to stop productization and additional virtual-oracle work.
-- [[Development/Artifact Policy|Artifact policy]] — what is tracked, what remains in the private
+- [[Development/Artifact Policy|Artifact policy]] — what is tracked, what remains in the external
   replay packet, and what a clean clone can reproduce.
-- [Public release gate](../PUBLIC_RELEASE.md) — unresolved rights, licensing, identity, history, and
-  visibility decisions. The repository is not currently cleared for publication.
-- [Third-party notices](../THIRD_PARTY_NOTICES.md) — source attribution and redistribution limits.
+- [Public release candidate record](../PUBLIC_RELEASE.md) — the owner-approved tracked and excluded
+  publication boundary, final technical checks, and separate visibility action.
+- [Third-party notices](../THIRD_PARTY_NOTICES.md) — upstream attribution and transformation
+  provenance.
 
 ## Important distinction
 
