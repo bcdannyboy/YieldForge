@@ -19,7 +19,7 @@ M0/M6/M7 content-addressed contracts.
 
 ## Execution rules
 
-- Work only in `/Users/danielbloom/Desktop/YieldForge/.worktrees/m6-temporal-benchmark` on
+- Work only in the isolated `<historical-worktree>` on
   `codex/m8-rollout-preparation`.
 - Preserve the complete current action catalog and full visible suffix.
 - Treat registered Shapely/Jagua outcomes as authoritative geometry semantics.
@@ -660,9 +660,9 @@ Run:
 cd yf && uv run yieldforge benchmark m8-sparse-proof \
   --m0 experiments/m0-contract-v1.json \
   --frozen-baseline experiments/results/m7-frozen-baseline-v1.0.1.json \
-  --archive-root /Users/danielbloom/Desktop/YieldForge/yf/var/experiments/yfgp-49906e93ed9ff0446705247b/workbench/candidate-archives \
-  --archive-root /Users/danielbloom/Desktop/YieldForge/yf/var/experiments/yfgp-49906e93ed9ff0446705247b-run-02/workbench/candidate-archives \
-  --archive-root /Users/danielbloom/Desktop/YieldForge/yf/var/experiments/yfgp-392644d98bb7035fdc218512-confirmation-run-01/workbench/candidate-archives \
+  --archive-root "<repository-root>/yf/var/experiments/yfgp-49906e93ed9ff0446705247b/workbench/candidate-archives" \
+  --archive-root "<repository-root>/yf/var/experiments/yfgp-49906e93ed9ff0446705247b-run-02/workbench/candidate-archives" \
+  --archive-root "<repository-root>/yf/var/experiments/yfgp-392644d98bb7035fdc218512-confirmation-run-01/workbench/candidate-archives" \
   --jagua-binary native/m7-jagua-spike/target/release/yieldforge-m7-jagua-spike \
   --output experiments/results
 ```

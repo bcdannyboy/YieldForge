@@ -12,7 +12,7 @@
 
 ## Execution rules
 
-- Work in `/Users/danielbloom/Desktop/YieldForge/.worktrees/m6-temporal-benchmark` on `codex/m8-rollout-preparation`.
+- Work in the isolated `<historical-worktree>` on `codex/m8-rollout-preparation`.
 - Preserve the dirty tree if one appears. Do not rewrite or delete existing M8 v3 artifacts.
 - Use test-driven development for every behavioral change: add the failing test, observe the intended failure, implement the minimum change, and rerun the focused test.
 - Keep commits task-scoped. Do not combine profiling, proof semantics, and runner changes into one commit.

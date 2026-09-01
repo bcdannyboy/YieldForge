@@ -25,7 +25,7 @@ SHA-256 canonical JSON, multiprocessing spawn/fork boundaries.
 
 ## Execution rules
 
-- Work in `/Users/danielbloom/Desktop/YieldForge/.worktrees/m6-temporal-benchmark` on
+- Work in the isolated `<historical-worktree>` on
   `codex/m8-rollout-preparation`.
 - Use strict red-green-refactor TDD for every behavior change.
 - Keep `score_sparse_event()` and `check_action_proofs()` unchanged as trusted v1 APIs.

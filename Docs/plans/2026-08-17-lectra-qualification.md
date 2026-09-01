@@ -344,7 +344,7 @@ git commit -m "feat: add isolated Lectra qualification"
 **Step 1: Verify free disk and Docker availability**
 
 ```bash
-df -h /Users/danielbloom/Desktop/YieldForge
+df -h "<repository-root>"
 docker version
 ```
 
@@ -368,8 +368,8 @@ Expected: all four files report verified byte counts and MD5 checksums.
 mkdir -p var/data/reports/lectra-7030786-v1.1
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --pids-limit 128 --memory 8g --cpus 4 \
-  --mount type=bind,src=/Users/danielbloom/Desktop/YieldForge/yf/var/data/raw/lectra-7030786-v1.1,dst=/input,readonly \
-  --mount type=bind,src=/Users/danielbloom/Desktop/YieldForge/yf/var/data/reports/lectra-7030786-v1.1,dst=/output \
+  --mount type=bind,src="<repository-root>/yf/var/data/raw/lectra-7030786-v1.1",dst=/input,readonly \
+  --mount type=bind,src="<repository-root>/yf/var/data/reports/lectra-7030786-v1.1",dst=/output \
   yieldforge-lectra-qualifier
 ```
 

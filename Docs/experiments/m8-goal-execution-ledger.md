@@ -8,7 +8,7 @@ Only one row may be `in_progress`; a component result never authorizes a later g
 
 | Field | Value |
 |---|---|
-| Worktree | `/Users/danielbloom/Desktop/YieldForge/.worktrees/m6-temporal-benchmark` |
+| Worktree | `<historical-worktree>` |
 | Branch | `codex/m8-rollout-preparation` |
 | Accepted source base | `47c1eaf` |
 | Committed execution specification | `6b8453706641f7ffac4e8b56c6ce0ca91683a8f9` |
@@ -36,7 +36,7 @@ used because a commit cannot contain its own hash; the value is resolved unambig
 - Ledger-only owned path: `Docs/experiments/m8-goal-execution-ledger.md`.
 - No source, test, dependency, artifact, or evaluation input was edited.
 - Existing isolated worktree is registered by Git and parent `.worktrees/` is ignored by
-  `/Users/danielbloom/Desktop/YieldForge/.gitignore`.
+  the repository-root `.gitignore`.
 
 ### Observed evidence
 

@@ -58,8 +58,8 @@ implementation exact and feasible; it cannot engineer a favorable economic resul
 
 ### Accepted source state
 
-- Worktree: `/Users/danielbloom/Desktop/YieldForge/.worktrees/m6-temporal-benchmark`
-- Package root: `/Users/danielbloom/Desktop/YieldForge/.worktrees/m6-temporal-benchmark/yf`
+- Worktree: `<historical-worktree>`
+- Package root: `<historical-worktree>/yf`
 - Branch: `codex/m8-rollout-preparation`
 - Accepted source base at specification creation: `47c1eaf` (the reviewed plan-only commit may
   advance HEAD without accepting the inherited source draft)

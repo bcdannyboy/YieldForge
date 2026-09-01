@@ -239,7 +239,7 @@ git commit -m "docs: close out YieldForge research"
 
 **Step 1: Replace absolute paths semantically**
 
-Replace `/Users/danielbloom/Desktop/YieldForge` and historical worktree paths with `<repository-root>`, `<historical-worktree>`, or repository-relative paths as appropriate. Keep commands understandable and preserve the fact that old work occurred in an isolated worktree.
+Replace legacy absolute repository paths and historical worktree paths with `<repository-root>`, `<historical-worktree>`, or repository-relative paths as appropriate. Keep commands understandable and preserve the fact that old work occurred in an isolated worktree.
 
 Do not rewrite Git author metadata or delete the historical plans.
 
@@ -248,7 +248,7 @@ Do not rewrite Git author metadata or delete the historical plans.
 Run:
 
 ```bash
-git grep -n -I -F '/Users/danielbloom' -- .
+git grep -n -I -E '/[U]sers/danielbloom' -- .
 ```
 
 Expected: no matches in the current tracked tree.
@@ -295,7 +295,7 @@ Request a specification review against this plan, then a code/document quality r
 
 ### Task 7: Preserve local work, integrate, and clean Git state
 
-**Files outside Git:** `/Users/danielbloom/Desktop/YieldForge-local-archive-2026-09-01/`
+**Files outside Git:** `<local-archive-root>/`
 
 **Step 1: Build a verified local archive**
 
