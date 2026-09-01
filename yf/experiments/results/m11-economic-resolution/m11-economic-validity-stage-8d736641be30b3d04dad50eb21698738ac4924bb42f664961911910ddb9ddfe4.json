@@ -1,0 +1,2097 @@
+{
+  "baseline_freezes": [
+    {
+      "calibration_only": true,
+      "calibration_stream_ids": [
+        "yfm11st-e8dfc9b753a472795b2cc6ec",
+        "yfm11st-e5e42910e34a79dc8f889577",
+        "yfm11st-d2eff8e8413a1af9654397ef",
+        "yfm11st-4e0077e5a973c408580406bd",
+        "yfm11st-72c18d1bc05e0373625c71da",
+        "yfm11st-19a8bb71e127aac557dd21a8",
+        "yfm11st-26bb0902bae3f8d344995a73",
+        "yfm11st-67944956cf13f5a1e7db7949"
+      ],
+      "confirmation_inputs_used": false,
+      "content_sha256": "sha256:05488571a35e43790cd92647ebd030bce85f7a0178b0a1316b80dbd04deaf937",
+      "corpus_id": "lectra-m3-m4",
+      "freeze_id": "yfm11g3bf-05488571a35e43790cd92647",
+      "policy_scores": [
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              "1932.798618"
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              "2467.562151"
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              "2207.012018"
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              "2479.539781"
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              "2413.964361"
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              "2395.541073"
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              "1880.357677"
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              "2207.118117"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              19
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              22
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              21
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              24
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              20
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              22
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              17
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              21
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:8ed9b0ccc50a17f58d5f3c500b306a86ed0c211c6044602a3efa7ac9bd5e36ac",
+          "corpus_id": "lectra-m3-m4",
+          "invalid_stream_count": 0,
+          "mean_cost": "2247.986725",
+          "median_cost": "2301.329595",
+          "policy_id": "age_regularity",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-8ed9b0ccc50a17f58d5f3c50",
+          "total_cost": "17983.893796",
+          "total_sheet_openings": 166,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              "1932.798618"
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              "2467.562151"
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              "2207.012018"
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              "2479.539781"
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              "2413.964361"
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              "2395.541073"
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              "1880.357677"
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              "2207.118117"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              19
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              22
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              21
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              24
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              20
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              22
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              17
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              21
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:d4b3e31a7474e0fe8d9a452745f1a29177f201d50614628558b3f7c1a25763e7",
+          "corpus_id": "lectra-m3-m4",
+          "invalid_stream_count": 0,
+          "mean_cost": "2247.986725",
+          "median_cost": "2301.329595",
+          "policy_id": "known_only_m9_two_ply_scrap",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-d4b3e31a7474e0fe8d9a4527",
+          "total_cost": "17983.893796",
+          "total_sheet_openings": 166,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              "1932.798618"
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              "2467.562151"
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              "2207.012018"
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              "2479.539781"
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              "2413.964361"
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              "2395.541073"
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              "1880.357677"
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              "2207.118117"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              19
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              22
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              21
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              24
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              20
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              22
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              17
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              21
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:da0f2dd3a294f011ddaa69d76148d7d88bf2f750a7067908ebec09990822421a",
+          "corpus_id": "lectra-m3-m4",
+          "invalid_stream_count": 0,
+          "mean_cost": "2247.986725",
+          "median_cost": "2301.329595",
+          "policy_id": "known_order_lookahead",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-da0f2dd3a294f011ddaa69d7",
+          "total_cost": "17983.893796",
+          "total_sheet_openings": 166,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              "2715.012734"
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              "2815.710666"
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              "2659.965460"
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              "2479.539781"
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              "3110.128361"
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              "2654.791079"
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              "2930.390783"
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              "2707.846097"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              24
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              24
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              24
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              24
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              24
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              24
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              24
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:7b59023e6f9c5d9c58e2294ec99a84843cc08fdce6ed6a924b6a914237ef0c1b",
+          "corpus_id": "lectra-m3-m4",
+          "invalid_stream_count": 0,
+          "mean_cost": "2759.173120",
+          "median_cost": "2711.429416",
+          "policy_id": "myopic_geometry",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-7b59023e6f9c5d9c58e2294e",
+          "total_cost": "22073.384961",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              "1932.798618"
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              "2467.562151"
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              "2207.012018"
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              "2479.539781"
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              "2413.964361"
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              "2395.541073"
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              "1880.357677"
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              "2207.118117"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              19
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              22
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              21
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              24
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              20
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              22
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              17
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              21
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:92d6eb264e5c2d2c6270f4e57de88a5a61b7cca0f1f9f5cfe67828f88b99f441",
+          "corpus_id": "lectra-m3-m4",
+          "invalid_stream_count": 0,
+          "mean_cost": "2247.986725",
+          "median_cost": "2301.329595",
+          "policy_id": "net_cost",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-92d6eb264e5c2d2c6270f4e5",
+          "total_cost": "17983.893796",
+          "total_sheet_openings": 166,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              "1932.798618"
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              "2467.562151"
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              "2207.012018"
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              "2479.539781"
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              "2413.964361"
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              "2395.541073"
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              "1880.357677"
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              "2207.118117"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-e8dfc9b753a472795b2cc6ec",
+              19
+            ],
+            [
+              "yfm11st-e5e42910e34a79dc8f889577",
+              22
+            ],
+            [
+              "yfm11st-d2eff8e8413a1af9654397ef",
+              21
+            ],
+            [
+              "yfm11st-4e0077e5a973c408580406bd",
+              24
+            ],
+            [
+              "yfm11st-72c18d1bc05e0373625c71da",
+              20
+            ],
+            [
+              "yfm11st-19a8bb71e127aac557dd21a8",
+              22
+            ],
+            [
+              "yfm11st-26bb0902bae3f8d344995a73",
+              17
+            ],
+            [
+              "yfm11st-67944956cf13f5a1e7db7949",
+              21
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:d8a434c22a95587adf48c47c84b06a539c3567a3b0b83f47480c9144cf740384",
+          "corpus_id": "lectra-m3-m4",
+          "invalid_stream_count": 0,
+          "mean_cost": "2247.986725",
+          "median_cost": "2301.329595",
+          "policy_id": "remnant_first",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-d8a434c22a95587adf48c47c",
+          "total_cost": "17983.893796",
+          "total_sheet_openings": 166,
+          "verified_feasible": true
+        }
+      ],
+      "registered_policy_ids": [
+        "myopic_geometry",
+        "remnant_first",
+        "net_cost",
+        "age_regularity",
+        "known_order_lookahead",
+        "known_only_m9_two_ply_scrap"
+      ],
+      "roots": {
+        "adapter_runtime_config_sha256": "sha256:9006a711a465e3b57b97f703cea5ea90b0b06fa8922a5330b95ef0979fe1e0a1",
+        "binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+        "content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+        "contract_content_sha256": "sha256:e956019aeef85350f2ffa9d351ab15539d1b23137d7566118f73c5f29882143b",
+        "contract_id": "yfm11c-e956019aeef85350f2ffa9d3",
+        "gate1_evaluation_result_content_sha256": "sha256:b3e8d97ce476749bbdd1e56207976f086bc17e47c8c17dcadb83080e33fa08e9",
+        "gate1_evaluation_result_id": "yfm11g1r-b3e8d97ce476749bbdd1e562",
+        "gate1_run_content_sha256": "sha256:c35f10fa4f4d7b6b01c59c298d3e61f82103551e3a8ec44435818dc028f1dd74",
+        "gate1_run_id": "yfm11g1run-c35f10fa4f4d7b6b01c59c29",
+        "gate2_evaluation_result_content_sha256": "sha256:12b6242eeb5eccb26034e54b6cd89c88ae3a6ea0b6f564c57fd4ce85ab423faa",
+        "gate2_evaluation_result_id": "yfm11g2r-12b6242eeb5eccb26034e54b",
+        "gate2_run_content_sha256": "sha256:7419e46b74e411aff5c27ee1913b3d67d703ec88d06855e8b366a16ffde6a450",
+        "gate2_run_id": "yfm11g2run-7419e46b74e411aff5c27ee1",
+        "gate2_survived": true,
+        "gate3_config_content_sha256": "sha256:795010e6747d2c11d556ef82071905d89fda757dd39273ab83d1c2a52606808b",
+        "gate3_config_id": "yfm11g3c-795010e6747d2c11d556ef82",
+        "population_content_sha256": "sha256:a26084179d2e8f776630f8ac272d5651069500a5df996869d20df9893ca0bc56",
+        "population_id": "yfm11pop-a26084179d2e8f776630f8ac",
+        "schema_version": "yieldforge.m11-gate3-root-binding.v1"
+      },
+      "schema_version": "yieldforge.m11-gate3-baseline-freeze.v1",
+      "selected_policy_id": "age_regularity",
+      "selection_rule": "lowest_mean_net_cost_then_invalid_median_sheet_openings_policy_id",
+      "tied_lowest_policy_ids": [
+        "age_regularity",
+        "known_only_m9_two_ply_scrap",
+        "known_order_lookahead",
+        "net_cost",
+        "remnant_first"
+      ]
+    },
+    {
+      "calibration_only": true,
+      "calibration_stream_ids": [
+        "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+        "yfm11st-bd03a6cee9d30a2782d94c26",
+        "yfm11st-fedd91bcfdcc878b6b833bbb",
+        "yfm11st-440052f11e681ecd4e8eacf2",
+        "yfm11st-84bf14a72d1065635d61ae1c",
+        "yfm11st-48a37312f2211a40b0fe7ad9",
+        "yfm11st-71c1fefab152fcafa914447b",
+        "yfm11st-187f1b2dfb4698f7a23a28b5"
+      ],
+      "confirmation_inputs_used": false,
+      "content_sha256": "sha256:cddd0dc9ef19d7bc8ba2a2e724a5a70627c22b1411fc25f4e3ed3975017e283d",
+      "corpus_id": "loco-2dics",
+      "freeze_id": "yfm11g3bf-cddd0dc9ef19d7bc8ba2a2e7",
+      "policy_scores": [
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              "3322.984419"
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              "2585.936060"
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              "2523.542233"
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              "2417.931715"
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              "2676.061407"
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              "2690.157433"
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              "2420.781511"
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              "2601.299171"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              24
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              24
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              24
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              24
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              24
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              24
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              24
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:4573d5bec06e40b55d7b6ec7db3b6a6be08997f9fed2931ecdb26f26346b9903",
+          "corpus_id": "loco-2dics",
+          "invalid_stream_count": 0,
+          "mean_cost": "2654.836744",
+          "median_cost": "2593.617616",
+          "policy_id": "age_regularity",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-4573d5bec06e40b55d7b6ec7",
+          "total_cost": "21238.693949",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              "3322.984419"
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              "2585.936060"
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              "2523.542233"
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              "2417.931715"
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              "2676.061407"
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              "2690.157433"
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              "2420.781511"
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              "2601.299171"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              24
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              24
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              24
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              24
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              24
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              24
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              24
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:0203cda8eb2b596e67c98e3a1872690fc0ab5112ca493e85165cf6f273759259",
+          "corpus_id": "loco-2dics",
+          "invalid_stream_count": 0,
+          "mean_cost": "2654.836744",
+          "median_cost": "2593.617616",
+          "policy_id": "known_only_m9_two_ply_scrap",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-0203cda8eb2b596e67c98e3a",
+          "total_cost": "21238.693949",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              "3322.984419"
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              "2585.936060"
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              "2523.542233"
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              "2417.931715"
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              "2676.061407"
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              "2690.157433"
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              "2420.781511"
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              "2601.299171"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              24
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              24
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              24
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              24
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              24
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              24
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              24
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:e5350c91905e3e68a5aa7c24681fffbb0c4d375be28e08bfe973d971b84af683",
+          "corpus_id": "loco-2dics",
+          "invalid_stream_count": 0,
+          "mean_cost": "2654.836744",
+          "median_cost": "2593.617616",
+          "policy_id": "known_order_lookahead",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-e5350c91905e3e68a5aa7c24",
+          "total_cost": "21238.693949",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              "3322.984419"
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              "2585.936060"
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              "2523.542233"
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              "2417.931715"
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              "2676.061407"
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              "2690.157433"
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              "2420.781511"
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              "2601.299171"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              24
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              24
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              24
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              24
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              24
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              24
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              24
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:5f6511b2c3a672b32e4bad1921ab21fd06e4288f6f4a504dce002c4647e495a3",
+          "corpus_id": "loco-2dics",
+          "invalid_stream_count": 0,
+          "mean_cost": "2654.836744",
+          "median_cost": "2593.617616",
+          "policy_id": "myopic_geometry",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-5f6511b2c3a672b32e4bad19",
+          "total_cost": "21238.693949",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              "3322.984419"
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              "2585.936060"
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              "2523.542233"
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              "2417.931715"
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              "2676.061407"
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              "2690.157433"
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              "2420.781511"
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              "2601.299171"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              24
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              24
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              24
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              24
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              24
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              24
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              24
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:a6b3141cd1436338eff7313e935ac879b4d487300a963f886229937c9f771d60",
+          "corpus_id": "loco-2dics",
+          "invalid_stream_count": 0,
+          "mean_cost": "2654.836744",
+          "median_cost": "2593.617616",
+          "policy_id": "net_cost",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-a6b3141cd1436338eff7313e",
+          "total_cost": "21238.693949",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        },
+        {
+          "calibration_only": true,
+          "calibration_stream_costs": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              "3322.984419"
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              "2585.936060"
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              "2523.542233"
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              "2417.931715"
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              "2676.061407"
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              "2690.157433"
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              "2420.781511"
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              "2601.299171"
+            ]
+          ],
+          "calibration_stream_sheet_openings": [
+            [
+              "yfm11st-0b1cb9dfc1785cebd4e2bd70",
+              24
+            ],
+            [
+              "yfm11st-bd03a6cee9d30a2782d94c26",
+              24
+            ],
+            [
+              "yfm11st-fedd91bcfdcc878b6b833bbb",
+              24
+            ],
+            [
+              "yfm11st-440052f11e681ecd4e8eacf2",
+              24
+            ],
+            [
+              "yfm11st-84bf14a72d1065635d61ae1c",
+              24
+            ],
+            [
+              "yfm11st-48a37312f2211a40b0fe7ad9",
+              24
+            ],
+            [
+              "yfm11st-71c1fefab152fcafa914447b",
+              24
+            ],
+            [
+              "yfm11st-187f1b2dfb4698f7a23a28b5",
+              24
+            ]
+          ],
+          "confirmation_inputs_used": false,
+          "content_sha256": "sha256:b73a30a680b6decace9bfb0577db88194673ac7ff0f8535af3c0ee2a8cb4fd07",
+          "corpus_id": "loco-2dics",
+          "invalid_stream_count": 0,
+          "mean_cost": "2654.836744",
+          "median_cost": "2593.617616",
+          "policy_id": "remnant_first",
+          "root_binding_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+          "root_binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+          "schema_version": "yieldforge.m11-gate3-baseline-score.v1",
+          "score_id": "yfm11g3bsc-b73a30a680b6decace9bfb05",
+          "total_cost": "21238.693949",
+          "total_sheet_openings": 192,
+          "verified_feasible": true
+        }
+      ],
+      "registered_policy_ids": [
+        "myopic_geometry",
+        "remnant_first",
+        "net_cost",
+        "age_regularity",
+        "known_order_lookahead",
+        "known_only_m9_two_ply_scrap"
+      ],
+      "roots": {
+        "adapter_runtime_config_sha256": "sha256:9006a711a465e3b57b97f703cea5ea90b0b06fa8922a5330b95ef0979fe1e0a1",
+        "binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+        "content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+        "contract_content_sha256": "sha256:e956019aeef85350f2ffa9d351ab15539d1b23137d7566118f73c5f29882143b",
+        "contract_id": "yfm11c-e956019aeef85350f2ffa9d3",
+        "gate1_evaluation_result_content_sha256": "sha256:b3e8d97ce476749bbdd1e56207976f086bc17e47c8c17dcadb83080e33fa08e9",
+        "gate1_evaluation_result_id": "yfm11g1r-b3e8d97ce476749bbdd1e562",
+        "gate1_run_content_sha256": "sha256:c35f10fa4f4d7b6b01c59c298d3e61f82103551e3a8ec44435818dc028f1dd74",
+        "gate1_run_id": "yfm11g1run-c35f10fa4f4d7b6b01c59c29",
+        "gate2_evaluation_result_content_sha256": "sha256:12b6242eeb5eccb26034e54b6cd89c88ae3a6ea0b6f564c57fd4ce85ab423faa",
+        "gate2_evaluation_result_id": "yfm11g2r-12b6242eeb5eccb26034e54b",
+        "gate2_run_content_sha256": "sha256:7419e46b74e411aff5c27ee1913b3d67d703ec88d06855e8b366a16ffde6a450",
+        "gate2_run_id": "yfm11g2run-7419e46b74e411aff5c27ee1",
+        "gate2_survived": true,
+        "gate3_config_content_sha256": "sha256:795010e6747d2c11d556ef82071905d89fda757dd39273ab83d1c2a52606808b",
+        "gate3_config_id": "yfm11g3c-795010e6747d2c11d556ef82",
+        "population_content_sha256": "sha256:a26084179d2e8f776630f8ac272d5651069500a5df996869d20df9893ca0bc56",
+        "population_id": "yfm11pop-a26084179d2e8f776630f8ac",
+        "schema_version": "yieldforge.m11-gate3-root-binding.v1"
+      },
+      "schema_version": "yieldforge.m11-gate3-baseline-freeze.v1",
+      "selected_policy_id": "age_regularity",
+      "selection_rule": "lowest_mean_net_cost_then_invalid_median_sheet_openings_policy_id",
+      "tied_lowest_policy_ids": [
+        "age_regularity",
+        "known_only_m9_two_ply_scrap",
+        "known_order_lookahead",
+        "myopic_geometry",
+        "net_cost",
+        "remnant_first"
+      ]
+    }
+  ],
+  "calibration_failure_count": 0,
+  "calibration_manifest_content_sha256": "sha256:3409ada18b831fee1394410dfec88a02806ff0c3709372cfbe9340e05b920533",
+  "calibration_manifest_id": "yfm11econcalman-3409ada18b831fee1394410d",
+  "calibration_status": "complete_valid",
+  "calibration_success_count": 96,
+  "central_authorized": true,
+  "complete": true,
+  "content_sha256": "sha256:8d736641be30b3d04dad50eb21698738ac4924bb42f664961911910ddb9ddfe4",
+  "manifest_id": "yfm11econvalman-8d736641be30b3d04dad50eb",
+  "protocol": {
+    "accounting_arithmetic_semantic": "placed_plus_process_loss_plus_retained_plus_scrap_left_to_right",
+    "bootstrap_bit_generator": "PCG64",
+    "bootstrap_confidence_level": 0.95,
+    "bootstrap_generator": "numpy.Generator(PCG64(0))",
+    "bootstrap_lower_quantile": 0.025,
+    "bootstrap_quantile_method": "linear_type_7",
+    "bootstrap_resamples": 10000,
+    "bootstrap_resampling_unit": "paired_stream",
+    "bootstrap_seed": 0,
+    "bootstrap_upper_quantile": 0.975,
+    "causal_known_only_mean_min_percent": "1.500000000000",
+    "central_full_future_mean_min_percent": "2.500000000000",
+    "central_unknown_future_contribution_min_percentage_points": "1.500000000000",
+    "content_sha256": "sha256:fa9218f96bb810350e8526e48bd2f9cfe7404eea47146ef2516878c6aa266cfd",
+    "legacy_artifact_byte_count": 2270455752,
+    "legacy_artifact_raw_sha256": "sha256:e5757919ddd9251bf374d1664be25faf175963e78478b223ea0d7e22f7439199",
+    "legacy_root_content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+    "legacy_run_content_sha256": "sha256:3dd87efab6f64ada4c5bd09c0580a1696017b3115ccdce3ce041b4221c89a89f",
+    "legacy_run_id": "yfm11g3run-3dd87efab6f64ada4c5bd09c",
+    "lower_confidence_bound_rule": "strictly_greater_than_zero",
+    "max_attempt_object_bytes": 67108864,
+    "median_savings_rule": "strictly_greater_than_zero",
+    "positive_stream_fraction_rule": "strictly_greater_than_one_half",
+    "protocol_id": "yfm11econp-fa9218f96bb810350e8526e4",
+    "protocol_version": "yieldforge.m11-economic-resolution.v1",
+    "repair_commit_sha": "3e7bcb1c587d950134639f6836341ef3d8f7d99e",
+    "repaired_source_path": "yf/src/yieldforge/baseline/geometry.py",
+    "repaired_source_raw_sha256": "sha256:2b0ffd70c079d3526277ea554e82f47604d5f28e5171fd3dd1a8ddc8651b610c",
+    "schema_version": "yieldforge.m11-economic-resolution-protocol.v1"
+  },
+  "roots": {
+    "adapter_runtime_config_sha256": "sha256:9006a711a465e3b57b97f703cea5ea90b0b06fa8922a5330b95ef0979fe1e0a1",
+    "binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+    "content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+    "contract_content_sha256": "sha256:e956019aeef85350f2ffa9d351ab15539d1b23137d7566118f73c5f29882143b",
+    "contract_id": "yfm11c-e956019aeef85350f2ffa9d3",
+    "gate1_evaluation_result_content_sha256": "sha256:b3e8d97ce476749bbdd1e56207976f086bc17e47c8c17dcadb83080e33fa08e9",
+    "gate1_evaluation_result_id": "yfm11g1r-b3e8d97ce476749bbdd1e562",
+    "gate1_run_content_sha256": "sha256:c35f10fa4f4d7b6b01c59c298d3e61f82103551e3a8ec44435818dc028f1dd74",
+    "gate1_run_id": "yfm11g1run-c35f10fa4f4d7b6b01c59c29",
+    "gate2_evaluation_result_content_sha256": "sha256:12b6242eeb5eccb26034e54b6cd89c88ae3a6ea0b6f564c57fd4ce85ab423faa",
+    "gate2_evaluation_result_id": "yfm11g2r-12b6242eeb5eccb26034e54b",
+    "gate2_run_content_sha256": "sha256:7419e46b74e411aff5c27ee1913b3d67d703ec88d06855e8b366a16ffde6a450",
+    "gate2_run_id": "yfm11g2run-7419e46b74e411aff5c27ee1",
+    "gate2_survived": true,
+    "gate3_config_content_sha256": "sha256:795010e6747d2c11d556ef82071905d89fda757dd39273ab83d1c2a52606808b",
+    "gate3_config_id": "yfm11g3c-795010e6747d2c11d556ef82",
+    "population_content_sha256": "sha256:a26084179d2e8f776630f8ac272d5651069500a5df996869d20df9893ca0bc56",
+    "population_id": "yfm11pop-a26084179d2e8f776630f8ac",
+    "schema_version": "yieldforge.m11-gate3-root-binding.v1"
+  },
+  "schema_version": "yieldforge.m11-economic-validity-stage.v1",
+  "status": "valid",
+  "validity_evidence": {
+    "baseline_freezes": [
+      {
+        "corpus_id": "lectra-m3-m4",
+        "freeze_content_sha256": "sha256:05488571a35e43790cd92647ebd030bce85f7a0178b0a1316b80dbd04deaf937",
+        "freeze_id": "yfm11g3bf-05488571a35e43790cd92647",
+        "selected_policy_id": "age_regularity"
+      },
+      {
+        "corpus_id": "loco-2dics",
+        "freeze_content_sha256": "sha256:cddd0dc9ef19d7bc8ba2a2e724a5a70627c22b1411fc25f4e3ed3975017e283d",
+        "freeze_id": "yfm11g3bf-cddd0dc9ef19d7bc8ba2a2e7",
+        "selected_policy_id": "age_regularity"
+      }
+    ],
+    "compressed_byte_count": 3131675,
+    "compressed_raw_sha256": "sha256:129fa8ad1fa905fd486465797f732674d20a7782b3090e8554ad2a6a0d45099e",
+    "compression": "gzip-level-6-mtime-0-flags-0",
+    "content_sha256": "sha256:c5964f606ac450e583ea08595e935a3389ece7c45045489fe7c985882140e9e6",
+    "diagnosis_codes": [],
+    "evidence_id": "yfm11g3valrcpt-c5964f606ac450e583ea0859",
+    "exact_audits": [
+      {
+        "audit_ordinal": 0,
+        "corpus_id": "lectra-m3-m4",
+        "economic_arm": "central",
+        "passes": true,
+        "registration_content_sha256": "sha256:d7f3cf3578e483abf53db19da74aeea374d2f56278efd93de9bccb1314d65f67",
+        "registration_id": "yfm11audit-d7f3cf3578e483abf53db19d",
+        "selected_action_id": "m7-standard:cand_88a7032f0143f6dca87f",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:245ee7989eed25b84c5d1b763f6e553219e1549c49e8e8ad193117d26dedae6b",
+        "trace_id": "yfm11g3audit-245ee7989eed25b84c5d1b76"
+      },
+      {
+        "audit_ordinal": 1,
+        "corpus_id": "lectra-m3-m4",
+        "economic_arm": "central",
+        "passes": true,
+        "registration_content_sha256": "sha256:978377752a9ffb80323040a1187269f65fc8e86dd57b5d9a8b29f28a46eb632b",
+        "registration_id": "yfm11audit-978377752a9ffb80323040a1",
+        "selected_action_id": "m7-standard:cand_9229e457c37c7f27ce62",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:207557bd9bbaf68c5eed35a6291592a6db8d0b82ea6f39b2ae5bfd23c4a95be6",
+        "trace_id": "yfm11g3audit-207557bd9bbaf68c5eed35a6"
+      },
+      {
+        "audit_ordinal": 2,
+        "corpus_id": "lectra-m3-m4",
+        "economic_arm": "adverse",
+        "passes": true,
+        "registration_content_sha256": "sha256:dd06bdef8f640f6ed60e9f1a9e5eb64cb865d7d5c8b974befd7195d958875756",
+        "registration_id": "yfm11audit-dd06bdef8f640f6ed60e9f1a",
+        "selected_action_id": "m7-standard:cand_e3499cfbe74571b6dae5",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:8f282e715d3c1897bb985579d02f0ffcd66e356d15eaa3350724a07eb33a8a14",
+        "trace_id": "yfm11g3audit-8f282e715d3c1897bb985579"
+      },
+      {
+        "audit_ordinal": 3,
+        "corpus_id": "lectra-m3-m4",
+        "economic_arm": "adverse",
+        "passes": true,
+        "registration_content_sha256": "sha256:a0e2ff0d555ac08484a89f697e455ee7eeaff769a5b966089ab91bee032ccb6a",
+        "registration_id": "yfm11audit-a0e2ff0d555ac08484a89f69",
+        "selected_action_id": "m7-standard:cand_88129d8b8cf832aa398d",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:41fee9d6c0eb938634a74f085165db7d730d09d56afc21f9435d457d68ef33c5",
+        "trace_id": "yfm11g3audit-41fee9d6c0eb938634a74f08"
+      },
+      {
+        "audit_ordinal": 4,
+        "corpus_id": "lectra-m3-m4",
+        "economic_arm": "null",
+        "passes": true,
+        "registration_content_sha256": "sha256:bf17d0ce94a20af1361502932abbbef90225cf1a10a5c1ec3bae3c98506fd8b6",
+        "registration_id": "yfm11audit-bf17d0ce94a20af136150293",
+        "selected_action_id": "m7-standard:cand_50d7a4ca73d7018bb972",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:968dc2413e9a32ce921b291c66d27c12fa2c55958da10a48ddb3425772adfd26",
+        "trace_id": "yfm11g3audit-968dc2413e9a32ce921b291c"
+      },
+      {
+        "audit_ordinal": 5,
+        "corpus_id": "lectra-m3-m4",
+        "economic_arm": "null",
+        "passes": true,
+        "registration_content_sha256": "sha256:82f7eb122d8f6a4259b1a7e88a18b37d341aa18c98942a47fe3c5fd64277b537",
+        "registration_id": "yfm11audit-82f7eb122d8f6a4259b1a7e8",
+        "selected_action_id": "m7-standard:cand_7b58c21031d6091e6870",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:596a4c7eb80b822712217ab045363d339d6a926bf154f8f1e786566b173a8d07",
+        "trace_id": "yfm11g3audit-596a4c7eb80b822712217ab0"
+      },
+      {
+        "audit_ordinal": 0,
+        "corpus_id": "loco-2dics",
+        "economic_arm": "central",
+        "passes": true,
+        "registration_content_sha256": "sha256:0eff0872a36b74dc471ffe297d870f3e962c360180f3d89695b0e869a0daf319",
+        "registration_id": "yfm11audit-0eff0872a36b74dc471ffe29",
+        "selected_action_id": "m7-standard:yfm11fb-f6741594ef8bebeae8044026",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:6fc7e5ed91952dd07b50ff9922733862c885303f18dc7274719af7c7fecf4188",
+        "trace_id": "yfm11g3audit-6fc7e5ed91952dd07b50ff99"
+      },
+      {
+        "audit_ordinal": 1,
+        "corpus_id": "loco-2dics",
+        "economic_arm": "central",
+        "passes": true,
+        "registration_content_sha256": "sha256:dcf6c68824625feb5ad9311f5d8bd6ee8cb5aaa14d90606faa12c209ab5f2d6d",
+        "registration_id": "yfm11audit-dcf6c68824625feb5ad9311f",
+        "selected_action_id": "m7-standard:yfm11fb-e79f55fb0acbde9ea2b5d9ad",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:fdd093c3bc39c2bc1492ccf2b13f9809791351a7210a2219ada992914230fc35",
+        "trace_id": "yfm11g3audit-fdd093c3bc39c2bc1492ccf2"
+      },
+      {
+        "audit_ordinal": 2,
+        "corpus_id": "loco-2dics",
+        "economic_arm": "adverse",
+        "passes": true,
+        "registration_content_sha256": "sha256:e2db17a00f3e179bea8ec5ec1e6d554351a9add199e7456095f937c3735d3291",
+        "registration_id": "yfm11audit-e2db17a00f3e179bea8ec5ec",
+        "selected_action_id": "m7-standard:yfm11fb-4541ddc47b2f4e6dacec4e19",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:1d34a2025e089072862d805a2e2ed23f4ecf40b1d932387dc55dc633a5b872bc",
+        "trace_id": "yfm11g3audit-1d34a2025e089072862d805a"
+      },
+      {
+        "audit_ordinal": 3,
+        "corpus_id": "loco-2dics",
+        "economic_arm": "adverse",
+        "passes": true,
+        "registration_content_sha256": "sha256:47c7448be638dedc532cfb1090aed644b524bf1fdfcebbe371279306577390c2",
+        "registration_id": "yfm11audit-47c7448be638dedc532cfb10",
+        "selected_action_id": "m7-standard:yfm11fb-2e9a4cc7fe51e27f34d76e10",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:569bba92f9c693d50b2516e5135b7af9c31917b6164d81639dbc72aada51167b",
+        "trace_id": "yfm11g3audit-569bba92f9c693d50b2516e5"
+      },
+      {
+        "audit_ordinal": 4,
+        "corpus_id": "loco-2dics",
+        "economic_arm": "null",
+        "passes": true,
+        "registration_content_sha256": "sha256:895447b482a15f1bab3507bf45aabe677987bd3dabe7c391f944db8e40c2e65a",
+        "registration_id": "yfm11audit-895447b482a15f1bab3507bf",
+        "selected_action_id": "m7-standard:yfm11fb-e810283f913e4d46d32648b2",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:7892753b2143cd5d0ee745e2dd9d5a65223869063d03e32b94352a6180961d62",
+        "trace_id": "yfm11g3audit-7892753b2143cd5d0ee745e2"
+      },
+      {
+        "audit_ordinal": 5,
+        "corpus_id": "loco-2dics",
+        "economic_arm": "null",
+        "passes": true,
+        "registration_content_sha256": "sha256:eb80dda28f443e07b10faf2581dfaa87f3b0688f647bad2c70c50808021c2de0",
+        "registration_id": "yfm11audit-eb80dda28f443e07b10faf25",
+        "selected_action_id": "m7-standard:yfm11fb-d071934c742987644cc30c39",
+        "selected_is_exact_optimal": true,
+        "trace_content_sha256": "sha256:90bf3cf1bb096a537fad1906734f84e4e4c721981151c3348b3635aa55eabffb",
+        "trace_id": "yfm11g3audit-90bf3cf1bb096a537fad1906"
+      }
+    ],
+    "exact_control_census": true,
+    "failure_codes": [],
+    "hard_nulls": [
+      {
+        "control_content_sha256": "sha256:ef71791f3b852efaadaca49ba565a3b8a36e6eadcf1e3eeff2a31da70e8c9a8a",
+        "control_trace_id": "yfm11g3hn-ef71791f3b852efaadaca49b",
+        "corpus_id": "lectra-m3-m4",
+        "maximum_absolute_cost_difference": "0.000000",
+        "null_kind": "single_action",
+        "passes": true,
+        "registration_content_sha256": "sha256:228d67ee7959fe4c89b45fda01939b85ed95f4bca18121e67c3b3b095a3b161c",
+        "registration_id": "yfm11null-228d67ee7959fe4c89b45fda"
+      },
+      {
+        "control_content_sha256": "sha256:941fb28572aa9f92e73700e4c01d62b08591294945e2deccd9d4a626f674db7f",
+        "control_trace_id": "yfm11g3hn-941fb28572aa9f92e73700e4",
+        "corpus_id": "lectra-m3-m4",
+        "maximum_absolute_cost_difference": "0.000000",
+        "null_kind": "unique_materials_single_action",
+        "passes": true,
+        "registration_content_sha256": "sha256:7a5292cf3f662e3740397c34f12910b79a8a2f6bf2cfe8bee9317a443b91472a",
+        "registration_id": "yfm11null-7a5292cf3f662e3740397c34"
+      },
+      {
+        "control_content_sha256": "sha256:41b738ba5326f9681b56297856f4aac58c87cdc7ba8258de3f4a391852d4fa1a",
+        "control_trace_id": "yfm11g3hn-41b738ba5326f9681b562978",
+        "corpus_id": "lectra-m3-m4",
+        "maximum_absolute_cost_difference": "0.000000",
+        "null_kind": "all_work_known_single_action",
+        "passes": true,
+        "registration_content_sha256": "sha256:bcebddfb9489f3a0589d7ff0c0d7653881c710ca79c9674caacdb3dd3c9d8228",
+        "registration_id": "yfm11null-bcebddfb9489f3a0589d7ff0"
+      },
+      {
+        "control_content_sha256": "sha256:bd79771ac8f1af03caefa4bae4a6483fcb6f8b04a4a47e229454a75553eeb376",
+        "control_trace_id": "yfm11g3hn-bd79771ac8f1af03caefa4ba",
+        "corpus_id": "loco-2dics",
+        "maximum_absolute_cost_difference": "0.000000",
+        "null_kind": "single_action",
+        "passes": true,
+        "registration_content_sha256": "sha256:2d1a5808d34f2adbb4732e7f3ee6d96c08715173ccdd95fd5d72276624929e04",
+        "registration_id": "yfm11null-2d1a5808d34f2adbb4732e7f"
+      },
+      {
+        "control_content_sha256": "sha256:f332b0f782a5e4a31d4f8e77e5b372c6307a8e02554d7f1bce40f8e9a2dda5d0",
+        "control_trace_id": "yfm11g3hn-f332b0f782a5e4a31d4f8e77",
+        "corpus_id": "loco-2dics",
+        "maximum_absolute_cost_difference": "0.000000",
+        "null_kind": "unique_materials_single_action",
+        "passes": true,
+        "registration_content_sha256": "sha256:16daf72fe359e93c78fcf9aeca086aeacc68a8fe718df2b7b4200eef1814b4cf",
+        "registration_id": "yfm11null-16daf72fe359e93c78fcf9ae"
+      },
+      {
+        "control_content_sha256": "sha256:d26773e148f28e09441ad26c09217b37460a4f11920f2729590a13f3711b2dd7",
+        "control_trace_id": "yfm11g3hn-d26773e148f28e09441ad26c",
+        "corpus_id": "loco-2dics",
+        "maximum_absolute_cost_difference": "0.000000",
+        "null_kind": "all_work_known_single_action",
+        "passes": true,
+        "registration_content_sha256": "sha256:6dc92b2fa5a2cac9794df90a2bf085300299001b2eeb080836a7c3aa0a9458b4",
+        "registration_id": "yfm11null-6dc92b2fa5a2cac9794df90a"
+      }
+    ],
+    "no_signal_summaries": [
+      {
+        "classification": "clean",
+        "content_sha256": "sha256:387f08b913a4efcc084576913782d8ea09b46d0d2b1976801c6e4b80257d5b9e",
+        "control_content_sha256s": [
+          "sha256:2aa84b78a6febd26143f608d6337a42b396ef28b77ae5c5ed8d00b417b2f3715",
+          "sha256:319843f69baa20f3454239ce5de05252a878128fe25735c40bc31ce44bacf47b",
+          "sha256:ef22eee68943ca2a2799b391a7c131d0308be90c63450017a1054bea6e149f78",
+          "sha256:e147875280b8b77bfe80450aca19dde52e201cb181b8d397d306f3711b639894",
+          "sha256:90981a825094b17bfe41f2cadf9ac3c879625fed74ad336413505a8bb11ac73f",
+          "sha256:891a3e15f4ae3cc0692a653372e269b0311f4ede0ddca87f20488a93fc41ddd8",
+          "sha256:b68505d92e9d89b5dbb2f543d97035380d3ffb84b3d7048b25c8b4a0cd6fb71f",
+          "sha256:c18313fbfc0b80d06302a930300733707f593dd89e054c683f9cc383e312963c",
+          "sha256:c5d9639c84570b050b880a2df02fca38eef2d5189159ea6b266ecbf832318b53",
+          "sha256:dee6db93d96162d1cea5667f267598ff0450f60cce9f9ee88f20e98d3e1680e4",
+          "sha256:44b70f0f545fe9ef9a236d8666effac1481374f023f834a9de473ec7c2edd3bb",
+          "sha256:487f6b6c43e7c682c7dc75987c1c400204c4f9305ee3a07bd3a0167770e3ca0a",
+          "sha256:f9a77802e51009fee26eb174d8e88fb8f44d0a37a108616ff4288d47198beb24",
+          "sha256:98cefa8d5ba5fa4c0221b38d20c4457aae213731d6e5949226676bcb8a24f836",
+          "sha256:77524ea92de9e4b51a6239923709b346168fadcb05e5680367a682fef00e2ffb",
+          "sha256:dfdd402a4bd6dc20733632c914dddc251cae33697785be259400e46c0d9234d5",
+          "sha256:206627ef6521c9d646923aa876953f8f806b33236f66870d8e90a93c2ad02197",
+          "sha256:d4ba33bc056b0b769a524cbe0a10da01848ee64b5230cedbe61fce396a88826b",
+          "sha256:ecf2d9c9a7beb2519bdcaf7b22ea22c46778f2b42b9bd9804f8bbacf730e6f6b",
+          "sha256:ad4dfbb81b50645e486663e6a11173704ac6604f73858fd5da837b0f12d56067"
+        ],
+        "control_ids": [
+          "yfm11g3twin-2aa84b78a6febd26143f608d",
+          "yfm11g3twin-319843f69baa20f3454239ce",
+          "yfm11g3twin-ef22eee68943ca2a2799b391",
+          "yfm11g3twin-e147875280b8b77bfe80450a",
+          "yfm11g3twin-90981a825094b17bfe41f2ca",
+          "yfm11g3twin-891a3e15f4ae3cc0692a6533",
+          "yfm11g3twin-b68505d92e9d89b5dbb2f543",
+          "yfm11g3twin-c18313fbfc0b80d06302a930",
+          "yfm11g3twin-c5d9639c84570b050b880a2d",
+          "yfm11g3twin-dee6db93d96162d1cea5667f",
+          "yfm11g3twin-44b70f0f545fe9ef9a236d86",
+          "yfm11g3twin-487f6b6c43e7c682c7dc7598",
+          "yfm11g3twin-f9a77802e51009fee26eb174",
+          "yfm11g3twin-98cefa8d5ba5fa4c0221b38d",
+          "yfm11g3twin-77524ea92de9e4b51a623992",
+          "yfm11g3twin-dfdd402a4bd6dc20733632c9",
+          "yfm11g3twin-206627ef6521c9d646923aa8",
+          "yfm11g3twin-d4ba33bc056b0b769a524cbe",
+          "yfm11g3twin-ecf2d9c9a7beb2519bdcaf7b",
+          "yfm11g3twin-ad4dfbb81b50645e486663e6"
+        ],
+        "corpus_id": "lectra-m3-m4",
+        "diagnosis_minimum_percent": 0.3,
+        "invalid_above_percent": 0.5,
+        "mean_no_signal_savings_percent": "0.000000000000",
+        "schema_version": "yieldforge.m11-gate3-no-signal-summary.v1",
+        "summary_id": "yfm11g3ns-387f08b913a4efcc08457691"
+      },
+      {
+        "classification": "clean",
+        "content_sha256": "sha256:6c199ef15252e033ce98cbba71947d4b978c94e019027b6e0a2eb21609938e20",
+        "control_content_sha256s": [
+          "sha256:d2bbf9c723cba3e96f8659c6a009947da57bf266cc8b10c08c74572a25214952",
+          "sha256:b354b1e74b622602221ffdedb45c33201bf196f771ef0b7962ad5b32ca528904",
+          "sha256:329949d1d25c95db405ad653935fd7f31a1922be1ce5a595f1a8f2ab6622dde3",
+          "sha256:2665b319eb1551d7824149d309240afc3efb7b928062ecb43d5b73a969d45fe9",
+          "sha256:453918946772637f1bc240f1c52d07f101106c312b53bd1cb8867cf893b26b7d",
+          "sha256:97eed9f5fd62f13a79e8e4f5cc4b93530956ea4f642c4d199478884fa5253af6",
+          "sha256:e9b4244ca762963219e178c533702287d32d016b2c6603f45bac9e124327f6fa",
+          "sha256:31f98cf46905c06cac06b5e69b47ec83028c1aa30906012cc1685e0147d41936",
+          "sha256:0a0e7a2f5da5bb8bd7a436026c005b5e5a544c3bee0eff16925fcd8d9669a9b9",
+          "sha256:05f4ddfe457e10dce568b9941294d21f785c7d1edab0037342881a223fe616bd",
+          "sha256:1db991a86c16a8abdf75f65bedecb12b567dcb1e55915b27334574c2c74eabed",
+          "sha256:2b5a7ec4def18f8f8befe8d51a780a83681f6b39a19ba1e2da61312b3ac99a4f",
+          "sha256:fe0696f7a090edbdb1e23930a79188f27ab78ead93e4fb62c65bb2a7da5c1efd",
+          "sha256:b107a43ee27e33416bf77be140487c9bca6f3ad8f13f37af3ed7fe8be3fc0874",
+          "sha256:703ab2db49f4cf4e0735f9dd843aab24fd72d7a425ec233b8b49c0f9c0400ea3",
+          "sha256:9a27aa30695cce1e8d91d0eeadc7639badf9c32bc030af390bb62223b7f212b0",
+          "sha256:387223590f6a54b5deae9e6c848aca2718a940533f3f82c98da10191bd306703",
+          "sha256:4a7de041788bedf5abbc68b1efa06c9d4fd48801b1e2b147d754d22e0041f8b3",
+          "sha256:5ba60c1671603e4b313cba13f3ecd9156fa0e7896158f29e01a1e5a97e8a5177",
+          "sha256:b488cdc38649ddda0febbc99526fd54a2064e44c88e164f82c2c801eb80e8828"
+        ],
+        "control_ids": [
+          "yfm11g3twin-d2bbf9c723cba3e96f8659c6",
+          "yfm11g3twin-b354b1e74b622602221ffded",
+          "yfm11g3twin-329949d1d25c95db405ad653",
+          "yfm11g3twin-2665b319eb1551d7824149d3",
+          "yfm11g3twin-453918946772637f1bc240f1",
+          "yfm11g3twin-97eed9f5fd62f13a79e8e4f5",
+          "yfm11g3twin-e9b4244ca762963219e178c5",
+          "yfm11g3twin-31f98cf46905c06cac06b5e6",
+          "yfm11g3twin-0a0e7a2f5da5bb8bd7a43602",
+          "yfm11g3twin-05f4ddfe457e10dce568b994",
+          "yfm11g3twin-1db991a86c16a8abdf75f65b",
+          "yfm11g3twin-2b5a7ec4def18f8f8befe8d5",
+          "yfm11g3twin-fe0696f7a090edbdb1e23930",
+          "yfm11g3twin-b107a43ee27e33416bf77be1",
+          "yfm11g3twin-703ab2db49f4cf4e0735f9dd",
+          "yfm11g3twin-9a27aa30695cce1e8d91d0ee",
+          "yfm11g3twin-387223590f6a54b5deae9e6c",
+          "yfm11g3twin-4a7de041788bedf5abbc68b1",
+          "yfm11g3twin-5ba60c1671603e4b313cba13",
+          "yfm11g3twin-b488cdc38649ddda0febbc99"
+        ],
+        "corpus_id": "loco-2dics",
+        "diagnosis_minimum_percent": 0.3,
+        "invalid_above_percent": 0.5,
+        "mean_no_signal_savings_percent": "0.000000000000",
+        "schema_version": "yieldforge.m11-gate3-no-signal-summary.v1",
+        "summary_id": "yfm11g3ns-6c199ef15252e033ce98cbba"
+      }
+    ],
+    "raw_controls_revalidated": true,
+    "roots": {
+      "adapter_runtime_config_sha256": "sha256:9006a711a465e3b57b97f703cea5ea90b0b06fa8922a5330b95ef0979fe1e0a1",
+      "binding_id": "yfm11g3root-2a1a69bc188743bc5cca90a3",
+      "content_sha256": "sha256:2a1a69bc188743bc5cca90a37b4655aee29ebd05f07eb588c8e0189bab5994e2",
+      "contract_content_sha256": "sha256:e956019aeef85350f2ffa9d351ab15539d1b23137d7566118f73c5f29882143b",
+      "contract_id": "yfm11c-e956019aeef85350f2ffa9d3",
+      "gate1_evaluation_result_content_sha256": "sha256:b3e8d97ce476749bbdd1e56207976f086bc17e47c8c17dcadb83080e33fa08e9",
+      "gate1_evaluation_result_id": "yfm11g1r-b3e8d97ce476749bbdd1e562",
+      "gate1_run_content_sha256": "sha256:c35f10fa4f4d7b6b01c59c298d3e61f82103551e3a8ec44435818dc028f1dd74",
+      "gate1_run_id": "yfm11g1run-c35f10fa4f4d7b6b01c59c29",
+      "gate2_evaluation_result_content_sha256": "sha256:12b6242eeb5eccb26034e54b6cd89c88ae3a6ea0b6f564c57fd4ce85ab423faa",
+      "gate2_evaluation_result_id": "yfm11g2r-12b6242eeb5eccb26034e54b",
+      "gate2_run_content_sha256": "sha256:7419e46b74e411aff5c27ee1913b3d67d703ec88d06855e8b366a16ffde6a450",
+      "gate2_run_id": "yfm11g2run-7419e46b74e411aff5c27ee1",
+      "gate2_survived": true,
+      "gate3_config_content_sha256": "sha256:795010e6747d2c11d556ef82071905d89fda757dd39273ab83d1c2a52606808b",
+      "gate3_config_id": "yfm11g3c-795010e6747d2c11d556ef82",
+      "population_content_sha256": "sha256:a26084179d2e8f776630f8ac272d5651069500a5df996869d20df9893ca0bc56",
+      "population_id": "yfm11pop-a26084179d2e8f776630f8ac",
+      "schema_version": "yieldforge.m11-gate3-root-binding.v1"
+    },
+    "schema_version": "yieldforge.m11-gate3-validity-evidence.v1",
+    "sidecar_name": "m11-gate3-validity-receipt-9be256b6481a6b66ea6315293e114ebf15401c214ac97bfde2a355ae26f7bdc8-129fa8ad1fa905fd486465797f732674d20a7782b3090e8554ad2a6a0d45099e.json.gz",
+    "source_lineage": "repaired_runtime",
+    "status": "valid",
+    "twin_controls": [
+      {
+        "baseline_cost": "2400.472113",
+        "control_content_sha256": "sha256:2aa84b78a6febd26143f608d6337a42b396ef28b77ae5c5ed8d00b417b2f3715",
+        "control_id": "yfm11g3twin-2aa84b78a6febd26143f608d",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2400.472113",
+        "known_only_cost": "2400.472113",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-7ef682932c7b355cfbca624c",
+        "twin_cell_content_sha256": "sha256:34a78defc17a56429f30b26cba6b97919bb22228f990e54bb2cc061394539fbf",
+        "twin_cell_id": "yfm11g3cell-34a78defc17a56429f30b26c",
+        "twin_stream_id": "yfm11st-9c9eafd3103fe9ad5ad9695b"
+      },
+      {
+        "baseline_cost": "2386.631732",
+        "control_content_sha256": "sha256:319843f69baa20f3454239ce5de05252a878128fe25735c40bc31ce44bacf47b",
+        "control_id": "yfm11g3twin-319843f69baa20f3454239ce",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2386.631732",
+        "known_only_cost": "2386.631732",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-a566124845cf7c55927e45c2",
+        "twin_cell_content_sha256": "sha256:0ef1f3ec76c42999d12895eb10d66b1dbc59b88ebcdd07b7e2c5fb7ff02342b8",
+        "twin_cell_id": "yfm11g3cell-0ef1f3ec76c42999d12895eb",
+        "twin_stream_id": "yfm11st-6c7e8701f491da3cc35cdb84"
+      },
+      {
+        "baseline_cost": "2141.993511",
+        "control_content_sha256": "sha256:ef22eee68943ca2a2799b391a7c131d0308be90c63450017a1054bea6e149f78",
+        "control_id": "yfm11g3twin-ef22eee68943ca2a2799b391",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2141.993511",
+        "known_only_cost": "2141.993511",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-f8222cb923abffeb849f1d0c",
+        "twin_cell_content_sha256": "sha256:fa15bee4da6e57b9b5e306aa875f5484dfc6dd986e496f72f7c756e3a49b52bc",
+        "twin_cell_id": "yfm11g3cell-fa15bee4da6e57b9b5e306aa",
+        "twin_stream_id": "yfm11st-3b475e5a8dba9d975214de9d"
+      },
+      {
+        "baseline_cost": "2306.736027",
+        "control_content_sha256": "sha256:e147875280b8b77bfe80450aca19dde52e201cb181b8d397d306f3711b639894",
+        "control_id": "yfm11g3twin-e147875280b8b77bfe80450a",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2306.736027",
+        "known_only_cost": "2306.736027",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-22309dbaecfa2bd299f716eb",
+        "twin_cell_content_sha256": "sha256:c70cec4310481c587d195c19e2cc004987dfbbbeb4707339e099c487d6893434",
+        "twin_cell_id": "yfm11g3cell-c70cec4310481c587d195c19",
+        "twin_stream_id": "yfm11st-151aa35c30af585dadf4ffbb"
+      },
+      {
+        "baseline_cost": "2435.344405",
+        "control_content_sha256": "sha256:90981a825094b17bfe41f2cadf9ac3c879625fed74ad336413505a8bb11ac73f",
+        "control_id": "yfm11g3twin-90981a825094b17bfe41f2ca",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2435.344405",
+        "known_only_cost": "2435.344405",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-8606838f6f1f5c540a7ab1dc",
+        "twin_cell_content_sha256": "sha256:66d1ac2119d9939186407e048ea3d27e70b5f4c739cb4a04e7741f35abb1947d",
+        "twin_cell_id": "yfm11g3cell-66d1ac2119d9939186407e04",
+        "twin_stream_id": "yfm11st-92876b1ad9d5bf15c1d1bd9e"
+      },
+      {
+        "baseline_cost": "2259.407262",
+        "control_content_sha256": "sha256:891a3e15f4ae3cc0692a653372e269b0311f4ede0ddca87f20488a93fc41ddd8",
+        "control_id": "yfm11g3twin-891a3e15f4ae3cc0692a6533",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2259.407262",
+        "known_only_cost": "2259.407262",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-7885165ddee312f94c15b300",
+        "twin_cell_content_sha256": "sha256:5dd2d42dcd050d9fc900079af7cb493fa73427a99b022942c536f0b74febb456",
+        "twin_cell_id": "yfm11g3cell-5dd2d42dcd050d9fc900079a",
+        "twin_stream_id": "yfm11st-75b33ef98bee5d4309054449"
+      },
+      {
+        "baseline_cost": "2223.540192",
+        "control_content_sha256": "sha256:b68505d92e9d89b5dbb2f543d97035380d3ffb84b3d7048b25c8b4a0cd6fb71f",
+        "control_id": "yfm11g3twin-b68505d92e9d89b5dbb2f543",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2223.540192",
+        "known_only_cost": "2223.540192",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-d180b8a7063cd7148ff17f3e",
+        "twin_cell_content_sha256": "sha256:f1771f7dbcb751138120929b5183598cc0b65d2446ce5e527e040bc992520502",
+        "twin_cell_id": "yfm11g3cell-f1771f7dbcb751138120929b",
+        "twin_stream_id": "yfm11st-b37c4fa460a052c0bc18f8af"
+      },
+      {
+        "baseline_cost": "2243.631462",
+        "control_content_sha256": "sha256:c18313fbfc0b80d06302a930300733707f593dd89e054c683f9cc383e312963c",
+        "control_id": "yfm11g3twin-c18313fbfc0b80d06302a930",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2243.631462",
+        "known_only_cost": "2243.631462",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-00f78ff52dca0b7c701bdc2a",
+        "twin_cell_content_sha256": "sha256:4671d9008a7f15b0f92486eeb1bd6878d54bbaaf0602db310905f5892e9db5f7",
+        "twin_cell_id": "yfm11g3cell-4671d9008a7f15b0f92486ee",
+        "twin_stream_id": "yfm11st-0ad58cb17d773d72b7a166cc"
+      },
+      {
+        "baseline_cost": "2250.541624",
+        "control_content_sha256": "sha256:c5d9639c84570b050b880a2df02fca38eef2d5189159ea6b266ecbf832318b53",
+        "control_id": "yfm11g3twin-c5d9639c84570b050b880a2d",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2250.541624",
+        "known_only_cost": "2250.541624",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-edeb1dda11bd04a9bbe43f50",
+        "twin_cell_content_sha256": "sha256:606e171a246bb5053ff8778ca9a873b0a4aae59a6804c6d047dd2b656a304888",
+        "twin_cell_id": "yfm11g3cell-606e171a246bb5053ff8778c",
+        "twin_stream_id": "yfm11st-c286f50f073a9367b6ddb9d0"
+      },
+      {
+        "baseline_cost": "2502.712539",
+        "control_content_sha256": "sha256:dee6db93d96162d1cea5667f267598ff0450f60cce9f9ee88f20e98d3e1680e4",
+        "control_id": "yfm11g3twin-dee6db93d96162d1cea5667f",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2502.712539",
+        "known_only_cost": "2502.712539",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-22eedf35e19388a6f08b046b",
+        "twin_cell_content_sha256": "sha256:e838810c521c10e4778e87f1bca7b4a6062ab33f6d7df4615a7cc38f263a403f",
+        "twin_cell_id": "yfm11g3cell-e838810c521c10e4778e87f1",
+        "twin_stream_id": "yfm11st-331998d3c8ecb44662a7dc49"
+      },
+      {
+        "baseline_cost": "2433.914172",
+        "control_content_sha256": "sha256:44b70f0f545fe9ef9a236d8666effac1481374f023f834a9de473ec7c2edd3bb",
+        "control_id": "yfm11g3twin-44b70f0f545fe9ef9a236d86",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2433.914172",
+        "known_only_cost": "2433.914172",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-32878cf14272eac4fc0f637a",
+        "twin_cell_content_sha256": "sha256:aa904fcc5ba4e3878b4fb85e6c16a42df35af1b735a76d9595bb28c0452fb74f",
+        "twin_cell_id": "yfm11g3cell-aa904fcc5ba4e3878b4fb85e",
+        "twin_stream_id": "yfm11st-116cc1f429b5758709605b04"
+      },
+      {
+        "baseline_cost": "2366.863962",
+        "control_content_sha256": "sha256:487f6b6c43e7c682c7dc75987c1c400204c4f9305ee3a07bd3a0167770e3ca0a",
+        "control_id": "yfm11g3twin-487f6b6c43e7c682c7dc7598",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2366.863962",
+        "known_only_cost": "2366.863962",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-88b7909d74fd577b2dab66e7",
+        "twin_cell_content_sha256": "sha256:e66ac6ead8eabb04c8970b53b1bb73af682e29a79ca4587053fc9a79a95e6f7e",
+        "twin_cell_id": "yfm11g3cell-e66ac6ead8eabb04c8970b53",
+        "twin_stream_id": "yfm11st-1b9bd47d980afbc2dd3971ec"
+      },
+      {
+        "baseline_cost": "2402.918923",
+        "control_content_sha256": "sha256:f9a77802e51009fee26eb174d8e88fb8f44d0a37a108616ff4288d47198beb24",
+        "control_id": "yfm11g3twin-f9a77802e51009fee26eb174",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2402.918923",
+        "known_only_cost": "2402.918923",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-e81c7bf1a1bcc6b9589a881d",
+        "twin_cell_content_sha256": "sha256:3dffa1dc4529ecb63fa868ecc659c9d1e31ce93cf44887719554f4af1a35de66",
+        "twin_cell_id": "yfm11g3cell-3dffa1dc4529ecb63fa868ec",
+        "twin_stream_id": "yfm11st-76743f08ddeb611d63e285d4"
+      },
+      {
+        "baseline_cost": "2343.159983",
+        "control_content_sha256": "sha256:98cefa8d5ba5fa4c0221b38d20c4457aae213731d6e5949226676bcb8a24f836",
+        "control_id": "yfm11g3twin-98cefa8d5ba5fa4c0221b38d",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2343.159983",
+        "known_only_cost": "2343.159983",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-e41e17ed902d6f2736bbfb83",
+        "twin_cell_content_sha256": "sha256:57cca4a04271da77557edecdf88097cce1b0f0a8892d64202fc220fb024e85f4",
+        "twin_cell_id": "yfm11g3cell-57cca4a04271da77557edecd",
+        "twin_stream_id": "yfm11st-1da3bab4f68f5d8b2de8c39b"
+      },
+      {
+        "baseline_cost": "2330.904312",
+        "control_content_sha256": "sha256:77524ea92de9e4b51a6239923709b346168fadcb05e5680367a682fef00e2ffb",
+        "control_id": "yfm11g3twin-77524ea92de9e4b51a623992",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2330.904312",
+        "known_only_cost": "2330.904312",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-28fa786c670e58bfd3c06bb9",
+        "twin_cell_content_sha256": "sha256:bc43fd33fe9a4cb67672c42b6833232c99826b2a6672aa897f19dde680af1506",
+        "twin_cell_id": "yfm11g3cell-bc43fd33fe9a4cb67672c42b",
+        "twin_stream_id": "yfm11st-e4c647af05c83d2a11c700a7"
+      },
+      {
+        "baseline_cost": "2279.138868",
+        "control_content_sha256": "sha256:dfdd402a4bd6dc20733632c914dddc251cae33697785be259400e46c0d9234d5",
+        "control_id": "yfm11g3twin-dfdd402a4bd6dc20733632c9",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2279.138868",
+        "known_only_cost": "2279.138868",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-c2bbe014867de91d0ac8d87e",
+        "twin_cell_content_sha256": "sha256:bd62c1cbe762127ab3687764e6dc175ccce85de5f93579e5b90aa22513197268",
+        "twin_cell_id": "yfm11g3cell-bd62c1cbe762127ab3687764",
+        "twin_stream_id": "yfm11st-fa7dc68c04c08e40555ed355"
+      },
+      {
+        "baseline_cost": "2427.274372",
+        "control_content_sha256": "sha256:206627ef6521c9d646923aa876953f8f806b33236f66870d8e90a93c2ad02197",
+        "control_id": "yfm11g3twin-206627ef6521c9d646923aa8",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2427.274372",
+        "known_only_cost": "2427.274372",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-d8d36f3f5eb0b6c6094fb8eb",
+        "twin_cell_content_sha256": "sha256:7014b0bc65948cf22f9d1cefabfdea30bb84dc3bb38ab6988d23c3962d3930b9",
+        "twin_cell_id": "yfm11g3cell-7014b0bc65948cf22f9d1cef",
+        "twin_stream_id": "yfm11st-80addbaedf4f9be39f7a3a66"
+      },
+      {
+        "baseline_cost": "2254.762805",
+        "control_content_sha256": "sha256:d4ba33bc056b0b769a524cbe0a10da01848ee64b5230cedbe61fce396a88826b",
+        "control_id": "yfm11g3twin-d4ba33bc056b0b769a524cbe",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2254.762805",
+        "known_only_cost": "2254.762805",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-3079063296fe6a471891b514",
+        "twin_cell_content_sha256": "sha256:089a9087ff101e69bf660049f202cec78e898372f87d6a7e944ef2cb1901f2b5",
+        "twin_cell_id": "yfm11g3cell-089a9087ff101e69bf660049",
+        "twin_stream_id": "yfm11st-b611b452386d5040c45cd322"
+      },
+      {
+        "baseline_cost": "2228.430209",
+        "control_content_sha256": "sha256:ecf2d9c9a7beb2519bdcaf7b22ea22c46778f2b42b9bd9804f8bbacf730e6f6b",
+        "control_id": "yfm11g3twin-ecf2d9c9a7beb2519bdcaf7b",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2228.430209",
+        "known_only_cost": "2228.430209",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-d7a33df3d80dfd3741552d49",
+        "twin_cell_content_sha256": "sha256:cdc87fb5a97d4a163b3b03b478d523bc6c950a912fa3197b04afec3fbd1644d2",
+        "twin_cell_id": "yfm11g3cell-cdc87fb5a97d4a163b3b03b4",
+        "twin_stream_id": "yfm11st-796fa56cafb1bd953ea2c746"
+      },
+      {
+        "baseline_cost": "2388.683286",
+        "control_content_sha256": "sha256:ad4dfbb81b50645e486663e6a11173704ac6604f73858fd5da837b0f12d56067",
+        "control_id": "yfm11g3twin-ad4dfbb81b50645e486663e6",
+        "corpus_id": "lectra-m3-m4",
+        "full_future_cost": "2388.683286",
+        "known_only_cost": "2388.683286",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-60f1bb40497345b8dcdd7ec4",
+        "twin_cell_content_sha256": "sha256:28c5fe1017403081abced6ba4a791727c8c74b88f3764ef9f6013766b1beb17e",
+        "twin_cell_id": "yfm11g3cell-28c5fe1017403081abced6ba",
+        "twin_stream_id": "yfm11st-e882990054253913473182b9"
+      },
+      {
+        "baseline_cost": "2106.975431",
+        "control_content_sha256": "sha256:d2bbf9c723cba3e96f8659c6a009947da57bf266cc8b10c08c74572a25214952",
+        "control_id": "yfm11g3twin-d2bbf9c723cba3e96f8659c6",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2106.975431",
+        "known_only_cost": "2106.975431",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-36b83d2ff150dcd450d7e25c",
+        "twin_cell_content_sha256": "sha256:c13947a0a6fd3dd43efe20f583aa87a2be72c0c381ff5fc2343f5a08da7a7b15",
+        "twin_cell_id": "yfm11g3cell-c13947a0a6fd3dd43efe20f5",
+        "twin_stream_id": "yfm11st-cc1bf504a7a6f565fcddce80"
+      },
+      {
+        "baseline_cost": "1938.639302",
+        "control_content_sha256": "sha256:b354b1e74b622602221ffdedb45c33201bf196f771ef0b7962ad5b32ca528904",
+        "control_id": "yfm11g3twin-b354b1e74b622602221ffded",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "1938.639302",
+        "known_only_cost": "1938.639302",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-2eafa77cefe643cf67b320bd",
+        "twin_cell_content_sha256": "sha256:c974bf38c0c1b87e91cbe3d93453b5aaec9de5b05b73b2032d6e1e525d0ba3c9",
+        "twin_cell_id": "yfm11g3cell-c974bf38c0c1b87e91cbe3d9",
+        "twin_stream_id": "yfm11st-a1b420ce54d97a539bfc8dc5"
+      },
+      {
+        "baseline_cost": "2254.218529",
+        "control_content_sha256": "sha256:329949d1d25c95db405ad653935fd7f31a1922be1ce5a595f1a8f2ab6622dde3",
+        "control_id": "yfm11g3twin-329949d1d25c95db405ad653",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2254.218529",
+        "known_only_cost": "2254.218529",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-52a07ef48c820d911f98606f",
+        "twin_cell_content_sha256": "sha256:e9f860ce45f5addc6d906d9e06aeaae7aea94200a273434c064ad32dd3603bf0",
+        "twin_cell_id": "yfm11g3cell-e9f860ce45f5addc6d906d9e",
+        "twin_stream_id": "yfm11st-be28c878e81b76871907d99a"
+      },
+      {
+        "baseline_cost": "2152.219295",
+        "control_content_sha256": "sha256:2665b319eb1551d7824149d309240afc3efb7b928062ecb43d5b73a969d45fe9",
+        "control_id": "yfm11g3twin-2665b319eb1551d7824149d3",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2152.219295",
+        "known_only_cost": "2152.219295",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-9602f8c429152c658ba271ac",
+        "twin_cell_content_sha256": "sha256:4b7d0cd256674c26f7faa28a6a009369b9367af9b4ffe0f12ee37c6764a4af56",
+        "twin_cell_id": "yfm11g3cell-4b7d0cd256674c26f7faa28a",
+        "twin_stream_id": "yfm11st-2b26a0a48c44993af84cfa7e"
+      },
+      {
+        "baseline_cost": "1779.889640",
+        "control_content_sha256": "sha256:453918946772637f1bc240f1c52d07f101106c312b53bd1cb8867cf893b26b7d",
+        "control_id": "yfm11g3twin-453918946772637f1bc240f1",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "1779.889640",
+        "known_only_cost": "1779.889640",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-22736d71b6b09b484a811e5e",
+        "twin_cell_content_sha256": "sha256:992e87b2611f189384a1e45510adaa0ee7ab855f79ad1636d6bb26d87cefbf07",
+        "twin_cell_id": "yfm11g3cell-992e87b2611f189384a1e455",
+        "twin_stream_id": "yfm11st-4fa784c5f404416e7a15480c"
+      },
+      {
+        "baseline_cost": "1873.019538",
+        "control_content_sha256": "sha256:97eed9f5fd62f13a79e8e4f5cc4b93530956ea4f642c4d199478884fa5253af6",
+        "control_id": "yfm11g3twin-97eed9f5fd62f13a79e8e4f5",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "1873.019538",
+        "known_only_cost": "1873.019538",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-ffe4ad381f29451912b990a6",
+        "twin_cell_content_sha256": "sha256:06a92089cca385bdfefc7f8b1c8ea84c652c883f2e8580b60b35ed5f55d6626c",
+        "twin_cell_id": "yfm11g3cell-06a92089cca385bdfefc7f8b",
+        "twin_stream_id": "yfm11st-93f936f3c1c771ae13d4e9fd"
+      },
+      {
+        "baseline_cost": "1963.070358",
+        "control_content_sha256": "sha256:e9b4244ca762963219e178c533702287d32d016b2c6603f45bac9e124327f6fa",
+        "control_id": "yfm11g3twin-e9b4244ca762963219e178c5",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "1963.070358",
+        "known_only_cost": "1963.070358",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-65a23f537d63e4c0b262ed5f",
+        "twin_cell_content_sha256": "sha256:556422bb3331a2d6a2cc6ffc2633630f26fe5adf492008bcbb4be6f1be19af52",
+        "twin_cell_id": "yfm11g3cell-556422bb3331a2d6a2cc6ffc",
+        "twin_stream_id": "yfm11st-1a7d972d8009b14adeeafbb9"
+      },
+      {
+        "baseline_cost": "3505.550400",
+        "control_content_sha256": "sha256:31f98cf46905c06cac06b5e69b47ec83028c1aa30906012cc1685e0147d41936",
+        "control_id": "yfm11g3twin-31f98cf46905c06cac06b5e6",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "3505.550400",
+        "known_only_cost": "3505.550400",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-218579eb18ec57da0de7f8cf",
+        "twin_cell_content_sha256": "sha256:cd9b81de76d222c365aadd573eee51c09a66d489df62f34b76d4fb0995cf176f",
+        "twin_cell_id": "yfm11g3cell-cd9b81de76d222c365aadd57",
+        "twin_stream_id": "yfm11st-2fadb7b4c06f6f9b679bea9e"
+      },
+      {
+        "baseline_cost": "2783.371567",
+        "control_content_sha256": "sha256:0a0e7a2f5da5bb8bd7a436026c005b5e5a544c3bee0eff16925fcd8d9669a9b9",
+        "control_id": "yfm11g3twin-0a0e7a2f5da5bb8bd7a43602",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2783.371567",
+        "known_only_cost": "2783.371567",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-4797e8201f0c5651aae78e11",
+        "twin_cell_content_sha256": "sha256:c61ff5d04562eeb7825664c90e6be1fa053b75b4b3ac93f93e7f18135f7c6ec5",
+        "twin_cell_id": "yfm11g3cell-c61ff5d04562eeb7825664c9",
+        "twin_stream_id": "yfm11st-46326220b59bfddfb057315e"
+      },
+      {
+        "baseline_cost": "2141.823737",
+        "control_content_sha256": "sha256:05f4ddfe457e10dce568b9941294d21f785c7d1edab0037342881a223fe616bd",
+        "control_id": "yfm11g3twin-05f4ddfe457e10dce568b994",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2141.823737",
+        "known_only_cost": "2141.823737",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-532f7e06c89344e869c843be",
+        "twin_cell_content_sha256": "sha256:19a7a7659cae162dd5800ba9796a3aad21aba60bc44ea79827598378ef15fde4",
+        "twin_cell_id": "yfm11g3cell-19a7a7659cae162dd5800ba9",
+        "twin_stream_id": "yfm11st-61d09cf45227901baece43d0"
+      },
+      {
+        "baseline_cost": "2466.675126",
+        "control_content_sha256": "sha256:1db991a86c16a8abdf75f65bedecb12b567dcb1e55915b27334574c2c74eabed",
+        "control_id": "yfm11g3twin-1db991a86c16a8abdf75f65b",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2466.675126",
+        "known_only_cost": "2466.675126",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-4d65465a3b34d9da9734ea4f",
+        "twin_cell_content_sha256": "sha256:4cac1c2f461c0daf7161b12a8864bf833c3ac7fa3e4a0daecbf667a9b0ed298f",
+        "twin_cell_id": "yfm11g3cell-4cac1c2f461c0daf7161b12a",
+        "twin_stream_id": "yfm11st-de255fc6ab57204717a64cfb"
+      },
+      {
+        "baseline_cost": "2058.899313",
+        "control_content_sha256": "sha256:2b5a7ec4def18f8f8befe8d51a780a83681f6b39a19ba1e2da61312b3ac99a4f",
+        "control_id": "yfm11g3twin-2b5a7ec4def18f8f8befe8d5",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2058.899313",
+        "known_only_cost": "2058.899313",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-ac7e6801fa4f511d5df27bbd",
+        "twin_cell_content_sha256": "sha256:de26899c69b2241095d8a9be792296877fd25ff4ed8400452501630cf89665b0",
+        "twin_cell_id": "yfm11g3cell-de26899c69b2241095d8a9be",
+        "twin_stream_id": "yfm11st-83c4f614c0ce37a2898aedef"
+      },
+      {
+        "baseline_cost": "2296.595154",
+        "control_content_sha256": "sha256:fe0696f7a090edbdb1e23930a79188f27ab78ead93e4fb62c65bb2a7da5c1efd",
+        "control_id": "yfm11g3twin-fe0696f7a090edbdb1e23930",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2296.595154",
+        "known_only_cost": "2296.595154",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-5e82baa4010c17308d2e2430",
+        "twin_cell_content_sha256": "sha256:2effa82a9825d95ec9fc02b17097dad4f5c04e993330dd6855dfce287ab7a74b",
+        "twin_cell_id": "yfm11g3cell-2effa82a9825d95ec9fc02b1",
+        "twin_stream_id": "yfm11st-bbcd721f03830786c2c3204e"
+      },
+      {
+        "baseline_cost": "2479.289682",
+        "control_content_sha256": "sha256:b107a43ee27e33416bf77be140487c9bca6f3ad8f13f37af3ed7fe8be3fc0874",
+        "control_id": "yfm11g3twin-b107a43ee27e33416bf77be1",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2479.289682",
+        "known_only_cost": "2479.289682",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-a5a214140c03c4a892c3c1fe",
+        "twin_cell_content_sha256": "sha256:f212aa2f45d1970f171349893d19e7dfe3aff09cdcd4bbad5d868e1e0a0b706c",
+        "twin_cell_id": "yfm11g3cell-f212aa2f45d1970f17134989",
+        "twin_stream_id": "yfm11st-5bd1031aee44ac6a8293c657"
+      },
+      {
+        "baseline_cost": "2734.412597",
+        "control_content_sha256": "sha256:703ab2db49f4cf4e0735f9dd843aab24fd72d7a425ec233b8b49c0f9c0400ea3",
+        "control_id": "yfm11g3twin-703ab2db49f4cf4e0735f9dd",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2734.412597",
+        "known_only_cost": "2734.412597",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-4bff19dba499e844af0e6882",
+        "twin_cell_content_sha256": "sha256:dbc96d07ed719e4edba577d854a9171ef7183e57b114f8be9b7137395716a4d8",
+        "twin_cell_id": "yfm11g3cell-dbc96d07ed719e4edba577d8",
+        "twin_stream_id": "yfm11st-5820e3f7d0bfce33230949e5"
+      },
+      {
+        "baseline_cost": "2213.803606",
+        "control_content_sha256": "sha256:9a27aa30695cce1e8d91d0eeadc7639badf9c32bc030af390bb62223b7f212b0",
+        "control_id": "yfm11g3twin-9a27aa30695cce1e8d91d0ee",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2213.803606",
+        "known_only_cost": "2213.803606",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-7637a134368182286cee278f",
+        "twin_cell_content_sha256": "sha256:702bf6f657889e4574fe2ab74b272a8c11b02197aadbd5fac8f2526479c85a0c",
+        "twin_cell_id": "yfm11g3cell-702bf6f657889e4574fe2ab7",
+        "twin_stream_id": "yfm11st-6e234da560d7c5e12c603abf"
+      },
+      {
+        "baseline_cost": "2342.586960",
+        "control_content_sha256": "sha256:387223590f6a54b5deae9e6c848aca2718a940533f3f82c98da10191bd306703",
+        "control_id": "yfm11g3twin-387223590f6a54b5deae9e6c",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2342.586960",
+        "known_only_cost": "2342.586960",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-bd08a70f2d37c760e5e3ad7f",
+        "twin_cell_content_sha256": "sha256:9e12db7ab49be76cd1dab8c2452a30d8fbb79d6dcdcc2dcb9038da3a27980c85",
+        "twin_cell_id": "yfm11g3cell-9e12db7ab49be76cd1dab8c2",
+        "twin_stream_id": "yfm11st-cccf7f3dd110adf62edb0557"
+      },
+      {
+        "baseline_cost": "2152.743346",
+        "control_content_sha256": "sha256:4a7de041788bedf5abbc68b1efa06c9d4fd48801b1e2b147d754d22e0041f8b3",
+        "control_id": "yfm11g3twin-4a7de041788bedf5abbc68b1",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2152.743346",
+        "known_only_cost": "2152.743346",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-ee496b48cbe4f2f0ba309923",
+        "twin_cell_content_sha256": "sha256:055ca078bd58a5dedccf3a9c1a78b73a220d0beeaba71674788dfe9a00b36f1c",
+        "twin_cell_id": "yfm11g3cell-055ca078bd58a5dedccf3a9c",
+        "twin_stream_id": "yfm11st-fbc089553aeecaeafe291854"
+      },
+      {
+        "baseline_cost": "2179.869978",
+        "control_content_sha256": "sha256:5ba60c1671603e4b313cba13f3ecd9156fa0e7896158f29e01a1e5a97e8a5177",
+        "control_id": "yfm11g3twin-5ba60c1671603e4b313cba13",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "2179.869978",
+        "known_only_cost": "2179.869978",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-c915cdf181b8620a3169211b",
+        "twin_cell_content_sha256": "sha256:e6c3fc9c66725a820c7148f9511f9829010912a8b97ddb7bb588381f12d7b560",
+        "twin_cell_id": "yfm11g3cell-e6c3fc9c66725a820c7148f9",
+        "twin_stream_id": "yfm11st-0d54a53daa4b7bb1d6e73482"
+      },
+      {
+        "baseline_cost": "1989.407325",
+        "control_content_sha256": "sha256:b488cdc38649ddda0febbc99526fd54a2064e44c88e164f82c2c801eb80e8828",
+        "control_id": "yfm11g3twin-b488cdc38649ddda0febbc99",
+        "corpus_id": "loco-2dics",
+        "full_future_cost": "1989.407325",
+        "known_only_cost": "1989.407325",
+        "no_signal_savings_percent": "0.000000000000",
+        "source_stream_id": "yfm11st-8da4aac1341ea0775d51ffc4",
+        "twin_cell_content_sha256": "sha256:8e09bd6a115f54f6d55a5ea0d724ce36ffcb36080b89b8245b059c67a853124e",
+        "twin_cell_id": "yfm11g3cell-8e09bd6a115f54f6d55a5ea0",
+        "twin_stream_id": "yfm11st-3bdf9e579e49714dd8461314"
+      }
+    ],
+    "uncompressed_byte_count": 56341748,
+    "validity_receipt_content_sha256": "sha256:9be256b6481a6b66ea6315293e114ebf15401c214ac97bfde2a355ae26f7bdc8",
+    "validity_receipt_id": "yfm11g3valid-9be256b6481a6b66ea631529"
+  }
+}

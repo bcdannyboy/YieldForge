@@ -132,6 +132,17 @@ cell errors. Both executions produced byte-identical normalized outputs with SHA
 reconciled 40 checkpoints, 40 compressed cell sidecars, 120 ledgers, all per-stream metrics, both
 bootstrap intervals, every gate, and the cross-segment reducer to the same terminal verdict.
 
+### Publication boundary
+
+The full authenticated replay packet remains preserved separately as private local evidence. For
+the M11 economic publication packet, this repository tracks only the calibration, validity, and
+central manifests: three compact, non-reconstructive records that preserve bindings, receipts,
+aggregate outcomes, and the verdict without source geometry or demand. A clean clone can
+authenticate those files and inspect this report, but the notebook cannot perform its complete raw
+reconciliation without the separately permissioned packet of source-bound parents, checkpoints,
+receipts, and cell sidecars. See [[Development/Artifact Policy]] and
+[PUBLIC_RELEASE.md](../../PUBLIC_RELEASE.md).
+
 ## This result adds economic evidence; it does not rewrite history
 
 M10 result `yfm10-931b3a95fe84cd96cff799f2` remains the historical minimum roadmap verdict:

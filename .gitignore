@@ -11,6 +11,13 @@ yf/**/__pycache__/
 yf/**/*.py[cod]
 yf/experiments/results/m11-gate2-*.json
 yf/experiments/results/m11-gate3-early-*.json
+yf/experiments/results/m11-economic-resolution/m11-gate3-calibration-observation-*.json.gz
+yf/experiments/results/m11-economic-resolution/m11-gate3-validity-receipt-*.json.gz
+yf/experiments/results/m11-economic-resolution/m11-gate3-central-cell-*.json.gz
+yf/experiments/results/m11-economic-resolution/m11-economic-calibration-checkpoint-*.json
+yf/experiments/results/m11-economic-resolution/m11-economic-central-cell-checkpoint-*.json
+yf/experiments/results/m11-economic-resolution/m11-economic-validity-evidence-checkpoint-*.json
+yf/experiments/results/m11-economic-resolution/m11-economic-central-segment-*.json
 yf/var/archives/*
 !yf/var/archives/.gitkeep
 yf/var/jobs/
