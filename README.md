@@ -176,8 +176,8 @@ test, not a sample-size reinterpretation of this one.
 
 ## Why the project is on the back burner
 
-The current deployable policy saved exactly `0%` in the model, while even perfect hindsight missed
-the full-future magnitude and reliability gates. The intended workflow advantage was that an
+The current deployable policy saved exactly `0%` in the model, while the full-future arm still
+missed its magnitude and reliability gates. The intended workflow advantage was that an
 incumbent optimizer could remain in place, but even an overlay needs candidate access, inventory
 integration, and a selection mechanism valuable enough to justify deployment. Rebuilding Sparrow
 specifically for YieldForge—or developing additional incumbent adapters—would be substantial new

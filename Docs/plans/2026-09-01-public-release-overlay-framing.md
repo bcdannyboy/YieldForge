@@ -13,36 +13,35 @@ evidence outside Git, and leave remote visibility private.
 
 ---
 
-### Task 1: Verify the target semantic boundary
+### Task 1: Record the diagnostic baseline and target gaps
 
 **Files:** none
 
-**Step 1: Confirm the workflow-overlay idea is explicit**
+**Step 1: Inspect the workflow-overlay baseline**
 
 Run:
 
 ```bash
 rg -n -i "keep.*existing|existing.*workflow|progressive.*nest|strong.*space|selection layer" \
-  README.md Docs/Home.md
+  README.md Docs/Home.md || true
 ```
 
-Expected: both entry points lead with keeping the incumbent nesting system and workflow, explain
-selection over strong alternative nests, and identify Sparrow's progressive reports as the reason
-it was a practical first substrate.
+Expected: record which target ideas already appear and which are missing. Missing phrases are an
+expected implementation gap before Task 2; they are not a failed final check.
 
-**Step 2: Confirm the release-candidate assertions**
+**Step 2: Inspect the publication-boundary baseline**
 
 Run:
 
 ```bash
 rg -n -i "owner-approved|approved publication boundary|visibility remains private" \
-  PUBLIC_RELEASE.md README.md Docs/Home.md
+  PUBLIC_RELEASE.md README.md Docs/Home.md || true
 rg -n -i "attribution|transformation provenance" \
-  THIRD_PARTY_NOTICES.md Docs/Research/Technical\ Sources.md
+  THIRD_PARTY_NOTICES.md Docs/Research/Technical\ Sources.md || true
 ```
 
-Expected: the entry points and release record describe the approved tracked boundary and separate
-visibility action, while the source notes preserve attribution and transformation provenance.
+Expected: record the target gaps that Task 3 must close. The post-implementation assertions become
+mandatory only in Task 4, after the workflow and publication edits are complete.
 
 ### Task 2: Make the incumbent-preserving workflow thesis explicit
 
@@ -149,14 +148,15 @@ separately preserved raw parents as a reproducibility limitation, and consistent
 resolved owner decisions. In the earlier closeout plans, mark the later publication-boundary
 amendment and preserve the experimental outcomes and artifact identities.
 
-**Step 4: Verify the publication-boundary assertions**
+**Step 4: Check the Task 3 documentation diff**
 
-Run the positive checks from Task 1 across the release record, entry points, source notices,
-artifact policy, M11 report, roadmap, and amended closeout plans. Then ask an independent reviewer
-to compare every tracked publication statement with the approved included/excluded boundary.
+Run `git diff --check` and inspect the release record, entry points, source notices, artifact
+policy, M11 report, roadmap, and amended closeout plans as one documentation boundary. Defer the
+mandatory positive assertion scan and independent semantic review until Task 4, after all Task 2
+and Task 3 edits are present together.
 
-Expected: the reviewer finds no contradiction, unresolved owner decision, or claim beyond the
-approved research-archive boundary.
+Expected: no whitespace defect, accidental artifact change, or internal contradiction in the
+Task 3 diff.
 
 **Step 5: Commit**
 
@@ -208,13 +208,21 @@ browser, cache, test-result, or native-target member is present.
 
 **Step 4: Run documentation and repository scans**
 
-Validate all tracked Markdown inline links and wikilinks. Run `git diff --check`, macOS and Unix
-absolute home-path scans, high-confidence credential/private-key scans, tracked-object size
-inventory, the positive publication-boundary checks, and `git status`. Have an independent reviewer
-inspect the tracked publication statements for consistency with the resolved owner decisions.
+Re-run the positive target queries from Task 1 without the permissive diagnostic suffixes and
+require the workflow and publication assertions in the final entry points. Validate all tracked
+Markdown inline links and wikilinks and run `git diff --check` plus the tracked-object size
+inventory.
 
-Expected: links resolve; the publication statements are consistent; there is no operational local
-path, secret, or object at/above GitHub's 100 MiB hard limit; worktree clean.
+Scan both the current checkout and every reachable commit in the intended `main` history for
+high-confidence credentials/private keys and absolute local home paths. Classify and record every
+finding as an active risk, accepted historical metadata, or false positive. Run `git status`, then
+have an independent reviewer inspect the tracked publication statements for consistency with the
+resolved owner decisions.
+
+Expected: final target assertions and links pass; the current checkout has no absolute home-path or
+high-confidence secret match; reachable history has no high-confidence secret, and its accepted
+local-path metadata matches the disclosure in `PUBLIC_RELEASE.md`; no object is at/above GitHub's
+100 MiB hard limit; worktree clean.
 
 ### Task 5: Integrate the prepared candidate without publishing it
 

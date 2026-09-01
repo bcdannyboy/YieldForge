@@ -53,6 +53,15 @@ These decisions do not expand YieldForge's claims. The M11 result remains a semi
 disposition of the current modeled product and algorithms, not a measurement of representative
 factory ROI or proof about every possible future algorithm.
 
+## Known history metadata
+
+The current tip contains no absolute home-path matches. Across its reachable history, seven earlier
+plan/ledger files retain owner-local YieldForge project, worktree, and archive paths. Review found
+no credentials or machine configuration in those references, and a high-confidence
+credential/private-key scan found no match in the current checkout or intended history. The path
+references are consistent with the approved author identity and are accepted as historical
+metadata; no history rewrite is required.
+
 ## Large tracked research artifacts
 
 The tracked tree retains two research-relevant JSON artifacts:
