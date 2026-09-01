@@ -29,19 +29,21 @@ and beat a strong conventional policy often enough to pay for itself.
 
 ## Why test with perfect future information
 
-Perfect future information was an intentionally favorable upper-bound test, not a proposed product
-feature. Giving the research policy every later order removes forecasting error and asks a simpler
-question first: **does this residual-selection mechanism contain enough value even with an unfair
-informational advantage?**
+Perfect future information was an intentionally favorable-information stress test, not a proposed
+product feature. Giving the research policy every later order removes forecasting error and asks a
+simpler question first: **does this residual-selection mechanism show meaningful headroom even with
+an unfair informational advantage?**
 
-This was an information upper bound for the tested executor, not a proof of globally optimal
-material cost. The search checks were deliberately finite and bounded.
+F was not proven to be a mathematical upper bound on K. They were separately executed, finite
+policies, so complete future visibility did not guarantee that F would dominate K on every stream;
+nor was either arm a proof of globally optimal material cost. The search checks were deliberately
+finite and bounded.
 
-If the full-future arm cannot produce a material, repeatable advantage within the same candidate,
-inventory, and cost model, there is no evidence that adding forecasts and production integration to
-the same mechanism will create the missing headroom. A positive result would still have required a
-deployable known-only policy and real factory evidence; a weak result lets us stop before making
-those larger investments.
+A red F arm alone could not stop the program under the registered protocol. It showed that the
+tested mechanism had little favorable-information headroom, while the separately required K arm
+tested whether any value was deployable without future information. The terminal stop required F
+and K to be red in both segments. A positive F result would likewise still have required a positive
+K result and real factory evidence before investment.
 
 Sparrow supplied the underlying nesting capability through a reproducible Spyrrow adapter and
 immutable candidate archives. Replacing or substantially rebuilding that layer would be a new
@@ -96,7 +98,8 @@ savings on more than half of streams. Every segment/arm failed every applicable 
 reliability gate.
 
 The terminal M11 disposition was `INSUFFICIENT_CURRENT_MODELED_VALUE`: no bounded pilot and no
-productization were authorized.
+productization were authorized. That terminal decision depended on both F and K being red in both
+segments; F by itself was diagnostic, not sufficient to stop.
 
 ## Why this was not just a sample-size problem
 
@@ -112,6 +115,10 @@ The decision did not rest on a single p-value or an imprecise mean.
    uncertainty or reveal rare cases, but they cannot create a missing known-only decision
    mechanism. A larger sample would change this decision only by exhibiting a materially different
    effect and prevalence pattern; the current evidence provides no such signal.
+
+The F evidence alone was not terminal. The stopping inference comes from its weak or absent
+favorable-information signal together with K's exact zero across both segments, under a reducer
+that required both arms to fail in both segments.
 
 This evidence falsifies the **current modeled product and tested algorithms**. It does not prove
 that every future algorithm, material segment, or factory would behave the same way. A materially
@@ -140,8 +147,9 @@ test, not a sample-size reinterpretation of this one.
 - **Possible segment dependence:** the Lectra-only full-future signal is consistent with narrow
   forecast headroom or segment dependence. With a zero median, only 3/20 positive streams, and no K
   effect, it is not evidence for a product or even for a pilot.
-- **Value of the falsification sequence:** the upper-bound test gave a rational stopping point
-  before a Sparrow replacement, factory integration, or forecasting program. That avoided
+- **Value of the falsification sequence:** the favorable-information test helped establish a
+  rational stopping point, when combined with the known-only result, before a Sparrow replacement,
+  factory integration, or forecasting program. That avoided
   committing to a much larger build on the strength of geometry demonstrations alone; it is a
   decision implication, not a measured return on research spending.
 
@@ -197,24 +205,40 @@ and redistribution limits.
 - [`yf/notebooks/`](yf/notebooks/) contains independent analysis notebooks.
 - [`yf/web/`](yf/web/) is a local research workbench, not a hardened hosted application.
 
-Basic source verification starts with:
+These focused checks are safe to run from a clean clone:
 
 ```bash
 cd yf
 uv sync --locked --all-groups
-uv run --all-groups pytest
+uv run --all-groups pytest \
+  tests/test_packaging_policy.py \
+  tests/test_tooling_policy.py \
+  tests/realistic_falsification/test_public_economic_evidence.py -q
 uv run --all-groups ruff check .
-uv run --all-groups ruff format --check .
+uv run --all-groups ruff format --check \
+  tests/test_packaging_policy.py \
+  tests/test_tooling_policy.py \
+  tests/realistic_falsification/test_public_economic_evidence.py
 
 cd web
 npm ci
 npm test
+npm run typecheck
 npm run build
 ```
 
-Some full evidence replays and source-bound checks require the separately permissioned local packet
-or documented local services. See [Getting Started](Docs/Development/Getting%20Started.md) for the
-current environment and verification details.
+The whole-tree Ruff lint check excludes only the content-addressed M11 audit notebook, whose bytes
+must remain unchanged. The targeted format check is intentionally limited to the closeout-owned
+policy tests. A pre-exclusion whole-tree format audit found 70 artifacts Ruff would rewrite: the
+immutable notebook and 69 historical Python files. Neither was mechanically rewritten during
+closeout, and a whole-tree format pass is not claimed.
+
+The full Python suite is a local evidence verification, not a clean-clone command: it needs the
+ignored pinned audit input and a compatible local PostgreSQL service, and its tight process-timeout
+cases are run separately from the broad partition. Some raw evidence replays additionally require
+the separately permissioned local packet. See
+[Getting Started](Docs/Development/Getting%20Started.md) for the current environment and
+verification details.
 
 ## Public-release and name status
 

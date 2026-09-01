@@ -65,6 +65,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = ["notebooks/m11-economic-resolution.ipynb"]
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "UP"]

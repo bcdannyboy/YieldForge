@@ -29,6 +29,11 @@ sequence, material assumptions, and cost ledger:
 - **K — known only:** the tested YieldForge executor using only information available at the time
   of each decision.
 
+F was a deliberately favorable-information arm, but it was not proven to be a mathematical upper
+bound on K. The two arms executed separate finite policies, and neither was a proof of globally
+optimal material cost. Under the registered decision rule, F alone could not authorize the
+terminal stop: that disposition required both F and K to be red in both segments.
+
 The baseline was not chosen to make YieldForge look good. Six registered policies were scored on
 separate calibration streams before the central outcomes were opened. `age_regularity` tied for
 lowest cost with four other policies on Lectra and with all five alternatives on LOCo; the materially
@@ -70,7 +75,8 @@ LOCo fails every F and K condition. Lectra F fails the mean, lower-bound, median
 conditions; Lectra K fails all four. Each segment is therefore `current_segment_red`. The registered
 cross-segment reducer maps two red segments to `INSUFFICIENT_CURRENT_MODELED_VALUE`, with
 `economic_value_resolved=true`, `bounded_pilot_authorized=false`, and
-`productization_authorized=false`.
+`productization_authorized=false`. Thus the terminal decision rests on the joint F-and-K result in
+both segments, not on treating F as a mathematical ceiling or on its failure alone.
 
 ## There is no deployable break-even scale
 
@@ -123,7 +129,8 @@ a new hypothesis, not a reinterpretation of this result.
 
 The central manifest's raw-file SHA-256 is
 `sha256:3f3eb6aaa59ea4a1809e8684b3603096b180ecad4d53e42af6e950d08f7f4633`.
-Its 40 content-addressed compressed cell sidecars are present and no failure sidecars exist.
+Its 40 content-addressed compressed cell sidecars are present in the authenticated private packet,
+not the tracked tree, and no failure sidecars exist.
 
 The independent recomputation notebook is
 `yf/notebooks/m11-economic-resolution.ipynb`. It was executed twice from clean source with zero

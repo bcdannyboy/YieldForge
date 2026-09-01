@@ -33,12 +33,15 @@ material.
 
 ## LOCo 2D irregular cutting-stock instances
 
-YieldForge also used the official LOCo 2D irregular cutting-stock (`2D-ICS`) archive published at:
+YieldForge also used the official LOCo 2D irregular cutting-stock (`2D-ICS`) instances:
 
-- **Source:** [LOCo 2D-ICS archive](https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip)
+- **Citation:** A. M. Del Valle, T. A. Queiroz, E. C. Xavier, and F. K. Miyazawa,
+  *Two-dimensional Irregular Cutting Stock Problem — Instances* (2011)
+- **Official landing page:** [LOCo 2D-ICS instances](https://www.loco.ic.unicamp.br/files/instances/2dics/)
+- **Archive:** [LOCo 2D-ICS download](https://www.loco.ic.unicamp.br/files/instances/2dics_cutting_stock.zip)
 - **Pinned archive SHA-256:** `86980c3d4a33fb329bd9a4cdc9464a6de9e8450baf70b1b4365944ab471a5133`
 
-As reviewed on 2026-09-01, neither the official download source nor the pinned archive supplied an
+As reviewed on 2026-09-01, neither the official landing page nor the pinned archive supplied an
 express license granting redistribution of the dataset or derived source material. Public
 availability of a download is not itself a redistribution license. YieldForge therefore does not
 treat the LOCo archive, normalized LOCo catalog, source demand, source geometry, or reconstructive
@@ -51,7 +54,8 @@ The three selected M11 manifests contain no source geometry or source demand, bu
 embed complete non-reconstructive checkpoint, receipt, and segment-summary payloads. Those payloads
 disclose per-stream/per-policy records, legacy byte offsets and failure details, and standalone
 sidecar names and hashes. The corresponding standalone checkpoint, summary, and sidecar files are
-omitted; their embedded record payloads are disclosed in the tracked manifests.
+present in the authenticated private packet, not the tracked tree; their embedded record payloads
+are disclosed in the tracked manifests.
 “Non-reconstructive” is a technical observation about geometry and demand, not a license or rights
 clearance. Including these manifests does not clear any other LOCo-derived artifact or the existing
 history for public visibility.
