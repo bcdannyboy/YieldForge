@@ -6,8 +6,11 @@ Docs/.trash/
 yf/.venv/
 yf/.pytest_cache/
 yf/.ruff_cache/
+yf/dist/
 yf/**/__pycache__/
 yf/**/*.py[cod]
+yf/experiments/results/m11-gate2-*.json
+yf/experiments/results/m11-gate3-early-*.json
 yf/var/archives/*
 !yf/var/archives/.gitkeep
 yf/var/jobs/

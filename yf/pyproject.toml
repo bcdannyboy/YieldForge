@@ -32,6 +32,26 @@ dev = [
     "ruff>=0.12,<1",
 ]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/pyproject.toml",
+    "/src",
+]
+exclude = [
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/dist",
+    "/native/**/target",
+    "/var",
+    "/web/.playwright-browsers",
+    "/web/dist",
+    "/web/node_modules",
+    "/web/playwright-report",
+    "/web/test-results",
+    "**/*.py[cod]",
+    "**/__pycache__",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/yieldforge"]
 
