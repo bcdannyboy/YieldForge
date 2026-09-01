@@ -267,7 +267,7 @@ git commit -m "docs: remove local machine paths"
 
 **Step 1: Run Python verification in stable partitions**
 
-Run the broad suite excluding the two source-bound Postgres files and three tight timeout cases, then run those groups separately with the pinned local audit input and Postgres service available. This covers all 3,237 collected tests without making sub-second/one-second process deadlines compete with the 35-minute suite.
+Run the broad suite excluding the two source-bound Postgres files and three tight timeout cases, then run those groups separately with the pinned local audit input and Postgres service available. This covers all 3,238 collected tests without making sub-second/one-second process deadlines compete with the 35-minute suite.
 
 Run whole-tree Ruff lint after pytest, excluding only the exact content-addressed audit notebook
 `notebooks/m11-economic-resolution.ipynb`. Run Ruff's format check on the closeout-owned Python

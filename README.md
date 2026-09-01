@@ -42,8 +42,9 @@ finite and bounded.
 A red F arm alone could not stop the program under the registered protocol. It showed that the
 tested mechanism had little favorable-information headroom, while the separately required K arm
 tested whether any value was deployable without future information. The terminal stop required F
-and K to be red in both segments. A positive F result would likewise still have required a positive
-K result and real factory evidence before investment.
+and K to be red in both segments. An F-green/K-red result would have opened the registered forecast
+branch; pilot or product investment would still have required later deployable confirmation and
+real factory evidence.
 
 Sparrow supplied the underlying nesting capability through a reproducible Spyrrow adapter and
 immutable candidate archives. Replacing or substantially rebuilding that layer would be a new
