@@ -18,7 +18,10 @@ replacing the underlying nesting engine.
 
 Lead with the practical implication: adopting the idea was meant to preserve the incumbent solver,
 operator habits, and core nesting workflow. The research-side Sparrow/Spyrrow boundary is an
-example of this architecture, not the product itself.
+example of this architecture, not the product itself. Sparrow was selected because it was already
+a strong immediate-space optimizer and exposed progressive intermediate/alternative nests through
+Spyrrow. That made it possible to test whether YieldForge could add value by choosing among the
+incumbent's strong candidates rather than by replacing the incumbent.
 
 ## Claim boundary
 
@@ -27,6 +30,10 @@ candidate generation and re-ranking through one reproducible adapter and immutab
 did not prove compatibility with arbitrary commercial nesting systems, access to their near-tied
 candidates, live remnant/inventory synchronization, operator acceptance, or literally zero
 integration work.
+
+The corresponding requirement for another incumbent system is access to multiple strong candidate
+nests, or an equivalent extension that exposes them. That is an integration requirement, not a
+requirement to switch the operator's core nesting workflow.
 
 The closeout result therefore evaluates the tested overlay mechanism on top of a strong spatial
 nester. It does not evaluate a wholesale nesting-engine replacement, and the negative result does
