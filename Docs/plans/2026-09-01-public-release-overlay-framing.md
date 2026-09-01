@@ -33,8 +33,10 @@ Run:
 
 ```bash
 rg -n -i \
-  "not (currently )?cleared|not authorized for public|no express redistribution|LOCo permission|sanitized history|no project license|license has been selected|rights clearance|publication authorization" \
-  --glob '*.md' .
+  "not (currently )?cleared|not authorized for public|no express redistribution|LOCo permission|sanitized history|no (project )?license|no license has been (chosen|selected)|rights clearance|publication authorization" \
+  --glob '*.md' \
+  --glob '!Docs/plans/2026-09-01-public-release-overlay-framing.md' \
+  .
 ```
 
 Expected: FAIL the intended release-candidate boundary by finding matches in current entry points,
@@ -76,12 +78,23 @@ acceptance, or literally zero integration work.
 Run:
 
 ```bash
-rg -n -i "existing nesting|nesting workflow|selection layer|progressive|alternative nests|integration" \
-  README.md Docs/Home.md
+for entry_point in README.md Docs/Home.md; do
+  for required_phrase in \
+    "existing nesting" \
+    "nesting workflow" \
+    "selection layer" \
+    "progressive" \
+    "alternative nests" \
+    "integration"
+  do
+    rg -n -i "$required_phrase" "$entry_point"
+  done
+done
 ```
 
-Expected: both files express the workflow benefit, Sparrow rationale, and bounded integration
-caveat without describing YieldForge as a replacement solver.
+Expected: every required phrase is present independently in both files, and each entry point uses
+those phrases to express the workflow benefit, Sparrow rationale, and bounded integration caveat
+without describing YieldForge as a replacement solver.
 
 **Step 5: Commit**
 
