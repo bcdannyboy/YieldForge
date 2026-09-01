@@ -2,6 +2,10 @@
 
 Date: 2026-09-01
 
+> **Publication-boundary amendment (2026-09-01):** The publication sections in this earlier
+> closeout design were updated after the owner approved the tracked research tree and history.
+> Experimental design, results, artifact identities, and verification facts are unchanged.
+
 ## Purpose
 
 Close the active YieldForge research phase without erasing either the work or the negative result. The repository should explain the hypothesis, the sequence of tests, what was learned, why the result was not dismissed as a sample-size problem, and what genuinely new evidence would justify reopening the idea.
@@ -15,7 +19,8 @@ Use an outcome-first research-archive README rather than a chronological lab not
 
 1. mark the project as paused and not authorized for productization;
 2. explain the future-aware remnant hypothesis in semantic terms;
-3. explain why perfect future information was used as an intentionally favorable upper-bound test;
+3. explain why perfect future information was used as a favorable-information stress test while
+   preserving that F was not proven to mathematically bound K;
 4. summarize M0 through M11 as escalating falsification stages;
 5. distinguish the M10 roadmap stop from the later M11 quantitative result;
 6. report the full-future and known-only results without calling forecast headroom a deployable saving;
@@ -23,7 +28,9 @@ Use an outcome-first research-archive README rather than a chronological lab not
 8. state bounded conclusions and implications with necessary caveats; and
 9. define a concrete reopen bar that does not begin by rebuilding Sparrow.
 
-Detailed milestone records and immutable evidence remain in the `Docs/` vault. Historical notes are not rewritten to make the path look cleaner than it was.
+Detailed milestone records and immutable evidence remain in the `Docs/` vault. This design note's
+publication sections were amended as marked above; the experiment history was not rewritten to
+make the path look cleaner than it was.
 
 ## Evidence and claim boundaries
 

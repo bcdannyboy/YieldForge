@@ -21,8 +21,7 @@ The intended public archive includes the complete tracked research tree and hist
 - existing Git author metadata and the YieldForge working name.
 
 Upstream material retains factual citations, versions, checksums, and transformation provenance in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No project-level permissions file is part of this
-release candidate, by owner decision.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Excluded local boundary
 
@@ -56,9 +55,15 @@ factory ROI or proof about every possible future algorithm.
 
 ## Large tracked research artifacts
 
-The tracked tree retains two research-relevant JSON artifacts of approximately 70.12 MiB and
-52.43 MiB. The latter produced GitHub's 52.43 MiB advisory warning. Both are intentionally retained
-because they are part of the research lineage and remain below GitHub's 100 MiB per-file hard
+The tracked tree retains two research-relevant JSON artifacts:
+
+- `yf/experiments/results/residual-geometry-input-yfgi-2fe5b848ea643d282c284f90.json`
+  (approximately 70.12 MiB); and
+- `yf/experiments/results/m11-gate1-yfm11g1run-c35f10fa4f4d7b6b01c59c29.json`
+  (approximately 52.43 MiB).
+
+The latter produced GitHub's 52.43 MiB advisory warning. Both are intentionally retained because
+they are research-relevant parts of the lineage and remain below GitHub's 100 MiB per-file hard
 limit. This is a repository-size tradeoff, not a failed release check. See
 [GitHub's large-file guidance](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github).
 

@@ -4,17 +4,20 @@
 
 **Goal:** Prepare a coherent private release candidate that leads with YieldForge's workflow-preserving overlay thesis and reflects the owner's approval of all retained publication content.
 
-**Architecture:** Treat the incumbent nesting system as the candidate generator and YieldForge as a future-aware selection layer over its strong alternative nests. Update every tracked publication-boundary statement to retain factual provenance while removing superseded blocker language; keep raw local evidence outside Git and leave remote visibility private.
+**Architecture:** Treat the incumbent nesting system as the candidate generator and YieldForge as a
+future-aware selection layer over its strong alternative nests. Align every tracked publication
+statement with the owner-approved boundary, keep factual source provenance, retain raw local
+evidence outside Git, and leave remote visibility private.
 
 **Tech Stack:** Markdown/Obsidian, Git, Python 3.12, pytest, Ruff, Hatchling, GitHub CLI.
 
 ---
 
-### Task 1: Capture the fail-first semantic baseline
+### Task 1: Verify the target semantic boundary
 
 **Files:** none
 
-**Step 1: Confirm the workflow-overlay idea is currently incomplete**
+**Step 1: Confirm the workflow-overlay idea is explicit**
 
 Run:
 
@@ -23,24 +26,23 @@ rg -n -i "keep.*existing|existing.*workflow|progressive.*nest|strong.*space|sele
   README.md Docs/Home.md
 ```
 
-Expected: the current entry points mention candidate selection and Sparrow, but do not clearly lead
-with keeping the incumbent nesting system/workflow or explain that Sparrow was chosen because it is
-strong and exposes progressive alternative nests.
+Expected: both entry points lead with keeping the incumbent nesting system and workflow, explain
+selection over strong alternative nests, and identify Sparrow's progressive reports as the reason
+it was a practical first substrate.
 
-**Step 2: Confirm superseded blocker language is still present**
+**Step 2: Confirm the release-candidate assertions**
 
 Run:
 
 ```bash
-rg -n -i \
-  "not (currently )?cleared|not authorized for public|no express redistribution|LOCo permission|sanitized history|no (project )?license|no license has been (chosen|selected)|rights clearance|publication authorization" \
-  --glob '*.md' \
-  --glob '!Docs/plans/2026-09-01-public-release-overlay-framing.md' \
-  .
+rg -n -i "owner-approved|approved publication boundary|visibility remains private" \
+  PUBLIC_RELEASE.md README.md Docs/Home.md
+rg -n -i "attribution|transformation provenance" \
+  THIRD_PARTY_NOTICES.md Docs/Research/Technical\ Sources.md
 ```
 
-Expected: FAIL the intended release-candidate boundary by finding matches in current entry points,
-release notes, source/evidence notes, and earlier closeout plans.
+Expected: the entry points and release record describe the approved tracked boundary and separate
+visibility action, while the source notes preserve attribution and transformation provenance.
 
 ### Task 2: Make the incumbent-preserving workflow thesis explicit
 
@@ -103,7 +105,7 @@ git add README.md Docs/Home.md
 git commit -m "docs: lead with the incumbent workflow overlay"
 ```
 
-### Task 3: Replace the superseded publication gate with an owner-approved boundary
+### Task 3: Record the owner-approved publication boundary
 
 **Files:**
 
@@ -114,6 +116,9 @@ git commit -m "docs: lead with the incumbent workflow overlay"
 - Modify: `Docs/Research/Technical Sources.md`
 - Modify: `Docs/Development/Artifact Policy.md`
 - Modify: `Docs/Evidence/M11 - Economic resolution.md`
+- Modify: `Docs/Milestones/Milestone Roadmap.md`
+- Modify: `Docs/plans/2026-09-01-existing-workflow-overlay-framing-design.md`
+- Modify: `Docs/plans/2026-09-01-public-release-overlay-framing.md`
 - Modify: `Docs/plans/2026-09-01-repository-closeout-design.md`
 - Modify: `Docs/plans/2026-09-01-repository-closeout.md`
 
@@ -123,7 +128,6 @@ Record these resolved owner decisions:
 
 - the tracked proposal, diagrams, source-derived research material, project name, and existing Git
   author metadata are approved for publication;
-- no project-level permissions file will be added or treated as a release requirement;
 - retained source material keeps factual citations and transformation provenance;
 - the tracked current tree and compact manifests are publishable;
 - ignored `yf/var`, the external archive, raw/resumable packets, credentials, environments, and
@@ -137,29 +141,32 @@ services to untrusted networks.
 
 Preserve Lectra authors, DOI, version, CC BY 4.0 attribution, and YieldForge transformations.
 Preserve the LOCo citation, official source, pinned checksum, and transformation description.
-Remove the superseded language that presents retained LOCo-derived content as a publication
-blocker.
 
 **Step 3: Align every current-tree reference**
 
 Update the remaining listed files so they link to the prepared release boundary, describe
-separately preserved raw parents as a reproducibility limitation rather than a rights blocker, and
-contain no unresolved owner/license/name/history gate. In the earlier closeout plans, replace the
-superseded gate requirements with attribution/provenance and owner-approved publication-boundary
-requirements; do not alter experimental outcomes or artifact identities.
+separately preserved raw parents as a reproducibility limitation, and consistently reflect the
+resolved owner decisions. In the earlier closeout plans, mark the later publication-boundary
+amendment and preserve the experimental outcomes and artifact identities.
 
-**Step 4: Run the whole-tree blocker scan**
+**Step 4: Verify the publication-boundary assertions**
 
-Run the Task 1 blocker scan again.
+Run the positive checks from Task 1 across the release record, entry points, source notices,
+artifact policy, M11 report, roadmap, and amended closeout plans. Then ask an independent reviewer
+to compare every tracked publication statement with the approved included/excluded boundary.
 
-Expected: zero matches.
+Expected: the reviewer finds no contradiction, unresolved owner decision, or claim beyond the
+approved research-archive boundary.
 
 **Step 5: Commit**
 
 ```bash
 git add PUBLIC_RELEASE.md THIRD_PARTY_NOTICES.md README.md Docs/Home.md \
+  "Docs/Milestones/Milestone Roadmap.md" \
   "Docs/Research/Technical Sources.md" "Docs/Development/Artifact Policy.md" \
   "Docs/Evidence/M11 - Economic resolution.md" \
+  Docs/plans/2026-09-01-existing-workflow-overlay-framing-design.md \
+  Docs/plans/2026-09-01-public-release-overlay-framing.md \
   Docs/plans/2026-09-01-repository-closeout-design.md \
   Docs/plans/2026-09-01-repository-closeout.md
 git commit -m "docs: record the prepared public release boundary"
@@ -201,12 +208,13 @@ browser, cache, test-result, or native-target member is present.
 
 **Step 4: Run documentation and repository scans**
 
-Validate all tracked Markdown inline links and wikilinks. Run `git diff --check`, `/Users/` and
-`/home/` scans, high-confidence credential/private-key scans, tracked-object size inventory, the
-whole-tree blocker scan, and `git status`.
+Validate all tracked Markdown inline links and wikilinks. Run `git diff --check`, macOS and Unix
+absolute home-path scans, high-confidence credential/private-key scans, tracked-object size
+inventory, the positive publication-boundary checks, and `git status`. Have an independent reviewer
+inspect the tracked publication statements for consistency with the resolved owner decisions.
 
-Expected: links resolve; no blocker language, local path, secret, or object at/above GitHub's 100
-MiB hard limit; worktree clean.
+Expected: links resolve; the publication statements are consistent; there is no operational local
+path, secret, or object at/above GitHub's 100 MiB hard limit; worktree clean.
 
 ### Task 5: Integrate the prepared candidate without publishing it
 
@@ -219,9 +227,9 @@ private.
 
 **Step 2: Fast-forward `main` and run affected checks again**
 
-Fast-forward local `main` to `codex/public-release-framing`. Re-run the whole-tree blocker scan,
-link/path/secret scans, focused 7 tests, Ruff checks, source-distribution inspection, and clean
-status checks at the exact merged commit.
+Fast-forward local `main` to `codex/public-release-framing`. Re-run the positive
+publication-boundary review, link/path/secret scans, focused 7 tests, Ruff checks,
+source-distribution inspection, and clean status checks at the exact merged commit.
 
 **Step 3: Push private `main`**
 

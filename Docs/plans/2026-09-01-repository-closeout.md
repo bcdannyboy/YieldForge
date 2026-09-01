@@ -2,6 +2,10 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **Publication-boundary amendment (2026-09-01):** The publication sections in this earlier
+> closeout plan were updated after the owner approved the tracked research tree and history.
+> Experimental design, results, artifact identities, and verification facts are unchanged.
+
 **Goal:** Consolidate the completed YieldForge research lineage onto `main`, publish an
 evidence-faithful semantic closeout, preserve unique local work, and prepare an explicit
 owner-approved public-research boundary while leaving repository visibility private.

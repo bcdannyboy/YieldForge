@@ -66,11 +66,6 @@ and K to be red in both segments. An F-green/K-red result would have opened the 
 branch; pilot or product investment would still have required later deployable confirmation and
 real factory evidence.
 
-Sparrow supplied the underlying nesting capability through a reproducible Spyrrow adapter. Spyrrow
-drained Sparrow's progressive reports and exposed intermediate or alternative nests as immutable
-candidate archives for the YieldForge selection layer. This was the one tested integration path;
-the experiment did not establish equivalent access to arbitrary commercial nesting systems.
-
 ## How we tested it
 
 The work advanced through progressively more expensive falsification stages. Each stage had a
@@ -94,6 +89,10 @@ execution and evidence defects.
 The M11 chronology and economics were generated or assumed around source-observed geometry and
 source demand. The result is therefore a semi-synthetic disposition of the modeled hypothesis, not
 a measurement of representative factory ROI.
+
+Lectra alternatives followed the Sparrow/Spyrrow candidate lineage, while LOCo candidates were
+generated within the model. Neither segment was a live integration with an incumbent factory
+nesting system.
 
 ## What the final test found
 
